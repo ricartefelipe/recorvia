@@ -106,12 +106,14 @@ env: ## Cria .env a partir de .env.example (se ausente)
 	@test -f .env || cp .env.example .env
 
 .PHONY: up
-up: env ## Sobe o ambiente local completo
+up: env ## Sobe o ambiente local completo e carrega os dados de demonstração
 	$(COMPOSE) up -d --build --wait
+	$(COMPOSE) --profile seed run --rm --build seed
 
 .PHONY: up-obs
 up-obs: env ## Sobe o ambiente com a stack de observabilidade
 	$(COMPOSE) --profile observability up -d --build --wait
+	$(COMPOSE) --profile seed run --rm --build seed
 
 .PHONY: down
 down: ## Derruba o ambiente (mantém volumes)

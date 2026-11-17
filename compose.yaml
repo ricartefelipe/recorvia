@@ -84,6 +84,10 @@ services:
 
   rabbitmq:
     image: rabbitmq:4.2.9-management-alpine
+    # Servidor e healthcheck (docker exec) com o mesmo usuário: num volume
+    # novo, o healthcheck como root criaria o .erlang.cookie inacessível ao
+    # servidor.
+    user: rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?defina no .env}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?defina no .env}
@@ -189,8 +193,11 @@ services:
       retries: 20
     stop_grace_period: 2m
 
+  # Execução única: fica fora do "up" (que espera serviços em execução) e é
+  # chamado por "make up" com "docker compose run --rm seed".
   seed:
     image: recorvia-seed:local
+    profiles: ["seed"]
     build:
       <<: *go-build
       args: { CMD: seed }

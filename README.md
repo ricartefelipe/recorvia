@@ -34,10 +34,7 @@ tenant, RabbitMQ para eventos, Redis para sessões, Keycloak para identidade. De
 Pré-requisitos: Docker com Compose v2, GNU Make e (para desenvolvimento) Go 1.27.4.
 
 ```bash
-cp .env.example .env          # valores exclusivos do ambiente local
-docker compose up -d --build --wait postgres redis rabbitmq keycloak mailpit paysim
-docker compose up -d --wait api worker   # executa bootstrap e migrations antes
-docker compose run --rm seed  # dados de demonstração (idempotente)
+make up                       # cria .env a partir de .env.example, sobe tudo e executa o seed
 curl -s http://localhost:18081/readyz
 ```
 

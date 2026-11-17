@@ -1,7 +1,7 @@
 # Roteiro demonstrativo
 
 Ambiente: `make up` a partir de um checkout limpo (ver README). Dados de **demonstração**
-criados pelo seed (`docker compose run --rm seed`, executado também por `make up`):
+criados pelo seed (executado por `make up`; repetir com `docker compose --profile seed run --rm seed`):
 
 | Usuário (Keycloak local) | Senha | Organização | Papel |
 |---|---|---|---|

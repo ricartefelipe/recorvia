@@ -58,6 +58,9 @@ transações com contexto de tenant, bootstrap de papéis, migrations e CI.
 | 2026-11-17 | `go test -race -tags integration ./internal/httpapi/` | aprovado: 401/403/404/409/412/413/422/428, CSRF, permissões por papel, Idempotency-Key |
 | 2026-11-17 | `go test ./internal/httpapi/ -run Contract` | rotas coincidem com o OpenAPI |
 | 2026-11-17 | `make sqlc-check`, `make secrets-scan`, `golangci-lint` (código de produção) | sem diferenças, sem vazamentos, sem achados |
+| 2026-11-17 | `make lint`, `make test`, `make coverage` | sem achados; todos aprovados; 97,0% de cobertura em domínio e aplicação (mínimo 90%) |
+| 2026-11-17 | Testes unitários novos | 11 bugs reais encontrados e corrigidos (âncora da plataforma, redirecionamento por TAB, baixa e recuperação de incobráveis, taxa do provedor, repetição de pagamento manual, isolamento de falhas no motor, rejeições que alteravam a fatura) |
+| 2026-11-17 | `make reset && make up` (volumes novos) + roteiro automatizado via API | aprovado novamente após as correções; corrigidos no caminho: RabbitMQ executado como `rabbitmq` (cookie criado pelo healthcheck como root impedia a partida) e seed fora do `up --wait` |
 | 2026-11-17 | Stack local (`docker compose up`) + roteiro automatizado via API | login real no Keycloak com PKCE, cliente, plano, assinatura, fatura `ACME-2026-000001`, cobrança no simulador, pagamento pelo checkout, webhook HMAC, fatura paga, ledger (receita 99.000; liquidação 95.991; taxa 3.009), reenvio sem duplicidade, auditoria, dashboard e isolamento entre tenants |
 
 ## Pendências reais
@@ -83,5 +86,6 @@ transações com contexto de tenant, bootstrap de papéis, migrations e CI.
 
 ## Ponto de retomada
 
-Concluir os testes unitários dos pacotes de domínio (meta de 90%), abrir o PR da etapa 2, integrar
-a interface web (etapa 3) e seguir para a etapa 4.
+Abrir o PR da etapa 2, integrar a interface web (etapa 3, branch `feature/interface-web` com 15
+telas e testes de componente) e concluir a etapa 4 (`feature/faturamento-avancado`, em andamento:
+migration 00009, cupons, mudanças agendadas, prorrata, reajustes e correção de consumo).
