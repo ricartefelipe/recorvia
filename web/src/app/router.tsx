@@ -48,6 +48,11 @@ export const appRoutes: RouteObject[] = [
   },
   { path: 'cobranca', lazy: async () => ({ Component: (await import('../features/collections/CollectionsPage')).CollectionsPage }) },
   { path: 'usuarios', lazy: async () => ({ Component: (await import('../features/members/MembersPage')).MembersPage }) },
+  { path: 'integracoes', lazy: async () => ({ Component: (await import('../features/integrations/IntegrationsPage')).IntegrationsPage }) },
+  {
+    path: 'integracoes/webhooks/:id',
+    lazy: async () => ({ Component: (await import('../features/integrations/WebhooksTab')).WebhookDeliveriesPage }),
+  },
   { path: '*', Component: NotFoundPage },
 ];
 

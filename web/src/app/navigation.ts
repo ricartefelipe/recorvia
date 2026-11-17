@@ -8,6 +8,7 @@ import {
   IconGauge,
   IconGavel,
   IconPackage,
+  IconPlugConnected,
   IconReceiptRefund,
   IconRepeat,
   IconScale,
@@ -60,6 +61,12 @@ export const NAVIGATION: NavEntry[] = [
   { label: 'Conciliação', to: '/conciliacao', icon: IconScale, anyOf: ['reconciliation.read'] },
   { label: 'Políticas de cobrança', to: '/cobranca', icon: IconBellRinging, anyOf: ['collections.read'] },
   { label: 'Usuários e permissões', to: '/usuarios', icon: IconShieldLock, anyOf: ['members.read'] },
+  {
+    label: 'Integrações',
+    to: '/integracoes',
+    icon: IconPlugConnected,
+    anyOf: ['integrations.read', 'webhooks.read', 'api_credentials.manage'],
+  },
 ];
 
 export function visibleNavigation(can: (p: Permission) => boolean): NavEntry[] {
