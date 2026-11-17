@@ -126,16 +126,16 @@ func (s *Subscription) transition(to Status, event string, at time.Time, details
 
 // NewInput são os parâmetros de criação.
 type NewInput struct {
-	ID         uuid.UUID
-	TenantID   uuid.UUID
-	CustomerID uuid.UUID
-	Plan       catalog.Plan
-	Price      catalog.PriceVersion
-	Quantity   int
-	StartAt    time.Time
-	TrialDays  int
-	Location   *time.Location
-	Now        time.Time
+	ID               uuid.UUID
+	TenantID         uuid.UUID
+	CustomerID       uuid.UUID
+	Plan             catalog.Plan
+	Price            catalog.PriceVersion
+	Quantity         int
+	StartAt          time.Time
+	TrialDays        int
+	Location         *time.Location
+	Now              time.Time
 	PaymentTermsDays *int
 }
 

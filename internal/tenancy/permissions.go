@@ -86,10 +86,10 @@ const (
 	PermWebhooksWrite     Permission = "webhooks.write"
 	PermAPICredentials    Permission = "api_credentials.manage"
 
-	PermAuditRead            Permission = "audit.read"
-	PermOperationsRead       Permission = "operations.read"
-	PermOperationsReprocess  Permission = "operations.reprocess"
-	PermDashboardRead        Permission = "dashboard.read"
+	PermAuditRead           Permission = "audit.read"
+	PermOperationsRead      Permission = "operations.read"
+	PermOperationsReprocess Permission = "operations.reprocess"
+	PermDashboardRead       Permission = "dashboard.read"
 )
 
 var readAll = []Permission{
