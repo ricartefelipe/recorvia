@@ -178,7 +178,9 @@ func (s *Service) CloseDueStatements(ctx context.Context) (int, error) {
 		if err := ctx.Err(); err != nil {
 			return closed, err
 		}
+		inTenant := 0
 		err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+			inTenant = 0
 			loc, err := tx.TenantLocation(ctx)
 			if err != nil {
 				return err
@@ -207,7 +209,7 @@ func (s *Service) CloseDueStatements(ctx context.Context) (int, error) {
 					return err
 				}
 				if inserted {
-					closed++
+					inTenant++
 				}
 				if err := sub.Advance(loc); err != nil {
 					return err
@@ -218,6 +220,7 @@ func (s *Service) CloseDueStatements(ctx context.Context) (int, error) {
 		if err != nil {
 			return closed, err
 		}
+		closed += inTenant // contados somente após o commit
 	}
 	return closed, nil
 }

@@ -230,8 +230,8 @@ func (tx tenancyTx) PlatformUsage(ctx context.Context) (platformbilling.Usage, e
 
 func (tx tenancyTx) InsertPlatformSubscription(ctx context.Context, s platformbilling.Subscription) error {
 	return tx.q.InsertTenantPlatformSubscription(ctx, dbgen.InsertTenantPlatformSubscriptionParams{TenantID: tx.tenantID, PlanCode: s.PlanCode,
-		Status: string(s.Status), TrialEndsAt: s.TrialEndsAt, CurrentPeriodStart: s.PeriodStart, CurrentPeriodEnd: s.PeriodEnd,
-		CreatedAt: tx.store.clock.Now()})
+		Status: string(s.Status), TrialEndsAt: s.TrialEndsAt, AnchorDate: dateToPg(s.Anchor), CurrentPeriodStart: s.PeriodStart,
+		CurrentPeriodEnd: s.PeriodEnd, CreatedAt: tx.store.clock.Now()})
 }
 
 // --- plano da plataforma (compartilhado por vários módulos) ---

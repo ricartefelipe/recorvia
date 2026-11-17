@@ -560,6 +560,7 @@ type TenantPlatformSubscription struct {
 	PlanCode           string
 	Status             string
 	TrialEndsAt        *time.Time
+	AnchorDate         pgtype.Date
 	CurrentPeriodStart time.Time
 	CurrentPeriodEnd   time.Time
 	CreatedAt          time.Time

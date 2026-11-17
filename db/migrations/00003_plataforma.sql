@@ -52,6 +52,7 @@ CREATE TABLE tenant_platform_subscriptions (
   plan_code            text NOT NULL REFERENCES platform_plans (code),
   status               text NOT NULL CHECK (status IN ('trialing', 'active', 'past_due', 'canceled')),
   trial_ends_at        timestamptz,
+  anchor_date          date NOT NULL,
   current_period_start timestamptz NOT NULL,
   current_period_end   timestamptz NOT NULL,
   created_at           timestamptz NOT NULL DEFAULT now(),

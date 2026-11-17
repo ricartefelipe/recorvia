@@ -92,8 +92,8 @@ SELECT * FROM platform_addons WHERE active ORDER BY code;
 SELECT * FROM platform_addons WHERE code = @code;
 
 -- name: InsertTenantPlatformSubscription :exec
-INSERT INTO tenant_platform_subscriptions (tenant_id, plan_code, status, trial_ends_at, current_period_start, current_period_end, created_at, updated_at, version)
-VALUES (@tenant_id, @plan_code, @status, sqlc.narg(trial_ends_at), @current_period_start, @current_period_end, @created_at, @created_at, 1);
+INSERT INTO tenant_platform_subscriptions (tenant_id, plan_code, status, trial_ends_at, anchor_date, current_period_start, current_period_end, created_at, updated_at, version)
+VALUES (@tenant_id, @plan_code, @status, sqlc.narg(trial_ends_at), @anchor_date, @current_period_start, @current_period_end, @created_at, @created_at, 1);
 
 -- name: GetTenantPlatformSubscription :one
 SELECT * FROM tenant_platform_subscriptions WHERE tenant_id = @tenant_id;

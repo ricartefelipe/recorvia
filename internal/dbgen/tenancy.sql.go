@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const countActiveMembers = `-- name: CountActiveMembers :one
@@ -297,7 +298,7 @@ func (q *Queries) GetTenant(ctx context.Context) (Tenant, error) {
 }
 
 const getTenantPlatformSubscription = `-- name: GetTenantPlatformSubscription :one
-SELECT tenant_id, plan_code, status, trial_ends_at, current_period_start, current_period_end, created_at, updated_at, version FROM tenant_platform_subscriptions WHERE tenant_id = $1
+SELECT tenant_id, plan_code, status, trial_ends_at, anchor_date, current_period_start, current_period_end, created_at, updated_at, version FROM tenant_platform_subscriptions WHERE tenant_id = $1
 `
 
 func (q *Queries) GetTenantPlatformSubscription(ctx context.Context, tenantID uuid.UUID) (TenantPlatformSubscription, error) {
@@ -308,6 +309,7 @@ func (q *Queries) GetTenantPlatformSubscription(ctx context.Context, tenantID uu
 		&i.PlanCode,
 		&i.Status,
 		&i.TrialEndsAt,
+		&i.AnchorDate,
 		&i.CurrentPeriodStart,
 		&i.CurrentPeriodEnd,
 		&i.CreatedAt,
@@ -318,7 +320,7 @@ func (q *Queries) GetTenantPlatformSubscription(ctx context.Context, tenantID uu
 }
 
 const getTenantPlatformSubscriptionForUpdate = `-- name: GetTenantPlatformSubscriptionForUpdate :one
-SELECT tenant_id, plan_code, status, trial_ends_at, current_period_start, current_period_end, created_at, updated_at, version FROM tenant_platform_subscriptions WHERE tenant_id = $1 FOR UPDATE
+SELECT tenant_id, plan_code, status, trial_ends_at, anchor_date, current_period_start, current_period_end, created_at, updated_at, version FROM tenant_platform_subscriptions WHERE tenant_id = $1 FOR UPDATE
 `
 
 func (q *Queries) GetTenantPlatformSubscriptionForUpdate(ctx context.Context, tenantID uuid.UUID) (TenantPlatformSubscription, error) {
@@ -329,6 +331,7 @@ func (q *Queries) GetTenantPlatformSubscriptionForUpdate(ctx context.Context, te
 		&i.PlanCode,
 		&i.Status,
 		&i.TrialEndsAt,
+		&i.AnchorDate,
 		&i.CurrentPeriodStart,
 		&i.CurrentPeriodEnd,
 		&i.CreatedAt,
@@ -512,8 +515,8 @@ func (q *Queries) InsertTenant(ctx context.Context, arg InsertTenantParams) erro
 }
 
 const insertTenantPlatformSubscription = `-- name: InsertTenantPlatformSubscription :exec
-INSERT INTO tenant_platform_subscriptions (tenant_id, plan_code, status, trial_ends_at, current_period_start, current_period_end, created_at, updated_at, version)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $7, 1)
+INSERT INTO tenant_platform_subscriptions (tenant_id, plan_code, status, trial_ends_at, anchor_date, current_period_start, current_period_end, created_at, updated_at, version)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, 1)
 `
 
 type InsertTenantPlatformSubscriptionParams struct {
@@ -521,6 +524,7 @@ type InsertTenantPlatformSubscriptionParams struct {
 	PlanCode           string
 	Status             string
 	TrialEndsAt        *time.Time
+	AnchorDate         pgtype.Date
 	CurrentPeriodStart time.Time
 	CurrentPeriodEnd   time.Time
 	CreatedAt          time.Time
@@ -532,6 +536,7 @@ func (q *Queries) InsertTenantPlatformSubscription(ctx context.Context, arg Inse
 		arg.PlanCode,
 		arg.Status,
 		arg.TrialEndsAt,
+		arg.AnchorDate,
 		arg.CurrentPeriodStart,
 		arg.CurrentPeriodEnd,
 		arg.CreatedAt,

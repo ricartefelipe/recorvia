@@ -100,7 +100,8 @@ func (tx platformTx) Subscription(ctx context.Context) (platformbilling.Subscrip
 		return platformbilling.Subscription{}, notFound(err, "platform_subscription_not_found", "Assinatura da plataforma não encontrada.")
 	}
 	return platformbilling.Subscription{TenantID: r.TenantID, PlanCode: r.PlanCode, Status: platformbilling.Status(r.Status),
-		TrialEndsAt: r.TrialEndsAt, PeriodStart: r.CurrentPeriodStart, PeriodEnd: r.CurrentPeriodEnd, Version: int(r.Version)}, nil
+		TrialEndsAt: r.TrialEndsAt, Anchor: dateFromPg(r.AnchorDate), PeriodStart: r.CurrentPeriodStart, PeriodEnd: r.CurrentPeriodEnd,
+		Version: int(r.Version)}, nil
 }
 
 func (tx platformTx) UpdateSubscription(ctx context.Context, s platformbilling.Subscription) error {

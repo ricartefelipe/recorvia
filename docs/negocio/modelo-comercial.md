@@ -16,8 +16,9 @@ mudança de código.
   criação de assinatura (contratos ativos = `trialing`, `active`, `past_due`) e recursos (por
   exemplo, preço por consumo exige `usage_billing`; Asaas exige `asaas_integration`).
 - Troca de plano valida o consumo atual contra os limites do plano de destino.
-- Demonstrativo mensal (`platform_statements`) por período; períodos inteiramente em avaliação não
-  geram cobrança da mensalidade.
+- Demonstrativo mensal (`platform_statements`) por período. A avaliação é o primeiro período, sem
+  mensalidade (serviços adicionais concluídos continuam no demonstrativo); os ciclos mensais começam
+  no fim da avaliação e ficam ancorados nesse dia (dias 29 a 31 preservados, `anchor_date`).
 
 ## Serviço adicional
 
