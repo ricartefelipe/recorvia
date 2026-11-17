@@ -46,9 +46,9 @@ erDiagram
 | Plataforma | `platform_plans`, `platform_addons`, `tenant_platform_subscriptions`, `platform_addon_orders`, `platform_statements` |
 | Clientes | `customers`, `customer_contacts`, `customer_billing_addresses`, `customer_provider_refs`, `customer_credit_entries` |
 | Catálogo | `products`, `billable_metrics`, `plans`, `plan_price_versions`, `coupons` |
-| Assinaturas | `subscriptions`, `subscription_history`, `subscription_discounts`, `pending_invoice_items` |
+| Assinaturas | `subscriptions`, `subscription_history`, `subscription_discounts`, `pending_invoice_items`, `subscription_scheduled_changes`, `subscription_price_adjustments` |
 | Consumo | `usage_events`, `usage_aggregates` |
-| Faturamento | `invoice_number_sequences`, `invoices`, `invoice_items`, `invoice_status_history` |
+| Faturamento | `invoice_number_sequences`, `invoices`, `invoice_items`, `invoice_status_history`, `credit_notes` |
 | Pagamentos | `payment_provider_accounts`, `charges`, `payment_operations`, `payments`, `provider_webhook_events` |
 | Ledger | `ledger_accounts`, `ledger_transactions`, `ledger_entries` |
 | Infraestrutura | `outbox_events`, `inbox_messages`, `dead_letters`, `idempotency_keys`, `scheduled_jobs`, `audit_log` |
@@ -67,4 +67,8 @@ erDiagram
 | Ledger balanceado e imutável | gatilho de restrição adiado + `app_reject_mutation` |
 | Fatura emitida não reescrita | gatilho `app_invoice_guard` |
 | Versão de preço imutável | `app_reject_mutation` |
+| Nota de crédito imutável, número única por tenant e pedido único | `app_reject_mutation`, `credit_notes_number_key`, `credit_notes_request_key` |
+| Uma mudança pendente por assinatura; um reajuste programado por data | `subscription_scheduled_changes_pending_key`, `subscription_price_adjustments_date_key` |
+| Item pendente sempre positivo (créditos viram crédito do cliente) | `pending_invoice_items_positive` |
+| Valor reajustado sempre ligado ao reajuste que o originou | `subscriptions_override_consistency` |
 | Total da fatura coerente | `total = subtotal - desconto`; `saldo = total - crédito - pago - creditado - baixado` |

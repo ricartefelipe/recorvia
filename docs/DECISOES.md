@@ -214,3 +214,31 @@ na outbox uma reentrega direcionada à fila do consumidor que falhou
 (`recorvia-original-message-id`), com justificativa e auditoria.
 **Justificativa:** republicar no exchange entregaria o evento a todos os consumidores; manter o id
 original faz o inbox do consumidor continuar deduplicando.
+
+## ADR-026 Prorrata com fatura imediata ou crédito do cliente
+**Decisão:** mudança imediata com o período já faturado gera fatura de prorrata quando a diferença
+é positiva e crédito do cliente quando é negativa; itens pendentes são sempre positivos.
+**Justificativa:** créditos como itens negativos poderiam tornar uma fatura futura negativa e
+travar o motor; o crédito do cliente já é consumido automaticamente na emissão.
+**Consequências:** o desconto de valor fixo não é prorrateado; o percentual reduz a diferença.
+
+## ADR-027 Reajuste como valor da assinatura, sem versões de preço privadas
+**Decisão:** o reajuste grava o valor resultante na assinatura (`price_override_amount`) e no
+histórico do reajuste; a versão de preço do catálogo não muda.
+**Justificativa:** versões imutáveis continuam sendo do catálogo; criar versões por assinatura
+poluiria o catálogo e a numeração de versões.
+**Consequências:** a fatura registra no snapshot a versão de preço e o reajuste aplicado.
+
+## ADR-028 Consumo atrasado corrigido por ajuste, nunca na fatura emitida
+**Decisão:** eventos de período já fechado são aceitos dentro da tolerância da métrica e corrigidos
+por job: a diferença contra o valor já faturado (mais correções anteriores) vira item de ajuste,
+fatura imediata (assinatura encerrada) ou crédito do cliente.
+**Justificativa:** preserva a imutabilidade da fatura emitida e mantém rastreabilidade
+(agregado → item → correção).
+
+## ADR-029 Nota de crédito limitada ao saldo em aberto
+**Decisão:** a nota de crédito reduz somente o saldo devedor; valores já pagos são tratados por
+reembolso ou crédito do cliente. Após a nota, a cobrança com valor divergente é cancelada
+localmente e uma nova é solicitada pelo saldo.
+**Consequências:** a cobrança antiga pode continuar aberta no provedor até a etapa de
+reembolsos e conciliação; um pagamento por ela é aplicado e o excedente vira crédito do cliente.

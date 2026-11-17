@@ -73,3 +73,45 @@ ordem. Cada fatura de ciclo é única por `(tenant, assinatura, tipo, início do
   ÷ dias do período. O dia da alteração conta inteiro para a nova condição.
 - Exemplo: período 01/03 a 01/04 (31 dias), alteração em 15/03 às 15h → 17/31 restante.
 - O resultado fica sempre entre 0 e 1 (propriedade verificada por fuzz test).
+
+### Mudança imediata de plano ou quantidade
+
+Somente com o período corrente já faturado (fora do trial). Credita-se a fração não usufruída do
+componente fixo anterior e cobra-se a mesma fração do novo, cada valor arredondado uma única vez
+(half-even). Exemplo: período de 30 dias, troca no dia 21 de R$ 100,00 para R$ 160,00 → fração
+10/30; crédito R$ 33,33; cobrança R$ 53,33; diferença **R$ 20,00**.
+
+| Diferença | Efeito |
+|---|---|
+| positiva | fatura de prorrata imediata (itens de crédito e cobrança proporcionais) |
+| negativa | crédito do cliente (`customer_credit_entries`, tipo `proration`), consumido nas próximas faturas |
+| zero | nenhum documento; somente histórico |
+
+Cupom percentual vigente reduz a diferença na mesma proporção; cupom de valor fixo não é
+prorrateado (continua valendo por fatura). Planos com consumo medido só mudam no próximo ciclo, para
+que cada período de consumo seja precificado por uma única versão de preço.
+
+### Mudança no próximo ciclo e reajustes
+
+- Mudança agendada vale no início do período seguinte, com a versão de preço fixada no agendamento;
+  o consumo do período anterior continua precificado pela versão anterior.
+- Reajuste programado (percentual em pontos-base ou novo valor) vale no primeiro período iniciado
+  na data efetiva ou depois, sobre o componente fixo vigente (valor fixo ou preço por unidade),
+  arredondado a centavos. Ciclos já faturados nunca mudam. Mudança de versão de preço remove o
+  reajuste; cancelamento da assinatura descarta mudanças e reajustes pendentes.
+
+### Consumo recebido depois do fechamento
+
+O período de consumo fecha quando o motor fatura o período seguinte. Evento posterior para um
+período fechado é aceito como `late` até `late_grace_hours` (configuração da métrica) após o fim
+do período; depois disso, é rejeitado. A correção (job `billing.correct_late_usage`, a cada 5
+minutos) recalcula a quantidade com a mesma semântica de agregação, precifica pela versão usada no
+fechamento e compara com o valor já faturado mais correções anteriores:
+
+| Diferença | Efeito |
+|---|---|
+| positiva, assinatura com próximo ciclo | item de ajuste na próxima fatura |
+| positiva, assinatura encerrada | fatura de ajuste imediata |
+| negativa | crédito do cliente (tipo `usage_correction`) |
+
+A fatura emitida não é alterada (gatilho `app_invoice_guard`).

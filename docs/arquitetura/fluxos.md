@@ -81,6 +81,28 @@ sequenceDiagram
 A ordem de chegada não decide o estado: eventos com situação anterior à local são registrados sem
 efeito; saltos (por exemplo, reembolso antes da confirmação) levam à consulta ao provedor.
 
+## Nota de crédito
+
+1. `POST /api/v1/invoices/{id}/credit-notes` com `Idempotency-Key`; a mesma chave devolve a nota já
+   emitida.
+2. Na transação: valida o limite (saldo em aberto), grava a nota (`credit_notes`, imutável,
+   número `<fatura>-NCnn`), atualiza `amount_credited` da fatura, registra histórico, lança
+   `revenue_adjustments` × `accounts_receivable` no ledger e grava `invoice.credited` na outbox
+   (e `invoice.paid` quando o saldo zera).
+3. O consumidor `payments.invoice_credited` cancela localmente a cobrança aguardando pagamento
+   com valor divergente e solicita nova cobrança pelo saldo atualizado. Pagamento que ainda chegue
+   pela cobrança antiga é aplicado e o excedente vira crédito do cliente.
+
+## Ingestão de consumo
+
+1. `POST /api/v1/usage-events` com até 500 eventos; resultado por evento (`accepted`, `duplicate`,
+   `late` ou `rejected` com motivo).
+2. Validações: métrica do preço vigente, unidade, quantidade decimal não negativa com até 6 casas e
+   máximo por evento, `unique_key` para contagem distinta, instante dentro da vigência faturável.
+3. `external_id` único por tenant: reenvio idêntico é `duplicate`; conteúdo diferente é rejeitado.
+4. O fechamento agrega por período conforme a métrica (`sum`, `max`, `unique_count`, `last`) e
+   vincula o agregado ao item da fatura.
+
 ## Conciliação
 
 A conciliação compara cobranças locais com o provedor na janela de datas e registra divergências

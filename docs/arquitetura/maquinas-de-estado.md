@@ -29,6 +29,25 @@ Cancelamento ao fim do período é uma marcação (`cancel_at_period_end`) desfe
 `resume-renewal`; a transição para `canceled` ocorre no motor, no início do período seguinte.
 Reativação antes do fim do trial volta a `trialing` e mantém a data original de fim do trial.
 
+## Mudança agendada e reajuste programado (`internal/subscriptions`)
+
+```mermaid
+stateDiagram-v2
+  [*] --> pending: agendamento (next_cycle)
+  pending --> applied: início do período seguinte (motor)
+  pending --> canceled: nova mudança, mudança imediata ou cancelamento da assinatura
+```
+
+```mermaid
+stateDiagram-v2
+  [*] --> scheduled: programação (data efetiva futura)
+  scheduled --> applied: primeiro período iniciado na data efetiva ou depois (motor)
+  scheduled --> canceled: cancelamento manual ou da assinatura
+```
+
+Há no máximo uma mudança `pending` por assinatura e um reajuste `scheduled` por data (índices
+únicos parciais).
+
 ## Fatura (`internal/billing`)
 
 ```mermaid
