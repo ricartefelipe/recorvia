@@ -1,5 +1,6 @@
 import {
   IconAlertOctagon,
+  IconBellRinging,
   IconBook2,
   IconCash,
   IconCreditCard,
@@ -56,6 +57,7 @@ export const NAVIGATION: NavEntry[] = [
   },
   { label: 'Ledger', to: '/ledger', icon: IconBook2, anyOf: ['ledger.read'] },
   { label: 'Conciliação', to: '/conciliacao', icon: IconScale, anyOf: ['reconciliation.read'] },
+  { label: 'Políticas de cobrança', to: '/cobranca', icon: IconBellRinging, anyOf: ['collections.read'] },
 ];
 
 export function visibleNavigation(can: (p: Permission) => boolean): NavEntry[] {
