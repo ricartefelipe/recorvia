@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import type { FieldValues } from 'react-hook-form';
 import { useSearchParams } from 'react-router';
 import type { QueryDomain } from '../api/queryKeys';
@@ -28,19 +28,22 @@ export function useCursorPagination(filterKey: string) {
 export function useUrlFilters<K extends string>(keys: readonly K[]) {
   const [params, setParams] = useSearchParams();
   const values = Object.fromEntries(keys.map((k) => [k, params.get(k) ?? ''])) as Record<K, string>;
-  const update = (patch: Partial<Record<K, string | null | undefined>>) => {
-    setParams(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        for (const [k, v] of Object.entries(patch) as [K, string | null | undefined][]) {
-          if (v === null || v === undefined || v === '') next.delete(k);
-          else next.set(k, v);
-        }
-        return next;
-      },
-      { replace: true },
-    );
-  };
+  const update = useCallback(
+    (patch: Partial<Record<K, string | null | undefined>>) => {
+      setParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          for (const [k, v] of Object.entries(patch) as [K, string | null | undefined][]) {
+            if (v === null || v === undefined || v === '') next.delete(k);
+            else next.set(k, v);
+          }
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setParams],
+  );
   return [values, update] as const;
 }
 

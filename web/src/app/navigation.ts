@@ -1,4 +1,4 @@
-import { IconGauge, type Icon } from '@tabler/icons-react';
+import { IconGauge, IconUsers, type Icon } from '@tabler/icons-react';
 import type { Permission } from '../session/permissions';
 
 export interface NavItem {
@@ -22,7 +22,10 @@ export function isGroup(entry: NavEntry): entry is NavGroup {
   return 'children' in entry;
 }
 
-export const NAVIGATION: NavEntry[] = [{ label: 'Painel', to: '/', icon: IconGauge, anyOf: ['dashboard.read'], end: true }];
+export const NAVIGATION: NavEntry[] = [
+  { label: 'Painel', to: '/', icon: IconGauge, anyOf: ['dashboard.read'], end: true },
+  { label: 'Clientes', to: '/clientes', icon: IconUsers, anyOf: ['customers.read'] },
+];
 
 export function visibleNavigation(can: (p: Permission) => boolean): NavEntry[] {
   const allowed = (item: NavItem) => item.anyOf.some(can);

@@ -10,6 +10,8 @@ import { NotFoundPage, RequireTenant, SessionGate } from './SessionGate';
 /** Rotas da área interna (dentro do AppShell, com organização ativa). */
 export const appRoutes: RouteObject[] = [
   { index: true, lazy: async () => ({ Component: (await import('../features/dashboard/DashboardPage')).DashboardPage }) },
+  { path: 'clientes', lazy: async () => ({ Component: (await import('../features/customers/CustomersPage')).CustomersPage }) },
+  { path: 'clientes/:id', lazy: async () => ({ Component: (await import('../features/customers/CustomerDetailPage')).CustomerDetailPage }) },
   { path: '*', Component: NotFoundPage },
 ];
 

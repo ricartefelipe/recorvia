@@ -6,17 +6,19 @@ import {
   CopyButton,
   Group,
   Modal,
+  SegmentedControl,
   Stack,
   Text,
   TextInput,
   Title,
   Tooltip,
   VisuallyHidden,
+  type SegmentedControlProps,
   type TextInputProps,
 } from '@mantine/core';
 import { modals } from '@mantine/modals';
 import { IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconInfoCircle, IconKey } from '@tabler/icons-react';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useId, useState, type ReactNode } from 'react';
 import { setAnnouncer } from '../lib/notify';
 
 export function PageHeader({
@@ -270,4 +272,17 @@ export function KeyValue({ label, children }: { label: string; children: ReactNo
 
 export function InlineCode({ children }: { children: ReactNode }) {
   return <Code>{children}</Code>;
+}
+
+/** SegmentedControl com rótulo visível associado (grupo de opções acessível). */
+export function LabeledSegmented({ label, ...props }: { label: string } & SegmentedControlProps) {
+  const id = useId();
+  return (
+    <Stack gap={4}>
+      <Text size="sm" fw={500} id={id}>
+        {label}
+      </Text>
+      <SegmentedControl aria-labelledby={id} {...props} />
+    </Stack>
+  );
 }
