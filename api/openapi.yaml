@@ -1,0 +1,2619 @@
+openapi: 3.0.3
+info:
+  title: Recorvia API
+  version: 0.1.0
+  description: |
+    API do Recorvia: gestão de assinaturas, faturamento recorrente, cobranças,
+    inadimplência e conciliação de recebíveis.
+
+    Convenções:
+    - Valores monetários em unidades mínimas inteiras (centavos) com `currency`.
+      Preços unitários fracionários usam `unit_amount_decimal` (texto decimal em
+      centavos, até 10 casas).
+    - Instantes em RFC 3339 (UTC). Datas civis no formato `AAAA-MM-DD`, no fuso
+      da organização.
+    - Listas paginadas por cursor: `limit` (1 a 100, padrão 25) e `cursor`.
+      A ordenação é determinística (desempate por `id`).
+    - Erros no formato RFC 9457 (`application/problem+json`).
+    - Concorrência otimista: recursos expõem `version` e `ETag`; alterações
+      exigem `If-Match: "<version>"` quando indicado.
+    - Operações financeiras de criação exigem `Idempotency-Key`.
+    - Navegador: sessão por cookie HttpOnly, header `X-CSRF-Token` em métodos
+      que alteram estado e `X-Recorvia-Tenant` igual à organização ativa.
+    - Integrações: `Authorization: Bearer rcv_...` (credencial com escopos e
+      vinculada a uma organização).
+servers:
+  - url: /
+tags:
+  - name: health
+  - name: auth
+  - name: organizations
+  - name: platform
+  - name: customers
+  - name: catalog
+  - name: subscriptions
+  - name: usage
+  - name: invoices
+  - name: payments
+  - name: integrations
+  - name: ledger
+  - name: reconciliation
+  - name: collections
+  - name: webhooks
+  - name: operations
+  - name: audit
+  - name: dashboard
+  - name: portal
+security:
+  - session: []
+  - apiCredential: []
+
+paths:
+  /livez:
+    get:
+      tags: [health]
+      operationId: livez
+      security: []
+      summary: Processo em execução (não verifica dependências)
+      responses:
+        "200": { $ref: "#/components/responses/Health" }
+  /readyz:
+    get:
+      tags: [health]
+      operationId: readyz
+      security: []
+      summary: Pronto para receber tráfego (verifica dependências críticas)
+      responses:
+        "200": { $ref: "#/components/responses/Health" }
+        "503": { $ref: "#/components/responses/Health" }
+
+  /auth/login:
+    get:
+      tags: [auth]
+      operationId: authLogin
+      security: []
+      summary: Inicia login no provedor de identidade (Authorization Code + PKCE)
+      parameters:
+        - { name: return_to, in: query, schema: { type: string, maxLength: 512 } }
+      responses:
+        "302": { description: Redirecionamento para o provedor de identidade }
+  /auth/callback:
+    get:
+      tags: [auth]
+      operationId: authCallback
+      security: []
+      parameters:
+        - { name: code, in: query, required: true, schema: { type: string } }
+        - { name: state, in: query, required: true, schema: { type: string } }
+      responses:
+        "302": { description: Sessão criada; redireciona para a aplicação }
+        "401": { $ref: "#/components/responses/Problem" }
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: authLogout
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      responses:
+        "200":
+          description: Sessão encerrada
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [redirect_url]
+                properties:
+                  redirect_url: { type: string }
+
+  /api/v1/session:
+    get:
+      tags: [auth]
+      operationId: getSession
+      security: [ { session: [] } ]
+      responses:
+        "200": { description: Sessão atual, content: { application/json: { schema: { $ref: "#/components/schemas/Session" } } } }
+        "401": { $ref: "#/components/responses/Problem" }
+  /api/v1/session/tenant:
+    put:
+      tags: [auth]
+      operationId: switchTenant
+      security: [ { session: [] } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenant_id]
+              properties:
+                tenant_id: { type: string, format: uuid }
+      responses:
+        "200": { description: Organização ativa alterada (sessão rotacionada), content: { application/json: { schema: { $ref: "#/components/schemas/Session" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+  /api/v1/organizations:
+    post:
+      tags: [organizations]
+      operationId: createOrganization
+      summary: Onboarding de nova organização
+      security: [ { session: [] } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/OrganizationInput" } } }
+      responses:
+        "201": { description: Organização criada; sessão rotacionada com a nova organização ativa, content: { application/json: { schema: { $ref: "#/components/schemas/Session" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/invitations/accept:
+    post:
+      tags: [organizations]
+      operationId: acceptInvitation
+      security: [ { session: [] } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, minLength: 20, maxLength: 200 }
+      responses:
+        "200":
+          description: Convite aceito
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenant_id, role]
+                properties:
+                  tenant_id: { type: string, format: uuid }
+                  role: { $ref: "#/components/schemas/Role" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+
+  /api/v1/organization:
+    get:
+      tags: [organizations]
+      operationId: getOrganization
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Organização, content: { application/json: { schema: { $ref: "#/components/schemas/Organization" } } } }
+    patch:
+      tags: [organizations]
+      operationId: updateOrganization
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/OrganizationUpdate" } } }
+      responses:
+        "200": { description: Atualizada, content: { application/json: { schema: { $ref: "#/components/schemas/Organization" } } } }
+        "412": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/roles:
+    get:
+      tags: [organizations]
+      operationId: listRoles
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200":
+          description: Matriz de permissões por papel
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/RolePermissions" }
+  /api/v1/members:
+    get:
+      tags: [organizations]
+      operationId: listMembers
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Membros, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Member" } } } } } } }
+  /api/v1/members/{user_id}:
+    parameters: [ { $ref: "#/components/parameters/Tenant" }, { name: user_id, in: path, required: true, schema: { type: string, format: uuid } } ]
+    patch:
+      tags: [organizations]
+      operationId: updateMemberRole
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [role], properties: { role: { $ref: "#/components/schemas/Role" } } } } }
+      responses:
+        "200": { description: Papel alterado, content: { application/json: { schema: { $ref: "#/components/schemas/Member" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+    delete:
+      tags: [organizations]
+      operationId: removeMember
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      responses:
+        "204": { description: Removido }
+        "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/invitations:
+    get:
+      tags: [organizations]
+      operationId: listInvitations
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Convites, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Invitation" } } } } } } }
+    post:
+      tags: [organizations]
+      operationId: createInvitation
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email: { type: string, format: email, maxLength: 320 }
+                role: { $ref: "#/components/schemas/Role" }
+      responses:
+        "201": { description: Convite criado; accept_url é exibida uma única vez, content: { application/json: { schema: { $ref: "#/components/schemas/InvitationCreated" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+  /api/v1/invitations/{id}:
+    delete:
+      tags: [organizations]
+      operationId: revokeInvitation
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "204": { description: Revogado }
+        "409": { $ref: "#/components/responses/Problem" }
+
+  /api/v1/platform/overview:
+    get:
+      tags: [platform]
+      operationId: getPlatformOverview
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Plano da plataforma e consumo de limites, content: { application/json: { schema: { $ref: "#/components/schemas/PlatformOverview" } } } }
+  /api/v1/platform/plans:
+    get:
+      tags: [platform]
+      operationId: listPlatformPlans
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Planos da plataforma, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PlatformPlan" } } } } } } }
+  /api/v1/platform/plan:
+    put:
+      tags: [platform]
+      operationId: changePlatformPlan
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [plan_code], properties: { plan_code: { type: string } } } } }
+      responses:
+        "200": { description: Plano alterado, content: { application/json: { schema: { $ref: "#/components/schemas/PlatformOverview" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/platform/addons:
+    get:
+      tags: [platform]
+      operationId: listPlatformAddons
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Serviços adicionais, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PlatformAddon" } } } } } } }
+  /api/v1/platform/addon-orders:
+    get:
+      tags: [platform]
+      operationId: listAddonOrders
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Pedidos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AddonOrder" } } } } } } }
+    post:
+      tags: [platform]
+      operationId: createAddonOrder
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [addon_code], properties: { addon_code: { type: string }, notes: { type: string, maxLength: 2000 } } } } }
+      responses:
+        "201": { description: Pedido registrado, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
+  /api/v1/platform/statements:
+    get:
+      tags: [platform]
+      operationId: listPlatformStatements
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Demonstrativos mensais da plataforma, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PlatformStatement" } } } } } } }
+  /api/v1/admin/tenants:
+    get:
+      tags: [platform]
+      operationId: adminListTenants
+      summary: Catálogo de organizações para a equipe da plataforma (sem dados financeiros dos clientes)
+      security: [ { session: [] } ]
+      responses:
+        "200": { description: Organizações, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AdminTenant" } } } } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+
+  /api/v1/customers:
+    get:
+      tags: [customers]
+      operationId: listCustomers
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: status, in: query, schema: { type: string, enum: [active, archived] } }
+        - { name: q, in: query, description: "Busca por nome, documento ou identificador externo", schema: { type: string, maxLength: 100 } }
+        - { name: sort, in: query, schema: { type: string, enum: [name, -name, created_at, -created_at] } }
+      responses:
+        "200": { description: Clientes, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerPage" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+    post:
+      tags: [customers]
+      operationId: createCustomer
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CustomerInput" } } }
+      responses:
+        "201": { description: Cliente criado, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerDetails" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/customers/{id}:
+    parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+    get:
+      tags: [customers]
+      operationId: getCustomer
+      responses:
+        "200": { description: Cliente, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerDetails" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+    patch:
+      tags: [customers]
+      operationId: updateCustomer
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CustomerInput" } } }
+      responses:
+        "200": { description: Atualizado, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerDetails" } } } }
+        "412": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/customers/{id}/archive:
+    post:
+      tags: [customers]
+      operationId: archiveCustomer
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Arquivado, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerDetails" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/customers/{id}/contacts:
+    post:
+      tags: [customers]
+      operationId: addCustomerContact
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ContactInput" } } }
+      responses:
+        "201": { description: Contato adicionado, content: { application/json: { schema: { $ref: "#/components/schemas/Contact" } } } }
+  /api/v1/customers/{id}/contacts/{contact_id}:
+    delete:
+      tags: [customers]
+      operationId: removeCustomerContact
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/CSRF" }
+        - { $ref: "#/components/parameters/ID" }
+        - { name: contact_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Removido }
+  /api/v1/customers/{id}/billing-address:
+    put:
+      tags: [customers]
+      operationId: setCustomerAddress
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/Address" } } }
+      responses:
+        "200": { description: Endereço gravado, content: { application/json: { schema: { $ref: "#/components/schemas/Address" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/customers/{id}/history:
+    get:
+      tags: [customers]
+      operationId: getCustomerHistory
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Histórico do cliente (auditoria), content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AuditEvent" } } } } } } }
+  /api/v1/customers/{id}/credits:
+    get:
+      tags: [customers]
+      operationId: getCustomerCredits
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Saldo e movimentos de crédito, content: { application/json: { schema: { $ref: "#/components/schemas/CreditBalance" } } } }
+    post:
+      tags: [customers]
+      operationId: grantCustomerCredit
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, reason]
+              properties:
+                amount: { type: integer, format: int64, minimum: 1 }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+      responses:
+        "201": { description: Crédito concedido, content: { application/json: { schema: { $ref: "#/components/schemas/CreditBalance" } } } }
+  /api/v1/customers/{id}/portal-links:
+    post:
+      tags: [customers]
+      operationId: createPortalLink
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "201":
+          description: Link temporário de uso único para o portal do cliente
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url, expires_at]
+                properties:
+                  url: { type: string }
+                  expires_at: { type: string, format: date-time }
+
+  /api/v1/products:
+    get:
+      tags: [catalog]
+      operationId: listProducts
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { name: status, in: query, schema: { type: string, enum: [active, archived] } } ]
+      responses:
+        "200": { description: Produtos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Product" } } } } } } }
+    post:
+      tags: [catalog]
+      operationId: createProduct
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ProductInput" } } }
+      responses:
+        "201": { description: Produto criado, content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/products/{id}:
+    patch:
+      tags: [catalog]
+      operationId: updateProduct
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: "#/components/schemas/ProductInput" }
+                - type: object
+                  required: [status]
+                  properties:
+                    status: { type: string, enum: [active, archived] }
+      responses:
+        "200": { description: Atualizado, content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } } }
+        "412": { $ref: "#/components/responses/Problem" }
+  /api/v1/metrics:
+    get:
+      tags: [catalog]
+      operationId: listMetrics
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Métricas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Metric" } } } } } } }
+    post:
+      tags: [catalog]
+      operationId: createMetric
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/MetricInput" } } }
+      responses:
+        "201": { description: Métrica criada, content: { application/json: { schema: { $ref: "#/components/schemas/Metric" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/plans:
+    get:
+      tags: [catalog]
+      operationId: listPlans
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { name: status, in: query, schema: { type: string, enum: [active, archived] } }
+        - { name: product_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Planos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Plan" } } } } } } }
+    post:
+      tags: [catalog]
+      operationId: createPlan
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PlanInput" } } }
+      responses:
+        "201": { description: Plano criado, content: { application/json: { schema: { $ref: "#/components/schemas/PlanDetails" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/plans/{id}:
+    parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+    get:
+      tags: [catalog]
+      operationId: getPlan
+      responses:
+        "200": { description: Plano com versões de preço, content: { application/json: { schema: { $ref: "#/components/schemas/PlanDetails" } } } }
+    patch:
+      tags: [catalog]
+      operationId: updatePlan
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PlanUpdate" } } }
+      responses:
+        "200": { description: Atualizado, content: { application/json: { schema: { $ref: "#/components/schemas/PlanDetails" } } } }
+        "412": { $ref: "#/components/responses/Problem" }
+  /api/v1/plans/{id}/prices:
+    post:
+      tags: [catalog]
+      operationId: addPriceVersion
+      summary: Cria nova versão de preço (não altera assinaturas existentes)
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PriceInput" } } }
+      responses:
+        "201": { description: Versão criada, content: { application/json: { schema: { $ref: "#/components/schemas/PriceVersion" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/coupons:
+    get:
+      tags: [catalog]
+      operationId: listCoupons
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Cupons, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Coupon" } } } } } } }
+    post:
+      tags: [catalog]
+      operationId: createCoupon
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CouponInput" } } }
+      responses:
+        "201": { description: Cupom criado, content: { application/json: { schema: { $ref: "#/components/schemas/Coupon" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/coupons/{id}/archive:
+    post:
+      tags: [catalog]
+      operationId: archiveCoupon
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Arquivado, content: { application/json: { schema: { $ref: "#/components/schemas/Coupon" } } } }
+
+  /api/v1/subscriptions:
+    get:
+      tags: [subscriptions]
+      operationId: listSubscriptions
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/SubscriptionStatus" } }
+        - { name: customer_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Assinaturas, content: { application/json: { schema: { $ref: "#/components/schemas/SubscriptionPage" } } } }
+    post:
+      tags: [subscriptions]
+      operationId: createSubscription
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SubscriptionInput" } } }
+      responses:
+        "201": { description: Assinatura criada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/subscriptions/{id}:
+    get:
+      tags: [subscriptions]
+      operationId: getSubscription
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Assinatura, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/subscriptions/{id}/history:
+    get:
+      tags: [subscriptions]
+      operationId: getSubscriptionHistory
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Histórico de transições, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/SubscriptionHistoryEntry" } } } } } } }
+  /api/v1/subscriptions/{id}/cancel:
+    post:
+      tags: [subscriptions]
+      operationId: cancelSubscription
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode: { type: string, enum: [immediate, period_end] }
+                reason: { type: string, maxLength: 500 }
+      responses:
+        "200": { description: Cancelada ou agendada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/subscriptions/{id}/resume-renewal:
+    post:
+      tags: [subscriptions]
+      operationId: resumeSubscriptionRenewal
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Cancelamento agendado desfeito, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+  /api/v1/subscriptions/{id}/suspend:
+    post:
+      tags: [subscriptions]
+      operationId: suspendSubscription
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { reason: { type: string, maxLength: 500 } } } } }
+      responses:
+        "200": { description: Suspensa, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/subscriptions/{id}/reactivate:
+    post:
+      tags: [subscriptions]
+      operationId: reactivateSubscription
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Reativada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/subscriptions/{id}/change-plan:
+    post:
+      tags: [subscriptions]
+      operationId: changeSubscriptionPlan
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan_id, timing]
+              properties:
+                plan_id: { type: string, format: uuid }
+                quantity: { type: integer, minimum: 1, maximum: 1000000 }
+                timing: { $ref: "#/components/schemas/ChangeTiming" }
+      responses:
+        "200": { description: Alteração aplicada ou agendada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/subscriptions/{id}/change-quantity:
+    post:
+      tags: [subscriptions]
+      operationId: changeSubscriptionQuantity
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quantity, timing]
+              properties:
+                quantity: { type: integer, minimum: 1, maximum: 1000000 }
+                timing: { $ref: "#/components/schemas/ChangeTiming" }
+      responses:
+        "200": { description: Alteração aplicada ou agendada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/subscriptions/{id}/price-adjustments:
+    parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+    get:
+      tags: [subscriptions]
+      operationId: listPriceAdjustments
+      responses:
+        "200": { description: Reajustes, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PriceAdjustment" } } } } } } }
+    post:
+      tags: [subscriptions]
+      operationId: schedulePriceAdjustment
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PriceAdjustmentInput" } } }
+      responses:
+        "201": { description: Reajuste programado, content: { application/json: { schema: { $ref: "#/components/schemas/PriceAdjustment" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/subscriptions/{id}/price-adjustments/{adjustment_id}:
+    delete:
+      tags: [subscriptions]
+      operationId: cancelPriceAdjustment
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/CSRF" }
+        - { $ref: "#/components/parameters/ID" }
+        - { name: adjustment_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Reajuste cancelado }
+        "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/subscriptions/{id}/discounts:
+    parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+    post:
+      tags: [subscriptions]
+      operationId: applySubscriptionCoupon
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [coupon_code], properties: { coupon_code: { type: string } } } } }
+      responses:
+        "201": { description: Desconto aplicado, content: { application/json: { schema: { $ref: "#/components/schemas/SubscriptionDiscount" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+    delete:
+      tags: [subscriptions]
+      operationId: removeSubscriptionDiscount
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      responses:
+        "204": { description: Desconto encerrado }
+  /api/v1/subscriptions/{id}/usage:
+    get:
+      tags: [usage]
+      operationId: getSubscriptionUsage
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Consumo agregado do período corrente, content: { application/json: { schema: { $ref: "#/components/schemas/SubscriptionUsage" } } } }
+
+  /api/v1/usage-events:
+    get:
+      tags: [usage]
+      operationId: listUsageEvents
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: subscription_id, in: query, schema: { type: string, format: uuid } }
+        - { name: metric_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Eventos de consumo, content: { application/json: { schema: { $ref: "#/components/schemas/UsageEventPage" } } } }
+    post:
+      tags: [usage]
+      operationId: ingestUsageEvents
+      summary: Ingestão de eventos de consumo (deduplicados por external_id)
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [events]
+              properties:
+                events:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/UsageEventInput" }
+      responses:
+        "200": { description: Resultado por evento, content: { application/json: { schema: { $ref: "#/components/schemas/UsageBatchResult" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+
+  /api/v1/invoices:
+    get:
+      tags: [invoices]
+      operationId: listInvoices
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/InvoiceStatus" } }
+        - { name: customer_id, in: query, schema: { type: string, format: uuid } }
+        - { name: subscription_id, in: query, schema: { type: string, format: uuid } }
+        - { name: issued_from, in: query, schema: { type: string, format: date } }
+        - { name: issued_to, in: query, schema: { type: string, format: date } }
+        - { name: overdue, in: query, schema: { type: boolean } }
+      responses:
+        "200": { description: Faturas (ordenadas por emissão decrescente), content: { application/json: { schema: { $ref: "#/components/schemas/InvoicePage" } } } }
+  /api/v1/invoices/export:
+    get:
+      tags: [invoices]
+      operationId: exportInvoices
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/InvoiceStatus" } }
+        - { name: issued_from, in: query, schema: { type: string, format: date } }
+        - { name: issued_to, in: query, schema: { type: string, format: date } }
+      responses:
+        "200": { description: CSV gerado sob demanda (não é armazenado), content: { text/csv: { schema: { type: string } } } }
+  /api/v1/invoices/{id}:
+    get:
+      tags: [invoices]
+      operationId: getInvoice
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: "Fatura com itens, histórico e cobranças", headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: "#/components/schemas/InvoiceDetails" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/invoices/{id}/document:
+    get:
+      tags: [invoices]
+      operationId: getInvoiceDocument
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Documento comercial imprimível (não é documento fiscal), content: { text/html: { schema: { type: string } } } }
+  /api/v1/invoices/{id}/void:
+    post:
+      tags: [invoices]
+      operationId: voidInvoice
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ReasonInput" } } }
+      responses:
+        "200": { description: Cancelada, content: { application/json: { schema: { $ref: "#/components/schemas/InvoiceDetails" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/invoices/{id}/mark-uncollectible:
+    post:
+      tags: [invoices]
+      operationId: markInvoiceUncollectible
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ReasonInput" } } }
+      responses:
+        "200": { description: Baixada, content: { application/json: { schema: { $ref: "#/components/schemas/InvoiceDetails" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/invoices/{id}/credit-notes:
+    post:
+      tags: [invoices]
+      operationId: createCreditNote
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, reason]
+              properties:
+                amount: { type: integer, format: int64, minimum: 1 }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+      responses:
+        "201": { description: Nota de crédito emitida, content: { application/json: { schema: { $ref: "#/components/schemas/InvoiceDetails" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/invoices/{id}/payments:
+    post:
+      tags: [invoices]
+      operationId: recordManualPayment
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ManualPaymentInput" } } }
+      responses:
+        "201": { description: Pagamento registrado, content: { application/json: { schema: { $ref: "#/components/schemas/Payment" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/invoices/{id}/charges:
+    post:
+      tags: [invoices]
+      operationId: retryInvoiceCharge
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "201": { description: Cobrança solicitada ao provedor, content: { application/json: { schema: { $ref: "#/components/schemas/Charge" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/billing-runs:
+    post:
+      tags: [invoices]
+      operationId: runBilling
+      summary: Executa o motor de recorrência para a organização
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" } ]
+      responses:
+        "200": { description: Resultado da execução, content: { application/json: { schema: { $ref: "#/components/schemas/BillingRunResult" } } } }
+
+  /api/v1/charges:
+    get:
+      tags: [payments]
+      operationId: listCharges
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/ChargeStatus" } }
+        - { name: invoice_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Cobranças, content: { application/json: { schema: { $ref: "#/components/schemas/ChargePage" } } } }
+  /api/v1/charges/{id}:
+    get:
+      tags: [payments]
+      operationId: getCharge
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Cobrança, content: { application/json: { schema: { $ref: "#/components/schemas/Charge" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/charges/{id}/refunds:
+    post:
+      tags: [payments]
+      operationId: refundCharge
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, reason]
+              properties:
+                amount: { type: integer, format: int64, minimum: 1 }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+      responses:
+        "201": { description: Reembolso solicitado, content: { application/json: { schema: { $ref: "#/components/schemas/Refund" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/refunds:
+    get:
+      tags: [payments]
+      operationId: listRefunds
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
+      responses:
+        "200": { description: Reembolsos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Refund" } }, next_cursor: { type: string, nullable: true } } } } } }
+  /api/v1/payments:
+    get:
+      tags: [payments]
+      operationId: listPayments
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" }, { name: invoice_id, in: query, schema: { type: string, format: uuid } } ]
+      responses:
+        "200": { description: Recebimentos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Payment" } }, next_cursor: { type: string, nullable: true } } } } } }
+  /api/v1/disputes:
+    get:
+      tags: [payments]
+      operationId: listDisputes
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Disputas e chargebacks, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Dispute" } } } } } } }
+  /api/v1/payment-operations:
+    get:
+      tags: [payments]
+      operationId: listPaymentOperations
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { name: status, in: query, schema: { type: string, enum: [pending, in_flight, succeeded, failed, unknown] } }
+      responses:
+        "200": { description: Operações externas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PaymentOperation" } } } } } } }
+  /api/v1/payment-operations/{id}/retry:
+    post:
+      tags: [payments]
+      operationId: retryPaymentOperation
+      summary: Reconsulta o provedor para resolver operação com resultado desconhecido
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Operação reprocessada, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentOperation" } } } }
+
+  /api/v1/payment-providers:
+    get:
+      tags: [integrations]
+      operationId: listPaymentProviders
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Provedores configurados (sem segredos), content: { application/json: { schema: { type: object, required: [data, available], properties: { data: { type: array, items: { $ref: "#/components/schemas/ProviderAccount" } }, available: { type: array, items: { type: string } } } } } } }
+  /api/v1/payment-providers/{provider}:
+    put:
+      tags: [integrations]
+      operationId: configurePaymentProvider
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/CSRF" }
+        - { name: provider, in: path, required: true, schema: { type: string, enum: [simulator, asaas] } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ProviderAccountInput" } } }
+      responses:
+        "200": { description: Configurado; webhook_endpoint_url é exibida uma única vez, content: { application/json: { schema: { $ref: "#/components/schemas/ProviderAccountConfigured" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+
+  /api/v1/ledger/accounts:
+    get:
+      tags: [ledger]
+      operationId: listLedgerAccounts
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Contas com saldos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/LedgerAccount" } } } } } } }
+  /api/v1/ledger/transactions:
+    get:
+      tags: [ledger]
+      operationId: listLedgerTransactions
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: reference_type, in: query, schema: { type: string, enum: [invoice, payment, refund, dispute, credit_note, customer_credit, settlement, reconciliation_discrepancy] } }
+        - { name: reference_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Lançamentos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/LedgerTransaction" } }, next_cursor: { type: string, nullable: true } } } } } }
+
+  /api/v1/reconciliation/runs:
+    get:
+      tags: [reconciliation]
+      operationId: listReconciliationRuns
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Execuções, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/ReconciliationRun" } } } } } } }
+    post:
+      tags: [reconciliation]
+      operationId: runReconciliation
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" } ]
+      responses:
+        "200": { description: Execução concluída, content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationRun" } } } }
+  /api/v1/reconciliation/discrepancies:
+    get:
+      tags: [reconciliation]
+      operationId: listDiscrepancies
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { name: status, in: query, schema: { type: string, enum: [open, resolved, dismissed] } }
+        - { name: kind, in: query, schema: { $ref: "#/components/schemas/DiscrepancyKind" } }
+      responses:
+        "200": { description: Divergências, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Discrepancy" } } } } } } }
+  /api/v1/reconciliation/discrepancies/{id}:
+    get:
+      tags: [reconciliation]
+      operationId: getDiscrepancy
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Divergência com histórico, content: { application/json: { schema: { $ref: "#/components/schemas/Discrepancy" } } } }
+  /api/v1/reconciliation/discrepancies/{id}/resolve:
+    post:
+      tags: [reconciliation]
+      operationId: resolveDiscrepancy
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resolution, justification]
+              properties:
+                resolution: { type: string, enum: [accept_provider, keep_local, adjust_ledger, dismiss] }
+                justification: { type: string, minLength: 10, maxLength: 2000 }
+      responses:
+        "200": { description: Resolvida, content: { application/json: { schema: { $ref: "#/components/schemas/Discrepancy" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+
+  /api/v1/collection-policies:
+    get:
+      tags: [collections]
+      operationId: listCollectionPolicies
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Políticas de cobrança, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/CollectionPolicy" } } } } } } }
+    post:
+      tags: [collections]
+      operationId: createCollectionPolicy
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CollectionPolicyInput" } } }
+      responses:
+        "201": { description: Política criada, content: { application/json: { schema: { $ref: "#/components/schemas/CollectionPolicy" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/collection-policies/{id}:
+    parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+    patch:
+      tags: [collections]
+      operationId: updateCollectionPolicy
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CollectionPolicyInput" } } }
+      responses:
+        "200": { description: Atualizada, content: { application/json: { schema: { $ref: "#/components/schemas/CollectionPolicy" } } } }
+        "412": { $ref: "#/components/responses/Problem" }
+  /api/v1/notification-templates:
+    get:
+      tags: [collections]
+      operationId: listNotificationTemplates
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Templates de e-mail, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/NotificationTemplate" } } } } } } }
+  /api/v1/notification-templates/{key}:
+    put:
+      tags: [collections]
+      operationId: updateNotificationTemplate
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/CSRF" }
+        - { name: key, in: path, required: true, schema: { $ref: "#/components/schemas/TemplateKey" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subject, body]
+              properties:
+                subject: { type: string, minLength: 3, maxLength: 200 }
+                body: { type: string, minLength: 10, maxLength: 10000 }
+      responses:
+        "200": { description: Template gravado, content: { application/json: { schema: { $ref: "#/components/schemas/NotificationTemplate" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/notifications:
+    get:
+      tags: [collections]
+      operationId: listNotifications
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: status, in: query, schema: { type: string, enum: [scheduled, sending, sent, failed, canceled, suppressed] } }
+        - { name: invoice_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Histórico de envio, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Notification" } }, next_cursor: { type: string, nullable: true } } } } } }
+
+  /api/v1/webhook-event-types:
+    get:
+      tags: [webhooks]
+      operationId: listWebhookEventTypes
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Tipos de evento disponíveis, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { type: string } } } } } } }
+  /api/v1/webhook-endpoints:
+    get:
+      tags: [webhooks]
+      operationId: listWebhookEndpoints
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Endpoints, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/WebhookEndpoint" } } } } } } }
+    post:
+      tags: [webhooks]
+      operationId: createWebhookEndpoint
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/WebhookEndpointInput" } } }
+      responses:
+        "201": { description: Criado; o segredo é exibido uma única vez, content: { application/json: { schema: { $ref: "#/components/schemas/WebhookEndpointWithSecret" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/webhook-endpoints/{id}:
+    parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+    patch:
+      tags: [webhooks]
+      operationId: updateWebhookEndpoint
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: "#/components/schemas/WebhookEndpointInput" }
+                - type: object
+                  required: [status]
+                  properties:
+                    status: { type: string, enum: [active, disabled] }
+      responses:
+        "200": { description: Atualizado, content: { application/json: { schema: { $ref: "#/components/schemas/WebhookEndpoint" } } } }
+    delete:
+      tags: [webhooks]
+      operationId: deleteWebhookEndpoint
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      responses:
+        "204": { description: Desativado e removido da listagem ativa }
+  /api/v1/webhook-endpoints/{id}/rotate-secret:
+    post:
+      tags: [webhooks]
+      operationId: rotateWebhookSecret
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { previous_secret_valid_hours: { type: integer, minimum: 0, maximum: 168 } } } } }
+      responses:
+        "200": { description: Novo segredo (exibido uma única vez), content: { application/json: { schema: { $ref: "#/components/schemas/WebhookEndpointWithSecret" } } } }
+  /api/v1/webhook-endpoints/{id}/deliveries:
+    get:
+      tags: [webhooks]
+      operationId: listWebhookDeliveries
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
+      responses:
+        "200": { description: Entregas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/WebhookDelivery" } }, next_cursor: { type: string, nullable: true } } } } } }
+  /api/v1/webhook-deliveries/{id}/retry:
+    post:
+      tags: [webhooks]
+      operationId: retryWebhookDelivery
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Reagendada, content: { application/json: { schema: { $ref: "#/components/schemas/WebhookDelivery" } } } }
+
+  /api/v1/api-credentials:
+    get:
+      tags: [integrations]
+      operationId: listApiCredentials
+      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      responses:
+        "200": { description: Credenciais (sem segredos), content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/ApiCredential" } } } } } } }
+    post:
+      tags: [integrations]
+      operationId: createApiCredential
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, scopes]
+              properties:
+                name: { type: string, minLength: 3, maxLength: 100 }
+                scopes: { type: array, minItems: 1, items: { type: string } }
+                expires_in_days: { type: integer, minimum: 1, maximum: 730 }
+      responses:
+        "201": { description: Credencial criada; o segredo é exibido uma única vez, content: { application/json: { schema: { $ref: "#/components/schemas/ApiCredentialWithSecret" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/api-credentials/{id}/rotate:
+    post:
+      tags: [integrations]
+      operationId: rotateApiCredential
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "201": { description: Nova credencial; a anterior permanece válida por 24 horas, content: { application/json: { schema: { $ref: "#/components/schemas/ApiCredentialWithSecret" } } } }
+  /api/v1/api-credentials/{id}:
+    delete:
+      tags: [integrations]
+      operationId: revokeApiCredential
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "204": { description: Revogada }
+
+  /api/v1/dead-letters:
+    get:
+      tags: [operations]
+      operationId: listDeadLetters
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { name: status, in: query, schema: { type: string, enum: [open, replayed, discarded] } } ]
+      responses:
+        "200": { description: Mensagens não processadas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/DeadLetter" } } } } } } }
+  /api/v1/dead-letters/{id}/replay:
+    post:
+      tags: [operations]
+      operationId: replayDeadLetter
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ReasonInput" } } }
+      responses:
+        "200": { description: Reenfileirada (auditado), content: { application/json: { schema: { $ref: "#/components/schemas/DeadLetter" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/dead-letters/{id}/discard:
+    post:
+      tags: [operations]
+      operationId: discardDeadLetter
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ReasonInput" } } }
+      responses:
+        "200": { description: Descartada (auditado), content: { application/json: { schema: { $ref: "#/components/schemas/DeadLetter" } } } }
+
+  /api/v1/audit-events:
+    get:
+      tags: [audit]
+      operationId: listAuditEvents
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: resource_type, in: query, schema: { type: string, maxLength: 64 } }
+        - { name: resource_id, in: query, schema: { type: string, maxLength: 64 } }
+        - { name: action, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: actor_id, in: query, schema: { type: string, maxLength: 64 } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        "200": { description: Trilha de auditoria, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AuditEvent" } }, next_cursor: { type: string, nullable: true } } } } } }
+
+  /api/v1/dashboard:
+    get:
+      tags: [dashboard]
+      operationId: getDashboard
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { name: month, in: query, description: Mês de referência (AAAA-MM) no fuso da organização, schema: { type: string, pattern: '^\d{4}-\d{2}$' } }
+      responses:
+        "200": { description: Indicadores financeiros, content: { application/json: { schema: { $ref: "#/components/schemas/Dashboard" } } } }
+
+  /webhooks/providers/{provider}/{token}:
+    post:
+      tags: [webhooks]
+      operationId: receiveProviderWebhook
+      security: []
+      summary: Recepção de webhooks de provedores (autenticação conforme o provedor)
+      parameters:
+        - { name: provider, in: path, required: true, schema: { type: string, enum: [simulator, asaas] } }
+        - { name: token, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        "200": { description: Recebido e persistido }
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "413": { $ref: "#/components/responses/Problem" }
+
+  /portal/access:
+    get:
+      tags: [portal]
+      operationId: portalAccess
+      security: []
+      summary: Troca o link temporário de uso único por uma sessão restrita do portal
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string } }
+      responses:
+        "302": { description: Sessão do portal criada; redireciona para /portal }
+        "401": { $ref: "#/components/responses/Problem" }
+  /api/portal/v1/session:
+    get:
+      tags: [portal]
+      operationId: portalSession
+      security: [ { portalSession: [] } ]
+      responses:
+        "200": { description: Cliente e organização da sessão, content: { application/json: { schema: { $ref: "#/components/schemas/PortalSession" } } } }
+        "401": { $ref: "#/components/responses/Problem" }
+  /api/portal/v1/invoices:
+    get:
+      tags: [portal]
+      operationId: portalListInvoices
+      security: [ { portalSession: [] } ]
+      responses:
+        "200": { description: Faturas do cliente, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PortalInvoice" } } } } } } }
+  /api/portal/v1/invoices/{id}:
+    get:
+      tags: [portal]
+      operationId: portalGetInvoice
+      security: [ { portalSession: [] } ]
+      parameters: [ { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Fatura do cliente, content: { application/json: { schema: { $ref: "#/components/schemas/PortalInvoice" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/portal/v1/invoices/{id}/document:
+    get:
+      tags: [portal]
+      operationId: portalInvoiceDocument
+      security: [ { portalSession: [] } ]
+      parameters: [ { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Documento comercial, content: { text/html: { schema: { type: string } } } }
+  /api/portal/v1/contact-preferences:
+    put:
+      tags: [portal]
+      operationId: portalUpdateContactPreferences
+      security: [ { portalSession: [] } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contacts]
+              properties:
+                contacts:
+                  type: array
+                  maxItems: 20
+                  items:
+                    type: object
+                    required: [id, receives_billing_email]
+                    properties:
+                      id: { type: string, format: uuid }
+                      receives_billing_email: { type: boolean }
+      responses:
+        "200": { description: Preferências gravadas, content: { application/json: { schema: { $ref: "#/components/schemas/PortalSession" } } } }
+  /api/portal/v1/logout:
+    post:
+      tags: [portal]
+      operationId: portalLogout
+      security: [ { portalSession: [] } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      responses:
+        "204": { description: Sessão do portal encerrada }
+
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: recorvia_session
+      description: Sessão do navegador (nome do cookie varia por ambiente; em produção usa o prefixo __Host-)
+    portalSession:
+      type: apiKey
+      in: cookie
+      name: recorvia_portal
+    apiCredential:
+      type: http
+      scheme: bearer
+      description: Credencial de integração (rcv_...) vinculada a uma organização, com escopos
+
+  parameters:
+    Tenant:
+      name: X-Recorvia-Tenant
+      in: header
+      description: Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409.
+      schema: { type: string, format: uuid }
+    CSRF:
+      name: X-CSRF-Token
+      in: header
+      description: Obrigatório para sessões de navegador em métodos que alteram estado.
+      schema: { type: string }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Versão esperada do recurso, entre aspas (ex. "3").
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado.
+      schema: { type: string, minLength: 8, maxLength: 255 }
+    ID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string, maxLength: 512 }
+
+  responses:
+    Problem:
+      description: Erro estruturado (RFC 9457)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Health:
+      description: Situação de saúde
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [status]
+            properties:
+              status: { type: string, enum: [ok, degraded, unavailable] }
+              checks:
+                type: object
+                additionalProperties: { type: string }
+
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code: { type: string }
+        request_id: { type: string }
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }
+
+    Role:
+      type: string
+      enum: [owner, admin, finance, operator, auditor]
+    RolePermissions:
+      type: object
+      required: [role, permissions]
+      properties:
+        role: { $ref: "#/components/schemas/Role" }
+        permissions: { type: array, items: { type: string } }
+
+    User:
+      type: object
+      required: [id, email, display_name]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        display_name: { type: string }
+    OrganizationSummary:
+      type: object
+      required: [id, name, slug, role, status]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        status: { type: string }
+    Session:
+      type: object
+      required: [user, csrf_token, organizations, platform_staff]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        csrf_token: { type: string }
+        platform_staff: { type: boolean }
+        organizations: { type: array, items: { $ref: "#/components/schemas/OrganizationSummary" } }
+        active_tenant:
+          nullable: true
+          allOf:
+            - { $ref: "#/components/schemas/OrganizationSummary" }
+            - type: object
+              required: [permissions, timezone]
+              properties:
+                permissions: { type: array, items: { type: string } }
+                timezone: { type: string }
+
+    OrganizationInput:
+      type: object
+      required: [name, slug]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 200 }
+        slug: { type: string, pattern: '^[a-z0-9][a-z0-9-]{1,62}$' }
+        legal_name: { type: string, maxLength: 200 }
+        document_number: { type: string, description: CNPJ (aceita formato alfanumérico) }
+        timezone: { type: string, example: America/Sao_Paulo }
+        invoice_prefix: { type: string, pattern: '^[A-Z0-9]{1,10}$' }
+        payment_terms_days: { type: integer, minimum: 0, maximum: 120 }
+    OrganizationUpdate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 200 }
+        legal_name: { type: string, maxLength: 200 }
+        document_number: { type: string }
+        timezone: { type: string }
+        invoice_prefix: { type: string, pattern: '^[A-Z0-9]{1,10}$' }
+        payment_terms_days: { type: integer, minimum: 0, maximum: 120 }
+    Organization:
+      type: object
+      required: [id, slug, name, timezone, currency, invoice_prefix, payment_terms_days, status, created_at, version]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        legal_name: { type: string }
+        document_number: { type: string }
+        timezone: { type: string }
+        currency: { type: string }
+        invoice_prefix: { type: string }
+        payment_terms_days: { type: integer }
+        status: { type: string, enum: [active, suspended, closed] }
+        created_at: { type: string, format: date-time }
+        version: { type: integer }
+
+    Member:
+      type: object
+      required: [user_id, email, display_name, role, status, created_at, version]
+      properties:
+        user_id: { type: string, format: uuid }
+        email: { type: string }
+        display_name: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        status: { type: string, enum: [active, removed] }
+        created_at: { type: string, format: date-time }
+        version: { type: integer }
+    Invitation:
+      type: object
+      required: [id, email, role, state, expires_at, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        state: { type: string, enum: [pending, accepted, revoked, expired] }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    InvitationCreated:
+      type: object
+      required: [invitation, accept_url]
+      properties:
+        invitation: { $ref: "#/components/schemas/Invitation" }
+        accept_url: { type: string }
+
+    PlatformPlan:
+      type: object
+      required: [code, name, description, monthly_price, currency, features, trial_days, is_default]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        description: { type: string }
+        monthly_price: { type: integer, format: int64 }
+        currency: { type: string }
+        max_users: { type: integer, nullable: true }
+        max_active_subscriptions: { type: integer, nullable: true }
+        features: { type: array, items: { type: string } }
+        trial_days: { type: integer }
+        is_default: { type: boolean }
+    PlatformOverview:
+      type: object
+      required: [plan, subscription, usage]
+      properties:
+        plan: { $ref: "#/components/schemas/PlatformPlan" }
+        subscription:
+          type: object
+          required: [plan_code, status, current_period_start, current_period_end]
+          properties:
+            plan_code: { type: string }
+            status: { type: string, enum: [trialing, active, past_due, canceled] }
+            trial_ends_at: { type: string, format: date-time, nullable: true }
+            current_period_start: { type: string, format: date-time }
+            current_period_end: { type: string, format: date-time }
+        usage:
+          type: object
+          required: [active_users, active_subscriptions]
+          properties:
+            active_users: { type: integer }
+            active_subscriptions: { type: integer }
+    PlatformAddon:
+      type: object
+      required: [code, name, description, price, currency, kind]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        description: { type: string }
+        price: { type: integer, format: int64 }
+        currency: { type: string }
+        kind: { type: string }
+    AddonOrder:
+      type: object
+      required: [id, addon_code, status, notes, price, currency, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        addon_code: { type: string }
+        status: { type: string, enum: [requested, scheduled, completed, canceled] }
+        notes: { type: string }
+        price: { type: integer, format: int64 }
+        currency: { type: string }
+        created_at: { type: string, format: date-time }
+    PlatformStatement:
+      type: object
+      required: [id, period_start, period_end, plan_code, subscription_amount, addons_amount, total, currency, status]
+      properties:
+        id: { type: string, format: uuid }
+        period_start: { type: string, format: date-time }
+        period_end: { type: string, format: date-time }
+        plan_code: { type: string }
+        subscription_amount: { type: integer, format: int64 }
+        addons_amount: { type: integer, format: int64 }
+        total: { type: integer, format: int64 }
+        currency: { type: string }
+        status: { type: string }
+    AdminTenant:
+      type: object
+      required: [id, name, slug, status, member_count, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        status: { type: string }
+        plan_code: { type: string, nullable: true }
+        platform_status: { type: string, nullable: true }
+        member_count: { type: integer }
+        created_at: { type: string, format: date-time }
+
+    CustomerInput:
+      type: object
+      required: [kind, name, document_number]
+      properties:
+        kind: { type: string, enum: [individual, company] }
+        name: { type: string, minLength: 2, maxLength: 200 }
+        legal_name: { type: string, maxLength: 200 }
+        document_number: { type: string, description: CPF (pessoa física) ou CNPJ (jurídica); validação apenas estrutural }
+        email: { type: string, maxLength: 320 }
+        phone: { type: string }
+        external_id: { type: string, maxLength: 128 }
+        payment_terms_days: { type: integer, minimum: 0, maximum: 120, nullable: true }
+    Customer:
+      type: object
+      required: [id, kind, name, document_type, document_number, status, created_at, updated_at, version]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [individual, company] }
+        name: { type: string }
+        legal_name: { type: string }
+        document_type: { type: string, enum: [cpf, cnpj] }
+        document_number: { type: string }
+        email: { type: string }
+        phone: { type: string }
+        external_id: { type: string }
+        status: { type: string, enum: [active, archived] }
+        payment_terms_days: { type: integer, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        version: { type: integer }
+    CustomerDetails:
+      allOf:
+        - { $ref: "#/components/schemas/Customer" }
+        - type: object
+          required: [contacts]
+          properties:
+            contacts: { type: array, items: { $ref: "#/components/schemas/Contact" } }
+            billing_address:
+              nullable: true
+              allOf: [ { $ref: "#/components/schemas/Address" } ]
+    CustomerPage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/Customer" } }
+        next_cursor: { type: string, nullable: true }
+    ContactInput:
+      type: object
+      required: [name, email]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        email: { type: string, maxLength: 320 }
+        phone: { type: string }
+        role: { type: string, maxLength: 100 }
+        receives_billing_email: { type: boolean, default: true }
+    Contact:
+      type: object
+      required: [id, name, email, role, receives_billing_email, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string }
+        phone: { type: string }
+        role: { type: string }
+        receives_billing_email: { type: boolean }
+        created_at: { type: string, format: date-time }
+    Address:
+      type: object
+      required: [street, number, district, city, state, postal_code]
+      properties:
+        street: { type: string, maxLength: 200 }
+        number: { type: string, maxLength: 20 }
+        complement: { type: string, maxLength: 100 }
+        district: { type: string, maxLength: 100 }
+        city: { type: string, maxLength: 100 }
+        state: { type: string, pattern: '^[A-Za-z]{2}$' }
+        postal_code: { type: string }
+        country: { type: string, default: BR }
+    CreditBalance:
+      type: object
+      required: [balance, currency, entries]
+      properties:
+        balance: { type: integer, format: int64 }
+        currency: { type: string }
+        entries:
+          type: array
+          items:
+            type: object
+            required: [id, amount, kind, reason, created_at]
+            properties:
+              id: { type: string, format: uuid }
+              amount: { type: integer, format: int64 }
+              kind: { type: string, enum: [grant, consumption, return, overpayment] }
+              invoice_id: { type: string, format: uuid, nullable: true }
+              reason: { type: string }
+              created_at: { type: string, format: date-time }
+
+    ProductInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 200 }
+        description: { type: string, maxLength: 2000 }
+    Product:
+      type: object
+      required: [id, name, description, status, created_at, version]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [active, archived] }
+        created_at: { type: string, format: date-time }
+        version: { type: integer }
+    Aggregation:
+      type: string
+      enum: [sum, max, unique_count, last]
+    MetricInput:
+      type: object
+      required: [code, name, unit, aggregation, max_quantity_per_event]
+      properties:
+        code: { type: string, pattern: '^[a-z0-9][a-z0-9_.-]{1,63}$' }
+        name: { type: string }
+        unit: { type: string, pattern: '^[a-z0-9_]{1,32}$' }
+        aggregation: { $ref: "#/components/schemas/Aggregation" }
+        max_quantity_per_event: { type: string, description: Decimal positivo }
+        late_grace_hours: { type: integer, minimum: 0, maximum: 720 }
+    Metric:
+      type: object
+      required: [id, code, name, unit, aggregation, max_quantity_per_event, late_grace_hours, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        unit: { type: string }
+        aggregation: { $ref: "#/components/schemas/Aggregation" }
+        max_quantity_per_event: { type: string }
+        late_grace_hours: { type: integer }
+        status: { type: string, enum: [active, archived] }
+        created_at: { type: string, format: date-time }
+    PricingModel:
+      type: string
+      enum: [flat, per_unit, usage, flat_plus_overage]
+    PriceInput:
+      type: object
+      required: [pricing_model]
+      properties:
+        pricing_model: { $ref: "#/components/schemas/PricingModel" }
+        flat_amount: { type: integer, format: int64, minimum: 0, description: Valor fixo por período em centavos (flat e flat_plus_overage) }
+        unit_amount_decimal: { type: string, description: "Preço unitário em centavos, até 10 casas (per_unit, usage e flat_plus_overage)" }
+        metric_id: { type: string, format: uuid }
+        included_quantity: { type: string, description: Franquia incluída (flat_plus_overage) }
+    PriceVersion:
+      type: object
+      required: [id, version, pricing_model, currency, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        version: { type: integer }
+        pricing_model: { $ref: "#/components/schemas/PricingModel" }
+        flat_amount: { type: integer, format: int64, nullable: true }
+        unit_amount_decimal: { type: string, nullable: true }
+        metric_id: { type: string, format: uuid, nullable: true }
+        included_quantity: { type: string, nullable: true }
+        currency: { type: string }
+        created_at: { type: string, format: date-time }
+    PlanInput:
+      type: object
+      required: [product_id, code, name, billing_interval, price]
+      properties:
+        product_id: { type: string, format: uuid }
+        code: { type: string, pattern: '^[a-z0-9][a-z0-9_.-]{1,63}$' }
+        name: { type: string, minLength: 2, maxLength: 200 }
+        description: { type: string, maxLength: 2000 }
+        billing_interval: { type: string, enum: [month, year] }
+        trial_days: { type: integer, minimum: 0, maximum: 365 }
+        price: { $ref: "#/components/schemas/PriceInput" }
+    PlanUpdate:
+      type: object
+      required: [name, trial_days, status]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 200 }
+        description: { type: string, maxLength: 2000 }
+        trial_days: { type: integer, minimum: 0, maximum: 365 }
+        status: { type: string, enum: [active, archived] }
+    Plan:
+      type: object
+      required: [id, product_id, code, name, description, billing_interval, currency, trial_days, status, created_at, version]
+      properties:
+        id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        description: { type: string }
+        billing_interval: { type: string, enum: [month, year] }
+        currency: { type: string }
+        trial_days: { type: integer }
+        status: { type: string, enum: [active, archived] }
+        current_price: { nullable: true, allOf: [ { $ref: "#/components/schemas/PriceVersion" } ] }
+        created_at: { type: string, format: date-time }
+        version: { type: integer }
+    PlanDetails:
+      allOf:
+        - { $ref: "#/components/schemas/Plan" }
+        - type: object
+          required: [prices]
+          properties:
+            prices: { type: array, items: { $ref: "#/components/schemas/PriceVersion" } }
+    CouponInput:
+      type: object
+      required: [code, name, discount_type, duration]
+      properties:
+        code: { type: string, pattern: '^[A-Z0-9_-]{3,40}$' }
+        name: { type: string }
+        discount_type: { type: string, enum: [percent, amount] }
+        percent_off_bp: { type: integer, minimum: 1, maximum: 10000, description: Pontos-base (1% = 100) }
+        amount_off: { type: integer, format: int64, minimum: 1 }
+        duration: { type: string, enum: [once, repeating, forever] }
+        duration_cycles: { type: integer, minimum: 1, maximum: 120 }
+        max_redemptions: { type: integer, minimum: 1 }
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: string, format: date-time }
+        applies_to_plan_ids: { type: array, items: { type: string, format: uuid } }
+    Coupon:
+      allOf:
+        - { $ref: "#/components/schemas/CouponInput" }
+        - type: object
+          required: [id, redemptions_count, status, currency, created_at, version]
+          properties:
+            id: { type: string, format: uuid }
+            redemptions_count: { type: integer }
+            status: { type: string, enum: [active, archived] }
+            currency: { type: string }
+            created_at: { type: string, format: date-time }
+            version: { type: integer }
+
+    SubscriptionStatus:
+      type: string
+      enum: [trialing, active, past_due, suspended, canceled]
+    ChangeTiming:
+      type: string
+      enum: [immediate, next_cycle]
+    SubscriptionInput:
+      type: object
+      required: [customer_id, plan_id]
+      properties:
+        customer_id: { type: string, format: uuid }
+        plan_id: { type: string, format: uuid }
+        quantity: { type: integer, minimum: 1, maximum: 1000000, default: 1 }
+        start_date: { type: string, format: date, description: Não pode estar no futuro; retroativo até 366 dias }
+        trial_days: { type: integer, minimum: 0, maximum: 365 }
+        payment_terms_days: { type: integer, minimum: 0, maximum: 120 }
+    Subscription:
+      type: object
+      required: [id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date,
+                 started_at, current_period_start, current_period_end, cancel_at_period_end, created_at, version]
+      properties:
+        id: { type: string, format: uuid }
+        customer_id: { type: string, format: uuid }
+        customer_name: { type: string }
+        plan_id: { type: string, format: uuid }
+        plan_name: { type: string }
+        price_version_id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/SubscriptionStatus" }
+        quantity: { type: integer }
+        billing_interval: { type: string, enum: [month, year] }
+        timezone: { type: string }
+        anchor_date: { type: string, format: date }
+        trial_ends_at: { type: string, format: date-time, nullable: true }
+        started_at: { type: string, format: date-time }
+        current_period_start: { type: string, format: date-time }
+        current_period_end: { type: string, format: date-time }
+        next_billing_at: { type: string, format: date-time, nullable: true }
+        cancel_at_period_end: { type: boolean }
+        canceled_at: { type: string, format: date-time, nullable: true }
+        cancel_reason: { type: string }
+        ended_at: { type: string, format: date-time, nullable: true }
+        suspended_at: { type: string, format: date-time, nullable: true }
+        payment_terms_days: { type: integer, nullable: true }
+        scheduled_changes:
+          type: array
+          items:
+            type: object
+            required: [id, kind, effective_at, status]
+            properties:
+              id: { type: string, format: uuid }
+              kind: { type: string, enum: [plan_change, quantity_change] }
+              new_plan_id: { type: string, format: uuid, nullable: true }
+              new_quantity: { type: integer, nullable: true }
+              effective_at: { type: string, format: date-time }
+              status: { type: string, enum: [pending, applied, canceled] }
+        discount: { nullable: true, allOf: [ { $ref: "#/components/schemas/SubscriptionDiscount" } ] }
+        created_at: { type: string, format: date-time }
+        version: { type: integer }
+    SubscriptionPage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/Subscription" } }
+        next_cursor: { type: string, nullable: true }
+    SubscriptionHistoryEntry:
+      type: object
+      required: [id, event, to_status, occurred_at, actor_type]
+      properties:
+        id: { type: string, format: uuid }
+        event: { type: string }
+        from_status: { type: string, nullable: true }
+        to_status: { type: string }
+        occurred_at: { type: string, format: date-time }
+        actor_type: { type: string }
+        actor_id: { type: string }
+        details: { type: object, additionalProperties: true }
+    SubscriptionDiscount:
+      type: object
+      required: [id, coupon_id, coupon_code, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        coupon_id: { type: string, format: uuid }
+        coupon_code: { type: string }
+        remaining_cycles: { type: integer, nullable: true }
+        status: { type: string, enum: [active, ended] }
+        created_at: { type: string, format: date-time }
+    PriceAdjustmentInput:
+      type: object
+      required: [effective_date, kind, reason]
+      properties:
+        effective_date: { type: string, format: date, description: Vale a partir do primeiro ciclo iniciado nesta data ou depois }
+        kind: { type: string, enum: [percent, fixed_amount] }
+        percent_bp: { type: integer, minimum: -10000, maximum: 100000, description: "Pontos-base (IPCA de 4,5% = 450)" }
+        new_amount: { type: integer, format: int64, minimum: 0, description: Novo valor fixo ou unitário em centavos }
+        index_name: { type: string, maxLength: 50, description: Rótulo do índice de referência (informativo) }
+        reason: { type: string, minLength: 3, maxLength: 500 }
+    PriceAdjustment:
+      allOf:
+        - { $ref: "#/components/schemas/PriceAdjustmentInput" }
+        - type: object
+          required: [id, status, created_at]
+          properties:
+            id: { type: string, format: uuid }
+            status: { type: string, enum: [scheduled, applied, canceled] }
+            applied_at: { type: string, format: date-time, nullable: true }
+            previous_amount: { type: integer, format: int64, nullable: true }
+            resulting_amount: { type: integer, format: int64, nullable: true }
+            created_at: { type: string, format: date-time }
+    SubscriptionUsage:
+      type: object
+      required: [period_start, period_end, metrics]
+      properties:
+        period_start: { type: string, format: date-time }
+        period_end: { type: string, format: date-time }
+        metrics:
+          type: array
+          items:
+            type: object
+            required: [metric_id, code, name, unit, aggregation, quantity, event_count]
+            properties:
+              metric_id: { type: string, format: uuid }
+              code: { type: string }
+              name: { type: string }
+              unit: { type: string }
+              aggregation: { $ref: "#/components/schemas/Aggregation" }
+              quantity: { type: string }
+              event_count: { type: integer }
+              estimated_amount: { type: integer, format: int64 }
+
+    UsageEventInput:
+      type: object
+      required: [external_id, subscription_id, metric_code, quantity, occurred_at]
+      properties:
+        external_id: { type: string, minLength: 1, maxLength: 128 }
+        subscription_id: { type: string, format: uuid }
+        metric_code: { type: string }
+        unit: { type: string, description: "Se informado, deve coincidir com a unidade da métrica" }
+        quantity: { type: string, description: Decimal não negativo }
+        unique_key: { type: string, maxLength: 128, description: Chave para métricas unique_count }
+        occurred_at: { type: string, format: date-time }
+        properties: { type: object, additionalProperties: true }
+    UsageBatchResult:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            required: [external_id, outcome]
+            properties:
+              external_id: { type: string }
+              outcome: { type: string, enum: [accepted, duplicate, late, rejected] }
+              event_id: { type: string, format: uuid, nullable: true }
+              error: { type: string }
+    UsageEvent:
+      type: object
+      required: [id, external_id, subscription_id, metric_id, quantity, occurred_at, received_at, status]
+      properties:
+        id: { type: string, format: uuid }
+        external_id: { type: string }
+        subscription_id: { type: string, format: uuid }
+        metric_id: { type: string, format: uuid }
+        quantity: { type: string }
+        unique_key: { type: string, nullable: true }
+        occurred_at: { type: string, format: date-time }
+        received_at: { type: string, format: date-time }
+        period_start: { type: string, format: date-time }
+        status: { type: string, enum: [accepted, late] }
+        aggregate_id: { type: string, format: uuid, nullable: true }
+        invoice_item_id: { type: string, format: uuid, nullable: true }
+    UsageEventPage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/UsageEvent" } }
+        next_cursor: { type: string, nullable: true }
+
+    InvoiceStatus:
+      type: string
+      enum: [draft, open, partially_paid, paid, void, uncollectible]
+    Invoice:
+      type: object
+      required: [id, customer_id, status, kind, currency, subtotal, discount_total, total, credit_applied, amount_paid,
+                 amount_credited, amount_written_off, amount_due, overdue, created_at, version]
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: string, nullable: true }
+        customer_id: { type: string, format: uuid }
+        customer_name: { type: string }
+        subscription_id: { type: string, format: uuid, nullable: true }
+        status: { $ref: "#/components/schemas/InvoiceStatus" }
+        kind: { type: string, enum: [subscription_cycle, final_usage, proration, manual] }
+        currency: { type: string }
+        billing_period_start: { type: string, format: date-time, nullable: true }
+        billing_period_end: { type: string, format: date-time, nullable: true }
+        issued_at: { type: string, format: date-time, nullable: true }
+        due_at: { type: string, format: date-time, nullable: true }
+        due_date: { type: string, format: date, nullable: true }
+        subtotal: { type: integer, format: int64 }
+        discount_total: { type: integer, format: int64 }
+        total: { type: integer, format: int64 }
+        credit_applied: { type: integer, format: int64 }
+        amount_paid: { type: integer, format: int64 }
+        amount_credited: { type: integer, format: int64 }
+        amount_written_off: { type: integer, format: int64 }
+        amount_due: { type: integer, format: int64 }
+        overdue: { type: boolean }
+        paid_at: { type: string, format: date-time, nullable: true }
+        voided_at: { type: string, format: date-time, nullable: true }
+        void_reason: { type: string }
+        created_at: { type: string, format: date-time }
+        version: { type: integer }
+    InvoiceItem:
+      type: object
+      required: [id, position, kind, description, quantity, unit_amount_decimal, amount, discount_amount, price_snapshot]
+      properties:
+        id: { type: string, format: uuid }
+        position: { type: integer }
+        kind: { type: string, enum: [subscription_fee, usage, overage, proration, adjustment] }
+        description: { type: string }
+        quantity: { type: string }
+        unit_amount_decimal: { type: string }
+        amount: { type: integer, format: int64 }
+        discount_amount: { type: integer, format: int64 }
+        period_start: { type: string, format: date-time, nullable: true }
+        period_end: { type: string, format: date-time, nullable: true }
+        price_version_id: { type: string, format: uuid, nullable: true }
+        usage_aggregate_id: { type: string, format: uuid, nullable: true }
+        price_snapshot: { type: object, additionalProperties: true }
+    InvoiceHistoryEntry:
+      type: object
+      required: [id, to_status, occurred_at, actor_type, reason]
+      properties:
+        id: { type: string, format: uuid }
+        from_status: { type: string, nullable: true }
+        to_status: { type: string }
+        occurred_at: { type: string, format: date-time }
+        actor_type: { type: string }
+        actor_id: { type: string }
+        reason: { type: string }
+        details: { type: object, additionalProperties: true }
+    InvoiceDetails:
+      allOf:
+        - { $ref: "#/components/schemas/Invoice" }
+        - type: object
+          required: [items, history, charges, customer_snapshot]
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/InvoiceItem" } }
+            history: { type: array, items: { $ref: "#/components/schemas/InvoiceHistoryEntry" } }
+            charges: { type: array, items: { $ref: "#/components/schemas/Charge" } }
+            customer_snapshot: { type: object, additionalProperties: true }
+    InvoicePage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/Invoice" } }
+        next_cursor: { type: string, nullable: true }
+    ReasonInput:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 3, maxLength: 500 }
+    ManualPaymentInput:
+      type: object
+      required: [amount, method]
+      properties:
+        amount: { type: integer, format: int64, minimum: 1 }
+        paid_at: { type: string, format: date-time }
+        method: { type: string, enum: [pix, bank_transfer, boleto, cash, other] }
+        note: { type: string, maxLength: 500 }
+    BillingRunResult:
+      type: object
+      required: [subscriptions_processed, invoices_created, invoice_ids]
+      properties:
+        subscriptions_processed: { type: integer }
+        invoices_created: { type: integer }
+        invoice_ids: { type: array, items: { type: string, format: uuid } }
+
+    ChargeStatus:
+      type: string
+      enum: [pending, awaiting_payment, paid, failed, canceled, partially_refunded, refunded, disputed, charged_back]
+    Charge:
+      type: object
+      required: [id, invoice_id, customer_id, provider, attempt, status, amount, amount_paid, fee_amount, amount_refunded,
+                 amount_charged_back, currency, due_date, created_at, version]
+      properties:
+        id: { type: string, format: uuid }
+        invoice_id: { type: string, format: uuid }
+        customer_id: { type: string, format: uuid }
+        provider: { type: string }
+        attempt: { type: integer }
+        provider_charge_id: { type: string, nullable: true }
+        status: { $ref: "#/components/schemas/ChargeStatus" }
+        amount: { type: integer, format: int64 }
+        amount_paid: { type: integer, format: int64 }
+        fee_amount: { type: integer, format: int64 }
+        amount_refunded: { type: integer, format: int64 }
+        amount_charged_back: { type: integer, format: int64 }
+        refundable_amount: { type: integer, format: int64 }
+        currency: { type: string }
+        checkout_url: { type: string, nullable: true }
+        due_date: { type: string, format: date }
+        paid_at: { type: string, format: date-time, nullable: true }
+        failure_reason: { type: string }
+        provider_status: { type: string }
+        created_at: { type: string, format: date-time }
+        version: { type: integer }
+    ChargePage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/Charge" } }
+        next_cursor: { type: string, nullable: true }
+    Refund:
+      type: object
+      required: [id, charge_id, amount, currency, status, reason, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        charge_id: { type: string, format: uuid }
+        amount: { type: integer, format: int64 }
+        currency: { type: string }
+        status: { type: string, enum: [requested, succeeded, failed, unknown] }
+        provider_refund_id: { type: string, nullable: true }
+        reason: { type: string }
+        created_at: { type: string, format: date-time }
+    Payment:
+      type: object
+      required: [id, invoice_id, customer_id, amount, fee_amount, currency, method, source, paid_at, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        invoice_id: { type: string, format: uuid }
+        charge_id: { type: string, format: uuid, nullable: true }
+        customer_id: { type: string, format: uuid }
+        amount: { type: integer, format: int64 }
+        fee_amount: { type: integer, format: int64 }
+        currency: { type: string }
+        method: { type: string }
+        source: { type: string, enum: [provider, manual] }
+        paid_at: { type: string, format: date-time }
+        note: { type: string }
+        created_at: { type: string, format: date-time }
+    Dispute:
+      type: object
+      required: [id, charge_id, status, amount, currency, opened_at]
+      properties:
+        id: { type: string, format: uuid }
+        charge_id: { type: string, format: uuid }
+        status: { type: string, enum: [opened, under_review, won, lost] }
+        amount: { type: integer, format: int64 }
+        currency: { type: string }
+        opened_at: { type: string, format: date-time }
+        closed_at: { type: string, format: date-time, nullable: true }
+    PaymentOperation:
+      type: object
+      required: [id, charge_id, kind, status, external_reference, attempts, next_attempt_at, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        charge_id: { type: string, format: uuid }
+        refund_id: { type: string, format: uuid, nullable: true }
+        kind: { type: string, enum: [create_charge, refund] }
+        status: { type: string, enum: [pending, in_flight, succeeded, failed, unknown] }
+        external_reference: { type: string }
+        attempts: { type: integer }
+        next_attempt_at: { type: string, format: date-time }
+        last_error: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ProviderAccountInput:
+      type: object
+      required: [environment, api_key, webhook_secret]
+      properties:
+        environment: { type: string, enum: [local, sandbox, production] }
+        api_key: { type: string, minLength: 8, maxLength: 512 }
+        webhook_secret: { type: string, minLength: 32, maxLength: 255 }
+        make_default: { type: boolean }
+    ProviderAccount:
+      type: object
+      required: [id, provider, environment, status, is_default, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        provider: { type: string }
+        environment: { type: string }
+        status: { type: string }
+        is_default: { type: boolean }
+        api_key_hint: { type: string, description: Últimos 4 caracteres }
+        created_at: { type: string, format: date-time }
+    ProviderAccountConfigured:
+      type: object
+      required: [account, webhook_endpoint_url]
+      properties:
+        account: { $ref: "#/components/schemas/ProviderAccount" }
+        webhook_endpoint_url: { type: string }
+
+    LedgerAccount:
+      type: object
+      required: [code, name, kind, currency, debits, credits, balance]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [asset, liability, revenue, contra_revenue, expense] }
+        currency: { type: string }
+        debits: { type: integer, format: int64 }
+        credits: { type: integer, format: int64 }
+        balance: { type: integer, format: int64 }
+    LedgerTransaction:
+      type: object
+      required: [id, kind, description, occurred_at, reference_type, reference_id, entries]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string }
+        description: { type: string }
+        occurred_at: { type: string, format: date-time }
+        reference_type: { type: string }
+        reference_id: { type: string, format: uuid }
+        reverses_transaction_id: { type: string, format: uuid, nullable: true }
+        entries:
+          type: array
+          items:
+            type: object
+            required: [account, direction, amount, currency]
+            properties:
+              account: { type: string }
+              direction: { type: string, enum: [debit, credit] }
+              amount: { type: integer, format: int64 }
+              currency: { type: string }
+
+    DiscrepancyKind:
+      type: string
+      enum: [missing_local, missing_provider, amount_mismatch, fee_mismatch, payment_not_reflected, refund_pending, chargeback_pending, unknown_operation]
+    ReconciliationRun:
+      type: object
+      required: [id, provider, status, window_start, window_end, checked_count, discrepancy_count, started_at]
+      properties:
+        id: { type: string, format: uuid }
+        provider: { type: string }
+        status: { type: string, enum: [running, completed, failed] }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        checked_count: { type: integer }
+        discrepancy_count: { type: integer }
+        error: { type: string }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+    Discrepancy:
+      type: object
+      required: [id, kind, status, created_at, local_value, provider_value]
+      properties:
+        id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid, nullable: true }
+        kind: { $ref: "#/components/schemas/DiscrepancyKind" }
+        status: { type: string, enum: [open, resolved, dismissed] }
+        charge_id: { type: string, format: uuid, nullable: true }
+        provider_charge_id: { type: string, nullable: true }
+        local_value: { type: object, additionalProperties: true }
+        provider_value: { type: object, additionalProperties: true }
+        resolution: { type: string, nullable: true }
+        justification: { type: string, nullable: true }
+        resolved_by: { type: string, format: uuid, nullable: true }
+        resolved_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        history:
+          type: array
+          items: { $ref: "#/components/schemas/AuditEvent" }
+
+    TemplateKey:
+      type: string
+      enum: [invoice_issued, reminder_before_due, reminder_after_due, payment_confirmed, subscription_suspended]
+    CollectionPolicyInput:
+      type: object
+      required: [name, reminder_offsets_days, send_window_start_hour, send_window_end_hour, max_messages_per_day]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 100 }
+        is_default: { type: boolean }
+        reminder_offsets_days:
+          type: array
+          maxItems: 10
+          description: Dias relativos ao vencimento (negativo = antes; positivo = depois)
+          items: { type: integer, minimum: -30, maximum: 90 }
+        send_window_start_hour: { type: integer, minimum: 0, maximum: 23 }
+        send_window_end_hour: { type: integer, minimum: 1, maximum: 24 }
+        max_messages_per_day: { type: integer, minimum: 1, maximum: 5 }
+        suspend_after_days: { type: integer, minimum: 1, maximum: 180, nullable: true }
+        reactivate_on_payment: { type: boolean }
+    CollectionPolicy:
+      allOf:
+        - { $ref: "#/components/schemas/CollectionPolicyInput" }
+        - type: object
+          required: [id, created_at, version]
+          properties:
+            id: { type: string, format: uuid }
+            created_at: { type: string, format: date-time }
+            version: { type: integer }
+    NotificationTemplate:
+      type: object
+      required: [key, channel, subject, body, is_default, variables]
+      properties:
+        key: { $ref: "#/components/schemas/TemplateKey" }
+        channel: { type: string, enum: [email] }
+        subject: { type: string }
+        body: { type: string }
+        is_default: { type: boolean }
+        variables: { type: array, items: { type: string } }
+        updated_at: { type: string, format: date-time, nullable: true }
+    Notification:
+      type: object
+      required: [id, business_key, template_key, channel, recipient, subject, status, send_after, attempts, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        business_key: { type: string }
+        customer_id: { type: string, format: uuid, nullable: true }
+        invoice_id: { type: string, format: uuid, nullable: true }
+        template_key: { type: string }
+        channel: { type: string, enum: [email] }
+        recipient: { type: string }
+        subject: { type: string }
+        status: { type: string, enum: [scheduled, sending, sent, failed, canceled, suppressed] }
+        send_after: { type: string, format: date-time }
+        attempts: { type: integer }
+        last_error: { type: string }
+        sent_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    WebhookEndpointInput:
+      type: object
+      required: [url, event_types]
+      properties:
+        url: { type: string, maxLength: 2000 }
+        description: { type: string, maxLength: 200 }
+        event_types: { type: array, minItems: 1, items: { type: string } }
+    WebhookEndpoint:
+      type: object
+      required: [id, url, description, event_types, status, created_at, version, secrets]
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string }
+        description: { type: string }
+        event_types: { type: array, items: { type: string } }
+        status: { type: string, enum: [active, disabled] }
+        created_at: { type: string, format: date-time }
+        version: { type: integer }
+        secrets:
+          type: array
+          items:
+            type: object
+            required: [id, created_at]
+            properties:
+              id: { type: string, format: uuid }
+              created_at: { type: string, format: date-time }
+              expires_at: { type: string, format: date-time, nullable: true }
+    WebhookEndpointWithSecret:
+      type: object
+      required: [endpoint, secret]
+      properties:
+        endpoint: { $ref: "#/components/schemas/WebhookEndpoint" }
+        secret: { type: string, description: Exibido uma única vez }
+    WebhookDelivery:
+      type: object
+      required: [id, endpoint_id, event_id, event_type, status, attempts, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        endpoint_id: { type: string, format: uuid }
+        event_id: { type: string, format: uuid }
+        event_type: { type: string }
+        status: { type: string, enum: [pending, delivering, succeeded, retrying, exhausted] }
+        attempts: { type: integer }
+        next_attempt_at: { type: string, format: date-time, nullable: true }
+        last_status_code: { type: integer, nullable: true }
+        last_error: { type: string }
+        delivered_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    ApiCredential:
+      type: object
+      required: [id, name, prefix, scopes, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        prefix: { type: string }
+        scopes: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, nullable: true }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+    ApiCredentialWithSecret:
+      type: object
+      required: [credential, secret]
+      properties:
+        credential: { $ref: "#/components/schemas/ApiCredential" }
+        secret: { type: string, description: Exibido uma única vez }
+
+    DeadLetter:
+      type: object
+      required: [id, consumer, message_id, error, attempts, status, failed_at]
+      properties:
+        id: { type: string, format: uuid }
+        consumer: { type: string }
+        message_id: { type: string }
+        event_type: { type: string, nullable: true }
+        error: { type: string }
+        attempts: { type: integer }
+        status: { type: string, enum: [open, replayed, discarded] }
+        failed_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time, nullable: true }
+        resolution_note: { type: string, nullable: true }
+
+    AuditEvent:
+      type: object
+      required: [id, occurred_at, actor_type, action, resource_type, details]
+      properties:
+        id: { type: string, format: uuid }
+        occurred_at: { type: string, format: date-time }
+        actor_type: { type: string }
+        actor_id: { type: string }
+        actor_label: { type: string }
+        action: { type: string }
+        resource_type: { type: string }
+        resource_id: { type: string }
+        request_id: { type: string }
+        details: { type: object, additionalProperties: true }
+
+    Dashboard:
+      type: object
+      required: [month, currency, mrr, arr, billed, received, open_receivables, overdue_receivables, delinquency_rate_bp,
+                 churn_rate_bp, active_subscriptions, new_subscriptions, canceled_subscriptions, refunds, chargebacks, definitions]
+      properties:
+        month: { type: string }
+        currency: { type: string }
+        mrr: { type: integer, format: int64, description: Receita recorrente mensal fixa (exclui consumo) }
+        arr: { type: integer, format: int64 }
+        billed: { type: integer, format: int64, description: Total emitido no mês }
+        billed_recurring: { type: integer, format: int64 }
+        billed_usage: { type: integer, format: int64 }
+        received: { type: integer, format: int64, description: Pagamentos recebidos no mês }
+        open_receivables: { type: integer, format: int64 }
+        overdue_receivables: { type: integer, format: int64 }
+        delinquency_rate_bp: { type: integer, description: Pontos-base }
+        churn_rate_bp: { type: integer, description: Pontos-base }
+        active_subscriptions: { type: integer }
+        new_subscriptions: { type: integer }
+        canceled_subscriptions: { type: integer }
+        refunds: { type: integer, format: int64 }
+        chargebacks: { type: integer, format: int64 }
+        open_discrepancies: { type: integer }
+        unknown_operations: { type: integer }
+        definitions: { type: object, additionalProperties: { type: string } }
+
+    PortalSession:
+      type: object
+      required: [customer, organization, csrf_token, contacts]
+      properties:
+        customer:
+          type: object
+          required: [id, name]
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+        organization:
+          type: object
+          required: [name]
+          properties:
+            name: { type: string }
+        csrf_token: { type: string }
+        contacts: { type: array, items: { $ref: "#/components/schemas/Contact" } }
+    PortalInvoice:
+      type: object
+      required: [id, number, status, currency, total, amount_due, items]
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: string }
+        status: { $ref: "#/components/schemas/InvoiceStatus" }
+        currency: { type: string }
+        total: { type: integer, format: int64 }
+        amount_due: { type: integer, format: int64 }
+        issued_at: { type: string, format: date-time, nullable: true }
+        due_date: { type: string, format: date, nullable: true }
+        overdue: { type: boolean }
+        checkout_url: { type: string, nullable: true }
+        items:
+          type: array
+          items:
+            type: object
+            required: [description, amount]
+            properties:
+              description: { type: string }
+              amount: { type: integer, format: int64 }
