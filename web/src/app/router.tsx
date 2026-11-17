@@ -53,6 +53,9 @@ export const appRoutes: RouteObject[] = [
     path: 'integracoes/webhooks/:id',
     lazy: async () => ({ Component: (await import('../features/integrations/WebhooksTab')).WebhookDeliveriesPage }),
   },
+  { path: 'auditoria', lazy: async () => ({ Component: (await import('../features/audit/AuditPage')).AuditPage }) },
+  { path: 'operacoes', lazy: async () => ({ Component: (await import('../features/operations/OperationsPage')).OperationsPage }) },
+  { path: 'plataforma', lazy: async () => ({ Component: (await import('../features/platform/PlatformPage')).PlatformPage }) },
   { path: '*', Component: NotFoundPage },
 ];
 
