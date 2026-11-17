@@ -249,6 +249,20 @@ func InvoiceWrittenOff(id, tenant, invoiceID uuid.UUID, amount money.Money, at t
 		"invoice.uncollectible:"+invoiceID.String(), pair(BadDebt, AccountsReceivable, amount))
 }
 
+// BadDebtRecovered: recebimento de valor antes baixado como incobrável
+// estorna a perda na mesma medida.
+func BadDebtRecovered(id, tenant, paymentID uuid.UUID, amount money.Money, at time.Time) (Transaction, bool, error) {
+	return build(id, tenant, "invoice.bad_debt_recovered", "Recuperação de valor baixado como incobrável", at, "payment", paymentID,
+		"invoice.bad_debt_recovered:"+paymentID.String(), pair(AccountsReceivable, BadDebt, amount))
+}
+
+// ProviderFeeCharged: taxa do provedor sobre um recebimento que não quitou
+// saldo de fatura (por exemplo, pagamento de fatura já quitada).
+func ProviderFeeCharged(id, tenant, paymentID uuid.UUID, fee money.Money, at time.Time) (Transaction, bool, error) {
+	return build(id, tenant, "payment.provider_fee", "Taxa do provedor", at, "payment", paymentID,
+		"payment.provider_fee:"+paymentID.String(), pair(ProviderFees, ProviderClearing, fee))
+}
+
 // CreditNoteIssued: nota de crédito que reduz o saldo da fatura.
 func CreditNoteIssued(id, tenant, creditNoteID uuid.UUID, amount money.Money, at time.Time) (Transaction, bool, error) {
 	return build(id, tenant, "credit_note.issued", "Nota de crédito", at, "credit_note", creditNoteID,

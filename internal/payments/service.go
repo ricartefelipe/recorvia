@@ -266,6 +266,10 @@ func (s *Service) ExecuteOperation(ctx context.Context, tenantID, opID uuid.UUID
 		if !op.Claimable(now) {
 			return errNothingToDo
 		}
+		if op.Kind != OpCreateCharge {
+			// Não reivindica operações que esta execução não sabe realizar.
+			return fmt.Errorf("payments: operação %s ainda não suportada pela execução genérica", op.Kind)
+		}
 		lease := now.Add(s.cfg.Lease)
 		op.Status, op.LeaseUntil, op.UpdatedAt = OpInFlight, &lease, now
 		op.Attempts++
@@ -290,9 +294,6 @@ func (s *Service) ExecuteOperation(ctx context.Context, tenantID, opID uuid.UUID
 	}
 	if err != nil {
 		return err
-	}
-	if op.Kind != OpCreateCharge {
-		return fmt.Errorf("payments: operação %s ainda não suportada pela execução genérica", op.Kind)
 	}
 	gw, err := s.resolver.Gateway(account)
 	if err != nil {
@@ -718,10 +719,21 @@ func (s *Service) confirmPayment(ctx context.Context, tx Tx, c *Charge, pc Provi
 
 func (s *Service) applyToInvoice(ctx context.Context, tx Tx, inv *billing.Invoice, pay Payment, viaProvider bool, actor audit.Actor, now time.Time) error {
 	if inv.Status == billing.Void || inv.Status == billing.Paid {
-		// Fatura já quitada ou cancelada: o valor vira crédito do cliente.
-		return s.creditOverpayment(ctx, tx, inv, pay, pay.Amount, viaProvider, actor, now)
+		// Fatura já quitada ou cancelada: o valor bruto vira crédito do
+		// cliente e a taxa do provedor é reconhecida como despesa.
+		if err := s.creditOverpayment(ctx, tx, inv, pay, pay.Amount, viaProvider, actor, now); err != nil {
+			return err
+		}
+		if !viaProvider || !pay.Fee.IsPositive() {
+			return nil
+		}
+		t, ok, err := ledger.ProviderFeeCharged(ids.New(), pay.TenantID, pay.ID, pay.Fee, now)
+		if err != nil || !ok {
+			return err
+		}
+		return tx.PostLedger(ctx, t)
 	}
-	applied, excess, err := inv.ApplyPayment(pay.Amount, now)
+	applied, excess, recovered, err := inv.ApplyPaymentWithRecovery(pay.Amount, now)
 	if err != nil {
 		return err
 	}
@@ -744,6 +756,17 @@ func (s *Service) applyToInvoice(ctx context.Context, tx Tx, inv *billing.Invoic
 	if ok {
 		if err := tx.PostLedger(ctx, t); err != nil {
 			return err
+		}
+	}
+	if recovered.IsPositive() {
+		t, ok, err := ledger.BadDebtRecovered(ids.New(), pay.TenantID, pay.ID, recovered, now)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if err := tx.PostLedger(ctx, t); err != nil {
+				return err
+			}
 		}
 	}
 	if excess.IsPositive() {
@@ -837,6 +860,21 @@ func (s *Service) RecordManualPayment(ctx context.Context, tenantID uuid.UUID, a
 		if err != nil {
 			return err
 		}
+		if in.RequestKey != "" {
+			// Retentativa de um pedido já registrado devolve o pagamento
+			// existente mesmo que ele tenha quitado a fatura.
+			existing, err := tx.PaymentByRequestKey(ctx, in.RequestKey)
+			if err == nil {
+				if existing.InvoiceID != inv.ID {
+					return apperr.Conflict("request_key_reused", "A chave do pedido já foi usada em outra fatura.")
+				}
+				pay = existing
+				return nil
+			}
+			if !apperr.IsKind(err, apperr.KindNotFound) {
+				return err
+			}
+		}
 		if inv.Status != billing.Open && inv.Status != billing.PartiallyPaid && inv.Status != billing.Uncollectible {
 			return apperr.Conflict("invoice_not_payable", "A fatura não aceita pagamentos nesta situação.")
 		}
@@ -889,9 +927,10 @@ func (s *Service) CancelOpenCharges(ctx context.Context, tenantID, invoiceID, me
 // ConsumerInvoiceIssued identifica o consumidor que cria cobranças.
 const ConsumerInvoiceIssued = "payments.invoice_issued"
 
-// HandleInvoiceIssued cria a cobrança de uma fatura emitida. O inbox é
-// registrado numa transação própria antes da criação: a cobrança em si é
-// idempotente por fatura (RequestCharge retorna a existente).
+// HandleInvoiceIssued cria a cobrança de uma fatura emitida e depois
+// registra o inbox numa transação própria. A cobrança é idempotente por
+// fatura (RequestCharge retorna a existente), então uma reentrega após falha
+// entre as duas etapas não duplica a cobrança.
 func (s *Service) HandleInvoiceIssued(ctx context.Context, tenantID, invoiceID, messageID uuid.UUID) error {
 	_, err := s.RequestCharge(ctx, tenantID, invoiceID, systemActor)
 	if err != nil {

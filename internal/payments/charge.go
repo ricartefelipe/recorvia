@@ -275,7 +275,7 @@ func (o Operation) Claimable(now time.Time) bool {
 	case OpPending, OpUnknown:
 		return !o.NextAttemptAt.After(now) && o.Attempts < MaxOperationAttempts
 	case OpInFlight:
-		return o.LeaseUntil != nil && o.LeaseUntil.Before(now)
+		return o.LeaseUntil != nil && o.LeaseUntil.Before(now) && o.Attempts < MaxOperationAttempts
 	}
 	return false
 }
