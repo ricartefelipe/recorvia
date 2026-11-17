@@ -35,7 +35,7 @@ test.describe.serial('roteiro de faturamento da Acme', () => {
       const productDialog = page.getByRole('dialog', { name: 'Novo produto' });
       await productDialog.getByLabel(/^Nome/).fill(productName);
       await productDialog.getByRole('button', { name: 'Salvar' }).click();
-      await expect(page.getByRole('cell', { name: productName })).toBeVisible();
+      await expect(page.getByRole('cell', { name: productName, exact: true })).toBeVisible();
 
       await page.goto('/catalogo/planos');
       await page.getByRole('button', { name: 'Novo plano' }).click();

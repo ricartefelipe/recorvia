@@ -9,9 +9,10 @@ export const USERS = {
   davi: 'davi.auditor@acme.test',
 } as const;
 
+/** Nomes das organizações criadas pelo seed de demonstração. */
 export const TENANTS = {
-  acme: 'Acme Software',
-  beta: 'Beta Consultoria',
+  acme: 'Acme Software (demonstração)',
+  beta: 'Beta Consultoria (demonstração)',
 } as const;
 
 /** Entra pela tela do Recorvia e autentica no formulário do Keycloak. */
@@ -28,7 +29,8 @@ export async function login(page: Page, email: string, password: string = DEMO_P
 
 /** Garante a organização ativa, pela tela de seleção ou pelo seletor do cabeçalho. */
 export async function selectTenant(page: Page, name: string): Promise<void> {
-  const selector = page.getByLabel('Organização ativa');
+  // O Select expõe o campo e a lista de opções com o mesmo rótulo.
+  const selector = page.getByRole('textbox', { name: 'Organização ativa' });
   const chooser = page.getByRole('heading', { name: 'Escolha a organização' });
   await expect(selector.or(chooser)).toBeVisible({ timeout: 30_000 });
   if (await chooser.isVisible()) {
@@ -37,7 +39,7 @@ export async function selectTenant(page: Page, name: string): Promise<void> {
     await selector.click();
     await page.getByRole('option', { name, exact: true }).click();
   }
-  await expect(page.getByLabel('Organização ativa')).toHaveValue(name, { timeout: 30_000 });
+  await expect(selector).toHaveValue(name, { timeout: 30_000 });
 }
 
 /** Escolhe uma opção num Select do Mantine pelo rótulo do campo. */
