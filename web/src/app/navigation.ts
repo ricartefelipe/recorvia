@@ -2,6 +2,7 @@ import {
   IconAlertOctagon,
   IconBellRinging,
   IconBook2,
+  IconBuilding,
   IconBuildingStore,
   IconCash,
   IconCreditCard,
@@ -72,6 +73,7 @@ export const NAVIGATION: NavEntry[] = [
   },
   { label: 'Auditoria', to: '/auditoria', icon: IconHistory, anyOf: ['audit.read'] },
   { label: 'Operações', to: '/operacoes', icon: IconTool, anyOf: ['operations.read'] },
+  { label: 'Organização', to: '/organizacao', icon: IconBuilding, anyOf: ['organization.read'] },
   { label: 'Plano Recorvia', to: '/plataforma', icon: IconBuildingStore, anyOf: ['platform_billing.read'] },
 ];
 

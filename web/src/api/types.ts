@@ -7,6 +7,7 @@ export type ActiveTenant = NonNullable<Session['active_tenant']>;
 export type OrganizationSummary = S['OrganizationSummary'];
 export type OrganizationInput = S['OrganizationInput'];
 export type Organization = S['Organization'];
+export type OrganizationUpdate = S['OrganizationUpdate'];
 export type Role = S['Role'];
 export type RolePermissions = S['RolePermissions'];
 export type Member = S['Member'];
