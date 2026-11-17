@@ -168,3 +168,49 @@ lista explícita de CIDRs.
 **Decisão:** respostas de erro usam `application/problem+json` com `code`
 estável, `request_id` e lista de campos inválidos. Detalhes internos ficam
 apenas nos logs.
+
+## ADR-019 Adaptadores PostgreSQL em um pacote único (`internal/pgstore`)
+**Status:** aceita (substitui a localização `internal/<modulo>/<modulo>pg` prevista na ADR-002).
+**Contexto:** casos de uso de módulos diferentes precisam gravar fatura, ledger, outbox e
+auditoria na mesma transação, usando o mesmo `dbgen.Queries` gerado.
+**Decisão:** um pacote `pgstore` com um tipo de transação por módulo (`customersTx`, `billingTx`,
+`paymentsTx`...). Cada tipo implementa somente a interface `Tx` declarada pelo módulo consumidor;
+efeitos compartilhados (auditoria, outbox, ledger, inbox) ficam no tipo base.
+**Consequências:** sem interfaces genéricas de repositório; a composição transacional fica explícita
+em um lugar. O pacote é adaptador e fica fora da meta de cobertura (coberto por testes de
+integração).
+
+## ADR-020 Ambiente local sem bind mounts
+**Decisão:** configurações (realm do Keycloak, futuras configurações de Prometheus/Grafana) entram
+nas imagens via `COPY`; estado local usa volumes nomeados.
+**Justificativa:** com Docker Desktop, diretórios fora das pastas compartilhadas (por exemplo,
+partições montadas em `/run/media`) aparecem vazios no container. A abordagem também evita
+dependência de permissões do host.
+
+## ADR-021 Inicialização tolerante do provedor de identidade
+**Decisão:** a descoberta OIDC é preguiçosa (`oidc.Lazy`), com nova tentativa após falha. A
+readiness da API verifica somente PostgreSQL e Redis.
+**Consequências:** a indisponibilidade do Keycloak afeta apenas novos logins (503), sem reinícios
+em cascata nem queda das sessões existentes.
+
+## ADR-022 Idempotência HTTP com chave de negócio persistente
+**Decisão:** além da tabela `idempotency_keys` (resultado registrado por 24 h), operações
+financeiras sem chave natural recebem uma chave de negócio derivada do `Idempotency-Key`
+(`payments.request_key`, `customer_credit_entries.request_key`, ambas únicas por tenant).
+**Justificativa:** cobre a janela entre o commit do efeito e o registro do resultado HTTP e
+continua protegendo após a expiração da chave.
+
+## ADR-023 Vínculo de webhooks por token opaco no endpoint
+**Decisão:** cada conta de provedor recebe uma URL `/webhooks/providers/{provedor}/{token}`; somente
+o SHA-256 do token fica no banco (`app_resolve_webhook_endpoint`). A autenticação do conteúdo segue
+o provedor (HMAC com timestamp no simulador; `asaas-access-token` no Asaas).
+**Consequências:** o tenant é determinado sem confiar no corpo do webhook; tokens vazados podem ser
+rotacionados reconfigurando a conta.
+
+## ADR-024 Reprocessamento direcionado de dead letters
+**Decisão:** mensagens da DLQ são registradas em `dead_letters` (com RLS). O reprocessamento grava
+na outbox uma reentrega direcionada à fila do consumidor que falhou
+(`recorvia-target-queue`), preservando o id original da mensagem
+(`recorvia-original-message-id`), com justificativa e auditoria.
+**Justificativa:** republicar no exchange entregaria o evento a todos os consumidores; manter o id
+original faz o inbox do consumidor continuar deduplicando.

@@ -4,7 +4,8 @@
 // Pacotes considerados: internal/kernel/* e os pacotes raiz de cada módulo de
 // negócio (internal/<modulo>). Excluídos por regra: código gerado
 // (internal/dbgen), adaptadores (subpacotes de módulos, como <modulo>pg e
-// gateways), internal/httpapi, internal/infra/* e suporte a testes.
+// gateways), internal/httpapi, internal/pgstore (adaptador), internal/app
+// (raiz de composição), internal/infra/* e suporte a testes.
 package main
 
 import (
@@ -24,6 +25,7 @@ const modulePrefix = "github.com/ricartefelipe/recorvia/"
 var excludedRoots = map[string]bool{
 	"internal/httpapi": true, "internal/dbgen": true, "internal/infra": true,
 	"internal/testsupport": true, "internal/paysim": true,
+	"internal/app": true, "internal/pgstore": true,
 }
 
 func included(pkg string) bool {
