@@ -33,6 +33,9 @@ Todas as mudanças relevantes são registradas aqui. Formato baseado em
   agendador com lease; `Idempotency-Key`; `If-Match`; erros RFC 9457.
 - Ambiente local com Docker Compose (PostgreSQL, Redis, RabbitMQ, Keycloak,
   Mailpit, simulador, API, worker e seed de dois tenants).
+- Interface web em português (React, TypeScript, TanStack Query, Mantine) com
+  tipos gerados do contrato OpenAPI, testes de componente e roteiros E2E com
+  Playwright; servida por nginx sem root na mesma origem da API.
 
 ### Corrigido
 - Ciclo mensal da plataforma sobrepunha períodos e perdia a âncora dos dias 29
