@@ -1,4 +1,18 @@
-import { IconGauge, IconPackage, IconRepeat, IconUsers, type Icon } from '@tabler/icons-react';
+import {
+  IconAlertOctagon,
+  IconBook2,
+  IconCash,
+  IconCreditCard,
+  IconFileInvoice,
+  IconGauge,
+  IconGavel,
+  IconPackage,
+  IconReceiptRefund,
+  IconRepeat,
+  IconTransfer,
+  IconUsers,
+  type Icon,
+} from '@tabler/icons-react';
 import type { Permission } from '../session/permissions';
 
 export interface NavItem {
@@ -27,6 +41,19 @@ export const NAVIGATION: NavEntry[] = [
   { label: 'Clientes', to: '/clientes', icon: IconUsers, anyOf: ['customers.read'] },
   { label: 'Catálogo', to: '/catalogo', icon: IconPackage, anyOf: ['catalog.read'] },
   { label: 'Assinaturas', to: '/assinaturas', icon: IconRepeat, anyOf: ['subscriptions.read'] },
+  { label: 'Faturas', to: '/faturas', icon: IconFileInvoice, anyOf: ['invoices.read'] },
+  {
+    label: 'Pagamentos',
+    icon: IconCreditCard,
+    children: [
+      { label: 'Cobranças', to: '/cobrancas', icon: IconTransfer, anyOf: ['payments.read'] },
+      { label: 'Recebimentos', to: '/recebimentos', icon: IconCash, anyOf: ['payments.read'] },
+      { label: 'Reembolsos', to: '/reembolsos', icon: IconReceiptRefund, anyOf: ['payments.read'] },
+      { label: 'Disputas', to: '/disputas', icon: IconGavel, anyOf: ['payments.read'] },
+      { label: 'Operações de pagamento', to: '/operacoes-pagamento', icon: IconAlertOctagon, anyOf: ['payments.read'] },
+    ],
+  },
+  { label: 'Ledger', to: '/ledger', icon: IconBook2, anyOf: ['ledger.read'] },
 ];
 
 export function visibleNavigation(can: (p: Permission) => boolean): NavEntry[] {

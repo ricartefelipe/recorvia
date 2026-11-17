@@ -17,6 +17,7 @@ import { AddressPanel } from './AddressPanel';
 import { customersApi } from './api';
 import { ContactsPanel } from './ContactsPanel';
 import { CreditsPanel } from './CreditsPanel';
+import { RelatedInvoices } from '../invoices/InvoicesTable';
 import { CustomerSubscriptions } from '../subscriptions/CustomerSubscriptions';
 import { CustomerForm } from './CustomerForm';
 
@@ -135,7 +136,7 @@ function Overview({ customer }: { customer: CustomerDetails }) {
   );
 }
 
-const TABS = ['dados', 'contatos', 'assinaturas', 'creditos', 'historico'] as const;
+const TABS = ['dados', 'contatos', 'assinaturas', 'faturas', 'creditos', 'historico'] as const;
 
 export function CustomerDetailPage() {
   const { id = '' } = useParams();
@@ -165,6 +166,7 @@ export function CustomerDetailPage() {
                 <Tabs.Tab value="dados">Dados</Tabs.Tab>
                 <Tabs.Tab value="contatos">Contatos ({customer.contacts.length})</Tabs.Tab>
                 <Tabs.Tab value="assinaturas">Assinaturas</Tabs.Tab>
+                <Tabs.Tab value="faturas">Faturas</Tabs.Tab>
                 <Tabs.Tab value="creditos">Créditos</Tabs.Tab>
                 <Tabs.Tab value="historico">Histórico</Tabs.Tab>
               </Tabs.List>
@@ -176,6 +178,9 @@ export function CustomerDetailPage() {
               </Tabs.Panel>
               <Tabs.Panel value="assinaturas">
                 <CustomerSubscriptions customer={customer} />
+              </Tabs.Panel>
+              <Tabs.Panel value="faturas">
+                <RelatedInvoices params={{ customer_id: customer.id }} emptyText="Este cliente ainda não tem faturas." />
               </Tabs.Panel>
               <Tabs.Panel value="creditos">
                 <CreditsPanel customer={customer} />

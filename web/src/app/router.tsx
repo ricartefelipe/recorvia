@@ -29,6 +29,18 @@ export const appRoutes: RouteObject[] = [
     path: 'assinaturas/:id',
     lazy: async () => ({ Component: (await import('../features/subscriptions/SubscriptionDetailPage')).SubscriptionDetailPage }),
   },
+  { path: 'faturas', lazy: async () => ({ Component: (await import('../features/invoices/InvoicesPage')).InvoicesPage }) },
+  { path: 'faturas/:id', lazy: async () => ({ Component: (await import('../features/invoices/InvoiceDetailPage')).InvoiceDetailPage }) },
+  { path: 'cobrancas', lazy: async () => ({ Component: (await import('../features/payments/ChargesPage')).ChargesPage }) },
+  { path: 'cobrancas/:id', lazy: async () => ({ Component: (await import('../features/payments/ChargesPage')).ChargeDetailPage }) },
+  { path: 'recebimentos', lazy: async () => ({ Component: (await import('../features/payments/PaymentListsPages')).PaymentsPage }) },
+  { path: 'reembolsos', lazy: async () => ({ Component: (await import('../features/payments/PaymentListsPages')).RefundsPage }) },
+  { path: 'disputas', lazy: async () => ({ Component: (await import('../features/payments/PaymentListsPages')).DisputesPage }) },
+  {
+    path: 'operacoes-pagamento',
+    lazy: async () => ({ Component: (await import('../features/payments/PaymentListsPages')).PaymentOperationsPage }),
+  },
+  { path: 'ledger', lazy: async () => ({ Component: (await import('../features/ledger/LedgerPage')).LedgerPage }) },
   { path: '*', Component: NotFoundPage },
 ];
 

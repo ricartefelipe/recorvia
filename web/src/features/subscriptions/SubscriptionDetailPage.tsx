@@ -19,6 +19,7 @@ import {
 } from '../../lib/labels';
 import { useTenant } from '../../session/SessionContext';
 import { usePlans } from '../catalog/api';
+import { RelatedInvoices } from '../invoices/InvoicesTable';
 import { subscriptionsApi } from './api';
 import { PriceAdjustmentsPanel } from './PriceAdjustmentsPanel';
 import { CancelScheduledAlert, SubscriptionActions } from './SubscriptionActions';
@@ -217,7 +218,7 @@ function Overview({ subscription: s }: { subscription: Subscription }) {
   );
 }
 
-const TABS = ['geral', 'historico', 'consumo', 'reajustes'] as const;
+const TABS = ['geral', 'faturas', 'historico', 'consumo', 'reajustes'] as const;
 
 export function SubscriptionDetailPage() {
   const { id = '' } = useParams();
@@ -246,12 +247,16 @@ export function SubscriptionDetailPage() {
             <Tabs value={tab} onChange={(v) => setFilters({ aba: v === 'geral' ? null : v })} keepMounted={false}>
               <Tabs.List mb="md">
                 <Tabs.Tab value="geral">Visão geral</Tabs.Tab>
+                <Tabs.Tab value="faturas">Faturas</Tabs.Tab>
                 <Tabs.Tab value="historico">Histórico</Tabs.Tab>
                 <Tabs.Tab value="consumo">Consumo</Tabs.Tab>
                 <Tabs.Tab value="reajustes">Reajustes</Tabs.Tab>
               </Tabs.List>
               <Tabs.Panel value="geral">
                 <Overview subscription={s} />
+              </Tabs.Panel>
+              <Tabs.Panel value="faturas">
+                <RelatedInvoices params={{ subscription_id: s.id }} emptyText="Nenhuma fatura gerada para esta assinatura ainda." />
               </Tabs.Panel>
               <Tabs.Panel value="historico">
                 <HistoryPanel subscriptionId={s.id} />
