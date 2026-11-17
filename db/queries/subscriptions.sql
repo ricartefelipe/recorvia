@@ -31,6 +31,7 @@ UPDATE subscriptions
 -- do motor em paralelo sem processar a mesma assinatura.
 SELECT * FROM subscriptions
  WHERE tenant_id = @tenant_id AND next_billing_at IS NOT NULL AND next_billing_at <= @now AND status <> 'suspended'
+   AND NOT (id = ANY (@exclude::uuid[]))
  ORDER BY next_billing_at, id
  LIMIT 1
  FOR UPDATE SKIP LOCKED;

@@ -16,6 +16,7 @@ import (
 const claimDueSubscription = `-- name: ClaimDueSubscription :one
 SELECT id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date, trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at, cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days, created_at, updated_at, version FROM subscriptions
  WHERE tenant_id = $1 AND next_billing_at IS NOT NULL AND next_billing_at <= $2 AND status <> 'suspended'
+   AND NOT (id = ANY ($3::uuid[]))
  ORDER BY next_billing_at, id
  LIMIT 1
  FOR UPDATE SKIP LOCKED
@@ -24,12 +25,13 @@ SELECT id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, 
 type ClaimDueSubscriptionParams struct {
 	TenantID uuid.UUID
 	Now      *time.Time
+	Exclude  []uuid.UUID
 }
 
 // Reivindica uma assinatura vencida; SKIP LOCKED permite várias instâncias
 // do motor em paralelo sem processar a mesma assinatura.
 func (q *Queries) ClaimDueSubscription(ctx context.Context, arg ClaimDueSubscriptionParams) (Subscription, error) {
-	row := q.db.QueryRow(ctx, claimDueSubscription, arg.TenantID, arg.Now)
+	row := q.db.QueryRow(ctx, claimDueSubscription, arg.TenantID, arg.Now, arg.Exclude)
 	var i Subscription
 	err := row.Scan(
 		&i.ID,

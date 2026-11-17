@@ -67,8 +67,11 @@ func (tx billingTx) TenantSettings(ctx context.Context) (billing.TenantSettings,
 	return tx.tenantSettings(ctx)
 }
 
-func (tx billingTx) ClaimDueSubscription(ctx context.Context, now time.Time) (subscriptions.Subscription, bool, error) {
-	r, err := tx.q.ClaimDueSubscription(ctx, dbgen.ClaimDueSubscriptionParams{TenantID: tx.tenantID, Now: &now})
+func (tx billingTx) ClaimDueSubscription(ctx context.Context, now time.Time, exclude []uuid.UUID) (subscriptions.Subscription, bool, error) {
+	if exclude == nil {
+		exclude = []uuid.UUID{}
+	}
+	r, err := tx.q.ClaimDueSubscription(ctx, dbgen.ClaimDueSubscriptionParams{TenantID: tx.tenantID, Now: &now, Exclude: exclude})
 	if postgres.IsNoRows(err) {
 		return subscriptions.Subscription{}, false, nil
 	}
