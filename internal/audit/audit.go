@@ -22,7 +22,7 @@ const (
 	// ActorUser é um membro autenticado do tenant.
 	ActorUser ActorType = "user"
 	// ActorAPICredential é uma integração máquina a máquina.
-	ActorAPICredential ActorType = "api_credential"
+	ActorAPICredential ActorType = "api_credential" //nolint:gosec // nome do tipo de ator, não é credencial
 	// ActorSystem é um processo interno (worker, agendador).
 	ActorSystem ActorType = "system"
 	// ActorCustomerPortal é um cliente do tenant no portal.
