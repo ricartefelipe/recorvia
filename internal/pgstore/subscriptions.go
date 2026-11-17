@@ -37,6 +37,7 @@ func subscriptionFromRow(r dbgen.Subscription) subscriptions.Subscription {
 		CurrentPeriod: calendar.Period{Start: r.CurrentPeriodStart, End: r.CurrentPeriodEnd}, NextBillingIndex: int(r.NextBillingIndex),
 		NextBillingAt: r.NextBillingAt, CancelAtPeriodEnd: r.CancelAtPeriodEnd, CanceledAt: r.CanceledAt, CancelReason: deref(r.CancelReason),
 		EndedAt: r.EndedAt, SuspendedAt: r.SuspendedAt, SuspensionReason: deref(r.SuspensionReason), PaymentTermsDays: intFromPtr32(r.PaymentTermsDays),
+		PriceOverride: optMoney(r.PriceOverrideAmount), PriceOverrideAdjustmentID: r.PriceOverrideAdjustmentID,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: int(r.Version)}
 }
 
@@ -56,7 +57,7 @@ func (b base) updateSubscription(ctx context.Context, s subscriptions.Subscripti
 		CurrentPeriodEnd: s.CurrentPeriod.End, NextBillingIndex: int32(s.NextBillingIndex), NextBillingAt: s.NextBillingAt,
 		CancelAtPeriodEnd: s.CancelAtPeriodEnd, CanceledAt: s.CanceledAt, CancelReason: strPtr(s.CancelReason), EndedAt: s.EndedAt,
 		SuspendedAt: s.SuspendedAt, SuspensionReason: strPtr(s.SuspensionReason), PaymentTermsDays: intPtr32(s.PaymentTermsDays),
-		Version: int32(s.Version)})
+		PriceOverrideAmount: optAmount(s.PriceOverride), PriceOverrideAdjustmentID: s.PriceOverrideAdjustmentID, Version: int32(s.Version)})
 	if err != nil {
 		return err
 	}

@@ -147,7 +147,7 @@ func (tx billingTx) UsageFor(ctx context.Context, sub subscriptions.Subscription
 	aggID := ids.New()
 	if err := tx.q.InsertUsageAggregate(ctx, dbgen.InsertUsageAggregateParams{ID: aggID, TenantID: tx.tenantID, SubscriptionID: sub.ID, MetricID: metric.ID,
 		PeriodStart: period.Start, PeriodEnd: period.End, Aggregation: string(metric.Aggregation), Quantity: num, EventCount: int32(count),
-		ClosedAt: tx.store.clock.Now()}); err != nil {
+		PriceVersionID: &price.ID, ClosedAt: tx.store.clock.Now()}); err != nil {
 		return nil, err
 	}
 	if err := tx.q.AttachUsageEventsToAggregate(ctx, dbgen.AttachUsageEventsToAggregateParams{AggregateID: &aggID, TenantID: tx.tenantID,
@@ -214,7 +214,7 @@ func (tx billingTx) ActiveDiscount(ctx context.Context, subscriptionID uuid.UUID
 	if err != nil {
 		return nil, err
 	}
-	d := &billing.Discount{ID: r.ID, CouponCode: r.CouponCode, Description: r.CouponName}
+	d := &billing.Discount{ID: r.ID, CouponCode: r.CouponCode, Description: r.CouponName, AppliesToPlanIDs: r.AppliesToPlanIds}
 	if r.PercentOffBp != nil {
 		d.PercentBP = int64(*r.PercentOffBp)
 	}
