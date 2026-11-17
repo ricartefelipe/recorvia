@@ -93,3 +93,9 @@ UPDATE coupons SET status = 'archived', version = version + 1 WHERE tenant_id = 
 -- O limite de resgates é garantido pela condição e pela constraint do banco.
 UPDATE coupons SET redemptions_count = redemptions_count + 1
  WHERE tenant_id = @tenant_id AND id = @id AND (max_redemptions IS NULL OR redemptions_count < max_redemptions);
+
+-- name: CountPlansByIDs :one
+SELECT count(*)::int FROM plans WHERE tenant_id = @tenant_id AND id = ANY (@ids::uuid[]);
+
+-- name: GetCouponForUpdate :one
+SELECT * FROM coupons WHERE tenant_id = @tenant_id AND id = @id FOR UPDATE;

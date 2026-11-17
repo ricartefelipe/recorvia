@@ -13,6 +13,22 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countInvoiceCreditNotes = `-- name: CountInvoiceCreditNotes :one
+SELECT count(*)::int FROM credit_notes WHERE tenant_id = $1 AND invoice_id = $2
+`
+
+type CountInvoiceCreditNotesParams struct {
+	TenantID  uuid.UUID
+	InvoiceID uuid.UUID
+}
+
+func (q *Queries) CountInvoiceCreditNotes(ctx context.Context, arg CountInvoiceCreditNotesParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countInvoiceCreditNotes, arg.TenantID, arg.InvoiceID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const cycleInvoiceExists = `-- name: CycleInvoiceExists :one
 SELECT EXISTS (SELECT 1 FROM invoices WHERE tenant_id = $1 AND subscription_id = $2
                 AND kind = $3 AND billing_period_start = $4)::boolean
@@ -35,6 +51,33 @@ func (q *Queries) CycleInvoiceExists(ctx context.Context, arg CycleInvoiceExists
 	var column_1 bool
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const getCreditNoteByRequestKey = `-- name: GetCreditNoteByRequestKey :one
+SELECT id, tenant_id, invoice_id, number, amount, currency, reason, created_by, request_key, created_at FROM credit_notes WHERE tenant_id = $1 AND request_key = $2
+`
+
+type GetCreditNoteByRequestKeyParams struct {
+	TenantID   uuid.UUID
+	RequestKey *string
+}
+
+func (q *Queries) GetCreditNoteByRequestKey(ctx context.Context, arg GetCreditNoteByRequestKeyParams) (CreditNote, error) {
+	row := q.db.QueryRow(ctx, getCreditNoteByRequestKey, arg.TenantID, arg.RequestKey)
+	var i CreditNote
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.InvoiceID,
+		&i.Number,
+		&i.Amount,
+		&i.Currency,
+		&i.Reason,
+		&i.CreatedBy,
+		&i.RequestKey,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const getInvoice = `-- name: GetInvoice :one
@@ -127,6 +170,44 @@ func (q *Queries) GetInvoiceForUpdate(ctx context.Context, arg GetInvoiceForUpda
 		&i.Version,
 	)
 	return i, err
+}
+
+const insertCreditNote = `-- name: InsertCreditNote :execrows
+INSERT INTO credit_notes (id, tenant_id, invoice_id, number, amount, currency, reason, created_by, request_key, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (tenant_id, request_key) DO NOTHING
+`
+
+type InsertCreditNoteParams struct {
+	ID         uuid.UUID
+	TenantID   uuid.UUID
+	InvoiceID  uuid.UUID
+	Number     string
+	Amount     int64
+	Currency   string
+	Reason     string
+	CreatedBy  *uuid.UUID
+	RequestKey *string
+	CreatedAt  time.Time
+}
+
+func (q *Queries) InsertCreditNote(ctx context.Context, arg InsertCreditNoteParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertCreditNote,
+		arg.ID,
+		arg.TenantID,
+		arg.InvoiceID,
+		arg.Number,
+		arg.Amount,
+		arg.Currency,
+		arg.Reason,
+		arg.CreatedBy,
+		arg.RequestKey,
+		arg.CreatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const insertInvoice = `-- name: InsertInvoice :exec
@@ -324,6 +405,46 @@ func (q *Queries) ListInvoiceCharges(ctx context.Context, arg ListInvoiceCharges
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.Version,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listInvoiceCreditNotes = `-- name: ListInvoiceCreditNotes :many
+SELECT id, tenant_id, invoice_id, number, amount, currency, reason, created_by, request_key, created_at FROM credit_notes WHERE tenant_id = $1 AND invoice_id = $2 ORDER BY created_at, id
+`
+
+type ListInvoiceCreditNotesParams struct {
+	TenantID  uuid.UUID
+	InvoiceID uuid.UUID
+}
+
+func (q *Queries) ListInvoiceCreditNotes(ctx context.Context, arg ListInvoiceCreditNotesParams) ([]CreditNote, error) {
+	rows, err := q.db.Query(ctx, listInvoiceCreditNotes, arg.TenantID, arg.InvoiceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CreditNote
+	for rows.Next() {
+		var i CreditNote
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.InvoiceID,
+			&i.Number,
+			&i.Amount,
+			&i.Currency,
+			&i.Reason,
+			&i.CreatedBy,
+			&i.RequestKey,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}

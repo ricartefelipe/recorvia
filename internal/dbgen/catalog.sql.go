@@ -30,6 +30,22 @@ func (q *Queries) ArchiveCoupon(ctx context.Context, arg ArchiveCouponParams) (i
 	return result.RowsAffected(), nil
 }
 
+const countPlansByIDs = `-- name: CountPlansByIDs :one
+SELECT count(*)::int FROM plans WHERE tenant_id = $1 AND id = ANY ($2::uuid[])
+`
+
+type CountPlansByIDsParams struct {
+	TenantID uuid.UUID
+	Ids      []uuid.UUID
+}
+
+func (q *Queries) CountPlansByIDs(ctx context.Context, arg CountPlansByIDsParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countPlansByIDs, arg.TenantID, arg.Ids)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const getCoupon = `-- name: GetCoupon :one
 SELECT id, tenant_id, code, name, discount_type, percent_off_bp, amount_off, currency, duration, duration_cycles, max_redemptions, redemptions_count, valid_from, valid_until, applies_to_plan_ids, status, created_at, updated_at, version FROM coupons WHERE tenant_id = $1 AND id = $2
 `
@@ -77,6 +93,42 @@ type GetCouponByCodeForUpdateParams struct {
 
 func (q *Queries) GetCouponByCodeForUpdate(ctx context.Context, arg GetCouponByCodeForUpdateParams) (Coupon, error) {
 	row := q.db.QueryRow(ctx, getCouponByCodeForUpdate, arg.TenantID, arg.Code)
+	var i Coupon
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.Code,
+		&i.Name,
+		&i.DiscountType,
+		&i.PercentOffBp,
+		&i.AmountOff,
+		&i.Currency,
+		&i.Duration,
+		&i.DurationCycles,
+		&i.MaxRedemptions,
+		&i.RedemptionsCount,
+		&i.ValidFrom,
+		&i.ValidUntil,
+		&i.AppliesToPlanIds,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Version,
+	)
+	return i, err
+}
+
+const getCouponForUpdate = `-- name: GetCouponForUpdate :one
+SELECT id, tenant_id, code, name, discount_type, percent_off_bp, amount_off, currency, duration, duration_cycles, max_redemptions, redemptions_count, valid_from, valid_until, applies_to_plan_ids, status, created_at, updated_at, version FROM coupons WHERE tenant_id = $1 AND id = $2 FOR UPDATE
+`
+
+type GetCouponForUpdateParams struct {
+	TenantID uuid.UUID
+	ID       uuid.UUID
+}
+
+func (q *Queries) GetCouponForUpdate(ctx context.Context, arg GetCouponForUpdateParams) (Coupon, error) {
+	row := q.db.QueryRow(ctx, getCouponForUpdate, arg.TenantID, arg.ID)
 	var i Coupon
 	err := row.Scan(
 		&i.ID,

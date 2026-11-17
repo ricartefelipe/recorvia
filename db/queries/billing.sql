@@ -68,3 +68,17 @@ SELECT * FROM invoice_status_history WHERE tenant_id = @tenant_id AND invoice_id
 
 -- name: ListInvoiceCharges :many
 SELECT * FROM charges WHERE tenant_id = @tenant_id AND invoice_id = @invoice_id ORDER BY attempt;
+
+-- name: InsertCreditNote :execrows
+INSERT INTO credit_notes (id, tenant_id, invoice_id, number, amount, currency, reason, created_by, request_key, created_at)
+VALUES (@id, @tenant_id, @invoice_id, @number, @amount, @currency, @reason, sqlc.narg(created_by), sqlc.narg(request_key), @created_at)
+ON CONFLICT (tenant_id, request_key) DO NOTHING;
+
+-- name: GetCreditNoteByRequestKey :one
+SELECT * FROM credit_notes WHERE tenant_id = @tenant_id AND request_key = @request_key;
+
+-- name: CountInvoiceCreditNotes :one
+SELECT count(*)::int FROM credit_notes WHERE tenant_id = @tenant_id AND invoice_id = @invoice_id;
+
+-- name: ListInvoiceCreditNotes :many
+SELECT * FROM credit_notes WHERE tenant_id = @tenant_id AND invoice_id = @invoice_id ORDER BY created_at, id;

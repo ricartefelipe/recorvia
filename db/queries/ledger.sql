@@ -63,8 +63,10 @@ SELECT COALESCE((SELECT ev.quantity FROM ev ORDER BY ev.occurred_at DESC, ev.rec
        (SELECT count(*) FROM ev)::int AS event_count;
 
 -- name: InsertUsageAggregate :exec
-INSERT INTO usage_aggregates (id, tenant_id, subscription_id, metric_id, period_start, period_end, aggregation, quantity, event_count, closed_at)
-VALUES (@id, @tenant_id, @subscription_id, @metric_id, @period_start, @period_end, @aggregation, @quantity, @event_count, @closed_at);
+INSERT INTO usage_aggregates (id, tenant_id, subscription_id, metric_id, period_start, period_end, aggregation, quantity, event_count,
+                              price_version_id, closed_at)
+VALUES (@id, @tenant_id, @subscription_id, @metric_id, @period_start, @period_end, @aggregation, @quantity, @event_count,
+        sqlc.narg(price_version_id), @closed_at);
 
 -- name: AttachUsageEventsToAggregate :exec
 UPDATE usage_events SET aggregate_id = @aggregate_id

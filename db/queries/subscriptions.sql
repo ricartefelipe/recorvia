@@ -23,7 +23,8 @@ UPDATE subscriptions
        next_billing_index = @next_billing_index, next_billing_at = sqlc.narg(next_billing_at),
        cancel_at_period_end = @cancel_at_period_end, canceled_at = sqlc.narg(canceled_at), cancel_reason = sqlc.narg(cancel_reason),
        ended_at = sqlc.narg(ended_at), suspended_at = sqlc.narg(suspended_at), suspension_reason = sqlc.narg(suspension_reason),
-       payment_terms_days = sqlc.narg(payment_terms_days), version = version + 1
+       payment_terms_days = sqlc.narg(payment_terms_days), price_override_amount = sqlc.narg(price_override_amount),
+       price_override_adjustment_id = sqlc.narg(price_override_adjustment_id), version = version + 1
  WHERE tenant_id = @tenant_id AND id = @id AND version = @version;
 
 -- name: ClaimDueSubscription :one
@@ -70,7 +71,8 @@ SELECT EXISTS (SELECT 1 FROM invoices WHERE tenant_id = @tenant_id AND subscript
                 AND status IN ('open', 'partially_paid') AND due_at <= @now)::boolean;
 
 -- name: GetActiveDiscount :one
-SELECT d.*, c.code AS coupon_code, c.discount_type, c.percent_off_bp, c.amount_off, c.name AS coupon_name
+SELECT d.*, c.code AS coupon_code, c.discount_type, c.percent_off_bp, c.amount_off, c.name AS coupon_name,
+       c.applies_to_plan_ids
   FROM subscription_discounts d JOIN coupons c ON c.tenant_id = d.tenant_id AND c.id = d.coupon_id
  WHERE d.tenant_id = @tenant_id AND d.subscription_id = @subscription_id AND d.status = 'active';
 
@@ -98,6 +100,61 @@ UPDATE pending_invoice_items SET invoice_id = @invoice_id WHERE tenant_id = @ten
 
 -- name: InsertPendingItem :exec
 INSERT INTO pending_invoice_items (id, tenant_id, customer_id, subscription_id, kind, source, description, amount, quantity, unit_amount,
-                                   period_start, period_end, details, created_by, created_at)
+                                   period_start, period_end, details, usage_aggregate_id, created_by, created_at)
 VALUES (@id, @tenant_id, @customer_id, @subscription_id, @kind, @source, @description, @amount, sqlc.narg(quantity), sqlc.narg(unit_amount),
-        sqlc.narg(period_start), sqlc.narg(period_end), @details, sqlc.narg(created_by), @created_at);
+        sqlc.narg(period_start), sqlc.narg(period_end), @details, sqlc.narg(usage_aggregate_id), sqlc.narg(created_by), @created_at);
+
+-- name: InsertScheduledChange :exec
+INSERT INTO subscription_scheduled_changes (id, tenant_id, subscription_id, kind, new_plan_id, new_price_version_id, new_quantity,
+                                            effective_at, status, created_by, created_at)
+VALUES (@id, @tenant_id, @subscription_id, @kind, sqlc.narg(new_plan_id), sqlc.narg(new_price_version_id), sqlc.narg(new_quantity),
+        @effective_at, 'pending', sqlc.narg(created_by), @created_at);
+
+-- name: GetPendingScheduledChange :one
+SELECT * FROM subscription_scheduled_changes
+ WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id AND status = 'pending' FOR UPDATE;
+
+-- name: ResolveScheduledChange :execrows
+UPDATE subscription_scheduled_changes SET status = @status, resolved_at = @resolved_at
+ WHERE tenant_id = @tenant_id AND id = @id AND status = 'pending';
+
+-- name: CancelPendingScheduledChanges :execrows
+UPDATE subscription_scheduled_changes SET status = 'canceled', resolved_at = @resolved_at
+ WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id AND status = 'pending';
+
+-- name: ListScheduledChanges :many
+SELECT * FROM subscription_scheduled_changes WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id
+ ORDER BY created_at DESC, id DESC LIMIT 50;
+
+-- name: InsertPriceAdjustment :exec
+INSERT INTO subscription_price_adjustments (id, tenant_id, subscription_id, effective_date, kind, percent_bp, new_amount, index_name,
+                                            reason, status, created_by, created_at)
+VALUES (@id, @tenant_id, @subscription_id, @effective_date, @kind, sqlc.narg(percent_bp), sqlc.narg(new_amount), @index_name,
+        @reason, 'scheduled', sqlc.narg(created_by), @created_at);
+
+-- name: ListPriceAdjustments :many
+SELECT * FROM subscription_price_adjustments WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id
+ ORDER BY effective_date, created_at, id LIMIT 200;
+
+-- name: GetPriceAdjustmentForUpdate :one
+SELECT * FROM subscription_price_adjustments
+ WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id AND id = @id FOR UPDATE;
+
+-- name: DuePriceAdjustments :many
+SELECT * FROM subscription_price_adjustments
+ WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id AND status = 'scheduled' AND effective_date <= @on_date
+ ORDER BY effective_date, created_at, id FOR UPDATE;
+
+-- name: MarkPriceAdjustmentApplied :execrows
+UPDATE subscription_price_adjustments
+   SET status = 'applied', previous_amount = @previous_amount, resulting_amount = @resulting_amount,
+       applied_period_start = @applied_period_start, applied_at = @applied_at
+ WHERE tenant_id = @tenant_id AND id = @id AND status = 'scheduled';
+
+-- name: CancelPriceAdjustment :execrows
+UPDATE subscription_price_adjustments SET status = 'canceled', canceled_at = @canceled_at
+ WHERE tenant_id = @tenant_id AND id = @id AND status = 'scheduled';
+
+-- name: CancelScheduledPriceAdjustments :execrows
+UPDATE subscription_price_adjustments SET status = 'canceled', canceled_at = @canceled_at
+ WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id AND status = 'scheduled';
