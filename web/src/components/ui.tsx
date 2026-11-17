@@ -12,7 +12,6 @@ import {
   TextInput,
   Title,
   Tooltip,
-  VisuallyHidden,
   type SegmentedControlProps,
   type TextInputProps,
 } from '@mantine/core';
@@ -246,14 +245,14 @@ export function LiveRegion() {
     };
   }, []);
   return (
-    <VisuallyHidden>
+    <div className="visually-hidden">
       <div aria-live="polite" aria-atomic="true" data-testid="live-polite">
         {polite}
       </div>
       <div aria-live="assertive" aria-atomic="true" data-testid="live-assertive">
         {assertive}
       </div>
-    </VisuallyHidden>
+    </div>
   );
 }
 

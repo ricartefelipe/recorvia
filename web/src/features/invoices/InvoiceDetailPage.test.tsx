@@ -88,5 +88,7 @@ describe('detalhe da fatura', () => {
     expect(keys[0]).toBeTruthy();
     expect(keys[1]).toBe(keys[0]);
     expect(await screen.findByText('Pagamento registrado.')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('live-polite')).toHaveTextContent('Pagamento registrado.'));
+    expect(screen.getByTestId('live-assertive')).toHaveTextContent(/Sem conexão/);
   });
 });
