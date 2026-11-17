@@ -24,6 +24,11 @@ export const appRoutes: RouteObject[] = [
       { path: 'cupons', lazy: async () => ({ Component: (await import('../features/catalog/CouponsPage')).CouponsPage }) },
     ],
   },
+  { path: 'assinaturas', lazy: async () => ({ Component: (await import('../features/subscriptions/SubscriptionsPage')).SubscriptionsPage }) },
+  {
+    path: 'assinaturas/:id',
+    lazy: async () => ({ Component: (await import('../features/subscriptions/SubscriptionDetailPage')).SubscriptionDetailPage }),
+  },
   { path: '*', Component: NotFoundPage },
 ];
 

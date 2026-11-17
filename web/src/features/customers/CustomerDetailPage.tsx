@@ -17,6 +17,7 @@ import { AddressPanel } from './AddressPanel';
 import { customersApi } from './api';
 import { ContactsPanel } from './ContactsPanel';
 import { CreditsPanel } from './CreditsPanel';
+import { CustomerSubscriptions } from '../subscriptions/CustomerSubscriptions';
 import { CustomerForm } from './CustomerForm';
 
 function HistoryPanel({ customerId }: { customerId: string }) {
@@ -134,7 +135,7 @@ function Overview({ customer }: { customer: CustomerDetails }) {
   );
 }
 
-const TABS = ['dados', 'contatos', 'creditos', 'historico'] as const;
+const TABS = ['dados', 'contatos', 'assinaturas', 'creditos', 'historico'] as const;
 
 export function CustomerDetailPage() {
   const { id = '' } = useParams();
@@ -163,6 +164,7 @@ export function CustomerDetailPage() {
               <Tabs.List mb="md">
                 <Tabs.Tab value="dados">Dados</Tabs.Tab>
                 <Tabs.Tab value="contatos">Contatos ({customer.contacts.length})</Tabs.Tab>
+                <Tabs.Tab value="assinaturas">Assinaturas</Tabs.Tab>
                 <Tabs.Tab value="creditos">Créditos</Tabs.Tab>
                 <Tabs.Tab value="historico">Histórico</Tabs.Tab>
               </Tabs.List>
@@ -171,6 +173,9 @@ export function CustomerDetailPage() {
               </Tabs.Panel>
               <Tabs.Panel value="contatos">
                 <ContactsPanel customer={customer} />
+              </Tabs.Panel>
+              <Tabs.Panel value="assinaturas">
+                <CustomerSubscriptions customer={customer} />
               </Tabs.Panel>
               <Tabs.Panel value="creditos">
                 <CreditsPanel customer={customer} />

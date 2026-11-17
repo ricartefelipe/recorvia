@@ -1,4 +1,4 @@
-import { IconGauge, IconPackage, IconUsers, type Icon } from '@tabler/icons-react';
+import { IconGauge, IconPackage, IconRepeat, IconUsers, type Icon } from '@tabler/icons-react';
 import type { Permission } from '../session/permissions';
 
 export interface NavItem {
@@ -26,6 +26,7 @@ export const NAVIGATION: NavEntry[] = [
   { label: 'Painel', to: '/', icon: IconGauge, anyOf: ['dashboard.read'], end: true },
   { label: 'Clientes', to: '/clientes', icon: IconUsers, anyOf: ['customers.read'] },
   { label: 'Catálogo', to: '/catalogo', icon: IconPackage, anyOf: ['catalog.read'] },
+  { label: 'Assinaturas', to: '/assinaturas', icon: IconRepeat, anyOf: ['subscriptions.read'] },
 ];
 
 export function visibleNavigation(can: (p: Permission) => boolean): NavEntry[] {
