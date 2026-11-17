@@ -178,7 +178,9 @@ func (s *Service) SwitchTenant(ctx context.Context, sess Session, tenantID uuid.
 		return Session{}, err
 	}
 	if err := s.sessions.Delete(ctx, sess.ID); err != nil {
-		return Session{}, err
+		// Sem revogar a anterior, a nova sessão é descartada: o usuário
+		// continua apenas com a sessão original.
+		return Session{}, errors.Join(err, s.sessions.Delete(ctx, next.ID))
 	}
 	return next, nil
 }
