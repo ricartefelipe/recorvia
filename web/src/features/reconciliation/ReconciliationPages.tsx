@@ -1,0 +1,461 @@
+import { zodResolver } from '@hookform/resolvers/zod';
+import {
+  Alert,
+  Anchor,
+  Breadcrumbs,
+  Button,
+  Code,
+  Group,
+  Paper,
+  Radio,
+  Select,
+  SimpleGrid,
+  Stack,
+  Table,
+  Tabs,
+  Text,
+  Textarea,
+  Title,
+} from '@mantine/core';
+import { IconInfoCircle, IconPlayerPlay, IconScale } from '@tabler/icons-react';
+import { useQuery } from '@tanstack/react-query';
+import { Controller, useForm, useWatch } from 'react-hook-form';
+import { Link, useParams } from 'react-router';
+import { z } from 'zod';
+import { api } from '../../api/client';
+import type { DataList, Discrepancy, DiscrepancyKind, ReconciliationRun } from '../../api/types';
+import { AuditEventList } from '../../components/AuditEventList';
+import { DateTime, ShortId, StatusBadge } from '../../components/format';
+import { EmptyState, LoadingState, QueryContent } from '../../components/states';
+import { confirmAction, KeyValue, PageHeader } from '../../components/ui';
+import { useApiMutation, useUrlFilters } from '../../lib/hooks';
+import { useIdempotencyKey } from '../../lib/idempotency';
+import {
+  discrepancyKindLabels,
+  discrepancyStatusLabels,
+  labelOf,
+  optionsOf,
+  providerLabels,
+  reconciliationRunStatusLabels,
+  resolutionLabels,
+} from '../../lib/labels';
+import { formatMoney } from '../../lib/money';
+import { Can, usePermission, useSession, useTenant } from '../../session/SessionContext';
+
+const enc = encodeURIComponent;
+type Resolution = 'accept_provider' | 'keep_local' | 'adjust_ledger' | 'dismiss';
+
+const reconciliationApi = {
+  runs: (signal?: AbortSignal) => api.get<DataList<ReconciliationRun>>('/api/v1/reconciliation/runs', { signal }),
+  run: (idempotencyKey: string) => api.post<ReconciliationRun>('/api/v1/reconciliation/runs', undefined, { idempotencyKey }),
+  discrepancies: (params: { status?: string; kind?: DiscrepancyKind }, signal?: AbortSignal) =>
+    api.get<DataList<Discrepancy>>('/api/v1/reconciliation/discrepancies', { query: params, signal }),
+  discrepancy: (id: string, signal?: AbortSignal) => api.get<Discrepancy>(`/api/v1/reconciliation/discrepancies/${enc(id)}`, { signal }),
+  resolve: (id: string, input: { resolution: Resolution; justification: string }) =>
+    api.post<Discrepancy>(`/api/v1/reconciliation/discrepancies/${enc(id)}/resolve`, input),
+};
+
+const RESOLUTION_HELP: Record<Resolution, string> = {
+  accept_provider: 'O registro local é corrigido para refletir o provedor, com lançamento compensatório.',
+  keep_local: 'O registro local está correto; a diferença é do provedor e fica documentada.',
+  adjust_ledger: 'Registra um lançamento compensatório no ledger para zerar a diferença.',
+  dismiss: 'A divergência não procede (por exemplo, já resolvida por outro meio).',
+};
+
+function RunsTab() {
+  const { keys } = useTenant();
+  const idempotency = useIdempotencyKey();
+  const query = useQuery({ queryKey: keys('reconciliation', 'runs'), queryFn: ({ signal }) => reconciliationApi.runs(signal) });
+  const run = useApiMutation<void, ReconciliationRun>({
+    mutationFn: () => reconciliationApi.run(idempotency.keyFor({ operation: 'reconciliation-run' })),
+    invalidate: ['reconciliation', 'dashboard'],
+    successMessage: (r) => `Conciliação concluída: ${r.checked_count} cobrança(s) verificada(s), ${r.discrepancy_count} divergência(s).`,
+    onSuccess: () => idempotency.reset(),
+  });
+  const onRun = async () => {
+    const ok = await confirmAction({
+      title: 'Executar conciliação agora',
+      message: 'Compara as cobranças, pagamentos, taxas, reembolsos e chargebacks locais com o provedor e registra as divergências encontradas.',
+      confirmLabel: 'Executar conciliação',
+    });
+    if (ok) run.mutate();
+  };
+  return (
+    <Stack>
+      <Group justify="flex-end">
+        <Can permission="reconciliation.run">
+          <Button leftSection={<IconPlayerPlay size={16} />} onClick={() => void onRun()} loading={run.isPending}>
+            Executar conciliação agora
+          </Button>
+        </Can>
+      </Group>
+      <QueryContent query={query}>
+        {({ data }) =>
+          data.length === 0 ? (
+            <EmptyState title="Nenhuma execução" description="As execuções agendadas e manuais aparecem aqui." />
+          ) : (
+            <Table.ScrollContainer minWidth={860}>
+              <Table aria-label="Execuções de conciliação">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Início</Table.Th>
+                    <Table.Th>Provedor</Table.Th>
+                    <Table.Th>Janela verificada</Table.Th>
+                    <Table.Th>Situação</Table.Th>
+                    <Table.Th ta="right">Verificadas</Table.Th>
+                    <Table.Th ta="right">Divergências</Table.Th>
+                    <Table.Th>Término</Table.Th>
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {data.map((r) => (
+                    <Table.Tr key={r.id}>
+                      <Table.Td>
+                        <DateTime value={r.started_at} />
+                      </Table.Td>
+                      <Table.Td>{labelOf(providerLabels, r.provider)}</Table.Td>
+                      <Table.Td>
+                        <Text size="sm">
+                          <DateTime value={r.window_start} /> – <DateTime value={r.window_end} />
+                        </Text>
+                      </Table.Td>
+                      <Table.Td>
+                        <StatusBadge status={r.status} labels={reconciliationRunStatusLabels} />
+                        {r.error && (
+                          <Text size="xs" c="red">
+                            {r.error}
+                          </Text>
+                        )}
+                      </Table.Td>
+                      <Table.Td ta="right">{r.checked_count}</Table.Td>
+                      <Table.Td ta="right">{r.discrepancy_count}</Table.Td>
+                      <Table.Td>{r.finished_at ? <DateTime value={r.finished_at} /> : '—'}</Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            </Table.ScrollContainer>
+          )
+        }
+      </QueryContent>
+    </Stack>
+  );
+}
+
+function DiscrepanciesTab() {
+  const { keys } = useTenant();
+  const [filters, setFilters] = useUrlFilters(['situacao', 'tipo'] as const);
+  const status = filters.situacao === 'todas' ? undefined : filters.situacao || 'open';
+  const kind = (filters.tipo || undefined) as DiscrepancyKind | undefined;
+  const query = useQuery({
+    queryKey: keys('reconciliation', 'discrepancies', { status, kind }),
+    queryFn: ({ signal }) => reconciliationApi.discrepancies({ status, kind }, signal),
+  });
+  return (
+    <Stack>
+      <Group align="flex-end">
+        <Select
+          label="Situação"
+          data={[...optionsOf(discrepancyStatusLabels), { value: 'todas', label: 'Todas' }]}
+          value={filters.situacao || 'open'}
+          onChange={(v) => setFilters({ situacao: v === 'open' ? null : v })}
+          allowDeselect={false}
+          w={200}
+        />
+        <Select
+          label="Tipo"
+          placeholder="Todos"
+          clearable
+          data={optionsOf(discrepancyKindLabels)}
+          value={kind ?? null}
+          onChange={(v) => setFilters({ tipo: v })}
+          w={300}
+        />
+      </Group>
+      <QueryContent query={query}>
+        {({ data }) =>
+          data.length === 0 ? (
+            <EmptyState title="Nenhuma divergência" description={status === 'open' ? 'Tudo conciliado com o provedor.' : 'Nenhuma divergência com esses filtros.'} icon={<IconScale size={26} />} />
+          ) : (
+            <Table.ScrollContainer minWidth={800}>
+              <Table aria-label="Divergências">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Tipo</Table.Th>
+                    <Table.Th>Situação</Table.Th>
+                    <Table.Th>Cobrança</Table.Th>
+                    <Table.Th>Identificador no provedor</Table.Th>
+                    <Table.Th>Detectada em</Table.Th>
+                    <Table.Th aria-label="Ações" />
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {data.map((d) => (
+                    <Table.Tr key={d.id}>
+                      <Table.Td>{labelOf(discrepancyKindLabels, d.kind)}</Table.Td>
+                      <Table.Td>
+                        <StatusBadge status={d.status} labels={discrepancyStatusLabels} />
+                      </Table.Td>
+                      <Table.Td>
+                        {d.charge_id ? (
+                          <Anchor component={Link} to={`/cobrancas/${d.charge_id}`} size="sm">
+                            {d.charge_id.slice(0, 8)}
+                          </Anchor>
+                        ) : (
+                          '—'
+                        )}
+                      </Table.Td>
+                      <Table.Td>{d.provider_charge_id ? <Code>{d.provider_charge_id}</Code> : '—'}</Table.Td>
+                      <Table.Td>
+                        <DateTime value={d.created_at} />
+                      </Table.Td>
+                      <Table.Td>
+                        <Anchor component={Link} to={`/conciliacao/divergencias/${d.id}`} size="sm" fw={500}>
+                          {d.status === 'open' ? 'Analisar' : 'Ver detalhes'}
+                        </Anchor>
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            </Table.ScrollContainer>
+          )
+        }
+      </QueryContent>
+    </Stack>
+  );
+}
+
+export function ReconciliationPage() {
+  const [filters, setFilters] = useUrlFilters(['aba'] as const);
+  const tab = filters.aba === 'divergencias' ? 'divergencias' : 'execucoes';
+  return (
+    <Stack gap={0}>
+      <PageHeader
+        title="Conciliação"
+        description="Confronto dos registros locais com o provedor de pagamento: cobranças sem correspondência, valores e taxas divergentes, pagamentos não refletidos e operações com resultado desconhecido."
+      />
+      <Tabs value={tab} onChange={(v) => setFilters({ aba: v === 'execucoes' ? null : v })} keepMounted={false}>
+        <Tabs.List mb="md">
+          <Tabs.Tab value="execucoes">Execuções</Tabs.Tab>
+          <Tabs.Tab value="divergencias">Divergências</Tabs.Tab>
+        </Tabs.List>
+        <Tabs.Panel value="execucoes">
+          <RunsTab />
+        </Tabs.Panel>
+        <Tabs.Panel value="divergencias">
+          <DiscrepanciesTab />
+        </Tabs.Panel>
+      </Tabs>
+    </Stack>
+  );
+}
+
+function formatValue(key: string, value: unknown, currency: string): string {
+  if (value === undefined) return '—';
+  if (typeof value === 'number' && Number.isInteger(value) && /amount|fee|total|value|paid|refund/i.test(key)) {
+    return `${formatMoney(value, currency)} (${value})`;
+  }
+  if (value === null) return 'nulo';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+export function ComparisonTable({ discrepancy }: { discrepancy: Discrepancy }) {
+  const local = discrepancy.local_value ?? {};
+  const provider = discrepancy.provider_value ?? {};
+  const currency = String(local.currency ?? provider.currency ?? 'BRL');
+  const fields = Array.from(new Set([...Object.keys(local), ...Object.keys(provider)])).sort();
+  if (fields.length === 0) return <Text size="sm" c="dimmed">Sem valores para comparar.</Text>;
+  return (
+    <Table.ScrollContainer minWidth={600}>
+      <Table aria-label="Comparação local e provedor">
+        <Table.Thead>
+          <Table.Tr>
+            <Table.Th>Campo</Table.Th>
+            <Table.Th>Local (Recorvia)</Table.Th>
+            <Table.Th>Provedor</Table.Th>
+          </Table.Tr>
+        </Table.Thead>
+        <Table.Tbody>
+          {fields.map((f) => {
+            const differs = JSON.stringify(local[f]) !== JSON.stringify(provider[f]);
+            return (
+              <Table.Tr key={f} bg={differs ? 'yellow.0' : undefined}>
+                <Table.Th scope="row">
+                  <Code>{f}</Code>
+                  {differs && <span className="visually-hidden"> (diferente)</span>}
+                </Table.Th>
+                <Table.Td fw={differs ? 600 : undefined}>{formatValue(f, local[f], currency)}</Table.Td>
+                <Table.Td fw={differs ? 600 : undefined}>{formatValue(f, provider[f], currency)}</Table.Td>
+              </Table.Tr>
+            );
+          })}
+        </Table.Tbody>
+      </Table>
+    </Table.ScrollContainer>
+  );
+}
+
+const resolveSchema = z.object({
+  resolution: z
+    .string()
+    .refine((v): v is Resolution => v in RESOLUTION_HELP, 'Escolha como resolver.')
+    .transform((v) => v as Resolution),
+  justification: z
+    .string()
+    .trim()
+    .min(10, 'A justificativa deve ter pelo menos 10 caracteres.')
+    .max(2000, 'A justificativa deve ter no máximo 2000 caracteres.'),
+});
+type ResolveForm = z.input<typeof resolveSchema>;
+type ResolveInput = z.output<typeof resolveSchema>;
+
+export function ResolveDiscrepancyForm({ discrepancy }: { discrepancy: Discrepancy }) {
+  const { user } = useSession();
+  const form = useForm<ResolveForm, unknown, ResolveInput>({
+    resolver: zodResolver(resolveSchema),
+    defaultValues: { resolution: '', justification: '' },
+  });
+  const mutation = useApiMutation<ResolveInput, Discrepancy, ResolveForm>({
+    mutationFn: (input) => reconciliationApi.resolve(discrepancy.id, input),
+    invalidate: ['reconciliation', 'ledger', 'dashboard', 'charges', 'invoices'],
+    successMessage: 'Divergência resolvida.',
+    form,
+  });
+  const justification = useWatch({ control: form.control, name: 'justification' });
+  const submit = form.handleSubmit(async (input) => {
+    const ok = await confirmAction({
+      title: 'Confirmar resolução',
+      message: (
+        <Stack gap="xs">
+          <Text size="sm">
+            Resolver como <strong>{labelOf(resolutionLabels, input.resolution)}</strong>? A decisão fica registrada na
+            auditoria com seu nome e a justificativa, e não pode ser desfeita.
+          </Text>
+          <Text size="sm" c="dimmed">
+            Responsável: {user.display_name} ({user.email})
+          </Text>
+        </Stack>
+      ),
+      confirmLabel: 'Resolver divergência',
+      danger: input.resolution === 'accept_provider' || input.resolution === 'adjust_ledger',
+    });
+    if (ok) mutation.mutate(input);
+  });
+  return (
+    <Paper withBorder p="md" radius="md">
+      <form onSubmit={submit} noValidate aria-label="Resolver divergência">
+        <Stack>
+          <Title order={2} size="h5">
+            Resolver divergência
+          </Title>
+          <Text size="sm">
+            Responsável pela resolução: <strong>{user.display_name}</strong> ({user.email})
+          </Text>
+          <Controller
+            control={form.control}
+            name="resolution"
+            render={({ field, fieldState }) => (
+              <Radio.Group label="Resolução" required value={field.value} onChange={field.onChange} error={fieldState.error?.message}>
+                <Stack gap="xs" mt="xs">
+                  {(Object.keys(RESOLUTION_HELP) as Resolution[]).map((r) => (
+                    <Radio key={r} value={r} label={resolutionLabels[r]} description={RESOLUTION_HELP[r]} />
+                  ))}
+                </Stack>
+              </Radio.Group>
+            )}
+          />
+          <Textarea
+            label="Justificativa"
+            description={`Mínimo de 10 caracteres. ${justification.trim().length}/2000`}
+            required
+            autosize
+            minRows={3}
+            maxLength={2000}
+            {...form.register('justification')}
+            error={form.formState.errors.justification?.message}
+          />
+          <Group justify="flex-end">
+            <Button type="submit" loading={mutation.isPending}>
+              Continuar
+            </Button>
+          </Group>
+        </Stack>
+      </form>
+    </Paper>
+  );
+}
+
+export function DiscrepancyDetailPage() {
+  const { id = '' } = useParams();
+  const { keys } = useTenant();
+  const canResolve = usePermission('reconciliation.resolve');
+  const query = useQuery({ queryKey: keys('reconciliation', 'discrepancy', id), queryFn: ({ signal }) => reconciliationApi.discrepancy(id, signal) });
+  return (
+    <Stack gap="md">
+      <Breadcrumbs>
+        <Anchor component={Link} to="/conciliacao?aba=divergencias">
+          Divergências
+        </Anchor>
+        <Text>{query.data ? labelOf(discrepancyKindLabels, query.data.kind) : 'Divergência'}</Text>
+      </Breadcrumbs>
+      <QueryContent query={query} loading={<LoadingState variant="detail" />}>
+        {(d) => (
+          <>
+            <PageHeader title={labelOf(discrepancyKindLabels, d.kind)} badge={<StatusBadge status={d.status} labels={discrepancyStatusLabels} size="lg" />} />
+            <Paper withBorder p="md" radius="md">
+              <SimpleGrid cols={{ base: 1, xs: 2, md: 4 }}>
+                <KeyValue label="Cobrança">
+                  {d.charge_id ? (
+                    <Anchor component={Link} to={`/cobrancas/${d.charge_id}`}>
+                      {d.charge_id.slice(0, 8)}
+                    </Anchor>
+                  ) : (
+                    '—'
+                  )}
+                </KeyValue>
+                <KeyValue label="Identificador no provedor">{d.provider_charge_id ?? '—'}</KeyValue>
+                <KeyValue label="Detectada em">
+                  <DateTime value={d.created_at} />
+                </KeyValue>
+                <KeyValue label="Execução">
+                  <ShortId id={d.run_id} />
+                </KeyValue>
+              </SimpleGrid>
+            </Paper>
+            <Stack gap="xs">
+              <Title order={2} size="h4">
+                Local × provedor
+              </Title>
+              <ComparisonTable discrepancy={d} />
+            </Stack>
+            {d.status !== 'open' ? (
+              <Alert color={d.status === 'resolved' ? 'green' : 'gray'} title={labelOf(discrepancyStatusLabels, d.status)}>
+                <Stack gap={4}>
+                  <Text size="sm">Resolução: {labelOf(resolutionLabels, d.resolution)}</Text>
+                  <Text size="sm">Justificativa: {d.justification ?? '—'}</Text>
+                  <Text size="sm">
+                    Responsável: <ShortId id={d.resolved_by} /> em <DateTime value={d.resolved_at} />
+                  </Text>
+                </Stack>
+              </Alert>
+            ) : canResolve ? (
+              <ResolveDiscrepancyForm discrepancy={d} />
+            ) : (
+              <Alert icon={<IconInfoCircle />} color="gray">
+                Resolver divergências exige a permissão “Resolver divergências”.
+              </Alert>
+            )}
+            <Stack gap="xs">
+              <Title order={2} size="h4">
+                Histórico
+              </Title>
+              <AuditEventList events={d.history ?? []} showResource={false} />
+            </Stack>
+          </>
+        )}
+      </QueryContent>
+    </Stack>
+  );
+}
