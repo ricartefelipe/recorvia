@@ -1,0 +1,6 @@
+go test fuzz v1
+int(1976)
+int(-129)
+int(36)
+int(120)
+bool(false)

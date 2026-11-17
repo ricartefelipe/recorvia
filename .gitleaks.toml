@@ -1,0 +1,13 @@
+# Configuração de detecção de segredos. Usa as regras padrão e permite apenas
+# valores de teste e de desenvolvimento local explicitamente identificados.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Valores fictícios de teste e do ambiente local"
+paths = [
+  '''(^|/)testdata/''',
+  '''_test\.go$''',
+  '''^\.env\.example$''',
+  '''^deploy/keycloak/realm-recorvia\.json$''',
+]

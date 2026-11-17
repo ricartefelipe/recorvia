@@ -1,0 +1,25 @@
+# Binários e artefatos de build
+/bin/
+/dist/
+*.test
+*.out
+coverage*.txt
+coverage*.html
+
+# Ambiente local
+.env
+*.local
+.idea/
+.vscode/
+
+# Frontend
+web/node_modules/
+web/dist/
+web/playwright-report/
+web/test-results/
+web/blob-report/
+web/.vite/
+
+# Dados locais
+/tmp/
+/backups/
