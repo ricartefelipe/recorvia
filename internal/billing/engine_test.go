@@ -112,7 +112,7 @@ func newCycleFake() *cycleFake {
 		plans:    map[uuid.UUID]catalog.Plan{}, prices: map[uuid.UUID]catalog.PriceVersion{},
 		snapshot: customers.Snapshot{Name: "Padaria Central", DocumentType: "cnpj", DocumentNumber: "11222333000181"},
 		pending:  map[uuid.UUID][]PendingItem{}, existing: map[string]bool{}, errs: map[string]error{}, failTenant: map[uuid.UUID]error{},
-		changes:  map[uuid.UUID]*subscriptions.ScheduledChange{}, adjustments: map[uuid.UUID][]subscriptions.PriceAdjustment{},
+		changes: map[uuid.UUID]*subscriptions.ScheduledChange{}, adjustments: map[uuid.UUID][]subscriptions.PriceAdjustment{},
 		resolved: map[uuid.UUID]subscriptions.ChangeStatus{},
 	}
 }

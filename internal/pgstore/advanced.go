@@ -154,7 +154,9 @@ func (tx billingTx) Subscription(ctx context.Context, id uuid.UUID, forUpdate bo
 	return tx.subscription(ctx, id, forUpdate)
 }
 
-func (tx billingTx) PlatformPlan(ctx context.Context) (platformbilling.Plan, error) { return tx.platformPlan(ctx) }
+func (tx billingTx) PlatformPlan(ctx context.Context) (platformbilling.Plan, error) {
+	return tx.platformPlan(ctx)
+}
 
 func (tx billingTx) InsertScheduledChange(ctx context.Context, c subscriptions.ScheduledChange) error {
 	return tx.q.InsertScheduledChange(ctx, dbgen.InsertScheduledChangeParams{ID: c.ID, TenantID: tx.tenantID, SubscriptionID: c.SubscriptionID,
@@ -204,7 +206,9 @@ func (tx billingTx) ClosedAggregate(ctx context.Context, g billing.LateGroup) (b
 		PriceVersionID: r.PriceVersionID, CorrectedQuantity: corrected, CorrectedAmount: optMoney(r.CorrectedAmount)}, nil
 }
 
-func (tx billingTx) Metric(ctx context.Context, id uuid.UUID) (catalog.Metric, error) { return tx.metric(ctx, id) }
+func (tx billingTx) Metric(ctx context.Context, id uuid.UUID) (catalog.Metric, error) {
+	return tx.metric(ctx, id)
+}
 
 func (tx billingTx) RecomputeUsage(ctx context.Context, subscriptionID uuid.UUID, metric catalog.Metric, periodStart time.Time) (*big.Rat, int, error) {
 	return tx.aggregate(ctx, subscriptionID, metric, periodStart)
@@ -510,7 +514,9 @@ func (tx meteringTx) PriceVersion(ctx context.Context, id uuid.UUID) (catalog.Pr
 	return tx.priceVersion(ctx, id)
 }
 
-func (tx meteringTx) Metric(ctx context.Context, id uuid.UUID) (catalog.Metric, error) { return tx.metric(ctx, id) }
+func (tx meteringTx) Metric(ctx context.Context, id uuid.UUID) (catalog.Metric, error) {
+	return tx.metric(ctx, id)
+}
 
 func (tx meteringTx) MetricByCode(ctx context.Context, code string) (catalog.Metric, error) {
 	r, err := tx.q.GetMetricByCode(ctx, dbgen.GetMetricByCodeParams{TenantID: tx.tenantID, Code: code})
