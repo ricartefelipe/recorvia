@@ -18,6 +18,7 @@ stateDiagram-v2
   active --> suspended: manual ou política de inadimplência
   past_due --> suspended
   suspended --> active: reativação
+  suspended --> trialing: reativação antes do fim do trial
   active --> canceled: imediato ou fim do período
   past_due --> canceled
   suspended --> canceled
@@ -26,6 +27,7 @@ stateDiagram-v2
 
 Cancelamento ao fim do período é uma marcação (`cancel_at_period_end`) desfeita com
 `resume-renewal`; a transição para `canceled` ocorre no motor, no início do período seguinte.
+Reativação antes do fim do trial volta a `trialing` e mantém a data original de fim do trial.
 
 ## Fatura (`internal/billing`)
 
@@ -40,14 +42,16 @@ stateDiagram-v2
   open --> void: cancelamento sem pagamentos
   open --> uncollectible: baixa
   partially_paid --> uncollectible
-  uncollectible --> partially_paid: pagamento tardio
-  uncollectible --> paid
+  uncollectible --> paid: recuperação integral do valor baixado
   paid --> [*]
   void --> [*]
 ```
 
 Fatura emitida não muda número, itens, valores faturados nem snapshot do cliente (gatilho
 `app_invoice_guard`). Correções usam nota de crédito, cancelamento com estorno no ledger ou baixa.
+Pagamento de fatura incobrável reverte a baixa na mesma medida (lançamento
+`invoice.bad_debt_recovered`); enquanto houver valor baixado, a fatura continua `uncollectible`, com
+o recebimento registrado no histórico.
 
 ## Cobrança (`internal/payments`)
 

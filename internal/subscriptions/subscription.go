@@ -37,7 +37,7 @@ var transitions = map[Status][]Status{
 	Trialing:  {Active, Suspended, Canceled},
 	Active:    {PastDue, Suspended, Canceled},
 	PastDue:   {Active, Suspended, Canceled},
-	Suspended: {Active, Canceled},
+	Suspended: {Active, Trialing, Canceled},
 	Canceled:  {},
 }
 
@@ -389,7 +389,11 @@ func (s *Subscription) Reactivate(at time.Time) error {
 	}
 	s.NextBillingAt = &next
 	s.SuspendedAt, s.SuspensionReason = nil, ""
-	return s.transition(Active, "reactivated", at, map[string]any{"skipped_periods": skipped})
+	to := Active
+	if s.TrialEndsAt != nil && at.Before(*s.TrialEndsAt) {
+		to = Trialing // a avaliação continua até a data original
+	}
+	return s.transition(to, "reactivated", at, map[string]any{"skipped_periods": skipped})
 }
 
 // MarkPastDue indica fatura vencida em aberto.
