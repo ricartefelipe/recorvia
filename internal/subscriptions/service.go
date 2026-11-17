@@ -58,6 +58,9 @@ type Tx interface {
 	List(ctx context.Context, f ListFilter) (Page, error)
 	InsertHistory(ctx context.Context, subscriptionID uuid.UUID, actor audit.Actor, ev []HistoryEvent) error
 	History(ctx context.Context, subscriptionID uuid.UUID) ([]HistoryEntry, error)
+	// CancelPendingTerms cancela mudanças agendadas e reajustes programados
+	// (assinatura encerrada ou com encerramento agendado).
+	CancelPendingTerms(ctx context.Context, subscriptionID uuid.UUID, at time.Time) error
 
 	Audit(ctx context.Context, e audit.Entry) error
 	Emit(ctx context.Context, e outbox.Event) error
@@ -252,7 +255,12 @@ func (s *Service) Cancel(ctx context.Context, tenantID uuid.UUID, actor audit.Ac
 		if err != nil {
 			return err
 		}
-		return sub.Cancel(mode, reason, price.HasUsage(), now)
+		if err := sub.Cancel(mode, reason, price.HasUsage(), now); err != nil {
+			return err
+		}
+		// Mudanças e reajustes futuros deixam de valer: no cancelamento ao fim
+		// do período não há próximo ciclo em que aplicá-los.
+		return tx.CancelPendingTerms(ctx, sub.ID, now)
 	})
 }
 

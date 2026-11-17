@@ -19,6 +19,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/catalog"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/calendar"
+	"github.com/ricartefelipe/recorvia/internal/kernel/money"
 )
 
 // Status é a situação da assinatura.
@@ -80,9 +81,13 @@ type Subscription struct {
 	SuspendedAt       *time.Time
 	SuspensionReason  string
 	PaymentTermsDays  *int
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	Version           int
+	// PriceOverride substitui o componente fixo da versão de preço (valor
+	// fixo ou preço por unidade) após um reajuste programado.
+	PriceOverride             *money.Money
+	PriceOverrideAdjustmentID *uuid.UUID
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
+	Version                   int
 
 	pending []HistoryEvent
 }
@@ -111,6 +116,11 @@ func (s *Subscription) record(event string, from *Status, at time.Time, details 
 		details = map[string]any{}
 	}
 	s.pending = append(s.pending, HistoryEvent{Event: event, From: from, To: s.Status, At: at, Details: details})
+}
+
+// RecordEvent registra no histórico um evento sem mudança de situação.
+func (s *Subscription) RecordEvent(event string, at time.Time, details map[string]any) {
+	s.record(event, nil, at, details)
 }
 
 func (s *Subscription) transition(to Status, event string, at time.Time, details map[string]any) error {

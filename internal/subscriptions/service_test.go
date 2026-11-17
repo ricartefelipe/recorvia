@@ -46,6 +46,16 @@ type fakeStore struct {
 	tenants    []uuid.UUID
 	listFilter ListFilter
 	forUpdate  []bool
+
+	termsCanceled []uuid.UUID
+}
+
+func (s *fakeStore) CancelPendingTerms(_ context.Context, id uuid.UUID, _ time.Time) error {
+	if err := s.errs["CancelPendingTerms"]; err != nil {
+		return err
+	}
+	s.termsCanceled = append(s.termsCanceled, id)
+	return nil
 }
 
 func newFakeStore() *fakeStore {
