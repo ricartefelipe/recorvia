@@ -10,7 +10,7 @@ resultado real) e as pendências.
 | 1 | Fundação: núcleo de dinheiro/calendário, infraestrutura, bootstrap do banco, CI | `feature/fundacao-do-projeto` | integrada em `develop` (PR #1) |
 | 2 | Fatia vertical: autenticação, tenant, cliente, plano, assinatura, fatura, cobrança simulada, webhook, ledger, outbox, worker | `feature/fatia-vertical-cobranca` | integrada em `develop` (PR #2) |
 | 3 | Interface web (React) e E2E | `feature/interface-web` | integrada em `develop` (PR #3) |
-| 4 | Consumo medido, cupons, prorrata, troca de plano/quantidade, reajustes, notas de crédito | `feature/faturamento-avancado` | em desenvolvimento (implementado, testado e revisado; segunda rodada de correções residuais em andamento) |
+| 4 | Consumo medido, cupons, prorrata, troca de plano/quantidade, reajustes, notas de crédito | `feature/faturamento-avancado` | em revisão |
 | 5 | Reembolsos, disputas, conciliação, validação no sandbox do Asaas | `feature/recebiveis-conciliacao` | pendente |
 | 6 | Inadimplência, notificações por e-mail, webhooks enviados com proteção SSRF | `feature/cobranca-e-notificacoes` | pendente |
 | 7 | Portal do cliente, credenciais de API com escopos | `feature/portal-e-credenciais` | pendente |
@@ -87,6 +87,9 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
 | 2026-11-17 | Revisão independente da etapa 4 (3 revisores e 1 verificador por achado) | 26 achados, 22 confirmados e 4 refutados; os 22 (17 problemas distintos, somado o bug da prorrata encontrado pelos testes) corrigidos, cada um com o teste que o demonstrava passando |
 | 2026-11-17 | `make lint test coverage` + `make test-integration` (etapa 4) | sem achados; todos aprovados; 97,1% de cobertura em domínio e aplicação (`metering` 99,2%, `billing` 94,6%, `subscriptions` 98,4%) |
 | 2026-11-17 | `cd web && npm run verify` (etapa 4) | 17 arquivos e 97 testes de componente aprovados; tipos gerados do contrato atualizados |
+| 2026-11-17 | Segunda rodada de revisão independente (3 frentes, 1 revisor por frente) | 8 pontos residuais corrigidos (base do crédito da prorrata pelo valor faturado, desconto de valor fixo na correção de consumo, limite numérico, consumo anterior à suspensão, mudança agendada em vigor, pagamento após recusa, ordem de bloqueio, resposta da nova tentativa) e 4 casos de borda adicionais; revisores sem achados de severidade alta ou média |
+| 2026-11-17 | `make lint test coverage fuzz test-integration` (final da etapa 4) | sem achados; todos aprovados; 97,1% de cobertura |
+| 2026-11-17 | `make reset && make up` + `make web-e2e` (etapa 4) | 9 migrations aplicadas em banco novo; 4 roteiros E2E aprovados |
 | 2026-11-17 | Stack local (`docker compose up`) + roteiro automatizado via API | login real no Keycloak com PKCE, cliente, plano, assinatura, fatura `ACME-2026-000001`, cobrança no simulador, pagamento pelo checkout, webhook HMAC, fatura paga, ledger (receita 99.000; liquidação 95.991; taxa 3.009), reenvio sem duplicidade, auditoria, dashboard e isolamento entre tenants |
 
 ## Pendências reais

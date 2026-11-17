@@ -37,6 +37,13 @@ Todas as mudanças relevantes são registradas aqui. Formato baseado em
   tipos gerados do contrato OpenAPI, testes de componente e roteiros E2E com
   Playwright; servida por nginx sem root na mesma origem da API.
 
+- Cupons de desconto, aplicação e remoção na assinatura.
+- Mudança de plano e quantidade imediata (prorrata com fatura ou crédito do
+  cliente) ou no próximo ciclo; reajustes programados com histórico.
+- Ingestão de consumo medido com deduplicação, política de atraso por métrica e
+  correção posterior sem alterar a fatura emitida.
+- Notas de crédito limitadas ao saldo em aberto, com ajuste da cobrança.
+
 ### Corrigido
 - Ciclo mensal da plataforma sobrepunha períodos e perdia a âncora dos dias 29
   a 31; a avaliação parcial cobrava o mês inteiro.
@@ -46,3 +53,7 @@ Todas as mudanças relevantes são registradas aqui. Formato baseado em
   com valor ainda baixado; taxa do provedor ignorada em pagamento de fatura já
   quitada; repetição de pagamento manual após quitação era recusada.
 - Falha de uma assinatura interrompia o faturamento de todo o tenant.
+- Confirmação do provedor para cobrança recusada ou cancelada localmente era
+  ignorada; o valor recebido passa a ser aplicado.
+- Chave de negócio derivada do `Idempotency-Key` passa a ter tamanho fixo
+  (chaves longas provocavam erro interno).
