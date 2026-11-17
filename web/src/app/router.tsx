@@ -47,6 +47,7 @@ export const appRoutes: RouteObject[] = [
     lazy: async () => ({ Component: (await import('../features/reconciliation/ReconciliationPages')).DiscrepancyDetailPage }),
   },
   { path: 'cobranca', lazy: async () => ({ Component: (await import('../features/collections/CollectionsPage')).CollectionsPage }) },
+  { path: 'usuarios', lazy: async () => ({ Component: (await import('../features/members/MembersPage')).MembersPage }) },
   { path: '*', Component: NotFoundPage },
 ];
 

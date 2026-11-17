@@ -11,6 +11,7 @@ import {
   IconReceiptRefund,
   IconRepeat,
   IconScale,
+  IconShieldLock,
   IconTransfer,
   IconUsers,
   type Icon,
@@ -58,6 +59,7 @@ export const NAVIGATION: NavEntry[] = [
   { label: 'Ledger', to: '/ledger', icon: IconBook2, anyOf: ['ledger.read'] },
   { label: 'Conciliação', to: '/conciliacao', icon: IconScale, anyOf: ['reconciliation.read'] },
   { label: 'Políticas de cobrança', to: '/cobranca', icon: IconBellRinging, anyOf: ['collections.read'] },
+  { label: 'Usuários e permissões', to: '/usuarios', icon: IconShieldLock, anyOf: ['members.read'] },
 ];
 
 export function visibleNavigation(can: (p: Permission) => boolean): NavEntry[] {
