@@ -87,6 +87,19 @@ type Coupon struct {
 	Version          int32
 }
 
+type CreditNote struct {
+	ID         uuid.UUID
+	TenantID   uuid.UUID
+	InvoiceID  uuid.UUID
+	Number     string
+	Amount     int64
+	Currency   string
+	Reason     string
+	CreatedBy  *uuid.UUID
+	RequestKey *string
+	CreatedAt  time.Time
+}
+
 type Customer struct {
 	ID               uuid.UUID
 	TenantID         uuid.UUID
@@ -356,22 +369,23 @@ type PaymentProviderAccount struct {
 }
 
 type PendingInvoiceItem struct {
-	ID             uuid.UUID
-	TenantID       uuid.UUID
-	CustomerID     uuid.UUID
-	SubscriptionID uuid.UUID
-	Kind           string
-	Source         string
-	Description    string
-	Amount         int64
-	Quantity       pgtype.Numeric
-	UnitAmount     pgtype.Numeric
-	PeriodStart    *time.Time
-	PeriodEnd      *time.Time
-	Details        []byte
-	InvoiceID      *uuid.UUID
-	CreatedBy      *uuid.UUID
-	CreatedAt      time.Time
+	ID               uuid.UUID
+	TenantID         uuid.UUID
+	CustomerID       uuid.UUID
+	SubscriptionID   uuid.UUID
+	Kind             string
+	Source           string
+	Description      string
+	Amount           int64
+	Quantity         pgtype.Numeric
+	UnitAmount       pgtype.Numeric
+	PeriodStart      *time.Time
+	PeriodEnd        *time.Time
+	Details          []byte
+	InvoiceID        *uuid.UUID
+	CreatedBy        *uuid.UUID
+	CreatedAt        time.Time
+	UsageAggregateID *uuid.UUID
 }
 
 type Plan struct {
@@ -498,32 +512,35 @@ type ScheduledJob struct {
 }
 
 type Subscription struct {
-	ID                 uuid.UUID
-	TenantID           uuid.UUID
-	CustomerID         uuid.UUID
-	PlanID             uuid.UUID
-	PriceVersionID     uuid.UUID
-	Status             string
-	Quantity           int32
-	BillingInterval    string
-	Timezone           string
-	AnchorDate         pgtype.Date
-	TrialEndsAt        *time.Time
-	StartedAt          time.Time
-	CurrentPeriodStart time.Time
-	CurrentPeriodEnd   time.Time
-	NextBillingIndex   int32
-	NextBillingAt      *time.Time
-	CancelAtPeriodEnd  bool
-	CanceledAt         *time.Time
-	CancelReason       *string
-	EndedAt            *time.Time
-	SuspendedAt        *time.Time
-	SuspensionReason   *string
-	PaymentTermsDays   *int32
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	Version            int32
+	ID                        uuid.UUID
+	TenantID                  uuid.UUID
+	CustomerID                uuid.UUID
+	PlanID                    uuid.UUID
+	PriceVersionID            uuid.UUID
+	Status                    string
+	Quantity                  int32
+	BillingInterval           string
+	Timezone                  string
+	AnchorDate                pgtype.Date
+	TrialEndsAt               *time.Time
+	StartedAt                 time.Time
+	CurrentPeriodStart        time.Time
+	CurrentPeriodEnd          time.Time
+	NextBillingIndex          int32
+	NextBillingAt             *time.Time
+	CancelAtPeriodEnd         bool
+	CanceledAt                *time.Time
+	CancelReason              *string
+	EndedAt                   *time.Time
+	SuspendedAt               *time.Time
+	SuspensionReason          *string
+	PaymentTermsDays          *int32
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
+	Version                   int32
+	PriceOverrideAmount       pgtype.Numeric
+	PriceOverrideAdjustmentID *uuid.UUID
+	PendingUsageStarts        []time.Time
 }
 
 type SubscriptionHistory struct {
@@ -537,6 +554,42 @@ type SubscriptionHistory struct {
 	ActorType      string
 	ActorID        *string
 	Details        []byte
+}
+
+type SubscriptionPriceAdjustment struct {
+	ID                 uuid.UUID
+	TenantID           uuid.UUID
+	SubscriptionID     uuid.UUID
+	EffectiveDate      pgtype.Date
+	Kind               string
+	PercentBp          *int32
+	NewAmount          *int64
+	IndexName          string
+	Reason             string
+	Status             string
+	PreviousAmount     pgtype.Numeric
+	ResultingAmount    pgtype.Numeric
+	AppliedPeriodStart *time.Time
+	AppliedAt          *time.Time
+	CanceledAt         *time.Time
+	CancelReason       *string
+	CreatedBy          *uuid.UUID
+	CreatedAt          time.Time
+}
+
+type SubscriptionScheduledChange struct {
+	ID                uuid.UUID
+	TenantID          uuid.UUID
+	SubscriptionID    uuid.UUID
+	Kind              string
+	NewPlanID         *uuid.UUID
+	NewPriceVersionID *uuid.UUID
+	NewQuantity       *int32
+	EffectiveAt       time.Time
+	Status            string
+	CreatedBy         *uuid.UUID
+	CreatedAt         time.Time
+	ResolvedAt        *time.Time
 }
 
 type Tenant struct {
@@ -569,17 +622,39 @@ type TenantPlatformSubscription struct {
 }
 
 type UsageAggregate struct {
-	ID             uuid.UUID
-	TenantID       uuid.UUID
-	SubscriptionID uuid.UUID
-	MetricID       uuid.UUID
-	PeriodStart    time.Time
-	PeriodEnd      time.Time
-	Aggregation    string
-	Quantity       pgtype.Numeric
-	EventCount     int32
-	InvoiceItemID  *uuid.UUID
-	ClosedAt       time.Time
+	ID                uuid.UUID
+	TenantID          uuid.UUID
+	SubscriptionID    uuid.UUID
+	MetricID          uuid.UUID
+	PeriodStart       time.Time
+	PeriodEnd         time.Time
+	Aggregation       string
+	Quantity          pgtype.Numeric
+	EventCount        int32
+	InvoiceItemID     *uuid.UUID
+	ClosedAt          time.Time
+	PriceVersionID    *uuid.UUID
+	CorrectedQuantity pgtype.Numeric
+	CorrectedAmount   *int64
+}
+
+type UsageEvent struct {
+	ID               uuid.UUID
+	TenantID         uuid.UUID
+	ExternalID       string
+	CustomerID       uuid.UUID
+	SubscriptionID   uuid.UUID
+	MetricID         uuid.UUID
+	Quantity         pgtype.Numeric
+	UniqueKey        *string
+	OccurredAt       time.Time
+	ReceivedAt       time.Time
+	PeriodStart      time.Time
+	Status           string
+	AggregateID      *uuid.UUID
+	CorrectionItemID *uuid.UUID
+	Properties       []byte
+	CorrectedAt      *time.Time
 }
 
 type User struct {

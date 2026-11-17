@@ -61,6 +61,8 @@ func TestChargeCanTransitionMatrix(t *testing.T) {
 		ChargePaid:              {ChargePartiallyRefunded, ChargeRefunded, ChargeDisputed},
 		ChargePartiallyRefunded: {ChargePartiallyRefunded, ChargeRefunded, ChargeDisputed},
 		ChargeDisputed:          {ChargePaid, ChargePartiallyRefunded, ChargeChargedBack},
+		ChargeFailed:            {ChargePaid},
+		ChargeCanceled:          {ChargePaid},
 	}
 	for _, from := range allChargeStatuses {
 		for _, to := range allChargeStatuses {
@@ -152,12 +154,60 @@ func TestMarkPaidRules(t *testing.T) {
 	wantAppErr(t, c.MarkPaid(brl(0), brl(0), chargeNow, chargeNow), apperr.KindInvalid, "invalid_amount")
 	wantAppErr(t, c.MarkPaid(money.New(100, money.Currency{}), brl(0), chargeNow, chargeNow), apperr.KindInvalid, "invalid_amount")
 	for _, st := range []ChargeStatus{ChargeFailed, ChargeCanceled} {
-		c := newTestCharge(t, 10000)
-		c.Status = st
-		wantAppErr(t, c.MarkPaid(brl(10000), brl(0), chargeNow, chargeNow), apperr.KindConflict, "invalid_charge_transition")
-		if c.PaidAt != nil || !c.AmountPaid.IsZero() {
-			t.Fatal("transição rejeitada não registra pagamento")
+		closed := newTestCharge(t, 10000)
+		closed.Status = st
+		wantAppErr(t, closed.MarkPaid(brl(0), brl(0), chargeNow, chargeNow), apperr.KindInvalid, "invalid_amount")
+		if closed.Status != st || closed.PaidAt != nil {
+			t.Fatalf("valor inválido não altera a cobrança em %s", st)
 		}
+	}
+	unknown := newTestCharge(t, 10000)
+	unknown.Status = ChargeStatus("desconhecida")
+	wantAppErr(t, unknown.MarkPaid(brl(10000), brl(0), chargeNow, chargeNow), apperr.KindConflict, "invalid_charge_transition")
+	if unknown.PaidAt != nil || !unknown.AmountPaid.IsZero() {
+		t.Fatal("transição rejeitada não registra pagamento")
+	}
+}
+
+// Recusa e cancelamento locais não encerram a cobrança no provedor: a
+// confirmação de pagamento é a única saída desses estados e leva a cobrança
+// a paga, para que o valor recebido nunca seja descartado.
+func TestMarkPaidConfirmsFailedOrCanceledCharge(t *testing.T) {
+	cases := []struct {
+		name  string
+		close func(*Charge) error
+		want  ChargeStatus
+	}{
+		{"recusada pelo provedor", func(c *Charge) error { return c.MarkFailed("cartão recusado", chargeNow) }, ChargeFailed},
+		{"cancelada localmente", func(c *Charge) error { return c.MarkCanceled(chargeNow) }, ChargeCanceled},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestCharge(t, 10000)
+			if err := c.MarkCreated("pay_1", "https://checkout.exemplo/pay_1", chargeNow); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.close(&c); err != nil || c.Status != tc.want {
+				t.Fatalf("encerramento local: %v %s", err, c.Status)
+			}
+			paidAt, at := chargeNow.Add(time.Hour), chargeNow.Add(2*time.Hour)
+			if err := c.MarkPaid(brl(10000), brl(199), paidAt, at); err != nil {
+				t.Fatalf("confirmação do provedor para cobrança em %s: %v", tc.want, err)
+			}
+			if c.Status != ChargePaid || c.AmountPaid.Amount() != 10000 || c.Fee.Amount() != 199 || !c.PaidAt.Equal(paidAt) || !c.UpdatedAt.Equal(at) {
+				t.Fatalf("cobrança paga após %s: %+v", tc.want, c)
+			}
+			if c.FailureReason != "" {
+				t.Fatalf("motivo da recusa não descreve a cobrança paga: %q", c.FailureReason)
+			}
+			for _, to := range []ChargeStatus{ChargePending, ChargeAwaitingPayment, ChargeFailed, ChargeCanceled, ChargeRefunded} {
+				if CanTransition(tc.want, to) {
+					t.Fatalf("%s só sai para paga, não para %s", tc.want, to)
+				}
+			}
+			wantAppErr(t, c.MarkCanceled(at), apperr.KindConflict, "invalid_charge_transition")
+			wantAppErr(t, c.MarkFailed("x", at), apperr.KindConflict, "invalid_charge_transition")
+		})
 	}
 }
 

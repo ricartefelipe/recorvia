@@ -36,14 +36,18 @@ const (
 	ChargeChargedBack       ChargeStatus = "charged_back"
 )
 
+// chargeTransitions lista as transições permitidas. Recusa (failed) e
+// cancelamento (canceled) não encerram a cobrança no provedor: a única saída
+// desses estados é a confirmação de pagamento pelo provedor (MarkPaid), para
+// que o dinheiro recebido nunca seja descartado.
 var chargeTransitions = map[ChargeStatus][]ChargeStatus{
 	ChargePending:           {ChargeAwaitingPayment, ChargePaid, ChargeFailed, ChargeCanceled},
 	ChargeAwaitingPayment:   {ChargePaid, ChargeFailed, ChargeCanceled},
 	ChargePaid:              {ChargePartiallyRefunded, ChargeRefunded, ChargeDisputed},
 	ChargePartiallyRefunded: {ChargePartiallyRefunded, ChargeRefunded, ChargeDisputed},
 	ChargeDisputed:          {ChargePaid, ChargePartiallyRefunded, ChargeChargedBack},
-	ChargeFailed:            {},
-	ChargeCanceled:          {},
+	ChargeFailed:            {ChargePaid},
+	ChargeCanceled:          {ChargePaid},
 	ChargeRefunded:          {},
 	ChargeChargedBack:       {},
 }
@@ -122,10 +126,19 @@ func (c *Charge) MarkCreated(providerChargeID, checkoutURL string, at time.Time)
 	return nil
 }
 
-// MarkPaid registra o pagamento confirmado. O valor pago e a taxa vêm do
-// provedor e podem diferir do valor cobrado (juros, multa ou desconto do
-// provedor); a diferença é tratada na aplicação à fatura (excedente vira
-// crédito) e apontada na conciliação.
+// MarkPaid registra o pagamento confirmado pelo provedor. O valor pago e a
+// taxa vêm do provedor e podem diferir do valor cobrado (juros, multa ou
+// desconto do provedor); a diferença é tratada na aplicação à fatura
+// (excedente vira crédito) e apontada na conciliação.
+//
+// A confirmação prevalece sobre recusa e cancelamento locais. O cancelamento
+// no Recorvia (fatura cancelada, nota de crédito ou substituição por mudança
+// de saldo) é apenas local, e a cobrança continua válida no provedor; uma
+// recusa (por exemplo, do cartão) não impede o pagamento posterior por outro
+// meio no mesmo checkout. Nos dois casos a cobrança passa a paga, para que o
+// valor recebido seja aplicado à fatura ou vire crédito do cliente. O motivo
+// da recusa deixa de descrever a situação da cobrança e é removido; quem
+// confirma o pagamento o preserva na auditoria.
 func (c *Charge) MarkPaid(paid, fee money.Money, paidAt, at time.Time) error {
 	if IsSettledStatus(c.Status) {
 		return nil // confirmação repetida: idempotente
@@ -136,7 +149,7 @@ func (c *Charge) MarkPaid(paid, fee money.Money, paidAt, at time.Time) error {
 	if err := c.transition(ChargePaid, at); err != nil {
 		return err
 	}
-	c.AmountPaid, c.Fee, c.PaidAt = paid, fee, &paidAt
+	c.AmountPaid, c.Fee, c.PaidAt, c.FailureReason = paid, fee, &paidAt, ""
 	return nil
 }
 

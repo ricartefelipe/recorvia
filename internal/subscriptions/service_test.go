@@ -46,12 +46,33 @@ type fakeStore struct {
 	tenants    []uuid.UUID
 	listFilter ListFilter
 	forUpdate  []bool
+
+	termsCanceled []uuid.UUID
+	// pendingItems indica assinaturas com itens pendentes ainda não faturados.
+	pendingItems  map[uuid.UUID]bool
+	pendingChecks int
+}
+
+func (s *fakeStore) CancelPendingTerms(_ context.Context, id uuid.UUID, _ time.Time) error {
+	if err := s.errs["CancelPendingTerms"]; err != nil {
+		return err
+	}
+	s.termsCanceled = append(s.termsCanceled, id)
+	return nil
+}
+
+func (s *fakeStore) HasOpenPendingItems(_ context.Context, id uuid.UUID) (bool, error) {
+	s.pendingChecks++
+	if err := s.errs["HasOpenPendingItems"]; err != nil {
+		return false, err
+	}
+	return s.pendingItems[id], nil
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{loc: saoPaulo, customers: map[uuid.UUID]customers.Customer{}, plans: map[uuid.UUID]catalog.Plan{},
 		prices: map[uuid.UUID]catalog.PriceVersion{}, subs: map[uuid.UUID]Subscription{}, history: map[uuid.UUID][]HistoryEntry{},
-		errs: map[string]error{}}
+		errs: map[string]error{}, pendingItems: map[uuid.UUID]bool{}}
 }
 
 func (s *fakeStore) InTenant(_ context.Context, tenantID uuid.UUID, fn func(Tx) error) error {

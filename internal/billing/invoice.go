@@ -69,6 +69,11 @@ const (
 
 // Item é um item discriminado da fatura. Quantity e UnitAmount são exatos;
 // Amount é o valor arredondado uma única vez.
+//
+// DiscountExempt exclui o item da base e da distribuição de descontos do
+// rascunho (por exemplo, ajuste de correção de consumo cujo valor já
+// considera o desconto do período corrigido). Não é persistido: o desconto
+// só é aplicado antes da emissão.
 type Item struct {
 	ID               uuid.UUID
 	Position         int
@@ -83,6 +88,7 @@ type Item struct {
 	PriceVersionID   *uuid.UUID
 	PriceSnapshot    map[string]any
 	UsageAggregateID *uuid.UUID
+	DiscountExempt   bool
 }
 
 // StatusChange é uma transição registrada no histórico.
@@ -177,8 +183,30 @@ func (inv *Invoice) AddItem(it Item) error {
 	return nil
 }
 
-// ApplyDiscount distribui um desconto entre os itens positivos pelo maior
-// resto (determinístico), limitado ao subtotal positivo.
+// DiscountableBase é a base de um desconto da fatura: subtotal líquido de
+// descontos já aplicados, sem os itens isentos de desconto.
+func (inv *Invoice) DiscountableBase() (money.Money, error) {
+	base, err := inv.Subtotal.Sub(inv.DiscountTotal)
+	if err != nil {
+		return money.Money{}, err
+	}
+	for _, it := range inv.Items {
+		if !it.DiscountExempt {
+			continue
+		}
+		net, err := it.Amount.Sub(it.DiscountAmount)
+		if err != nil {
+			return money.Money{}, err
+		}
+		if base, err = base.Sub(net); err != nil {
+			return money.Money{}, err
+		}
+	}
+	return base, nil
+}
+
+// ApplyDiscount distribui um desconto entre os itens positivos não isentos
+// pelo maior resto (determinístico), limitado ao subtotal positivo.
 func (inv *Invoice) ApplyDiscount(d money.Money) (money.Money, error) {
 	if inv.Status != Draft {
 		return money.Money{}, apperr.Conflict("invoice_not_draft", "Descontos só podem ser aplicados a rascunhos.")
@@ -187,18 +215,22 @@ func (inv *Invoice) ApplyDiscount(d money.Money) (money.Money, error) {
 		return money.Zero(inv.Currency), nil
 	}
 	weights := make([]int64, len(inv.Items))
-	var positive int64
+	var positive, exempt int64
 	for i, it := range inv.Items {
 		remaining := it.Amount.Amount() - it.DiscountAmount.Amount()
+		if it.DiscountExempt {
+			exempt += remaining
+			continue
+		}
 		if remaining > 0 {
 			weights[i] = remaining
 			positive += remaining
 		}
 	}
-	// O desconto é limitado ao subtotal líquido (itens negativos, como
-	// créditos de prorrata, reduzem a base) e distribuído entre os itens
-	// positivos.
-	limit := min(positive, inv.Total.Amount())
+	// O desconto é limitado ao subtotal líquido sem os itens isentos (itens
+	// negativos, como créditos de prorrata, reduzem a base) e distribuído
+	// entre os itens positivos não isentos.
+	limit := min(positive, inv.Total.Amount()-exempt)
 	if limit <= 0 {
 		return money.Zero(inv.Currency), nil
 	}

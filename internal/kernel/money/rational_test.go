@@ -94,6 +94,32 @@ func TestFormatRatAndTrim(t *testing.T) {
 	}
 }
 
+func TestRoundToScale(t *testing.T) {
+	cases := []struct {
+		name  string
+		in    *big.Rat
+		scale int
+		mode  RoundingMode
+		want  *big.Rat
+	}{
+		{"valor exato na escala não muda", big.NewRat(49905, 10), 10, HalfEven, big.NewRat(49905, 10)},
+		{"dízima arredonda na última casa", big.NewRat(1, 3), 4, HalfEven, big.NewRat(3333, 10000)},
+		{"metade exata vai para o par abaixo", big.NewRat(125, 1000), 2, HalfEven, big.NewRat(12, 100)},
+		{"metade exata vai para o par acima", big.NewRat(135, 1000), 2, HalfEven, big.NewRat(14, 100)},
+		{"metade exata com half-up", big.NewRat(125, 1000), 2, HalfUp, big.NewRat(13, 100)},
+		{"escala zero arredonda a inteiro", big.NewRat(55, 10), 0, HalfEven, big.NewRat(6, 1)},
+		{"negativo", big.NewRat(-1, 3), 2, HalfEven, big.NewRat(-33, 100)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := RoundToScale(c.in, c.scale, c.mode)
+			if got.Cmp(c.want) != 0 {
+				t.Fatalf("RoundToScale(%s, %d) = %s, esperado %s", c.in.RatString(), c.scale, got.RatString(), c.want.RatString())
+			}
+		})
+	}
+}
+
 func TestFromRatOverflow(t *testing.T) {
 	huge := new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), 70))
 	if _, err := FromRat(huge, BRL, HalfEven); !errors.Is(err, ErrOverflow) {

@@ -122,7 +122,12 @@ func (a *API) getSubscription(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeVersioned(w, r, http.StatusOK, s.Version, a.subscriptionView(r, s))
+	d := a.subscriptionView(r, s)
+	if err := a.subscriptionTerms(r, &d); err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	a.writeVersioned(w, r, http.StatusOK, s.Version, d)
 }
 
 func (a *API) subscriptionHistory(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +166,12 @@ func (a *API) subscriptionAction(w http.ResponseWriter, r *http.Request, fn func
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeVersioned(w, r, http.StatusOK, s.Version, a.subscriptionView(r, s))
+	d := a.subscriptionView(r, s)
+	if err := a.subscriptionTerms(r, &d); err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	a.writeVersioned(w, r, http.StatusOK, s.Version, d)
 }
 
 func (a *API) cancelSubscription(w http.ResponseWriter, r *http.Request) {

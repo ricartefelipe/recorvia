@@ -1913,7 +1913,7 @@ components:
         amount_off: { type: integer, format: int64, minimum: 1 }
         duration: { type: string, enum: [once, repeating, forever] }
         duration_cycles: { type: integer, minimum: 1, maximum: 120 }
-        max_redemptions: { type: integer, minimum: 1 }
+        max_redemptions: { type: integer, minimum: 1, maximum: 1000000000 }
         valid_from: { type: string, format: date-time }
         valid_until: { type: string, format: date-time }
         applies_to_plan_ids: { type: array, items: { type: string, format: uuid } }
@@ -2035,8 +2035,36 @@ components:
             id: { type: string, format: uuid }
             status: { type: string, enum: [scheduled, applied, canceled] }
             applied_at: { type: string, format: date-time, nullable: true }
-            previous_amount: { type: integer, format: int64, nullable: true }
-            resulting_amount: { type: integer, format: int64, nullable: true }
+            previous_amount:
+              type: integer
+              format: int64
+              nullable: true
+              description: Componente fixo antes do reajuste, em centavos, arredondado (half-even) para exibição
+            resulting_amount:
+              type: integer
+              format: int64
+              nullable: true
+              description: Componente fixo após o reajuste, em centavos, arredondado (half-even) para exibição
+            previous_amount_decimal:
+              type: string
+              nullable: true
+              pattern: '^[0-9]+(\.[0-9]{1,10})?$'
+              description: Valor exato antes do reajuste, em centavos (no preço por unidade pode ter até 10 casas decimais)
+            resulting_amount_decimal:
+              type: string
+              nullable: true
+              pattern: '^[0-9]+(\.[0-9]{1,10})?$'
+              description: >-
+                Valor exato após o reajuste, em centavos. No preço por unidade, o percentual incide sobre o preço
+                unitário exato, arredondado a 10 casas; o total do item é arredondado a centavos uma única vez.
+            canceled_at: { type: string, format: date-time, nullable: true }
+            cancel_reason:
+              type: string
+              nullable: true
+              enum: [manual, subscription_ended, price_version_changed, price_without_fixed_component, adjustment_amount_limit, null]
+              description: >-
+                Motivo do cancelamento: manual; assinatura encerrada; troca da versão de preço; preço somente por consumo
+                no início do ciclo; valor resultante acima do limite
             created_at: { type: string, format: date-time }
     SubscriptionUsage:
       type: object
@@ -2069,8 +2097,8 @@ components:
         unit: { type: string, description: "Se informado, deve coincidir com a unidade da métrica" }
         quantity: { type: string, description: Decimal não negativo }
         unique_key: { type: string, maxLength: 128, description: Chave para métricas unique_count }
-        occurred_at: { type: string, format: date-time }
-        properties: { type: object, additionalProperties: true }
+        occurred_at: { type: string, format: date-time, description: "Precisão de microssegundos; frações menores são descartadas" }
+        properties: { type: object, additionalProperties: true, description: "Até 4 KB serializado, sem o caractere NUL (\\u0000)" }
     UsageBatchResult:
       type: object
       required: [results]
@@ -2176,12 +2204,23 @@ components:
       allOf:
         - { $ref: "#/components/schemas/Invoice" }
         - type: object
-          required: [items, history, charges, customer_snapshot]
+          required: [items, history, charges, customer_snapshot, credit_notes]
           properties:
             items: { type: array, items: { $ref: "#/components/schemas/InvoiceItem" } }
             history: { type: array, items: { $ref: "#/components/schemas/InvoiceHistoryEntry" } }
             charges: { type: array, items: { $ref: "#/components/schemas/Charge" } }
             customer_snapshot: { type: object, additionalProperties: true }
+            credit_notes: { type: array, items: { $ref: "#/components/schemas/CreditNote" } }
+    CreditNote:
+      type: object
+      description: Reduz o saldo devedor de uma fatura emitida sem reescrevê-la; limitada ao saldo em aberto.
+      required: [id, number, amount, reason, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: string, description: "Número da fatura seguido de -NCnn" }
+        amount: { type: integer, format: int64 }
+        reason: { type: string }
+        created_at: { type: string, format: date-time }
     InvoicePage:
       type: object
       required: [data]

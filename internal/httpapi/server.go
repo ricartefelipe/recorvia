@@ -33,6 +33,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/infra/telemetry"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
+	"github.com/ricartefelipe/recorvia/internal/metering"
 	"github.com/ricartefelipe/recorvia/internal/payments"
 	"github.com/ricartefelipe/recorvia/internal/pgstore"
 	"github.com/ricartefelipe/recorvia/internal/platformbilling"
@@ -56,6 +57,11 @@ type Deps struct {
 	Catalog       *catalog.Service
 	Subscriptions *subscriptions.Service
 	Billing       *billing.Service
+	Changes       *billing.ChangeService
+	CreditNotes   *billing.CreditNoteService
+	Coupons       *catalog.CouponService
+	Terms         *subscriptions.TermsService
+	Metering      *metering.Service
 	Payments      *payments.Service
 	Reporting     *reporting.Service
 	Providers     []string

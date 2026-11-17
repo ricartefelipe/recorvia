@@ -21,6 +21,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/infra/secrets"
 	"github.com/ricartefelipe/recorvia/internal/infra/telemetry"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
+	"github.com/ricartefelipe/recorvia/internal/metering"
 	"github.com/ricartefelipe/recorvia/internal/payments"
 	"github.com/ricartefelipe/recorvia/internal/payments/gateways"
 	"github.com/ricartefelipe/recorvia/internal/payments/gateways/asaas"
@@ -50,6 +51,12 @@ type Core struct {
 	Subscriptions *subscriptions.Service
 	Engine        *billing.Engine
 	Billing       *billing.Service
+	Changes       *billing.ChangeService
+	CreditNotes   *billing.CreditNoteService
+	Corrector     *billing.UsageCorrector
+	Coupons       *catalog.CouponService
+	Terms         *subscriptions.TermsService
+	Metering      *metering.Service
 	Payments      *payments.Service
 	Reporting     *reporting.Service
 }
@@ -104,6 +111,12 @@ func Open(ctx context.Context, cfg *config.Config, log *slog.Logger, appName str
 		Subscriptions: subscriptions.NewService(store.Subscriptions(), c),
 		Engine:        engine,
 		Billing:       billing.NewService(store.Billing(), engine, c),
+		Changes:       billing.NewChangeService(store.Billing(), c),
+		CreditNotes:   billing.NewCreditNoteService(store.Billing(), c),
+		Corrector:     billing.NewUsageCorrector(store.Billing(), c),
+		Coupons:       catalog.NewCouponService(store.Catalog(), c),
+		Terms:         subscriptions.NewTermsService(store.Subscriptions(), c),
+		Metering:      metering.NewService(store.Metering(), c),
 		Payments: payments.NewService(store.Payments(), resolver, c, payments.Config{WebhookBaseURL: webhookBase,
 			CallTimeout: 15 * time.Second, Lease: time.Minute, Log: log}),
 		Reporting: reporting.NewService(store.Reporting(), c),

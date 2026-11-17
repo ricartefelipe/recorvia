@@ -30,14 +30,40 @@ func (a *Subscriptions) InTenant(ctx context.Context, tenantID uuid.UUID, fn fun
 	return a.s.inTenant(ctx, tenantID, func(b base) error { return fn(subscriptionsTx{b}) })
 }
 
-func subscriptionFromRow(r dbgen.Subscription) subscriptions.Subscription {
+func subscriptionFromRow(r dbgen.Subscription) (subscriptions.Subscription, error) {
+	override, err := ratFromNumeric(r.PriceOverrideAmount)
+	if err != nil {
+		return subscriptions.Subscription{}, err
+	}
 	return subscriptions.Subscription{ID: r.ID, TenantID: r.TenantID, CustomerID: r.CustomerID, PlanID: r.PlanID, PriceVersionID: r.PriceVersionID,
 		Status: subscriptions.Status(r.Status), Quantity: int(r.Quantity), Interval: calendar.Interval(r.BillingInterval), Timezone: r.Timezone,
 		Anchor: dateFromPg(r.AnchorDate), TrialEndsAt: r.TrialEndsAt, StartedAt: r.StartedAt,
 		CurrentPeriod: calendar.Period{Start: r.CurrentPeriodStart, End: r.CurrentPeriodEnd}, NextBillingIndex: int(r.NextBillingIndex),
 		NextBillingAt: r.NextBillingAt, CancelAtPeriodEnd: r.CancelAtPeriodEnd, CanceledAt: r.CanceledAt, CancelReason: deref(r.CancelReason),
 		EndedAt: r.EndedAt, SuspendedAt: r.SuspendedAt, SuspensionReason: deref(r.SuspensionReason), PaymentTermsDays: intFromPtr32(r.PaymentTermsDays),
-		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: int(r.Version)}
+		PriceOverride: override, PriceOverrideAdjustmentID: r.PriceOverrideAdjustmentID, PendingUsageStarts: pendingUsageFromPg(r.PendingUsageStarts),
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: int(r.Version)}, nil
+}
+
+// pendingUsageFromPg normaliza a lista lida do banco: vazia vira nula e os
+// instantes ficam em UTC.
+func pendingUsageFromPg(starts []time.Time) []time.Time {
+	if len(starts) == 0 {
+		return nil
+	}
+	out := make([]time.Time, len(starts))
+	for i, t := range starts {
+		out[i] = t.UTC()
+	}
+	return out
+}
+
+// pendingUsageToPg devolve a lista a gravar; a coluna não aceita nulo.
+func pendingUsageToPg(starts []time.Time) []time.Time {
+	if starts == nil {
+		return []time.Time{}
+	}
+	return starts
 }
 
 func (b base) insertSubscription(ctx context.Context, s subscriptions.Subscription) error {
@@ -51,11 +77,16 @@ func (b base) insertSubscription(ctx context.Context, s subscriptions.Subscripti
 }
 
 func (b base) updateSubscription(ctx context.Context, s subscriptions.Subscription) error {
+	override, err := numericPtr(s.PriceOverride)
+	if err != nil {
+		return err
+	}
 	n, err := b.q.UpdateSubscription(ctx, dbgen.UpdateSubscriptionParams{TenantID: b.tenantID, ID: s.ID, PlanID: s.PlanID, PriceVersionID: s.PriceVersionID,
 		Status: string(s.Status), Quantity: int32(s.Quantity), TrialEndsAt: s.TrialEndsAt, CurrentPeriodStart: s.CurrentPeriod.Start,
 		CurrentPeriodEnd: s.CurrentPeriod.End, NextBillingIndex: int32(s.NextBillingIndex), NextBillingAt: s.NextBillingAt,
 		CancelAtPeriodEnd: s.CancelAtPeriodEnd, CanceledAt: s.CanceledAt, CancelReason: strPtr(s.CancelReason), EndedAt: s.EndedAt,
 		SuspendedAt: s.SuspendedAt, SuspensionReason: strPtr(s.SuspensionReason), PaymentTermsDays: intPtr32(s.PaymentTermsDays),
+		PriceOverrideAmount: override, PriceOverrideAdjustmentID: s.PriceOverrideAdjustmentID, PendingUsageStarts: pendingUsageToPg(s.PendingUsageStarts),
 		Version: int32(s.Version)})
 	if err != nil {
 		return err
@@ -130,7 +161,7 @@ func (b base) subscription(ctx context.Context, id uuid.UUID, forUpdate bool) (s
 	if err != nil {
 		return subscriptions.Subscription{}, notFound(err, "subscription_not_found", "Assinatura não encontrada.")
 	}
-	return subscriptionFromRow(r), nil
+	return subscriptionFromRow(r)
 }
 
 func (tx subscriptionsTx) Update(ctx context.Context, s subscriptions.Subscription) error {
@@ -155,13 +186,18 @@ func (tx subscriptionsTx) List(ctx context.Context, f subscriptions.ListFilter) 
 			p.NextCursor = timeCursor(last.CreatedAt, last.ID)
 			break
 		}
-		p.Items = append(p.Items, subscriptionFromRow(dbgen.Subscription{ID: r.ID, TenantID: r.TenantID, CustomerID: r.CustomerID, PlanID: r.PlanID,
+		sub, err := subscriptionFromRow(dbgen.Subscription{ID: r.ID, TenantID: r.TenantID, CustomerID: r.CustomerID, PlanID: r.PlanID,
 			PriceVersionID: r.PriceVersionID, Status: r.Status, Quantity: r.Quantity, BillingInterval: r.BillingInterval, Timezone: r.Timezone,
 			AnchorDate: r.AnchorDate, TrialEndsAt: r.TrialEndsAt, StartedAt: r.StartedAt, CurrentPeriodStart: r.CurrentPeriodStart,
 			CurrentPeriodEnd: r.CurrentPeriodEnd, NextBillingIndex: r.NextBillingIndex, NextBillingAt: r.NextBillingAt,
 			CancelAtPeriodEnd: r.CancelAtPeriodEnd, CanceledAt: r.CanceledAt, CancelReason: r.CancelReason, EndedAt: r.EndedAt,
 			SuspendedAt: r.SuspendedAt, SuspensionReason: r.SuspensionReason, PaymentTermsDays: r.PaymentTermsDays, CreatedAt: r.CreatedAt,
-			UpdatedAt: r.UpdatedAt, Version: r.Version}))
+			UpdatedAt: r.UpdatedAt, Version: r.Version, PriceOverrideAmount: r.PriceOverrideAmount, PriceOverrideAdjustmentID: r.PriceOverrideAdjustmentID,
+			PendingUsageStarts: r.PendingUsageStarts})
+		if err != nil {
+			return subscriptions.Page{}, err
+		}
+		p.Items = append(p.Items, sub)
 	}
 	return p, nil
 }

@@ -13,6 +13,22 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countInvoiceCreditNotes = `-- name: CountInvoiceCreditNotes :one
+SELECT count(*)::int FROM credit_notes WHERE tenant_id = $1 AND invoice_id = $2
+`
+
+type CountInvoiceCreditNotesParams struct {
+	TenantID  uuid.UUID
+	InvoiceID uuid.UUID
+}
+
+func (q *Queries) CountInvoiceCreditNotes(ctx context.Context, arg CountInvoiceCreditNotesParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countInvoiceCreditNotes, arg.TenantID, arg.InvoiceID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const cycleInvoiceExists = `-- name: CycleInvoiceExists :one
 SELECT EXISTS (SELECT 1 FROM invoices WHERE tenant_id = $1 AND subscription_id = $2
                 AND kind = $3 AND billing_period_start = $4)::boolean
@@ -35,6 +51,72 @@ func (q *Queries) CycleInvoiceExists(ctx context.Context, arg CycleInvoiceExists
 	var column_1 bool
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const getCreditNoteByRequestKey = `-- name: GetCreditNoteByRequestKey :one
+SELECT id, tenant_id, invoice_id, number, amount, currency, reason, created_by, request_key, created_at FROM credit_notes WHERE tenant_id = $1 AND request_key = $2
+`
+
+type GetCreditNoteByRequestKeyParams struct {
+	TenantID   uuid.UUID
+	RequestKey *string
+}
+
+func (q *Queries) GetCreditNoteByRequestKey(ctx context.Context, arg GetCreditNoteByRequestKeyParams) (CreditNote, error) {
+	row := q.db.QueryRow(ctx, getCreditNoteByRequestKey, arg.TenantID, arg.RequestKey)
+	var i CreditNote
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.InvoiceID,
+		&i.Number,
+		&i.Amount,
+		&i.Currency,
+		&i.Reason,
+		&i.CreatedBy,
+		&i.RequestKey,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getCycleFeeItem = `-- name: GetCycleFeeItem :one
+SELECT i.id AS invoice_id, i.status AS invoice_status, it.id AS item_id, it.amount, it.discount_amount
+  FROM invoices i
+  JOIN invoice_items it ON it.tenant_id = i.tenant_id AND it.invoice_id = i.id
+ WHERE i.tenant_id = $1 AND i.subscription_id = $2 AND i.kind = 'subscription_cycle'
+   AND i.billing_period_start = $3 AND it.tenant_id = $1 AND it.kind = 'subscription_fee'
+ ORDER BY it.position
+ LIMIT 1
+`
+
+type GetCycleFeeItemParams struct {
+	TenantID       uuid.UUID
+	SubscriptionID *uuid.UUID
+	PeriodStart    *time.Time
+}
+
+type GetCycleFeeItemRow struct {
+	InvoiceID      uuid.UUID
+	InvoiceStatus  string
+	ItemID         uuid.UUID
+	Amount         int64
+	DiscountAmount int64
+}
+
+// Item do componente fixo da fatura de ciclo do período, com a situação da
+// fatura (há no máximo uma fatura de ciclo por assinatura e período).
+func (q *Queries) GetCycleFeeItem(ctx context.Context, arg GetCycleFeeItemParams) (GetCycleFeeItemRow, error) {
+	row := q.db.QueryRow(ctx, getCycleFeeItem, arg.TenantID, arg.SubscriptionID, arg.PeriodStart)
+	var i GetCycleFeeItemRow
+	err := row.Scan(
+		&i.InvoiceID,
+		&i.InvoiceStatus,
+		&i.ItemID,
+		&i.Amount,
+		&i.DiscountAmount,
+	)
+	return i, err
 }
 
 const getInvoice = `-- name: GetInvoice :one
@@ -127,6 +209,44 @@ func (q *Queries) GetInvoiceForUpdate(ctx context.Context, arg GetInvoiceForUpda
 		&i.Version,
 	)
 	return i, err
+}
+
+const insertCreditNote = `-- name: InsertCreditNote :execrows
+INSERT INTO credit_notes (id, tenant_id, invoice_id, number, amount, currency, reason, created_by, request_key, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (tenant_id, request_key) DO NOTHING
+`
+
+type InsertCreditNoteParams struct {
+	ID         uuid.UUID
+	TenantID   uuid.UUID
+	InvoiceID  uuid.UUID
+	Number     string
+	Amount     int64
+	Currency   string
+	Reason     string
+	CreatedBy  *uuid.UUID
+	RequestKey *string
+	CreatedAt  time.Time
+}
+
+func (q *Queries) InsertCreditNote(ctx context.Context, arg InsertCreditNoteParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertCreditNote,
+		arg.ID,
+		arg.TenantID,
+		arg.InvoiceID,
+		arg.Number,
+		arg.Amount,
+		arg.Currency,
+		arg.Reason,
+		arg.CreatedBy,
+		arg.RequestKey,
+		arg.CreatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const insertInvoice = `-- name: InsertInvoice :exec
@@ -281,6 +401,54 @@ func (q *Queries) InsertInvoiceItem(ctx context.Context, arg InsertInvoiceItemPa
 	return err
 }
 
+const insertSubscriptionProration = `-- name: InsertSubscriptionProration :exec
+INSERT INTO subscription_prorations (id, tenant_id, subscription_id, period_start, period_end, effective_at, price_version_id, quantity,
+                                     remaining_days, period_days, credit_base, credit_amount, charge_base, charge_amount, invoice_id, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+        $10, $11, $12, $13, $14, $15, $16)
+`
+
+type InsertSubscriptionProrationParams struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	SubscriptionID uuid.UUID
+	PeriodStart    time.Time
+	PeriodEnd      time.Time
+	EffectiveAt    time.Time
+	PriceVersionID uuid.UUID
+	Quantity       int32
+	RemainingDays  int32
+	PeriodDays     int32
+	CreditBase     pgtype.Numeric
+	CreditAmount   int64
+	ChargeBase     pgtype.Numeric
+	ChargeAmount   int64
+	InvoiceID      *uuid.UUID
+	CreatedAt      time.Time
+}
+
+func (q *Queries) InsertSubscriptionProration(ctx context.Context, arg InsertSubscriptionProrationParams) error {
+	_, err := q.db.Exec(ctx, insertSubscriptionProration,
+		arg.ID,
+		arg.TenantID,
+		arg.SubscriptionID,
+		arg.PeriodStart,
+		arg.PeriodEnd,
+		arg.EffectiveAt,
+		arg.PriceVersionID,
+		arg.Quantity,
+		arg.RemainingDays,
+		arg.PeriodDays,
+		arg.CreditBase,
+		arg.CreditAmount,
+		arg.ChargeBase,
+		arg.ChargeAmount,
+		arg.InvoiceID,
+		arg.CreatedAt,
+	)
+	return err
+}
+
 const listInvoiceCharges = `-- name: ListInvoiceCharges :many
 SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version FROM charges WHERE tenant_id = $1 AND invoice_id = $2 ORDER BY attempt
 `
@@ -324,6 +492,46 @@ func (q *Queries) ListInvoiceCharges(ctx context.Context, arg ListInvoiceCharges
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.Version,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listInvoiceCreditNotes = `-- name: ListInvoiceCreditNotes :many
+SELECT id, tenant_id, invoice_id, number, amount, currency, reason, created_by, request_key, created_at FROM credit_notes WHERE tenant_id = $1 AND invoice_id = $2 ORDER BY created_at, id
+`
+
+type ListInvoiceCreditNotesParams struct {
+	TenantID  uuid.UUID
+	InvoiceID uuid.UUID
+}
+
+func (q *Queries) ListInvoiceCreditNotes(ctx context.Context, arg ListInvoiceCreditNotesParams) ([]CreditNote, error) {
+	rows, err := q.db.Query(ctx, listInvoiceCreditNotes, arg.TenantID, arg.InvoiceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CreditNote
+	for rows.Next() {
+		var i CreditNote
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.InvoiceID,
+			&i.Number,
+			&i.Amount,
+			&i.Currency,
+			&i.Reason,
+			&i.CreatedBy,
+			&i.RequestKey,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -536,6 +744,80 @@ func (q *Queries) ListInvoices(ctx context.Context, arg ListInvoicesParams) ([]L
 			&i.UpdatedAt,
 			&i.Version,
 			&i.CustomerName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPeriodProrations = `-- name: ListPeriodProrations :many
+SELECT p.id, p.subscription_id, p.period_start, p.period_end, p.effective_at, p.price_version_id, p.quantity, p.remaining_days,
+       p.period_days, p.credit_base, p.credit_amount, p.charge_base, p.charge_amount, p.invoice_id, p.created_at,
+       i.status AS invoice_status
+  FROM subscription_prorations p
+  LEFT JOIN invoices i ON i.tenant_id = p.tenant_id AND i.id = p.invoice_id
+ WHERE p.tenant_id = $1 AND p.subscription_id = $2 AND p.period_start = $3
+ ORDER BY p.effective_at, p.created_at, p.id
+`
+
+type ListPeriodProrationsParams struct {
+	TenantID       uuid.UUID
+	SubscriptionID uuid.UUID
+	PeriodStart    time.Time
+}
+
+type ListPeriodProrationsRow struct {
+	ID             uuid.UUID
+	SubscriptionID uuid.UUID
+	PeriodStart    time.Time
+	PeriodEnd      time.Time
+	EffectiveAt    time.Time
+	PriceVersionID uuid.UUID
+	Quantity       int32
+	RemainingDays  int32
+	PeriodDays     int32
+	CreditBase     pgtype.Numeric
+	CreditAmount   int64
+	ChargeBase     pgtype.Numeric
+	ChargeAmount   int64
+	InvoiceID      *uuid.UUID
+	CreatedAt      time.Time
+	InvoiceStatus  *string
+}
+
+// Prorratas do período em ordem cronológica, com a situação da fatura de
+// prorrata (nula quando a mudança não emitiu fatura).
+func (q *Queries) ListPeriodProrations(ctx context.Context, arg ListPeriodProrationsParams) ([]ListPeriodProrationsRow, error) {
+	rows, err := q.db.Query(ctx, listPeriodProrations, arg.TenantID, arg.SubscriptionID, arg.PeriodStart)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPeriodProrationsRow
+	for rows.Next() {
+		var i ListPeriodProrationsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SubscriptionID,
+			&i.PeriodStart,
+			&i.PeriodEnd,
+			&i.EffectiveAt,
+			&i.PriceVersionID,
+			&i.Quantity,
+			&i.RemainingDays,
+			&i.PeriodDays,
+			&i.CreditBase,
+			&i.CreditAmount,
+			&i.ChargeBase,
+			&i.ChargeAmount,
+			&i.InvoiceID,
+			&i.CreatedAt,
+			&i.InvoiceStatus,
 		); err != nil {
 			return nil, err
 		}

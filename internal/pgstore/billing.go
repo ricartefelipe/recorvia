@@ -78,7 +78,8 @@ func (tx billingTx) ClaimDueSubscription(ctx context.Context, now time.Time, exc
 	if err != nil {
 		return subscriptions.Subscription{}, false, err
 	}
-	return subscriptionFromRow(r), true, nil
+	sub, err := subscriptionFromRow(r)
+	return sub, err == nil, err
 }
 
 func (tx billingTx) UpdateSubscription(ctx context.Context, s subscriptions.Subscription) error {
@@ -147,7 +148,7 @@ func (tx billingTx) UsageFor(ctx context.Context, sub subscriptions.Subscription
 	aggID := ids.New()
 	if err := tx.q.InsertUsageAggregate(ctx, dbgen.InsertUsageAggregateParams{ID: aggID, TenantID: tx.tenantID, SubscriptionID: sub.ID, MetricID: metric.ID,
 		PeriodStart: period.Start, PeriodEnd: period.End, Aggregation: string(metric.Aggregation), Quantity: num, EventCount: int32(count),
-		ClosedAt: tx.store.clock.Now()}); err != nil {
+		PriceVersionID: &price.ID, ClosedAt: tx.store.clock.Now()}); err != nil {
 		return nil, err
 	}
 	if err := tx.q.AttachUsageEventsToAggregate(ctx, dbgen.AttachUsageEventsToAggregateParams{AggregateID: &aggID, TenantID: tx.tenantID,
@@ -214,7 +215,7 @@ func (tx billingTx) ActiveDiscount(ctx context.Context, subscriptionID uuid.UUID
 	if err != nil {
 		return nil, err
 	}
-	d := &billing.Discount{ID: r.ID, CouponCode: r.CouponCode, Description: r.CouponName}
+	d := &billing.Discount{ID: r.ID, CouponCode: r.CouponCode, Description: r.CouponName, AppliesToPlanIDs: r.AppliesToPlanIds}
 	if r.PercentOffBp != nil {
 		d.PercentBP = int64(*r.PercentOffBp)
 	}
@@ -253,8 +254,8 @@ func (tx billingTx) PendingItems(ctx context.Context, subscriptionID uuid.UUID) 
 			p = &calendar.Period{Start: *r.PeriodStart, End: *r.PeriodEnd}
 		}
 		details["source"] = r.Source
-		out = append(out, billing.PendingItem{ID: r.ID, Kind: billing.ItemKind(r.Kind), Description: r.Description, Amount: brl(r.Amount),
-			Quantity: qty, UnitAmount: unit, Period: p, Details: details})
+		out = append(out, billing.PendingItem{ID: r.ID, Kind: billing.ItemKind(r.Kind), Source: r.Source, Description: r.Description,
+			Amount: brl(r.Amount), Quantity: qty, UnitAmount: unit, Period: p, Details: details})
 	}
 	return out, nil
 }

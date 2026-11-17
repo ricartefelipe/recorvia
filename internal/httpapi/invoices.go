@@ -171,8 +171,13 @@ func (a *API) invoiceDetails(r *http.Request, id uuid.UUID) (map[string]any, int
 	for _, c := range charges {
 		ch = append(ch, a.chargeDTO(c))
 	}
+	notes, err := a.Store.Billing().CreditNotes(r.Context(), p.TenantID, id)
+	if err != nil {
+		return nil, 0, err
+	}
 	out := structToMap(base)
 	out["items"], out["history"], out["charges"], out["customer_snapshot"] = items, hist, ch, d.CustomerSnapshot
+	out["credit_notes"] = creditNotesView(notes)
 	return out, d.Version, nil
 }
 
