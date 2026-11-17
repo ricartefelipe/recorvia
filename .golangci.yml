@@ -28,6 +28,7 @@ linters:
     generated: strict
     paths:
       - internal/dbgen
+      - web
     rules:
       - path: _test\.go
         linters:

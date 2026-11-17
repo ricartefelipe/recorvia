@@ -2,6 +2,8 @@ SHELL := /usr/bin/env bash
 .SHELLFLAGS := -euo pipefail -c
 
 GO ?= go
+# Pacotes Go do projeto (web/node_modules pode conter pacotes Go de dependências npm).
+GO_PKGS = $(shell $(GO) list ./... | grep -v '/web/')
 BIN := $(CURDIR)/bin
 # Ferramentas ficam fora do repositório (o checkout pode estar em disco noexec).
 TOOLS_BIN ?= $(shell $(GO) env GOPATH)/bin
@@ -48,8 +50,8 @@ fmt-check: ## Falha se houver arquivos Go não formatados
 
 .PHONY: vet
 vet: ## go vet (unitário e integração)
-	$(GO) vet ./...
-	$(GO) vet -tags integration ./...
+	$(GO) vet $(GO_PKGS)
+	$(GO) vet -tags integration $(GO_PKGS)
 
 .PHONY: lint
 lint: ## golangci-lint
@@ -57,7 +59,7 @@ lint: ## golangci-lint
 
 .PHONY: vulncheck
 vulncheck: ## govulncheck nas dependências alcançáveis
-	govulncheck ./...
+	govulncheck $(GO_PKGS)
 
 .PHONY: secrets-scan
 secrets-scan: ## Detecção de segredos no repositório (gitleaks)
@@ -66,11 +68,11 @@ secrets-scan: ## Detecção de segredos no repositório (gitleaks)
 ## ---------- Testes ----------
 .PHONY: test
 test: ## Testes unitários com detector de corridas (sem Docker)
-	$(GO) test -race -count=1 ./...
+	$(GO) test -race -count=1 $(GO_PKGS)
 
 .PHONY: coverage
 coverage: ## Cobertura dos pacotes de domínio e aplicação (mínimo $(COVERAGE_THRESHOLD)%)
-	$(GO) test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+	$(GO) test -count=1 -covermode=atomic -coverprofile=coverage.out $(GO_PKGS)
 	$(GO) run ./tools/covercheck -profile coverage.out -threshold $(COVERAGE_THRESHOLD)
 
 .PHONY: fuzz
@@ -84,7 +86,7 @@ fuzz: ## Execução curta dos fuzz tests críticos
 
 .PHONY: test-integration
 test-integration: ## Testes de integração com PostgreSQL, RabbitMQ e Redis reais (Docker)
-	$(GO) test -race -count=1 -tags integration -timeout 20m ./...
+	$(GO) test -race -count=1 -tags integration -timeout 20m $(GO_PKGS)
 
 ## ---------- Geração de código ----------
 .PHONY: sqlc
