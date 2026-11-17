@@ -10,4 +10,5 @@ paths = [
   '''_test\.go$''',
   '''^\.env\.example$''',
   '''^deploy/keycloak/realm-recorvia\.json$''',
+  '''^web/e2e/''',
 ]

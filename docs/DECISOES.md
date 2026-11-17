@@ -215,6 +215,15 @@ na outbox uma reentrega direcionada à fila do consumidor que falhou
 **Justificativa:** republicar no exchange entregaria o evento a todos os consumidores; manter o id
 original faz o inbox do consumidor continuar deduplicando.
 
+## ADR-025 Interface servida na mesma origem da API
+**Decisão:** a interface é uma SPA estática servida por nginx sem root (`web/Dockerfile`), que faz
+proxy de `/api`, `/auth`, `/webhooks` e `/portal/access` para a API. A CSP restringe scripts a
+`'self'`; estilos inline são permitidos porque a biblioteca de componentes injeta variáveis CSS e o
+documento da fatura usa estilos inline.
+**Justificativa:** mesma origem dispensa CORS para a sessão por cookie e mantém o cookie
+`SameSite` efetivo; o callback OIDC passa pela mesma origem da aplicação.
+**Consequências:** fora do Compose, o `resolver` do nginx precisa apontar para o DNS do ambiente.
+
 ## ADR-026 Prorrata com fatura imediata ou crédito do cliente
 **Decisão:** mudança imediata com o período já faturado gera fatura de prorrata quando a diferença
 é positiva e crédito do cliente quando é negativa; itens pendentes são sempre positivos.

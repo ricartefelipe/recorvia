@@ -8,9 +8,9 @@ resultado real) e as pendências.
 | # | Etapa | Branch | Situação |
 |---|---|---|---|
 | 1 | Fundação: núcleo de dinheiro/calendário, infraestrutura, bootstrap do banco, CI | `feature/fundacao-do-projeto` | integrada em `develop` (PR #1) |
-| 2 | Fatia vertical: autenticação, tenant, cliente, plano, assinatura, fatura, cobrança simulada, webhook, ledger, outbox, worker | `feature/fatia-vertical-cobranca` | em revisão |
-| 3 | Interface web (React) e E2E | `feature/interface-web` | em desenvolvimento |
-| 4 | Consumo medido, cupons, prorrata, troca de plano/quantidade, reajustes, notas de crédito | `feature/faturamento-avancado` | pendente |
+| 2 | Fatia vertical: autenticação, tenant, cliente, plano, assinatura, fatura, cobrança simulada, webhook, ledger, outbox, worker | `feature/fatia-vertical-cobranca` | integrada em `develop` (PR #2) |
+| 3 | Interface web (React) e E2E | `feature/interface-web` | em revisão |
+| 4 | Consumo medido, cupons, prorrata, troca de plano/quantidade, reajustes, notas de crédito | `feature/faturamento-avancado` | em desenvolvimento (código recuperado e commitado; testes em andamento) |
 | 5 | Reembolsos, disputas, conciliação, validação no sandbox do Asaas | `feature/recebiveis-conciliacao` | pendente |
 | 6 | Inadimplência, notificações por e-mail, webhooks enviados com proteção SSRF | `feature/cobranca-e-notificacoes` | pendente |
 | 7 | Portal do cliente, credenciais de API com escopos | `feature/portal-e-credenciais` | pendente |
@@ -46,6 +46,15 @@ transações com contexto de tenant, bootstrap de papéis, migrations e CI.
 - **Ambiente local**: compose com PostgreSQL, Redis, RabbitMQ, Keycloak (realm embutido), Mailpit,
   simulador, API, worker e seed idempotente de dois tenants.
 
+### Etapa 3: interface web
+React 19 + TypeScript + Vite, TanStack Query (chaves com usuário e organização; cache descartado
+na troca de organização), React Router, React Hook Form + Zod e Mantine (ADR-015). Tipos gerados do
+contrato OpenAPI (`web/src/api/schema.d.ts`, verificados na CI). Telas: entrada e seleção de
+organização, onboarding e convites, dashboard com fórmulas, clientes, catálogo, assinaturas,
+faturas, pagamentos, ledger, conciliação, cobrança, membros, integrações, auditoria, operações,
+plano da plataforma e portal do cliente. Servida por nginx sem root na mesma origem da API
+(ADR-025).
+
 ## Verificações executadas
 
 | Data | Comando | Resultado |
@@ -58,11 +67,22 @@ transações com contexto de tenant, bootstrap de papéis, migrations e CI.
 | 2026-11-17 | `go test -race -tags integration ./internal/httpapi/` | aprovado: 401/403/404/409/412/413/422/428, CSRF, permissões por papel, Idempotency-Key |
 | 2026-11-17 | `go test ./internal/httpapi/ -run Contract` | rotas coincidem com o OpenAPI |
 | 2026-11-17 | `make sqlc-check`, `make secrets-scan`, `golangci-lint` (código de produção) | sem diferenças, sem vazamentos, sem achados |
+| 2026-11-17 | `make lint`, `make test`, `make coverage` | sem achados; todos aprovados; 97,0% de cobertura em domínio e aplicação (mínimo 90%) |
+| 2026-11-17 | Testes unitários novos | 11 bugs reais encontrados e corrigidos (âncora da plataforma, redirecionamento por TAB, baixa e recuperação de incobráveis, taxa do provedor, repetição de pagamento manual, isolamento de falhas no motor, rejeições que alteravam a fatura) |
+| 2026-11-17 | `make reset && make up` (volumes novos) + roteiro automatizado via API | aprovado novamente após as correções; corrigidos no caminho: RabbitMQ executado como `rabbitmq` (cookie criado pelo healthcheck como root impedia a partida) e seed fora do `up --wait` |
+| 2026-11-17 | `cd web && npm ci && npm run verify` | tipos e lint sem erros; 17 arquivos, 95 testes de componente aprovados; build concluído |
+| 2026-11-17 | `make up` + `make web-e2e` (Playwright, Chromium) | 4 roteiros aprovados: login no Keycloak e cadastro, faturamento, cobrança e checkout pela interface; pagamento no simulador com fatura paga, ledger e auditoria; isolamento entre organizações; auditor sem ações de escrita |
 | 2026-11-17 | Stack local (`docker compose up`) + roteiro automatizado via API | login real no Keycloak com PKCE, cliente, plano, assinatura, fatura `ACME-2026-000001`, cobrança no simulador, pagamento pelo checkout, webhook HMAC, fatura paga, ledger (receita 99.000; liquidação 95.991; taxa 3.009), reenvio sem duplicidade, auditoria, dashboard e isolamento entre tenants |
 
 ## Pendências reais
 
-- Etapas 3 a 9.
+- Etapas 4 a 9.
+- **Telas que dependem de etapas futuras**: conciliação, reembolsos e disputas (etapa 5), políticas
+  de cobrança, templates e webhooks enviados (etapa 6), portal do cliente e credenciais de API
+  (etapa 7) já consomem o contrato, mas as rotas ainda não existem; até lá a tela mostra o estado de
+  erro com nova tentativa.
+- **ESLint 9.39.5** está fora do período de suporte do projeto; a migração para a versão 10 fica
+  para uma atualização dedicada de dependências do frontend.
 - **Asaas**: o adaptador segue a documentação oficial (criação de cliente e cobrança com
   `billingType=UNDEFINED`, consulta por id e por `externalReference`, reembolso, criação de webhook
   com `authToken`, autenticação por `asaas-access-token`), mas **não foi exercitado no sandbox**:
@@ -83,5 +103,6 @@ transações com contexto de tenant, bootstrap de papéis, migrations e CI.
 
 ## Ponto de retomada
 
-Concluir os testes unitários dos pacotes de domínio (meta de 90%), abrir o PR da etapa 2, integrar
-a interface web (etapa 3) e seguir para a etapa 4.
+Integrar a interface web (PR da etapa 3) e concluir a etapa 4 (`feature/faturamento-avancado`:
+código de cupons, mudanças agendadas, prorrata, reajustes, correção de consumo, notas de crédito e
+ingestão de consumo commitado; faltam testes unitários e de integração e o PR).
