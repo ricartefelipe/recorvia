@@ -256,16 +256,16 @@ func TestEngineAppliesDueAdjustmentsInOrder(t *testing.T) {
 		t.Fatalf("reajustes aplicados em ordem (10%% e depois R$ 125,00): %+v", fee)
 	}
 	if fee.PriceSnapshot["price_adjustment_id"] != second.ID || fee.PriceSnapshot["adjusted_fixed_amount"] != int64(12500) ||
-		fee.PriceSnapshot["flat_amount"] != int64(12500) {
+		fee.PriceSnapshot["adjusted_amount_decimal"] != "12500" || fee.PriceSnapshot["flat_amount"] != int64(12500) {
 		t.Fatalf("snapshot com o reajuste vigente: %+v", fee.PriceSnapshot)
 	}
 	adjs := f.store.adjustments[sub.ID]
 	period1 := f.period(t, sub, 1).Start
-	if adjs[0].Status != subscriptions.AdjustmentApplied || adjs[0].PreviousAmount.Amount() != 10000 || adjs[0].ResultingAmount.Amount() != 11000 ||
+	if adjs[0].Status != subscriptions.AdjustmentApplied || !isCents(adjs[0].PreviousAmount, 10000) || !isCents(adjs[0].ResultingAmount, 11000) ||
 		!adjs[0].AppliedPeriodStart.Equal(period1) || adjs[0].ID != first.ID {
 		t.Fatalf("primeiro reajuste: %+v", adjs[0])
 	}
-	if adjs[1].Status != subscriptions.AdjustmentApplied || adjs[1].PreviousAmount.Amount() != 11000 || adjs[1].ResultingAmount.Amount() != 12500 {
+	if adjs[1].Status != subscriptions.AdjustmentApplied || !isCents(adjs[1].PreviousAmount, 11000) || !isCents(adjs[1].ResultingAmount, 12500) {
 		t.Fatalf("segundo reajuste parte do valor já reajustado: %+v", adjs[1])
 	}
 	if adjs[2].Status != subscriptions.AdjustmentScheduled || adjs[2].ID != future.ID {
@@ -284,7 +284,7 @@ func TestEngineAppliesDueAdjustmentsInOrder(t *testing.T) {
 		t.Fatalf("auditoria dos reajustes em ordem: %v", adjusted)
 	}
 	got := f.store.sub(sub.ID)
-	if got.PriceOverride == nil || got.PriceOverride.Amount() != 12500 || *got.PriceOverrideAdjustmentID != second.ID {
+	if !isCents(got.PriceOverride, 12500) || *got.PriceOverrideAdjustmentID != second.ID {
 		t.Fatalf("valor reajustado gravado na assinatura: %+v", got.PriceOverride)
 	}
 
@@ -299,9 +299,8 @@ func TestEngineAppliesDueAdjustmentsInOrder(t *testing.T) {
 func TestEnginePlanChangeDropsPreviousAdjustment(t *testing.T) {
 	f := newTermsFixture(t)
 	adjID := uuid.New()
-	override := brl(12000)
 	sub := f.addSub(t, f.basic, 1, true, func(s *subscriptions.Subscription) {
-		s.PriceOverride, s.PriceOverrideAdjustmentID = &override, &adjID
+		s.PriceOverride, s.PriceOverrideAdjustmentID = big.NewRat(12000, 1), &adjID
 	})
 	f.schedule(t, sub, &f.pro, nil)
 
@@ -383,7 +382,7 @@ func TestEngineCancelsPendingTermsWhenEnding(t *testing.T) {
 		f := newTermsFixture(t)
 		at := local(2026, time.October, 20, 12, 0)
 		sub := f.addSub(t, f.metered, 1, true, func(s *subscriptions.Subscription) {
-			if err := s.Cancel(subscriptions.CancelImmediately, "", true, at); err != nil {
+			if err := s.Cancel(subscriptions.CancelImmediately, "", true, false, at); err != nil {
 				t.Fatal(err)
 			}
 			s.PopEvents()
@@ -403,32 +402,51 @@ func TestEngineCancelsPendingTermsWhenEnding(t *testing.T) {
 }
 
 func TestEngineRollsBackScheduledTermsOnFailure(t *testing.T) {
+	type scenario int
+	const (
+		// change: mudança de plano agendada (que cancela o reajuste programado).
+		change scenario = iota
+		// adjust: reajuste vencido sem mudança de plano.
+		adjust
+		// unapplicable: reajuste vencido em preço somente por consumo.
+		unapplicable
+	)
 	cases := []struct {
-		name   string
-		method string
-		nth    int
+		name     string
+		scenario scenario
+		method   string
+		nth      int
 	}{
-		{"mudança pendente", "PendingChange", 0},
-		{"novo plano", "Plan", 2},
-		{"novo preço", "PriceVersion", 2},
-		{"resolução da mudança", "ResolveChange", 0},
-		{"desconto vigente", "ActiveDiscount", 1},
-		{"encerramento do desconto", "EndActiveDiscount", 0},
-		{"auditoria da mudança", "Audit", 1},
-		{"reajustes vencidos", "DueAdjustments", 0},
-		{"preço para reajuste", "PriceVersion", 3},
-		{"marcação do reajuste", "MarkAdjustmentApplied", 0},
-		{"auditoria do reajuste", "Audit", 2},
-		{"releitura do plano", "Plan", 3},
-		{"releitura do preço", "PriceVersion", 4},
+		{"mudança pendente", change, "PendingChange", 0},
+		{"novo plano", change, "Plan", 2},
+		{"novo preço", change, "PriceVersion", 2},
+		{"resolução da mudança", change, "ResolveChange", 0},
+		{"cancelamento dos reajustes programados", change, "CancelScheduledAdjustments", 0},
+		{"desconto vigente", change, "ActiveDiscount", 1},
+		{"encerramento do desconto", change, "EndActiveDiscount", 0},
+		{"auditoria da mudança", change, "Audit", 1},
+		{"reajustes vencidos", change, "DueAdjustments", 0},
+		{"releitura do plano", change, "Plan", 3},
+		{"releitura do preço", change, "PriceVersion", 3},
+		{"preço para reajuste", adjust, "PriceVersion", 2},
+		{"marcação do reajuste", adjust, "MarkAdjustmentApplied", 0},
+		{"auditoria do reajuste", adjust, "Audit", 1},
+		{"cancelamento do reajuste inaplicável", unapplicable, "CancelAdjustment", 0},
+		{"auditoria do reajuste cancelado", unapplicable, "Audit", 1},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := newTermsFixture(t)
-			sub := f.addSub(t, f.basic, 1, true, nil)
+			o := f.basic
+			if c.scenario == unapplicable {
+				o = f.metered
+			}
+			sub := f.addSub(t, o, 1, true, nil)
 			discount := &Discount{ID: uuid.New(), PercentBP: 1000, AppliesToPlanIDs: []uuid.UUID{f.basic.plan.ID}}
 			f.store.discount = discount
-			f.schedule(t, sub, &f.pro, nil)
+			if c.scenario == change {
+				f.schedule(t, sub, &f.pro, nil)
+			}
 			f.adjustment(sub, calendar.Date{Year: 2026, Month: time.November, Day: 1}, subscriptions.AdjustPercent, 1000)
 			boom := errors.New("falha em " + c.method)
 			f.store.errs[c.method] = boom

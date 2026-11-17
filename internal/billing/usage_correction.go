@@ -30,7 +30,8 @@ type LateGroup struct {
 
 // ClosedAggregate é o agregado fechado de um período. Quantity e o item
 // faturado nunca mudam; CorrectedQuantity e CorrectedAmount acumulam o
-// resultado das correções posteriores.
+// resultado das correções posteriores (CorrectedAmount é o valor líquido de
+// desconto).
 type ClosedAggregate struct {
 	ID                uuid.UUID
 	SubscriptionID    uuid.UUID
@@ -65,7 +66,9 @@ type CorrectionTx interface {
 	ClosedAggregate(ctx context.Context, g LateGroup) (ClosedAggregate, error)
 	Metric(ctx context.Context, id uuid.UUID) (catalog.Metric, error)
 	RecomputeUsage(ctx context.Context, subscriptionID uuid.UUID, metric catalog.Metric, periodStart time.Time) (*big.Rat, int, error)
-	InvoiceItemAmount(ctx context.Context, id uuid.UUID) (money.Money, error)
+	// InvoiceItemAmounts devolve o valor bruto e o desconto distribuído de um
+	// item faturado.
+	InvoiceItemAmounts(ctx context.Context, id uuid.UUID) (amount, discount money.Money, err error)
 	SetAggregateCorrection(ctx context.Context, id uuid.UUID, qty *big.Rat, amount money.Money) error
 	MarkLateCorrected(ctx context.Context, g LateGroup, aggregateID uuid.UUID, itemID *uuid.UUID, at time.Time) error
 	InsertPendingItem(ctx context.Context, it NewPendingItem) error
@@ -82,11 +85,14 @@ type CorrectionStore interface {
 //
 // Política: a quantidade do período é recalculada com todos os eventos
 // (mesma semântica de agregação) e precificada pela versão usada no
-// fechamento. A diferença em relação ao que já foi faturado (incluindo
+// fechamento. A comparação usa valores líquidos de desconto: o valor
+// faturado é o do item menos o desconto distribuído nele, e o novo valor
+// recebe a mesma proporção de desconto do item original (arredondado uma
+// única vez). A diferença em relação ao que já foi faturado (incluindo
 // correções anteriores) vira item de ajuste na próxima fatura da assinatura
-// quando positiva, ou crédito do cliente quando negativa. Se a assinatura
-// não tiver próximo ciclo (cancelada ou com encerramento agendado), a
-// diferença positiva é faturada imediatamente.
+// quando positiva (sem novo desconto), ou crédito do cliente quando
+// negativa. Se a assinatura não tiver próximo ciclo (cancelada ou com
+// encerramento agendado), a diferença positiva é faturada imediatamente.
 type UsageCorrector struct {
 	store CorrectionStore
 	clock clock.Clock
@@ -164,7 +170,30 @@ func (c *UsageCorrector) correct(ctx context.Context, tx CorrectionTx, g LateGro
 	if err != nil {
 		return err
 	}
-	newAmount, _, err := price.UsageCharge(newQty)
+	_, billable, err := price.UsageCharge(newQty)
+	if err != nil {
+		return err
+	}
+	billedAmount, billedDiscount := money.Zero(price.Currency), money.Zero(price.Currency)
+	if agg.InvoiceItemID != nil {
+		if billedAmount, billedDiscount, err = tx.InvoiceItemAmounts(ctx, *agg.InvoiceItemID); err != nil {
+			return err
+		}
+	}
+	// Proporção líquida do item faturado: (valor − desconto) ÷ valor.
+	netRatio := big.NewRat(1, 1)
+	if billedAmount.IsPositive() {
+		netRatio = new(big.Rat).SetFrac(big.NewInt(billedAmount.Amount()-billedDiscount.Amount()), big.NewInt(billedAmount.Amount()))
+	}
+	grossExact := new(big.Rat)
+	if billable.Sign() > 0 {
+		grossExact.Mul(price.UnitAmount, billable)
+	}
+	newGross, err := money.FromRat(grossExact, price.Currency, money.DefaultRounding)
+	if err != nil {
+		return err
+	}
+	newAmount, err := money.FromRat(new(big.Rat).Mul(grossExact, netRatio), price.Currency, money.DefaultRounding)
 	if err != nil {
 		return err
 	}
@@ -173,7 +202,7 @@ func (c *UsageCorrector) correct(ctx context.Context, tx CorrectionTx, g LateGro
 	case agg.CorrectedAmount != nil:
 		prevQty, prevAmount = agg.CorrectedQuantity, *agg.CorrectedAmount
 	case agg.InvoiceItemID != nil:
-		if prevAmount, err = tx.InvoiceItemAmount(ctx, *agg.InvoiceItemID); err != nil {
+		if prevAmount, err = billedAmount.Sub(billedDiscount); err != nil {
 			return err
 		}
 	}
@@ -188,14 +217,15 @@ func (c *UsageCorrector) correct(ctx context.Context, tx CorrectionTx, g LateGro
 	details := map[string]any{"aggregate_id": agg.ID, "metric_code": metric.Code, "aggregation": metric.Aggregation,
 		"billed_quantity": money.RatString(agg.Quantity), "previous_quantity": money.RatString(prevQty),
 		"corrected_quantity": money.RatString(newQty), "previous_amount": prevAmount.Amount(), "corrected_amount": newAmount.Amount(),
-		"events": events, "price_version_id": price.ID}
+		"corrected_gross_amount": newGross.Amount(), "billed_amount": billedAmount.Amount(), "billed_discount_amount": billedDiscount.Amount(),
+		"discount_ratio": money.RatString(new(big.Rat).Sub(big.NewRat(1, 1), netRatio)), "events": events, "price_version_id": price.ID}
 	desc := fmt.Sprintf("Correção de consumo de %s: %s para %s %s (%s)", metric.Name, money.RatString(prevQty), money.RatString(newQty),
 		metric.Unit, localRange(agg.Period, settings.Location))
 	var itemID *uuid.UUID
 	period := agg.Period
 	switch {
 	case delta.IsPositive() && subscriptionBillsAgain(sub):
-		it := NewPendingItem{ID: ids.New(), CustomerID: sub.CustomerID, SubscriptionID: sub.ID, Kind: ItemAdjustment, Source: "usage_correction",
+		it := NewPendingItem{ID: ids.New(), CustomerID: sub.CustomerID, SubscriptionID: sub.ID, Kind: ItemAdjustment, Source: PendingSourceUsageCorrection,
 			Description: desc, Amount: delta, Period: &period, Details: details, UsageAggregateID: &agg.ID}
 		if err := tx.InsertPendingItem(ctx, it); err != nil {
 			return err

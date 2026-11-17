@@ -61,11 +61,6 @@ func billedSubscription(t *testing.T, plan catalog.Plan, price catalog.PriceVers
 	return s
 }
 
-func moneyPtr(cents int64) *money.Money {
-	m := money.New(cents, money.BRL)
-	return &m
-}
-
 func fieldNames(err error) []string {
 	e, ok := apperr.As(err)
 	if !ok {
@@ -80,11 +75,11 @@ func fieldNames(err error) []string {
 
 func TestEffectivePrice(t *testing.T) {
 	plan := fixturePlan(calendar.Monthly)
-	override := moneyPtr(10890)
+	override := big.NewRat(10890, 1)
 	cases := []struct {
 		name      string
 		price     catalog.PriceVersion
-		override  *money.Money
+		override  *big.Rat
 		wantFlat  *int64
 		wantUnit  *big.Rat
 		keepsUnit bool
@@ -93,6 +88,8 @@ func TestEffectivePrice(t *testing.T) {
 		{"preço fixo usa o valor reajustado", priceFlat(plan, 9900), override, new(int64(10890)), nil, false},
 		{"fixo com excedente reajusta só a mensalidade", priceFlatPlusOverage(plan, 9900), override, new(int64(10890)), big.NewRat(35, 100), true},
 		{"preço por unidade usa o preço unitário reajustado", pricePerUnit(plan, big.NewRat(2500, 1)), override, nil, big.NewRat(10890, 1), false},
+		{"preço por unidade mantém a fração de centavo do reajuste", pricePerUnit(plan, big.NewRat(49905, 10)), big.NewRat(548955, 100), nil,
+			big.NewRat(548955, 100), false},
 		{"preço por consumo não é reajustado", priceUsage(plan), override, nil, big.NewRat(35, 100), true},
 	}
 	for _, c := range cases {
@@ -119,6 +116,9 @@ func TestEffectivePrice(t *testing.T) {
 			if c.keepsUnit && got.UnitAmount != orig.UnitAmount {
 				t.Fatal("o componente de consumo não pode ser substituído")
 			}
+			if c.override != nil && got.UnitAmount == c.override {
+				t.Fatal("o preço efetivo não pode compartilhar o valor reajustado da assinatura")
+			}
 			if orig.FlatAmount != nil && orig.FlatAmount.Amount() != origFlat {
 				t.Fatal("a versão de preço original não pode ser alterada")
 			}
@@ -134,14 +134,13 @@ func TestFixedBase(t *testing.T) {
 	cases := []struct {
 		name  string
 		price catalog.PriceVersion
-		want  int64
+		want  *big.Rat
 	}{
-		{"preço fixo", priceFlat(plan, 9900), 9900},
-		{"fixo com excedente", priceFlatPlusOverage(plan, 4900), 4900},
-		{"preço unitário inteiro", pricePerUnit(plan, big.NewRat(2500, 1)), 2500},
-		{"meio centavo arredonda para o par abaixo", pricePerUnit(plan, big.NewRat(49905, 10)), 4990},
-		{"meio centavo arredonda para o par acima", pricePerUnit(plan, big.NewRat(49915, 10)), 4992},
-		{"fração acima da metade arredonda para cima", pricePerUnit(plan, big.NewRat(49906, 10)), 4991},
+		{"preço fixo", priceFlat(plan, 9900), big.NewRat(9900, 1)},
+		{"fixo com excedente", priceFlatPlusOverage(plan, 4900), big.NewRat(4900, 1)},
+		{"preço unitário inteiro", pricePerUnit(plan, big.NewRat(2500, 1)), big.NewRat(2500, 1)},
+		{"preço unitário com meio centavo não é arredondado", pricePerUnit(plan, big.NewRat(49905, 10)), big.NewRat(49905, 10)},
+		{"preço unitário abaixo de meio centavo não vira zero", pricePerUnit(plan, big.NewRat(35, 100)), big.NewRat(35, 100)},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -149,8 +148,11 @@ func TestFixedBase(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Amount() != c.want || got.Currency() != money.BRL {
-				t.Fatalf("base: obtive %v, esperava %d centavos", got, c.want)
+			if got.Cmp(c.want) != 0 {
+				t.Fatalf("base: obtive %s, esperava %s centavos", got.RatString(), c.want.RatString())
+			}
+			if c.price.UnitAmount != nil && got == c.price.UnitAmount {
+				t.Fatal("a base não pode compartilhar o preço unitário da versão")
 			}
 		})
 	}
@@ -158,12 +160,6 @@ func TestFixedBase(t *testing.T) {
 	t.Run("preço somente por consumo não tem componente fixo", func(t *testing.T) {
 		_, err := FixedBase(priceUsage(plan))
 		wantKind(t, err, apperr.KindInvalid, "price_without_fixed_component")
-	})
-	t.Run("preço unitário fora do intervalo de int64", func(t *testing.T) {
-		huge := new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), 70))
-		if _, err := FixedBase(pricePerUnit(plan, huge)); !errors.Is(err, money.ErrOverflow) {
-			t.Fatalf("esperava estouro, obtive %v", err)
-		}
 	})
 }
 
@@ -268,7 +264,7 @@ func TestApplyChange(t *testing.T) {
 		priceA, priceB := pricePerUnit(planA, big.NewRat(2500, 1)), pricePerUnit(planB, big.NewRat(3000, 1))
 		s := billedSubscription(t, planA, priceA, 3, start)
 		adjID := uuid.New()
-		s.PriceOverride, s.PriceOverrideAdjustmentID = moneyPtr(2750), &adjID
+		s.PriceOverride, s.PriceOverrideAdjustmentID = big.NewRat(2750, 1), &adjID
 		version, status := s.Version, s.Status
 
 		s.ApplyChange(planB, priceB, 5, "plan_changed", at, map[string]any{"timing": ChangeImmediately})
@@ -305,11 +301,11 @@ func TestApplyChange(t *testing.T) {
 		price := pricePerUnit(plan, big.NewRat(2500, 1))
 		s := billedSubscription(t, plan, price, 3, start)
 		adjID := uuid.New()
-		s.PriceOverride, s.PriceOverrideAdjustmentID = moneyPtr(2750), &adjID
+		s.PriceOverride, s.PriceOverrideAdjustmentID = big.NewRat(2750, 1), &adjID
 
 		s.ApplyChange(plan, price, 4, "quantity_changed", at, nil)
 
-		if s.Quantity != 4 || s.PriceOverride == nil || s.PriceOverride.Amount() != 2750 || *s.PriceOverrideAdjustmentID != adjID {
+		if s.Quantity != 4 || !isCents(s.PriceOverride, 2750) || *s.PriceOverrideAdjustmentID != adjID {
 			t.Fatalf("o reajuste da mesma versão continua valendo: %+v", s)
 		}
 		ev := s.PopEvents()
@@ -475,7 +471,7 @@ func TestProrateChangeExamples(t *testing.T) {
 			oldPrice, newPrice := priceFlat(planA, c.oldCents), priceFlat(planB, c.newCents)
 			s := billedSubscription(t, planA, oldPrice, 1, c.start)
 
-			p, ok, err := ProrateChange(s, oldPrice, newPrice, 1, 1, c.at)
+			p, ok, err := ProrateChange(s, oldPrice, newPrice, 1, 1, c.at, ProrationDiscount{})
 			if err != nil || !ok {
 				t.Fatalf("esperava prorrata: ok=%v err=%v", ok, err)
 			}
@@ -513,7 +509,7 @@ func TestProrateChangeQuantityAndAdjustedPrice(t *testing.T) {
 		plan := fixturePlan(calendar.Monthly)
 		price := pricePerUnit(plan, big.NewRat(2500, 1))
 		s := billedSubscription(t, plan, price, 3, start)
-		p, ok, err := ProrateChange(s, price, price, 3, 5, at)
+		p, ok, err := ProrateChange(s, price, price, 3, 5, at, ProrationDiscount{})
 		if err != nil || !ok {
 			t.Fatalf("esperava prorrata: ok=%v err=%v", ok, err)
 		}
@@ -527,7 +523,7 @@ func TestProrateChangeQuantityAndAdjustedPrice(t *testing.T) {
 		plan := fixturePlan(calendar.Monthly)
 		price := pricePerUnit(plan, big.NewRat(2500, 1))
 		s := billedSubscription(t, plan, price, 5, start)
-		p, ok, err := ProrateChange(s, price, price, 5, 2, at)
+		p, ok, err := ProrateChange(s, price, price, 5, 2, at, ProrationDiscount{})
 		if err != nil || !ok {
 			t.Fatalf("esperava prorrata: ok=%v err=%v", ok, err)
 		}
@@ -540,8 +536,8 @@ func TestProrateChangeQuantityAndAdjustedPrice(t *testing.T) {
 		planA, planB := fixturePlan(calendar.Monthly), fixturePlan(calendar.Monthly)
 		priceA, priceB := pricePerUnit(planA, big.NewRat(2500, 1)), pricePerUnit(planB, big.NewRat(3000, 1))
 		s := billedSubscription(t, planA, priceA, 3, start)
-		s.PriceOverride = moneyPtr(2750)
-		p, ok, err := ProrateChange(s, s.EffectivePrice(priceA), priceB, 3, 3, at)
+		s.PriceOverride = big.NewRat(2750, 1)
+		p, ok, err := ProrateChange(s, s.EffectivePrice(priceA), priceB, 3, 3, at, ProrationDiscount{})
 		if err != nil || !ok {
 			t.Fatalf("esperava prorrata: ok=%v err=%v", ok, err)
 		}
@@ -549,6 +545,57 @@ func TestProrateChangeQuantityAndAdjustedPrice(t *testing.T) {
 			t.Fatalf("o crédito deve usar o preço reajustado: %+v", p)
 		}
 	})
+}
+
+func TestProrateChangeWithCouponPercent(t *testing.T) {
+	start := local(2026, time.April, 1, 12, 0)
+	at := local(2026, time.April, 21, 10, 0) // 10 de 30 dias
+	cases := []struct {
+		name                string
+		oldCents, newCents  int64
+		discount            ProrationDiscount
+		credit, charge, net int64
+		creditUnit          *big.Rat
+		chargeUnit          *big.Rat
+	}{
+		{"cupom de 10% nos dois planos reduz crédito e cobrança", 10000, 16000, ProrationDiscount{OldBP: 1000, NewBP: 1000},
+			3000, 4800, 1800, big.NewRat(-9000, 1), big.NewRat(14400, 1)},
+		// O cliente pagou R$ 50,00 pelo período: a parte não usufruída vale R$ 16,67.
+		{"cupom de 50% que não vale para o novo plano", 10000, 16000, ProrationDiscount{OldBP: 5000},
+			1667, 5333, 3666, big.NewRat(-5000, 1), big.NewRat(16000, 1)},
+		{"redução com cupom restrito ao plano anterior", 16000, 10000, ProrationDiscount{OldBP: 1000},
+			4800, 3333, -1467, big.NewRat(-14400, 1), big.NewRat(10000, 1)},
+		{"cupom de 100% no período pago não gera crédito", 16000, 10000, ProrationDiscount{OldBP: 10000},
+			0, 3333, 3333, new(big.Rat), big.NewRat(10000, 1)},
+		{"cupom de 100% nos dois planos zera a diferença", 16000, 10000, ProrationDiscount{OldBP: 10000, NewBP: 10000},
+			0, 0, 0, new(big.Rat), new(big.Rat)},
+		{"percentual acima de 100% é limitado", 10000, 16000, ProrationDiscount{OldBP: 12000, NewBP: -500},
+			0, 5333, 5333, new(big.Rat), big.NewRat(16000, 1)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			planA, planB := fixturePlan(calendar.Monthly), fixturePlan(calendar.Monthly)
+			oldPrice, newPrice := priceFlat(planA, c.oldCents), priceFlat(planB, c.newCents)
+			s := billedSubscription(t, planA, oldPrice, 1, start)
+			p, ok, err := ProrateChange(s, oldPrice, newPrice, 1, 1, at, c.discount)
+			if err != nil || !ok {
+				t.Fatalf("esperava prorrata: ok=%v err=%v", ok, err)
+			}
+			if p.Credit.Amount() != c.credit || p.Charge.Amount() != c.charge || p.Net.Amount() != c.net {
+				t.Fatalf("crédito %d, cobrança %d e diferença %d esperados: %v %v %v", c.credit, c.charge, c.net, p.Credit, p.Charge, p.Net)
+			}
+			if p.OldAmount.Amount() != c.oldCents || p.NewAmount.Amount() != c.newCents || p.Discount != c.discount {
+				t.Fatalf("componentes sem desconto e percentuais registrados: %+v", p)
+			}
+			if p.CreditUnitAmount().Cmp(c.creditUnit) != 0 || p.ChargeUnitAmount().Cmp(c.chargeUnit) != 0 {
+				t.Fatalf("valores unitários: crédito %s cobrança %s", p.CreditUnitAmount().RatString(), p.ChargeUnitAmount().RatString())
+			}
+			credit, err := money.FromRat(new(big.Rat).Mul(p.CreditUnitAmount(), p.Fraction), money.BRL, money.DefaultRounding)
+			if err != nil || credit.Amount() != -c.credit {
+				t.Fatalf("fração × valor unitário do crédito arredonda para o crédito: %v %v", credit, err)
+			}
+		})
+	}
 }
 
 func TestProrateChangeWithoutProration(t *testing.T) {
@@ -588,7 +635,7 @@ func TestProrateChangeWithoutProration(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			p, ok, err := ProrateChange(c.make(t), price, newPrice, 1, 1, c.at)
+			p, ok, err := ProrateChange(c.make(t), price, newPrice, 1, 1, c.at, ProrationDiscount{})
 			if err != nil || ok {
 				t.Fatalf("não deveria haver prorrata: ok=%v err=%v", ok, err)
 			}
@@ -627,7 +674,7 @@ func TestProrateChangeErrors(t *testing.T) {
 			if c.timezone != "" {
 				s.Timezone = c.timezone
 			}
-			p, ok, err := ProrateChange(s, c.oldPrice, c.newPrice, c.qty, c.qty, at)
+			p, ok, err := ProrateChange(s, c.oldPrice, c.newPrice, c.qty, c.qty, at, ProrationDiscount{})
 			if err == nil || ok || p.Fraction != nil {
 				t.Fatalf("esperava erro sem prorrata: ok=%v err=%v", ok, err)
 			}

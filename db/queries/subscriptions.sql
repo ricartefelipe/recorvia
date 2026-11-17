@@ -95,6 +95,10 @@ UPDATE subscription_discounts SET status = 'ended', ended_at = @now
 SELECT * FROM pending_invoice_items WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id AND invoice_id IS NULL
  ORDER BY created_at, id FOR UPDATE;
 
+-- name: HasOpenPendingItems :one
+SELECT EXISTS (SELECT 1 FROM pending_invoice_items WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id
+                AND invoice_id IS NULL)::boolean;
+
 -- name: MarkPendingItemsBilled :exec
 UPDATE pending_invoice_items SET invoice_id = @invoice_id WHERE tenant_id = @tenant_id AND id = ANY (@ids::uuid[]) AND invoice_id IS NULL;
 
@@ -152,9 +156,10 @@ UPDATE subscription_price_adjustments
  WHERE tenant_id = @tenant_id AND id = @id AND status = 'scheduled';
 
 -- name: CancelPriceAdjustment :execrows
-UPDATE subscription_price_adjustments SET status = 'canceled', canceled_at = @canceled_at
+UPDATE subscription_price_adjustments SET status = 'canceled', canceled_at = @canceled_at, cancel_reason = @cancel_reason
  WHERE tenant_id = @tenant_id AND id = @id AND status = 'scheduled';
 
--- name: CancelScheduledPriceAdjustments :execrows
-UPDATE subscription_price_adjustments SET status = 'canceled', canceled_at = @canceled_at
- WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id AND status = 'scheduled';
+-- name: CancelScheduledPriceAdjustments :many
+UPDATE subscription_price_adjustments SET status = 'canceled', canceled_at = @canceled_at, cancel_reason = @cancel_reason
+ WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id AND status = 'scheduled'
+RETURNING id;

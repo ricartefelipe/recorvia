@@ -3,6 +3,8 @@ package billing
 import (
 	"context"
 	"fmt"
+	"math/big"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -67,11 +69,16 @@ type ChangeResult struct {
 // Change aplica ou agenda a mudança.
 //
 // Política de prorrata (mudança imediata com o período corrente já
-// faturado): diferença positiva gera fatura de prorrata imediata, com o
-// crédito da parte não usufruída e a cobrança proporcional do novo valor;
+// faturado): diferença positiva gera fatura de prorrata imediata, com a
+// cobrança proporcional do novo valor e o crédito da parte não usufruída;
 // diferença negativa vira crédito do cliente, consumido nas próximas
-// faturas. Cupom percentual vigente reduz a diferença na mesma proporção;
-// cupom de valor fixo não é prorrateado.
+// faturas; diferença zero não gera documento. Cupom percentual: o crédito
+// desconta o percentual do cupom vigente no período pago e a cobrança, o
+// percentual do cupom que continua valendo no novo plano (zero quando o
+// cupom não vale para ele); cupom de valor fixo não é prorrateado.
+//
+// A troca da versão de preço cancela os reajustes programados da
+// assinatura, que foram programados sobre o preço anterior.
 func (s *ChangeService) Change(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, by *uuid.UUID, subscriptionID uuid.UUID,
 	in ChangeInput, expectedVersion int) (ChangeResult, error) {
 	var res ChangeResult
@@ -159,7 +166,13 @@ func (s *ChangeService) Change(ctx context.Context, tenantID uuid.UUID, actor au
 			if price.ID == sub.PriceVersionID {
 				newEff = sub.EffectivePrice(price)
 			}
-			pr, prorate, err := subscriptions.ProrateChange(sub, oldEff, newEff, sub.Quantity, qty, now)
+			// O desconto é lido antes da troca: o cupom que não vale para o novo
+			// plano é encerrado em seguida, mas ainda vale para o período pago.
+			discount, err := tx.ActiveDiscount(ctx, sub.ID)
+			if err != nil {
+				return err
+			}
+			pr, prorate, err := subscriptions.ProrateChange(sub, oldEff, newEff, sub.Quantity, qty, now, prorationDiscount(discount, plan.ID))
 			if err != nil {
 				return err
 			}
@@ -173,12 +186,21 @@ func (s *ChangeService) Change(ctx context.Context, tenantID uuid.UUID, actor au
 				event = "plan_changed"
 			}
 			sub.ApplyChange(plan, price, qty, event, now, chDetails)
+			if kind == subscriptions.PlanChange {
+				canceled, err := cancelAdjustmentsOnPriceChange(ctx, tx, &sub, now)
+				if err != nil {
+					return err
+				}
+				if len(canceled) > 0 {
+					details["canceled_adjustment_ids"] = canceled
+				}
+			}
 			if err := endInapplicableDiscount(ctx, tx, &sub, now); err != nil {
 				return err
 			}
 			if prorate && !pr.Net.IsZero() {
 				res.Proration = &pr
-				if err := s.settleProration(ctx, tx, &sub, oldPlan, plan, oldEff, newEff, oldQty, qty, pr, actor, now, &res); err != nil {
+				if err := s.settleProration(ctx, tx, &sub, oldPlan, plan, oldEff, newEff, oldQty, qty, pr, discount, actor, now, &res); err != nil {
 					return err
 				}
 				details["proration_net"] = pr.Net.Amount()
@@ -201,37 +223,52 @@ func (s *ChangeService) Change(ctx context.Context, tenantID uuid.UUID, actor au
 	return res, err
 }
 
+// prorationDiscount extrai os percentuais de cupom da prorrata: o desconto
+// vigente vale para o crédito do período pago e, se o cupom também valer
+// para o novo plano, para a cobrança proporcional. Cupom de valor fixo não é
+// prorrateado.
+func prorationDiscount(d *Discount, newPlanID uuid.UUID) subscriptions.ProrationDiscount {
+	if d == nil || d.AmountOff != nil || d.PercentBP <= 0 {
+		return subscriptions.ProrationDiscount{}
+	}
+	pd := subscriptions.ProrationDiscount{OldBP: d.PercentBP}
+	if d.AppliesTo(newPlanID) {
+		pd.NewBP = d.PercentBP
+	}
+	return pd
+}
+
+// discountNote descreve o percentual de desconto aplicado a um item de
+// prorrata ("desconto de 12,5%").
+func discountNote(bp int64) string {
+	if bp <= 0 {
+		return ""
+	}
+	pct := strings.ReplaceAll(money.RatString(big.NewRat(bp, 100)), ".", ",")
+	return fmt.Sprintf(", desconto de %s%%", pct)
+}
+
+// addDiscountSnapshot registra no snapshot do item de prorrata o cupom e o
+// percentual aplicados (nada quando o percentual é zero).
+func addDiscountSnapshot(snap map[string]any, d *Discount, bp int64) {
+	if bp > 0 {
+		snap["discount_percent_bp"], snap["coupon_code"], snap["discount_id"] = bp, d.CouponCode, d.ID
+	}
+}
+
 func (s *ChangeService) settleProration(ctx context.Context, tx ChangeTx, sub *subscriptions.Subscription, oldPlan, newPlan catalog.Plan,
-	oldPrice, newPrice catalog.PriceVersion, oldQty, newQty int, pr subscriptions.Proration, actor audit.Actor, now time.Time, res *ChangeResult) error {
+	oldPrice, newPrice catalog.PriceVersion, oldQty, newQty int, pr subscriptions.Proration, discount *Discount, actor audit.Actor, now time.Time,
+	res *ChangeResult) error {
 	settings, err := tx.TenantSettings(ctx)
 	if err != nil {
 		return err
 	}
-	discount, err := tx.ActiveDiscount(ctx, sub.ID)
-	if err != nil {
-		return err
-	}
-	pct := int64(0)
-	if discount != nil && discount.AmountOff == nil {
-		pct = discount.PercentBP
-	}
 	span := fmt.Sprintf("%s, %d de %d dias", localRange(pr.Period, settings.Location), pr.RemainingDays, pr.PeriodDays)
 	if pr.Net.IsNegative() {
+		// Os percentuais de cupom já estão no crédito e na cobrança.
 		credit, err := pr.Net.Neg()
 		if err != nil {
 			return err
-		}
-		if pct > 0 {
-			off, err := credit.MulRat(money.Percent(pct), money.DefaultRounding)
-			if err != nil {
-				return err
-			}
-			if credit, err = credit.Sub(off); err != nil {
-				return err
-			}
-		}
-		if !credit.IsPositive() {
-			return nil
 		}
 		reason := fmt.Sprintf("Crédito de prorrata: %s para %s (%s)", oldPlan.Name, newPlan.Name, span)
 		creditID, err := tx.AddCustomerCredit(ctx, sub.CustomerID, credit, "proration", reason, nil)
@@ -271,28 +308,25 @@ func (s *ChangeService) settleProration(ctx context.Context, tx ChangeTx, sub *s
 	for k, v := range base {
 		creditSnap[k], chargeSnap[k] = v, v
 	}
-	negCredit, err := pr.Credit.Neg()
-	if err != nil {
+	if discount != nil {
+		addDiscountSnapshot(creditSnap, discount, pr.Discount.OldBP)
+		addDiscountSnapshot(chargeSnap, discount, pr.Discount.NewBP)
+	}
+	// A cobrança entra antes do crédito: o rascunho é recalculado a cada item
+	// e o total parcial não pode ficar negativo.
+	if err := inv.AddItem(Item{ID: ids.New(), Kind: ItemProration, Description: fmt.Sprintf("Cobrança proporcional de %s (%s%s)",
+		label(newPlan, newPrice, newQty), span, discountNote(pr.Discount.NewBP)), Quantity: pr.Fraction, UnitAmount: pr.ChargeUnitAmount(),
+		Amount: pr.Charge, Period: &period, PlanID: &newPlan.ID, PriceVersionID: &newPrice.ID, PriceSnapshot: chargeSnap}); err != nil {
 		return err
 	}
 	if !pr.Credit.IsZero() {
-		if err := inv.AddItem(Item{ID: ids.New(), Kind: ItemProration, Description: fmt.Sprintf("Crédito proporcional de %s (%s)",
-			label(oldPlan, oldPrice, oldQty), span), Quantity: pr.Fraction, UnitAmount: negCredit.Rat(), Amount: negCredit, Period: &period,
-			PlanID: &oldPlan.ID, PriceVersionID: &oldPrice.ID, PriceSnapshot: creditSnap}); err != nil {
-			return err
-		}
-	}
-	if err := inv.AddItem(Item{ID: ids.New(), Kind: ItemProration, Description: fmt.Sprintf("Cobrança proporcional de %s (%s)",
-		label(newPlan, newPrice, newQty), span), Quantity: pr.Fraction, UnitAmount: pr.NewAmount.Rat(), Amount: pr.Charge, Period: &period,
-		PlanID: &newPlan.ID, PriceVersionID: &newPrice.ID, PriceSnapshot: chargeSnap}); err != nil {
-		return err
-	}
-	if pct > 0 {
-		off, err := pr.Net.MulRat(money.Percent(pct), money.DefaultRounding)
+		negCredit, err := pr.Credit.Neg()
 		if err != nil {
 			return err
 		}
-		if _, err := inv.ApplyDiscount(off); err != nil {
+		if err := inv.AddItem(Item{ID: ids.New(), Kind: ItemProration, Description: fmt.Sprintf("Crédito proporcional de %s (%s%s)",
+			label(oldPlan, oldPrice, oldQty), span, discountNote(pr.Discount.OldBP)), Quantity: pr.Fraction, UnitAmount: pr.CreditUnitAmount(),
+			Amount: negCredit, Period: &period, PlanID: &oldPlan.ID, PriceVersionID: &oldPrice.ID, PriceSnapshot: creditSnap}); err != nil {
 			return err
 		}
 	}

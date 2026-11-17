@@ -15,21 +15,20 @@ func decimalPlaces(s string) int {
 	return len(strings.TrimRight(frac, "0"))
 }
 
-// FuzzBuildEventQuantity garante que buildEvent só aceita quantidades
+// FuzzParseEventQuantity garante que parseEvent só aceita quantidades
 // representáveis em numeric(20,6), sem alterar o valor informado, e que
 // cada rejeição de quantidade tem a mensagem do primeiro limite violado.
-func FuzzBuildEventQuantity(f *testing.F) {
+func FuzzParseEventQuantity(f *testing.F) {
 	for _, s := range []string{"0", "-0", "12.5", " 7 ", "0.000001", "0.0000001", "1.0000000", "1.0000001", "-1",
 		"99999999999999.999999", "100000000000000", "1e3", "12,5", "abc", "", "00012.500"} {
 		f.Add(s)
 	}
 	e := newEnv()
-	e.metric.MaxQuantityPerEvent = nil
 	base := e.input()
 	f.Fuzz(func(t *testing.T, s string) {
 		in := base
 		in.Quantity = s
-		ev, msg := buildEvent(e.tenantID, e.sub, e.price, e.metric, in, testNow)
+		ev, msg := parseEvent(e.tenantID, e.sub, e.metric, in, testNow)
 
 		text := strings.TrimSpace(s)
 		r, err := money.ParseDecimal(text)

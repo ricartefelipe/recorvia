@@ -538,7 +538,7 @@ type Subscription struct {
 	CreatedAt                 time.Time
 	UpdatedAt                 time.Time
 	Version                   int32
-	PriceOverrideAmount       *int64
+	PriceOverrideAmount       pgtype.Numeric
 	PriceOverrideAdjustmentID *uuid.UUID
 }
 
@@ -566,11 +566,12 @@ type SubscriptionPriceAdjustment struct {
 	IndexName          string
 	Reason             string
 	Status             string
-	PreviousAmount     *int64
-	ResultingAmount    *int64
+	PreviousAmount     pgtype.Numeric
+	ResultingAmount    pgtype.Numeric
 	AppliedPeriodStart *time.Time
 	AppliedAt          *time.Time
 	CanceledAt         *time.Time
+	CancelReason       *string
 	CreatedBy          *uuid.UUID
 	CreatedAt          time.Time
 }

@@ -42,8 +42,11 @@ stateDiagram-v2
 stateDiagram-v2
   [*] --> scheduled: programação (data efetiva futura)
   scheduled --> applied: primeiro período iniciado na data efetiva ou depois (motor)
-  scheduled --> canceled: cancelamento manual ou da assinatura
+  scheduled --> canceled: cancelamento manual ou da assinatura, troca da versão de preço ou reajuste inaplicável no ciclo
 ```
+
+O motivo do cancelamento do reajuste fica em `cancel_reason`: `manual`, `subscription_ended`,
+`price_version_changed`, `price_without_fixed_component` ou `adjustment_amount_limit`.
 
 Há no máximo uma mudança `pending` por assinatura e um reajuste `scheduled` por data (índices
 únicos parciais).
@@ -83,7 +86,8 @@ stateDiagram-v2
   pending --> canceled
   awaiting_payment --> paid
   awaiting_payment --> failed
-  awaiting_payment --> canceled: fatura cancelada
+  awaiting_payment --> canceled: fatura cancelada ou nota de crédito
+  canceled --> paid: pagamento confirmado pelo provedor
   paid --> partially_refunded
   paid --> refunded
   paid --> disputed: chargeback solicitado
@@ -92,6 +96,10 @@ stateDiagram-v2
   disputed --> paid: disputa ganha
   disputed --> charged_back: disputa perdida
 ```
+
+O cancelamento de cobrança é apenas local: a cobrança continua válida no provedor. Por isso a
+confirmação de pagamento pelo provedor é a única transição que sai de `canceled`; o valor é aplicado
+à fatura e o excedente vira crédito do cliente.
 
 ## Operação externa (`payment_operations`)
 

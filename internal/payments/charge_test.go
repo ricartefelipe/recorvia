@@ -151,14 +151,42 @@ func TestMarkPaidRules(t *testing.T) {
 	c := newTestCharge(t, 10000)
 	wantAppErr(t, c.MarkPaid(brl(0), brl(0), chargeNow, chargeNow), apperr.KindInvalid, "invalid_amount")
 	wantAppErr(t, c.MarkPaid(money.New(100, money.Currency{}), brl(0), chargeNow, chargeNow), apperr.KindInvalid, "invalid_amount")
-	for _, st := range []ChargeStatus{ChargeFailed, ChargeCanceled} {
-		c := newTestCharge(t, 10000)
-		c.Status = st
-		wantAppErr(t, c.MarkPaid(brl(10000), brl(0), chargeNow, chargeNow), apperr.KindConflict, "invalid_charge_transition")
-		if c.PaidAt != nil || !c.AmountPaid.IsZero() {
-			t.Fatal("transição rejeitada não registra pagamento")
-		}
+	failed := newTestCharge(t, 10000)
+	failed.Status = ChargeFailed
+	wantAppErr(t, failed.MarkPaid(brl(10000), brl(0), chargeNow, chargeNow), apperr.KindConflict, "invalid_charge_transition")
+	if failed.PaidAt != nil || !failed.AmountPaid.IsZero() || failed.Status != ChargeFailed {
+		t.Fatal("transição rejeitada não registra pagamento")
 	}
+	canceled := newTestCharge(t, 10000)
+	canceled.Status = ChargeCanceled
+	wantAppErr(t, canceled.MarkPaid(brl(0), brl(0), chargeNow, chargeNow), apperr.KindInvalid, "invalid_amount")
+	if canceled.Status != ChargeCanceled {
+		t.Fatal("valor inválido não altera a cobrança cancelada")
+	}
+}
+
+// Cobrança cancelada apenas no Recorvia continua válida no provedor: a
+// confirmação do provedor é a única saída do estado canceled e não depende da
+// matriz genérica de transições.
+func TestMarkPaidConfirmsLocallyCanceledCharge(t *testing.T) {
+	c := newTestCharge(t, 10000)
+	if err := c.MarkCreated("pay_1", "https://checkout.exemplo/pay_1", chargeNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.MarkCanceled(chargeNow); err != nil {
+		t.Fatal(err)
+	}
+	paidAt, at := chargeNow.Add(time.Hour), chargeNow.Add(2*time.Hour)
+	if err := c.MarkPaid(brl(10000), brl(199), paidAt, at); err != nil {
+		t.Fatalf("confirmação do provedor para cobrança cancelada localmente: %v", err)
+	}
+	if c.Status != ChargePaid || c.AmountPaid.Amount() != 10000 || c.Fee.Amount() != 199 || !c.PaidAt.Equal(paidAt) || !c.UpdatedAt.Equal(at) {
+		t.Fatalf("cobrança paga após cancelamento local: %+v", c)
+	}
+	if CanTransition(ChargeCanceled, ChargePaid) {
+		t.Fatal("a matriz genérica não permite sair de canceled")
+	}
+	wantAppErr(t, c.MarkCanceled(at), apperr.KindConflict, "invalid_charge_transition")
 }
 
 func TestMarkFailedAndCanceled(t *testing.T) {

@@ -466,13 +466,15 @@ func TestTermsServiceCancelAdjustment(t *testing.T) {
 			t.Fatal(err)
 		}
 		stored := f.store.adjustments[0]
-		if stored.Status != AdjustmentCanceled || stored.CanceledAt == nil || !stored.CanceledAt.Equal(f.clock.Now()) {
+		if stored.Status != AdjustmentCanceled || stored.CanceledAt == nil || !stored.CanceledAt.Equal(f.clock.Now()) ||
+			stored.CancelReason != AdjustmentCanceledManually {
 			t.Fatalf("reajuste cancelado: %+v", stored)
 		}
 		if !slices.Equal(f.store.forUpdate, []bool{true}) {
 			t.Fatal("a assinatura deve ser bloqueada")
 		}
-		f.assertRecorded(t, "price_adjustment_canceled", "subscription.price_adjustment_canceled", map[string]any{"adjustment_id": a.ID})
+		f.assertRecorded(t, "price_adjustment_canceled", "subscription.price_adjustment_canceled",
+			map[string]any{"adjustment_id": a.ID, "reason": AdjustmentCanceledManually})
 	})
 
 	cases := []struct {

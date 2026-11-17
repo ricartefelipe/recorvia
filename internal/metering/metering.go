@@ -2,26 +2,46 @@
 //
 // Política de eventos:
 //   - external_id identifica o evento: reenvio com o mesmo conteúdo é
-//     "duplicate"; com conteúdo diferente é rejeitado.
+//     "duplicate"; com conteúdo diferente é rejeitado. A regra vale também
+//     para external_id repetido no mesmo lote, comparado com o evento já
+//     gravado. A deduplicação vem antes das validações que dependem do
+//     estado atual (preço vigente, métrica, suspensão, encerramento): o
+//     reenvio de um evento gravado é respondido pelo conteúdo, mesmo que a
+//     assinatura, o preço ou a métrica tenham mudado depois.
+//   - occurred_at é truncado a microssegundos (precisão do timestamptz)
+//     antes de validar, gravar e comparar.
 //   - O evento pertence ao período de cobrança que contém occurred_at, no
 //     fuso do contrato; eventos anteriores ao primeiro período (avaliação ou
-//     antes do início), posteriores ao encerramento, durante suspensão ou
-//     mais de 5 minutos no futuro são rejeitados.
-//   - Se o período ainda não foi fechado pelo faturamento, o evento é
-//     "accepted" e entra no fechamento.
-//   - Se o período já foi fechado, o evento é "late" quando recebido até
-//     late_grace_hours (configuração da métrica) após o fim do período, e
-//     corrige o faturamento por ajuste posterior, sem alterar a fatura
-//     emitida; depois da tolerância, é rejeitado.
+//     antes do início), posteriores ao encerramento, ocorridos durante uma
+//     suspensão (pelo histórico da assinatura, mesmo depois da reativação)
+//     ou mais de 5 minutos no futuro são rejeitados.
+//   - Se o período ainda não foi fechado pelo faturamento, a métrica precisa
+//     fazer parte do preço vigente e o evento é "accepted" e entra no
+//     fechamento. Período cujo fechamento já passou sem agregado da métrica
+//     não é mais faturável e o evento é rejeitado.
+//   - Se o período já foi fechado (há agregado da métrica), a métrica é
+//     válida para ele, ainda que o preço vigente tenha mudado. O evento é
+//     "late" quando recebido até late_grace_hours (configuração da métrica)
+//     após o fim do período, e corrige o faturamento por ajuste posterior,
+//     sem alterar a fatura emitida; depois da tolerância, é rejeitado.
+//   - A ingestão lê a assinatura com bloqueio compartilhado, e o
+//     faturamento a reivindica com bloqueio exclusivo: a decisão entre
+//     "accepted" e "late" nunca é tomada durante um fechamento ainda não
+//     confirmado.
+//   - Textos com caractere NUL ou UTF-8 inválido e properties com NUL são
+//     rejeitados por evento, sem desfazer o lote.
 package metering
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"math/big"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -124,9 +144,26 @@ type Result struct {
 	Error      string
 }
 
+// SuspensionChange é uma suspensão ou reativação registrada no histórico da
+// assinatura.
+type SuspensionChange struct {
+	At time.Time
+	// Suspended indica suspensão; falso indica reativação.
+	Suspended bool
+}
+
 // Tx são as operações de consumo na transação do tenant.
 type Tx interface {
+	// Subscription lê a assinatura sem bloqueio (consultas).
 	Subscription(ctx context.Context, id uuid.UUID) (subscriptions.Subscription, error)
+	// SubscriptionForShare lê a assinatura com bloqueio compartilhado até o
+	// fim da transação. O faturamento reivindica a assinatura com bloqueio
+	// exclusivo; assim a ingestão espera o fechamento em andamento e só
+	// depois verifica se o período está fechado.
+	SubscriptionForShare(ctx context.Context, id uuid.UUID) (subscriptions.Subscription, error)
+	// SuspensionHistory lista as suspensões e reativações da assinatura em
+	// ordem cronológica.
+	SuspensionHistory(ctx context.Context, subscriptionID uuid.UUID) ([]SuspensionChange, error)
 	PriceVersion(ctx context.Context, id uuid.UUID) (catalog.PriceVersion, error)
 	Metric(ctx context.Context, id uuid.UUID) (catalog.Metric, error)
 	MetricByCode(ctx context.Context, code string) (catalog.Metric, error)
@@ -162,20 +199,21 @@ func (s *Service) Ingest(ctx context.Context, tenantID uuid.UUID, batch []EventI
 	results := make([]Result, len(batch))
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		now := s.clock.Now()
-		subs := map[uuid.UUID]*subscriptions.Subscription{}
-		metrics := map[string]*catalog.Metric{}
-		prices := map[uuid.UUID]catalog.PriceVersion{}
-		seen := map[string]int{}
-		for i, in := range batch {
-			if j, dup := seen[in.ExternalID]; dup && in.ExternalID != "" {
-				results[i] = Result{ExternalID: in.ExternalID, Outcome: OutcomeDuplicate, EventID: results[j].EventID}
-				if results[j].Outcome == OutcomeRejected {
-					results[i] = results[j]
-				}
-				continue
+		c := newBatchCache(tx)
+		// As assinaturas do lote são bloqueadas antes de tudo, em ordem
+		// crescente de ID (a mesma ordem da correção de consumo), para que
+		// transações concorrentes não as bloqueiem em ordens opostas.
+		for _, id := range batchSubscriptions(batch) {
+			if _, err := c.subscription(ctx, id); err != nil {
+				return err
 			}
-			seen[in.ExternalID] = i
-			r, err := s.ingestOne(ctx, tx, tenantID, in, now, subs, metrics, prices)
+		}
+		for i, in := range batch {
+			// external_id repetido no lote passa pelo mesmo caminho: a
+			// consulta por external_id enxerga o evento gravado antes na
+			// mesma transação e compara o conteúdo; se o primeiro foi
+			// rejeitado, o seguinte é avaliado por si.
+			r, err := ingestOne(ctx, c, tenantID, in, now)
 			if err != nil {
 				return err
 			}
@@ -189,91 +227,169 @@ func (s *Service) Ingest(ctx context.Context, tenantID uuid.UUID, batch []EventI
 	return results, nil
 }
 
+// batchSubscriptions devolve as assinaturas distintas do lote em ordem
+// crescente (a ordem de bytes é a mesma do tipo uuid no PostgreSQL).
+func batchSubscriptions(batch []EventInput) []uuid.UUID {
+	out := make([]uuid.UUID, 0, len(batch))
+	for _, in := range batch {
+		out = append(out, in.SubscriptionID)
+	}
+	slices.SortFunc(out, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
+	return slices.Compact(out)
+}
+
+// batchCache guarda as consultas repetidas dentro de um lote. Ausências
+// também são guardadas (ponteiro nulo).
+type batchCache struct {
+	tx          Tx
+	subs        map[uuid.UUID]*subscriptions.Subscription
+	metrics     map[string]*catalog.Metric
+	prices      map[uuid.UUID]catalog.PriceVersion
+	suspensions map[uuid.UUID][]SuspensionChange
+}
+
+func newBatchCache(tx Tx) *batchCache {
+	return &batchCache{tx: tx, subs: map[uuid.UUID]*subscriptions.Subscription{}, metrics: map[string]*catalog.Metric{},
+		prices: map[uuid.UUID]catalog.PriceVersion{}, suspensions: map[uuid.UUID][]SuspensionChange{}}
+}
+
+// subscription lê a assinatura com bloqueio compartilhado na primeira vez
+// em que aparece no lote; nil indica assinatura inexistente.
+func (c *batchCache) subscription(ctx context.Context, id uuid.UUID) (*subscriptions.Subscription, error) {
+	if sub, ok := c.subs[id]; ok {
+		return sub, nil
+	}
+	found, err := c.tx.SubscriptionForShare(ctx, id)
+	if apperr.IsKind(err, apperr.KindNotFound) {
+		c.subs[id] = nil
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.subs[id] = &found
+	return &found, nil
+}
+
+// metric devolve a métrica pelo código; nil indica métrica inexistente.
+func (c *batchCache) metric(ctx context.Context, code string) (*catalog.Metric, error) {
+	if m, ok := c.metrics[code]; ok {
+		return m, nil
+	}
+	found, err := c.tx.MetricByCode(ctx, code)
+	if apperr.IsKind(err, apperr.KindNotFound) {
+		c.metrics[code] = nil
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.metrics[code] = &found
+	return &found, nil
+}
+
+func (c *batchCache) price(ctx context.Context, id uuid.UUID) (catalog.PriceVersion, error) {
+	if p, ok := c.prices[id]; ok {
+		return p, nil
+	}
+	p, err := c.tx.PriceVersion(ctx, id)
+	if err != nil {
+		return catalog.PriceVersion{}, err
+	}
+	c.prices[id] = p
+	return p, nil
+}
+
+// suspendedAt informa se a assinatura estava suspensa no instante at: pela
+// situação atual e pela última suspensão ou reativação registrada no
+// histórico até at, inclusive.
+func (c *batchCache) suspendedAt(ctx context.Context, sub subscriptions.Subscription, at time.Time) (bool, error) {
+	if sub.Status == subscriptions.Suspended && sub.SuspendedAt != nil && !at.Before(*sub.SuspendedAt) {
+		return true, nil
+	}
+	history, ok := c.suspensions[sub.ID]
+	if !ok {
+		var err error
+		if history, err = c.tx.SuspensionHistory(ctx, sub.ID); err != nil {
+			return false, err
+		}
+		c.suspensions[sub.ID] = history
+	}
+	return suspendedIn(history, at), nil
+}
+
+// suspendedIn aplica a última mudança registrada até at, inclusive; em
+// empate de instante vale a que aparece depois na lista.
+func suspendedIn(history []SuspensionChange, at time.Time) bool {
+	var last *SuspensionChange
+	for i := range history {
+		ch := &history[i]
+		if ch.At.After(at) {
+			continue
+		}
+		if last == nil || !ch.At.Before(last.At) {
+			last = ch
+		}
+	}
+	return last != nil && last.Suspended
+}
+
 func reject(in EventInput, msg string) Result {
 	return Result{ExternalID: in.ExternalID, Outcome: OutcomeRejected, Error: msg}
 }
 
-func (s *Service) ingestOne(ctx context.Context, tx Tx, tenantID uuid.UUID, in EventInput, now time.Time,
-	subs map[uuid.UUID]*subscriptions.Subscription, metrics map[string]*catalog.Metric, prices map[uuid.UUID]catalog.PriceVersion) (Result, error) {
+func ingestOne(ctx context.Context, c *batchCache, tenantID uuid.UUID, in EventInput, now time.Time) (Result, error) {
 	in.ExternalID = strings.TrimSpace(in.ExternalID)
 	if l := len(in.ExternalID); l < 1 || l > 128 {
 		return reject(in, "external_id deve ter de 1 a 128 caracteres."), nil
 	}
-	sub, ok := subs[in.SubscriptionID]
-	if !ok {
-		found, err := tx.Subscription(ctx, in.SubscriptionID)
-		if apperr.IsKind(err, apperr.KindNotFound) {
-			subs[in.SubscriptionID] = nil
-			return reject(in, "Assinatura não encontrada."), nil
-		}
-		if err != nil {
-			return Result{}, err
-		}
-		sub, subs[in.SubscriptionID] = &found, &found
+	// O PostgreSQL recusa NUL e UTF-8 inválido em text; a verificação vem
+	// antes de qualquer consulta para que o erro não desfaça o lote.
+	if msg := invalidText(in); msg != "" {
+		return reject(in, msg), nil
+	}
+	sub, err := c.subscription(ctx, in.SubscriptionID)
+	if err != nil {
+		return Result{}, err
 	}
 	if sub == nil {
 		return reject(in, "Assinatura não encontrada."), nil
 	}
-	metric, ok := metrics[in.MetricCode]
-	if !ok {
-		found, err := tx.MetricByCode(ctx, in.MetricCode)
-		if apperr.IsKind(err, apperr.KindNotFound) {
-			metrics[in.MetricCode] = nil
-			return reject(in, "Métrica não encontrada."), nil
-		}
-		if err != nil {
-			return Result{}, err
-		}
-		metric, metrics[in.MetricCode] = &found, &found
+	metric, err := c.metric(ctx, in.MetricCode)
+	if err != nil {
+		return Result{}, err
 	}
 	if metric == nil {
 		return reject(in, "Métrica não encontrada."), nil
 	}
-	price, ok := prices[sub.PriceVersionID]
-	if !ok {
-		var err error
-		if price, err = tx.PriceVersion(ctx, sub.PriceVersionID); err != nil {
-			return Result{}, err
-		}
-		prices[sub.PriceVersionID] = price
-	}
-	ev, msg := buildEvent(tenantID, *sub, price, *metric, in, now)
+	ev, msg := parseEvent(tenantID, *sub, *metric, in, now)
 	if msg != "" {
 		return reject(in, msg), nil
 	}
-	existing, err := tx.EventByExternalID(ctx, ev.ExternalID)
+	// Deduplicação antes das validações que dependem do estado atual: o
+	// reenvio de um evento gravado é respondido pelo conteúdo, mesmo que a
+	// assinatura, o preço ou a métrica tenham mudado depois.
+	existing, err := c.tx.EventByExternalID(ctx, ev.ExternalID)
 	switch {
 	case err == nil:
 		return duplicateOrConflict(in, existing, ev), nil
 	case !apperr.IsKind(err, apperr.KindNotFound):
 		return Result{}, err
 	}
-	closed, err := tx.PeriodClosed(ctx, sub.ID, metric.ID, ev.PeriodStart)
+	outcome, msg, err := admit(ctx, c, *sub, *metric, in, &ev, now)
 	if err != nil {
 		return Result{}, err
 	}
-	outcome := OutcomeAccepted
-	if closed {
-		sched, err := sub.Schedule()
-		if err != nil {
-			return Result{}, err
-		}
-		end := sched.Period(sched.IndexOf(ev.OccurredAt)).End
-		if sub.EndedAt != nil && sub.EndedAt.Before(end) {
-			end = *sub.EndedAt
-		}
-		if now.After(end.Add(time.Duration(metric.LateGraceHours) * time.Hour)) {
-			return reject(in, "Período já faturado e fora da tolerância de atraso da métrica."), nil
-		}
-		ev.Status, outcome = Late, OutcomeLate
+	if msg != "" {
+		return reject(in, msg), nil
 	}
-	inserted, err := tx.InsertEvent(ctx, ev)
+	inserted, err := c.tx.InsertEvent(ctx, ev)
 	if err != nil {
 		return Result{}, err
 	}
 	if !inserted {
 		// Inserção concorrente com o mesmo external_id.
-		existing, err := tx.EventByExternalID(ctx, ev.ExternalID)
+		existing, err := c.tx.EventByExternalID(ctx, ev.ExternalID)
 		if err != nil {
 			return Result{}, err
 		}
@@ -291,19 +407,59 @@ func duplicateOrConflict(in EventInput, existing, ev Event) Result {
 	return Result{ExternalID: in.ExternalID, Outcome: OutcomeDuplicate, EventID: &id}
 }
 
-// buildEvent valida o evento contra a assinatura, o preço e a métrica.
-// Retorna a mensagem de rejeição, se houver.
-func buildEvent(tenantID uuid.UUID, sub subscriptions.Subscription, price catalog.PriceVersion, metric catalog.Metric,
-	in EventInput, now time.Time) (Event, string) {
-	if !price.HasUsage() || price.MetricID == nil || *price.MetricID != metric.ID {
-		return Event{}, "A métrica não faz parte do preço vigente da assinatura."
+// invalidText aponta o primeiro campo de texto com caractere NUL ou UTF-8
+// inválido.
+func invalidText(in EventInput) string {
+	fields := [...]struct{ name, value string }{{"external_id", in.ExternalID}, {"metric_code", in.MetricCode},
+		{"unit", in.Unit}, {"unique_key", in.UniqueKey}}
+	for _, f := range fields {
+		if strings.IndexByte(f.value, 0) >= 0 || !utf8.ValidString(f.value) {
+			return f.name + " contém caractere inválido (NUL ou UTF-8 inválido)."
+		}
 	}
-	if metric.Status != catalog.Active {
-		return Event{}, "A métrica está arquivada."
+	return ""
+}
+
+// hasNUL informa se alguma chave ou texto das propriedades serializadas
+// contém o caractere NUL (escape \u0000), que o jsonb não aceita.
+func hasNUL(serialized []byte) bool {
+	if !bytes.Contains(serialized, []byte(`\u0000`)) {
+		return false
 	}
-	if in.Unit != "" && in.Unit != metric.Unit {
-		return Event{}, "Unidade diferente da unidade da métrica (" + metric.Unit + ")."
+	// O trecho pode ser uma barra invertida literal seguida de "u0000";
+	// a decodificação distingue os dois casos.
+	var v any
+	if json.Unmarshal(serialized, &v) != nil {
+		return true
 	}
+	return containsNUL(v)
+}
+
+func containsNUL(v any) bool {
+	switch x := v.(type) {
+	case string:
+		return strings.IndexByte(x, 0) >= 0
+	case map[string]any:
+		for k, e := range x {
+			if strings.IndexByte(k, 0) >= 0 || containsNUL(e) {
+				return true
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if containsNUL(e) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// parseEvent interpreta o conteúdo do evento, que é o que a deduplicação
+// compara. As validações aqui dependem somente do próprio evento; as que
+// dependem do estado atual da assinatura, do preço ou da métrica ficam em
+// admit, depois da deduplicação. Retorna a mensagem de rejeição, se houver.
+func parseEvent(tenantID uuid.UUID, sub subscriptions.Subscription, metric catalog.Metric, in EventInput, now time.Time) (Event, string) {
 	qty, err := money.ParseDecimal(strings.TrimSpace(in.Quantity))
 	switch {
 	case err != nil:
@@ -314,13 +470,8 @@ func buildEvent(tenantID uuid.UUID, sub subscriptions.Subscription, price catalo
 		return Event{}, "Quantidade acima do limite."
 	case !withinScale(qty, MaxScale):
 		return Event{}, "Quantidade com mais de 6 casas decimais."
-	case metric.MaxQuantityPerEvent != nil && qty.Cmp(metric.MaxQuantityPerEvent) > 0:
-		return Event{}, "Quantidade acima do máximo por evento da métrica (" + money.RatString(metric.MaxQuantityPerEvent) + ")."
 	}
 	key := strings.TrimSpace(in.UniqueKey)
-	if metric.Aggregation == catalog.AggUniqueCount && key == "" {
-		return Event{}, "unique_key é obrigatório para métricas de contagem distinta."
-	}
 	if len(key) > 128 {
 		return Event{}, "unique_key deve ter no máximo 128 caracteres."
 	}
@@ -329,37 +480,114 @@ func buildEvent(tenantID uuid.UUID, sub subscriptions.Subscription, price catalo
 		if err != nil || len(b) > MaxPropertiesSize {
 			return Event{}, "properties deve ter no máximo 4 KB."
 		}
+		if hasNUL(b) {
+			return Event{}, "properties não pode conter o caractere NUL (\\u0000)."
+		}
 	}
-	at := in.OccurredAt.UTC()
+	// timestamptz guarda microssegundos: o instante é truncado antes de
+	// validar, gravar e comparar, para que o reenvio do mesmo evento seja
+	// reconhecido como duplicata.
+	at := in.OccurredAt.UTC().Truncate(time.Microsecond)
 	if at.IsZero() {
 		return Event{}, "Informe occurred_at."
 	}
-	if at.After(now.Add(MaxFutureSkew)) {
-		return Event{}, "occurred_at está no futuro."
+	return Event{ID: ids.New(), TenantID: tenantID, ExternalID: in.ExternalID, CustomerID: sub.CustomerID, SubscriptionID: sub.ID,
+		MetricID: metric.ID, Quantity: qty, UniqueKey: key, OccurredAt: at, ReceivedAt: now, Status: Accepted,
+		Properties: in.Properties}, ""
+}
+
+// admit valida o evento contra o estado atual da métrica, da assinatura e
+// do período, e define o período e a situação do evento. Retorna a mensagem
+// de rejeição, se houver.
+func admit(ctx context.Context, c *batchCache, sub subscriptions.Subscription, metric catalog.Metric, in EventInput, ev *Event,
+	now time.Time) (Outcome, string, error) {
+	if msg := checkMetric(metric, in, *ev); msg != "" {
+		return "", msg, nil
 	}
-	if at.Before(sub.StartedAt) {
-		return Event{}, "occurred_at é anterior ao início da assinatura."
+	at := ev.OccurredAt
+	switch {
+	case at.After(now.Add(MaxFutureSkew)):
+		return "", "occurred_at está no futuro.", nil
+	case at.Before(sub.StartedAt):
+		return "", "occurred_at é anterior ao início da assinatura.", nil
+	case sub.TrialEndsAt != nil && at.Before(*sub.TrialEndsAt):
+		return "", "Consumo durante o período de avaliação não é faturável.", nil
+	case sub.EndedAt != nil && !at.Before(*sub.EndedAt):
+		return "", "occurred_at é posterior ao encerramento da assinatura.", nil
 	}
-	if sub.TrialEndsAt != nil && at.Before(*sub.TrialEndsAt) {
-		return Event{}, "Consumo durante o período de avaliação não é faturável."
+	suspended, err := c.suspendedAt(ctx, sub, at)
+	if err != nil {
+		return "", "", err
 	}
-	if sub.EndedAt != nil && !at.Before(*sub.EndedAt) {
-		return Event{}, "occurred_at é posterior ao encerramento da assinatura."
+	if suspended {
+		return "", "Assinatura suspensa: consumo não é faturável durante a suspensão.", nil
 	}
-	if sub.Status == subscriptions.Suspended && sub.SuspendedAt != nil && !at.Before(*sub.SuspendedAt) {
-		return Event{}, "Assinatura suspensa: consumo não é faturável durante a suspensão."
+	period, idx, msg := eventPeriod(sub, at)
+	if msg != "" {
+		return "", msg, nil
 	}
+	ev.PeriodStart = period.Start
+	closed, err := c.tx.PeriodClosed(ctx, sub.ID, metric.ID, period.Start)
+	if err != nil {
+		return "", "", err
+	}
+	if !closed {
+		price, err := c.price(ctx, sub.PriceVersionID)
+		if err != nil {
+			return "", "", err
+		}
+		if !price.HasUsage() || price.MetricID == nil || *price.MetricID != metric.ID {
+			return "", "A métrica não faz parte do preço vigente da assinatura.", nil
+		}
+		// O consumo do período idx é fechado no passo idx+1. Se o
+		// faturamento já passou desse passo sem agregado da métrica (o
+		// preço daquele período não tinha a métrica), o evento não seria
+		// faturado nem corrigido.
+		if idx+1 < sub.NextBillingIndex {
+			return "", "Período já faturado sem consumo desta métrica.", nil
+		}
+		return OutcomeAccepted, "", nil
+	}
+	// Período fechado: a métrica foi faturada nele, com a versão de preço
+	// registrada no agregado, ainda que o preço vigente tenha mudado.
+	end := period.End
+	if sub.EndedAt != nil && sub.EndedAt.Before(end) {
+		end = *sub.EndedAt
+	}
+	if now.After(end.Add(time.Duration(metric.LateGraceHours) * time.Hour)) {
+		return "", "Período já faturado e fora da tolerância de atraso da métrica.", nil
+	}
+	ev.Status = Late
+	return OutcomeLate, "", nil
+}
+
+// eventPeriod devolve o período de cobrança que contém at, no fuso do
+// contrato, e o seu índice. Retorna a mensagem de rejeição, se houver.
+func eventPeriod(sub subscriptions.Subscription, at time.Time) (calendar.Period, int, string) {
 	sched, err := sub.Schedule()
 	if err != nil {
-		return Event{}, "Calendário da assinatura inválido."
+		return calendar.Period{}, 0, "Calendário da assinatura inválido."
 	}
 	idx := sched.IndexOf(at)
 	if idx < 0 {
-		return Event{}, "occurred_at é anterior ao primeiro período de cobrança."
+		return calendar.Period{}, 0, "occurred_at é anterior ao primeiro período de cobrança."
 	}
-	return Event{ID: ids.New(), TenantID: tenantID, ExternalID: strings.TrimSpace(in.ExternalID), CustomerID: sub.CustomerID,
-		SubscriptionID: sub.ID, MetricID: metric.ID, Quantity: qty, UniqueKey: key, OccurredAt: at, ReceivedAt: now,
-		PeriodStart: sched.Period(idx).Start, Status: Accepted, Properties: in.Properties}, ""
+	return sched.Period(idx), idx, ""
+}
+
+// checkMetric valida o evento contra a configuração atual da métrica.
+func checkMetric(metric catalog.Metric, in EventInput, ev Event) string {
+	switch {
+	case metric.Status != catalog.Active:
+		return "A métrica está arquivada."
+	case in.Unit != "" && in.Unit != metric.Unit:
+		return "Unidade diferente da unidade da métrica (" + metric.Unit + ")."
+	case metric.MaxQuantityPerEvent != nil && ev.Quantity.Cmp(metric.MaxQuantityPerEvent) > 0:
+		return "Quantidade acima do máximo por evento da métrica (" + money.RatString(metric.MaxQuantityPerEvent) + ")."
+	case metric.Aggregation == catalog.AggUniqueCount && ev.UniqueKey == "":
+		return "unique_key é obrigatório para métricas de contagem distinta."
+	}
+	return ""
 }
 
 func withinScale(r *big.Rat, scale int) bool {

@@ -13,20 +13,74 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const getInvoiceItemAmount = `-- name: GetInvoiceItemAmount :one
-SELECT amount FROM invoice_items WHERE tenant_id = $1 AND id = $2
+const getInvoiceItemAmounts = `-- name: GetInvoiceItemAmounts :one
+SELECT amount, discount_amount FROM invoice_items WHERE tenant_id = $1 AND id = $2
 `
 
-type GetInvoiceItemAmountParams struct {
+type GetInvoiceItemAmountsParams struct {
 	TenantID uuid.UUID
 	ID       uuid.UUID
 }
 
-func (q *Queries) GetInvoiceItemAmount(ctx context.Context, arg GetInvoiceItemAmountParams) (int64, error) {
-	row := q.db.QueryRow(ctx, getInvoiceItemAmount, arg.TenantID, arg.ID)
-	var amount int64
-	err := row.Scan(&amount)
-	return amount, err
+type GetInvoiceItemAmountsRow struct {
+	Amount         int64
+	DiscountAmount int64
+}
+
+func (q *Queries) GetInvoiceItemAmounts(ctx context.Context, arg GetInvoiceItemAmountsParams) (GetInvoiceItemAmountsRow, error) {
+	row := q.db.QueryRow(ctx, getInvoiceItemAmounts, arg.TenantID, arg.ID)
+	var i GetInvoiceItemAmountsRow
+	err := row.Scan(&i.Amount, &i.DiscountAmount)
+	return i, err
+}
+
+const getSubscriptionForShare = `-- name: GetSubscriptionForShare :one
+SELECT id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date, trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at, cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days, created_at, updated_at, version, price_override_amount, price_override_adjustment_id FROM subscriptions WHERE tenant_id = $1 AND id = $2 FOR SHARE
+`
+
+type GetSubscriptionForShareParams struct {
+	TenantID uuid.UUID
+	ID       uuid.UUID
+}
+
+// Leitura da assinatura pela ingestão de consumo. O bloqueio compartilhado
+// espera o faturamento, que reivindica a assinatura com FOR UPDATE SKIP
+// LOCKED e fecha o período na mesma transação; a consulta seguinte de
+// fechamento (UsageAggregateExists) já enxerga o agregado confirmado.
+func (q *Queries) GetSubscriptionForShare(ctx context.Context, arg GetSubscriptionForShareParams) (Subscription, error) {
+	row := q.db.QueryRow(ctx, getSubscriptionForShare, arg.TenantID, arg.ID)
+	var i Subscription
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.CustomerID,
+		&i.PlanID,
+		&i.PriceVersionID,
+		&i.Status,
+		&i.Quantity,
+		&i.BillingInterval,
+		&i.Timezone,
+		&i.AnchorDate,
+		&i.TrialEndsAt,
+		&i.StartedAt,
+		&i.CurrentPeriodStart,
+		&i.CurrentPeriodEnd,
+		&i.NextBillingIndex,
+		&i.NextBillingAt,
+		&i.CancelAtPeriodEnd,
+		&i.CanceledAt,
+		&i.CancelReason,
+		&i.EndedAt,
+		&i.SuspendedAt,
+		&i.SuspensionReason,
+		&i.PaymentTermsDays,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Version,
+		&i.PriceOverrideAmount,
+		&i.PriceOverrideAdjustmentID,
+	)
+	return i, err
 }
 
 const getUsageAggregateForUpdate = `-- name: GetUsageAggregateForUpdate :one
@@ -151,9 +205,17 @@ func (q *Queries) InsertUsageEvent(ctx context.Context, arg InsertUsageEventPara
 }
 
 const lateUsageGroups = `-- name: LateUsageGroups :many
-SELECT DISTINCT subscription_id, metric_id, period_start FROM usage_events
- WHERE tenant_id = $1 AND status = 'late' AND corrected_at IS NULL
- ORDER BY subscription_id, metric_id, period_start
+SELECT g.subscription_id, g.metric_id, g.period_start FROM (
+  SELECT e.subscription_id, e.metric_id, e.period_start FROM usage_events e
+   WHERE e.tenant_id = $1 AND e.status = 'late' AND e.corrected_at IS NULL
+  UNION
+  SELECT a.subscription_id, a.metric_id, a.period_start FROM usage_aggregates a
+   WHERE a.tenant_id = $1
+     AND EXISTS (SELECT 1 FROM usage_events e
+                  WHERE e.tenant_id = a.tenant_id AND e.subscription_id = a.subscription_id AND e.metric_id = a.metric_id
+                    AND e.period_start = a.period_start AND e.status = 'accepted' AND e.aggregate_id IS NULL)
+) g
+ ORDER BY g.subscription_id, g.metric_id, g.period_start
  LIMIT $2
 `
 
@@ -168,7 +230,9 @@ type LateUsageGroupsRow struct {
 	PeriodStart    time.Time
 }
 
-// Grupos (assinatura, métrica, período) com eventos atrasados ainda não corrigidos.
+// Grupos (assinatura, métrica, período) a corrigir: eventos atrasados ainda
+// não corrigidos e eventos aceitos que ficaram sem agregado num período já
+// fechado (gravados enquanto o fechamento era confirmado).
 func (q *Queries) LateUsageGroups(ctx context.Context, arg LateUsageGroupsParams) ([]LateUsageGroupsRow, error) {
 	rows, err := q.db.Query(ctx, lateUsageGroups, arg.TenantID, arg.RowLimit)
 	if err != nil {
@@ -179,6 +243,44 @@ func (q *Queries) LateUsageGroups(ctx context.Context, arg LateUsageGroupsParams
 	for rows.Next() {
 		var i LateUsageGroupsRow
 		if err := rows.Scan(&i.SubscriptionID, &i.MetricID, &i.PeriodStart); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSubscriptionSuspensions = `-- name: ListSubscriptionSuspensions :many
+SELECT event, occurred_at FROM subscription_history
+ WHERE tenant_id = $1 AND subscription_id = $2 AND event IN ('suspended', 'reactivated')
+ ORDER BY occurred_at, id
+`
+
+type ListSubscriptionSuspensionsParams struct {
+	TenantID       uuid.UUID
+	SubscriptionID uuid.UUID
+}
+
+type ListSubscriptionSuspensionsRow struct {
+	Event      string
+	OccurredAt time.Time
+}
+
+// Suspensões e reativações da assinatura em ordem cronológica: consumo
+// ocorrido durante uma suspensão é rejeitado mesmo depois da reativação.
+func (q *Queries) ListSubscriptionSuspensions(ctx context.Context, arg ListSubscriptionSuspensionsParams) ([]ListSubscriptionSuspensionsRow, error) {
+	rows, err := q.db.Query(ctx, listSubscriptionSuspensions, arg.TenantID, arg.SubscriptionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListSubscriptionSuspensionsRow
+	for rows.Next() {
+		var i ListSubscriptionSuspensionsRow
+		if err := rows.Scan(&i.Event, &i.OccurredAt); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -278,7 +380,7 @@ func (q *Queries) ListUsageEvents(ctx context.Context, arg ListUsageEventsParams
 const markLateUsageCorrected = `-- name: MarkLateUsageCorrected :execrows
 UPDATE usage_events SET aggregate_id = $1, corrected_at = $2, correction_item_id = $3
  WHERE tenant_id = $4 AND subscription_id = $5 AND metric_id = $6 AND period_start = $7
-   AND status = 'late' AND corrected_at IS NULL
+   AND corrected_at IS NULL AND (status = 'late' OR (status = 'accepted' AND aggregate_id IS NULL))
 `
 
 type MarkLateUsageCorrectedParams struct {
@@ -291,6 +393,8 @@ type MarkLateUsageCorrectedParams struct {
 	PeriodStart      time.Time
 }
 
+// Marca os eventos do grupo considerados na correção: atrasados e aceitos
+// sem agregado. A situação do evento não muda.
 func (q *Queries) MarkLateUsageCorrected(ctx context.Context, arg MarkLateUsageCorrectedParams) (int64, error) {
 	result, err := q.db.Exec(ctx, markLateUsageCorrected,
 		arg.AggregateID,

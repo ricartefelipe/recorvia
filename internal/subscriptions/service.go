@@ -61,6 +61,8 @@ type Tx interface {
 	// CancelPendingTerms cancela mudanças agendadas e reajustes programados
 	// (assinatura encerrada ou com encerramento agendado).
 	CancelPendingTerms(ctx context.Context, subscriptionID uuid.UUID, at time.Time) error
+	// HasOpenPendingItems informa se há itens pendentes ainda não faturados.
+	HasOpenPendingItems(ctx context.Context, subscriptionID uuid.UUID) (bool, error)
 
 	Audit(ctx context.Context, e audit.Entry) error
 	Emit(ctx context.Context, e outbox.Event) error
@@ -255,7 +257,15 @@ func (s *Service) Cancel(ctx context.Context, tenantID uuid.UUID, actor audit.Ac
 		if err != nil {
 			return err
 		}
-		if err := sub.Cancel(mode, reason, price.HasUsage(), now); err != nil {
+		// No cancelamento imediato, itens pendentes (por exemplo, correções de
+		// consumo) ainda precisam ser faturados no fechamento.
+		pending := false
+		if mode == CancelImmediately {
+			if pending, err = tx.HasOpenPendingItems(ctx, sub.ID); err != nil {
+				return err
+			}
+		}
+		if err := sub.Cancel(mode, reason, price.HasUsage(), pending, now); err != nil {
 			return err
 		}
 		// Mudanças e reajustes futuros deixam de valer: no cancelamento ao fim

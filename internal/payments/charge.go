@@ -122,10 +122,16 @@ func (c *Charge) MarkCreated(providerChargeID, checkoutURL string, at time.Time)
 	return nil
 }
 
-// MarkPaid registra o pagamento confirmado. O valor pago e a taxa vêm do
-// provedor e podem diferir do valor cobrado (juros, multa ou desconto do
-// provedor); a diferença é tratada na aplicação à fatura (excedente vira
-// crédito) e apontada na conciliação.
+// MarkPaid registra o pagamento confirmado pelo provedor. O valor pago e a
+// taxa vêm do provedor e podem diferir do valor cobrado (juros, multa ou
+// desconto do provedor); a diferença é tratada na aplicação à fatura
+// (excedente vira crédito) e apontada na conciliação.
+//
+// O cancelamento de cobrança no Recorvia (fatura cancelada ou nota de
+// crédito) é apenas local: a cobrança continua válida no provedor. Por isso a
+// confirmação do provedor é a única saída do estado canceled e leva a
+// cobrança a paga, para que o valor recebido seja aplicado à fatura ou vire
+// crédito do cliente. As demais transições seguem chargeTransitions.
 func (c *Charge) MarkPaid(paid, fee money.Money, paidAt, at time.Time) error {
 	if IsSettledStatus(c.Status) {
 		return nil // confirmação repetida: idempotente
@@ -133,7 +139,9 @@ func (c *Charge) MarkPaid(paid, fee money.Money, paidAt, at time.Time) error {
 	if !paid.IsPositive() || paid.Currency() != c.Amount.Currency() {
 		return apperr.Invalid("invalid_amount", "Valor pago inválido.")
 	}
-	if err := c.transition(ChargePaid, at); err != nil {
+	if c.Status == ChargeCanceled {
+		c.Status, c.UpdatedAt = ChargePaid, at
+	} else if err := c.transition(ChargePaid, at); err != nil {
 		return err
 	}
 	c.AmountPaid, c.Fee, c.PaidAt = paid, fee, &paidAt

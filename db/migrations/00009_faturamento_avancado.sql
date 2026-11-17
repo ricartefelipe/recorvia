@@ -33,7 +33,11 @@ GRANT SELECT, INSERT, UPDATE ON subscription_scheduled_changes TO recorvia_app;
 
 -- Reajustes programados do componente fixo da assinatura (valor fixo ou
 -- preço por unidade). Aplicados no primeiro ciclo iniciado na data efetiva
--- ou depois; ciclos já faturados nunca são alterados.
+-- ou depois; ciclos já faturados nunca são alterados. Os valores anterior e
+-- resultante usam a escala do preço unitário (10 casas em centavos): no
+-- preço por unidade o reajuste percentual mantém a fração de centavo e o
+-- arredondamento a centavos acontece uma única vez, no total do item.
+-- cancel_reason registra por que um reajuste programado deixou de valer.
 CREATE TABLE subscription_price_adjustments (
   id                   uuid PRIMARY KEY,
   tenant_id            uuid NOT NULL,
@@ -45,11 +49,13 @@ CREATE TABLE subscription_price_adjustments (
   index_name           text NOT NULL DEFAULT '' CHECK (length(index_name) <= 50),
   reason               text NOT NULL CHECK (length(reason) BETWEEN 3 AND 500),
   status               text NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'applied', 'canceled')),
-  previous_amount      bigint,
-  resulting_amount     bigint CHECK (resulting_amount IS NULL OR resulting_amount >= 0),
+  previous_amount      numeric(24, 10) CHECK (previous_amount IS NULL OR previous_amount >= 0),
+  resulting_amount     numeric(24, 10) CHECK (resulting_amount IS NULL OR resulting_amount >= 0),
   applied_period_start timestamptz,
   applied_at           timestamptz,
   canceled_at          timestamptz,
+  cancel_reason        text CHECK (cancel_reason IS NULL OR cancel_reason IN ('manual', 'subscription_ended', 'price_version_changed',
+                                                                            'price_without_fixed_component', 'adjustment_amount_limit')),
   created_by           uuid REFERENCES users (id),
   created_at           timestamptz NOT NULL,
   CONSTRAINT subscription_price_adjustments_tenant_id_key UNIQUE (tenant_id, id),
@@ -58,7 +64,8 @@ CREATE TABLE subscription_price_adjustments (
   CONSTRAINT subscription_price_adjustments_amount CHECK ((kind = 'fixed_amount') = (new_amount IS NOT NULL)),
   CONSTRAINT subscription_price_adjustments_applied CHECK (status <> 'applied' OR
     (previous_amount IS NOT NULL AND resulting_amount IS NOT NULL AND applied_at IS NOT NULL AND applied_period_start IS NOT NULL)),
-  CONSTRAINT subscription_price_adjustments_canceled CHECK ((status = 'canceled') = (canceled_at IS NOT NULL))
+  CONSTRAINT subscription_price_adjustments_canceled CHECK ((status = 'canceled') = (canceled_at IS NOT NULL)),
+  CONSTRAINT subscription_price_adjustments_cancel_reason CHECK ((status = 'canceled') = (cancel_reason IS NOT NULL))
 );
 CREATE UNIQUE INDEX subscription_price_adjustments_date_key ON subscription_price_adjustments (tenant_id, subscription_id, effective_date)
   WHERE status = 'scheduled';
@@ -66,10 +73,12 @@ CREATE INDEX subscription_price_adjustments_sub_idx ON subscription_price_adjust
 SELECT app_enable_tenant_rls('subscription_price_adjustments');
 GRANT SELECT, INSERT, UPDATE ON subscription_price_adjustments TO recorvia_app;
 
--- Valor do componente fixo após reajuste (substitui o valor da versão de
--- preço apenas nesta assinatura). Mudança de plano remove o reajuste.
+-- Valor do componente fixo após reajuste (substitui o valor fixo ou o preço
+-- por unidade da versão de preço apenas nesta assinatura), na escala do preço
+-- unitário. Mudança de versão de preço remove o reajuste vigente e cancela os
+-- reajustes programados.
 ALTER TABLE subscriptions
-  ADD COLUMN price_override_amount bigint CHECK (price_override_amount IS NULL OR price_override_amount >= 0),
+  ADD COLUMN price_override_amount numeric(24, 10) CHECK (price_override_amount IS NULL OR price_override_amount >= 0),
   ADD COLUMN price_override_adjustment_id uuid,
   ADD CONSTRAINT subscriptions_override_adjustment_fk FOREIGN KEY (tenant_id, price_override_adjustment_id)
     REFERENCES subscription_price_adjustments (tenant_id, id),
@@ -96,17 +105,30 @@ ALTER TABLE usage_events ADD COLUMN corrected_at timestamptz;
 DROP INDEX usage_events_late_idx;
 CREATE INDEX usage_events_late_idx ON usage_events (tenant_id, subscription_id, metric_id, period_start) WHERE status = 'late' AND corrected_at IS NULL;
 CREATE INDEX usage_events_received_idx ON usage_events (tenant_id, received_at DESC, id DESC);
+-- Eventos aceitos ainda sem agregado (períodos abertos). A correção procura
+-- aqui os que ficaram fora de um período já fechado.
+CREATE INDEX usage_events_unattached_idx ON usage_events (tenant_id, subscription_id, metric_id, period_start)
+  WHERE status = 'accepted' AND aggregate_id IS NULL;
 
 ALTER TABLE customer_credit_entries DROP CONSTRAINT customer_credit_entries_kind_check;
 ALTER TABLE customer_credit_entries ADD CONSTRAINT customer_credit_entries_kind_check
   CHECK (kind IN ('grant', 'consumption', 'return', 'overpayment', 'proration', 'usage_correction'));
 
+-- Tenants com consumo a corrigir: eventos atrasados não corrigidos ou
+-- eventos aceitos sem agregado num período já fechado.
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION app_tenants_with_late_usage()
 RETURNS SETOF uuid
 LANGUAGE sql STABLE SECURITY DEFINER
 SET search_path = public, pg_temp
-AS $$ SELECT DISTINCT tenant_id FROM usage_events WHERE status = 'late' AND corrected_at IS NULL $$;
+AS $$
+  SELECT tenant_id FROM usage_events WHERE status = 'late' AND corrected_at IS NULL
+  UNION
+  SELECT a.tenant_id FROM usage_aggregates a
+   WHERE EXISTS (SELECT 1 FROM usage_events e
+                  WHERE e.tenant_id = a.tenant_id AND e.subscription_id = a.subscription_id AND e.metric_id = a.metric_id
+                    AND e.period_start = a.period_start AND e.status = 'accepted' AND e.aggregate_id IS NULL)
+$$;
 -- +goose StatementEnd
 
 -- Notas de crédito: reduzem o saldo devedor de uma fatura emitida sem
@@ -144,6 +166,7 @@ AS $$ SELECT DISTINCT tenant_id FROM usage_events WHERE status = 'late' AND corr
 ALTER TABLE customer_credit_entries DROP CONSTRAINT customer_credit_entries_kind_check;
 ALTER TABLE customer_credit_entries ADD CONSTRAINT customer_credit_entries_kind_check
   CHECK (kind IN ('grant', 'consumption', 'return', 'overpayment'));
+DROP INDEX IF EXISTS usage_events_unattached_idx;
 DROP INDEX IF EXISTS usage_events_received_idx;
 DROP INDEX IF EXISTS usage_events_late_idx;
 CREATE INDEX usage_events_late_idx ON usage_events (tenant_id, received_at) WHERE status = 'late' AND correction_item_id IS NULL;

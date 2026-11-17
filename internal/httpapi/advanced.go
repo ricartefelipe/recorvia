@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"time"
 
@@ -44,6 +45,24 @@ func amountPtr(m *money.Money) *int64 {
 		return nil
 	}
 	v := m.Amount()
+	return &v
+}
+
+// centsPtr arredonda um valor exato a centavos (half-even) para exibição.
+func centsPtr(r *big.Rat) *int64 {
+	if r == nil {
+		return nil
+	}
+	v := money.RoundRat(r, money.DefaultRounding).Int64()
+	return &v
+}
+
+// decimalPtr formata um valor exato em centavos como texto decimal.
+func decimalPtr(r *big.Rat) *string {
+	if r == nil {
+		return nil
+	}
+	v := money.RatString(r)
 	return &v
 }
 
@@ -161,25 +180,38 @@ func (a *API) changeSubscriptionQuantity(w http.ResponseWriter, r *http.Request)
 
 // --- reajustes ---
 
+// adjustmentDTO expõe os valores anterior e resultante arredondados a
+// centavos (exibição) e exatos em texto (*_decimal): no preço por unidade o
+// valor reajustado pode ter fração de centavo.
 type adjustmentDTO struct {
-	ID              uuid.UUID  `json:"id"`
-	EffectiveDate   string     `json:"effective_date"`
-	Kind            string     `json:"kind"`
-	PercentBP       *int       `json:"percent_bp,omitempty"`
-	NewAmount       *int64     `json:"new_amount,omitempty"`
-	IndexName       string     `json:"index_name,omitempty"`
-	Reason          string     `json:"reason"`
-	Status          string     `json:"status"`
-	AppliedAt       *time.Time `json:"applied_at"`
-	PreviousAmount  *int64     `json:"previous_amount"`
-	ResultingAmount *int64     `json:"resulting_amount"`
-	CreatedAt       time.Time  `json:"created_at"`
+	ID                     uuid.UUID  `json:"id"`
+	EffectiveDate          string     `json:"effective_date"`
+	Kind                   string     `json:"kind"`
+	PercentBP              *int       `json:"percent_bp,omitempty"`
+	NewAmount              *int64     `json:"new_amount,omitempty"`
+	IndexName              string     `json:"index_name,omitempty"`
+	Reason                 string     `json:"reason"`
+	Status                 string     `json:"status"`
+	AppliedAt              *time.Time `json:"applied_at"`
+	PreviousAmount         *int64     `json:"previous_amount"`
+	ResultingAmount        *int64     `json:"resulting_amount"`
+	PreviousAmountDecimal  *string    `json:"previous_amount_decimal"`
+	ResultingAmountDecimal *string    `json:"resulting_amount_decimal"`
+	CanceledAt             *time.Time `json:"canceled_at"`
+	CancelReason           *string    `json:"cancel_reason"`
+	CreatedAt              time.Time  `json:"created_at"`
 }
 
 func adjustmentView(x subscriptions.PriceAdjustment) adjustmentDTO {
+	var reason *string
+	if x.CancelReason != "" {
+		r := string(x.CancelReason)
+		reason = &r
+	}
 	return adjustmentDTO{ID: x.ID, EffectiveDate: x.EffectiveDate.String(), Kind: string(x.Kind), PercentBP: x.PercentBP, NewAmount: amountPtr(x.NewAmount),
-		IndexName: x.IndexName, Reason: x.Reason, Status: string(x.Status), AppliedAt: x.AppliedAt, PreviousAmount: amountPtr(x.PreviousAmount),
-		ResultingAmount: amountPtr(x.ResultingAmount), CreatedAt: x.CreatedAt}
+		IndexName: x.IndexName, Reason: x.Reason, Status: string(x.Status), AppliedAt: x.AppliedAt, PreviousAmount: centsPtr(x.PreviousAmount),
+		ResultingAmount: centsPtr(x.ResultingAmount), PreviousAmountDecimal: decimalPtr(x.PreviousAmount),
+		ResultingAmountDecimal: decimalPtr(x.ResultingAmount), CanceledAt: x.CanceledAt, CancelReason: reason, CreatedAt: x.CreatedAt}
 }
 
 func (a *API) listPriceAdjustments(w http.ResponseWriter, r *http.Request) {

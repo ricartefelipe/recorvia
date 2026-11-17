@@ -37,16 +37,20 @@ type meterState struct {
 	metrics map[uuid.UUID]catalog.Metric
 	events  map[string]Event
 	closed  map[periodKey]bool
+	// suspensions é o histórico de suspensões e reativações por assinatura,
+	// em ordem cronológica.
+	suspensions map[uuid.UUID][]SuspensionChange
 }
 
 func newMeterState() *meterState {
 	return &meterState{subs: map[uuid.UUID]subscriptions.Subscription{}, prices: map[uuid.UUID]catalog.PriceVersion{},
-		metrics: map[uuid.UUID]catalog.Metric{}, events: map[string]Event{}, closed: map[periodKey]bool{}}
+		metrics: map[uuid.UUID]catalog.Metric{}, events: map[string]Event{}, closed: map[periodKey]bool{},
+		suspensions: map[uuid.UUID][]SuspensionChange{}}
 }
 
 func (s *meterState) clone() *meterState {
 	return &meterState{subs: maps.Clone(s.subs), prices: maps.Clone(s.prices), metrics: maps.Clone(s.metrics),
-		events: maps.Clone(s.events), closed: maps.Clone(s.closed)}
+		events: maps.Clone(s.events), closed: maps.Clone(s.closed), suspensions: maps.Clone(s.suspensions)}
 }
 
 // failure programa a falha de uma operação; call zero falha em todas as
@@ -67,6 +71,8 @@ type meterStore struct {
 	concurrent map[string]Event
 	lastFilter *ListFilter
 	aggregated []time.Time
+	// shareLocks registra a ordem das leituras com bloqueio compartilhado.
+	shareLocks []uuid.UUID
 }
 
 func newMeterStore() *meterStore {
@@ -113,11 +119,32 @@ func (t *meterTx) Subscription(_ context.Context, id uuid.UUID) (subscriptions.S
 	if err := t.s.hit("Subscription"); err != nil {
 		return subscriptions.Subscription{}, err
 	}
+	return t.subscription(id)
+}
+
+// SubscriptionForShare é contada à parte para que os testes verifiquem que a
+// ingestão usa a leitura com bloqueio e as consultas não.
+func (t *meterTx) SubscriptionForShare(_ context.Context, id uuid.UUID) (subscriptions.Subscription, error) {
+	if err := t.s.hit("SubscriptionForShare"); err != nil {
+		return subscriptions.Subscription{}, err
+	}
+	t.s.shareLocks = append(t.s.shareLocks, id)
+	return t.subscription(id)
+}
+
+func (t *meterTx) subscription(id uuid.UUID) (subscriptions.Subscription, error) {
 	sub, ok := t.st.subs[id]
 	if !ok {
 		return subscriptions.Subscription{}, apperr.NotFound("subscription_not_found", "Assinatura não encontrada.")
 	}
 	return sub, nil
+}
+
+func (t *meterTx) SuspensionHistory(_ context.Context, subscriptionID uuid.UUID) ([]SuspensionChange, error) {
+	if err := t.s.hit("SuspensionHistory"); err != nil {
+		return nil, err
+	}
+	return slices.Clone(t.st.suspensions[subscriptionID]), nil
 }
 
 func (t *meterTx) PriceVersion(_ context.Context, id uuid.UUID) (catalog.PriceVersion, error) {

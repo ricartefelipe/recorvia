@@ -38,6 +38,11 @@ const (
 // MaxCouponPlans limita a lista de planos elegíveis.
 const MaxCouponPlans = 100
 
+// MaxCouponRedemptions é o maior limite de usos aceito. Fica abaixo do
+// máximo da coluna integer (2.147.483.647), de modo que o valor validado é
+// sempre persistido sem truncamento.
+const MaxCouponRedemptions = 1_000_000_000
+
 // Coupon é um cupom de desconto recorrente do tenant.
 type Coupon struct {
 	ID               uuid.UUID
@@ -127,8 +132,8 @@ func NewCoupon(id, tenantID uuid.UUID, cur money.Currency, in CouponInput, now t
 	default:
 		add("duration", "Use once, repeating ou forever.")
 	}
-	if in.MaxRedemptions != nil && *in.MaxRedemptions < 1 {
-		add("max_redemptions", "O limite de usos deve ser positivo.")
+	if in.MaxRedemptions != nil && (*in.MaxRedemptions < 1 || *in.MaxRedemptions > MaxCouponRedemptions) {
+		add("max_redemptions", "Informe um limite de usos de 1 a 1.000.000.000.")
 	}
 	if in.ValidFrom != nil && in.ValidUntil != nil && !in.ValidFrom.Before(*in.ValidUntil) {
 		add("valid_until", "O fim da validade deve ser posterior ao início.")

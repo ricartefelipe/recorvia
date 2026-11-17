@@ -702,39 +702,34 @@ func TestScheduledChangeAppliedByEngineAtCycleStart(t *testing.T) {
 // 10/04 (31 dias), troca em 31/03: fração 10/31. De R$ 100,00 para R$ 160,00,
 // crédito de 3.226 (3.225,81 arredondado) e cobrança de 5.161 (5.161,29),
 // diferença de 1.935. Diferença negativa vira crédito do cliente, consumido
-// na fatura seguinte; cupom percentual reduz a diferença na mesma proporção
-// (10% de 1.935 = 193,5, arredondado half-even para 194).
+// na fatura seguinte. Com cupom percentual de 10% válido nos dois planos, o
+// crédito e a cobrança descontam o percentual, cada um arredondado uma vez:
+// 10.000 × 10/31 × 0,9 = 2.903,23 → 2.903 e 16.000 × 10/31 × 0,9 =
+// 4.645,16 → 4.645, diferença de 1.742.
 func TestImmediateChangeProratesCurrentPeriod(t *testing.T) {
 	ctx := context.Background()
-	const prorationBug = "bug: settleProration adiciona primeiro o item negativo de crédito proporcional; o recálculo do rascunho " +
-		"rejeita o total parcial negativo (negative_invoice) e toda mudança imediata com diferença positiva a partir de plano com " +
-		"valor fixo falha, sem emitir a fatura de prorrata"
 	cases := []struct {
 		name                          string
-		bug                           string
 		from, to                      int64
 		couponBP                      int
 		wantCredit, wantCharge        int64
 		wantNet                       int64
-		wantDiscount, wantTotal       int64
+		wantTotal                     int64
 		wantCustomerCredit            int64
 		wantNextTotal, wantNextCredit int64
 		wantNextDue                   int64
 	}{
-		{name: "upgrade gera fatura de prorrata", bug: prorationBug, from: 10000, to: 16000, wantCredit: 3226, wantCharge: 5161, wantNet: 1935,
+		{name: "upgrade gera fatura de prorrata", from: 10000, to: 16000, wantCredit: 3226, wantCharge: 5161, wantNet: 1935,
 			wantTotal: 1935, wantNextTotal: 16000, wantNextDue: 16000},
-		{name: "upgrade com cupom percentual", bug: prorationBug, from: 10000, to: 16000, couponBP: 1000, wantCredit: 3226, wantCharge: 5161, wantNet: 1935,
-			wantDiscount: 194, wantTotal: 1741, wantNextTotal: 14400, wantNextDue: 14400},
+		{name: "upgrade com cupom percentual", from: 10000, to: 16000, couponBP: 1000, wantCredit: 2903, wantCharge: 4645, wantNet: 1742,
+			wantTotal: 1742, wantNextTotal: 14400, wantNextDue: 14400},
 		{name: "downgrade gera crédito do cliente", from: 16000, to: 10000, wantCredit: 5161, wantCharge: 3226, wantNet: -1935,
 			wantCustomerCredit: 1935, wantNextTotal: 10000, wantNextCredit: 1935, wantNextDue: 8065},
-		{name: "downgrade com cupom percentual", from: 16000, to: 10000, couponBP: 1000, wantCredit: 5161, wantCharge: 3226, wantNet: -1935,
-			wantCustomerCredit: 1741, wantNextTotal: 9000, wantNextCredit: 1741, wantNextDue: 7259},
+		{name: "downgrade com cupom percentual", from: 16000, to: 10000, couponBP: 1000, wantCredit: 4645, wantCharge: 2903, wantNet: -1742,
+			wantCustomerCredit: 1742, wantNextTotal: 9000, wantNextCredit: 1742, wantNextDue: 7258},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.bug != "" {
-				t.Skip(tc.bug)
-			}
 			a := newAdvEnv(t, 4)
 			tn := a.NewTenant(t, "adv-prorrata")
 			fromPlan, toPlan := a.newFlatPlan(t, tn, tc.from), a.newFlatPlan(t, tn, tc.to)
@@ -782,17 +777,25 @@ func TestImmediateChangeProratesCurrentPeriod(t *testing.T) {
 				if inv.ID != *res.InvoiceID || !inv.PeriodEnd.Equal(periodEnd) || inv.Status != string(billing.Open) {
 					t.Errorf("fatura de prorrata: %+v", inv)
 				}
-				if inv.Subtotal != tc.wantNet || inv.DiscountTotal != tc.wantDiscount || inv.Total != tc.wantTotal || inv.AmountDue != tc.wantTotal {
+				if inv.Subtotal != tc.wantNet || inv.DiscountTotal != 0 || inv.Total != tc.wantTotal || inv.AmountDue != tc.wantTotal {
 					t.Errorf("totais da prorrata: subtotal %d desconto %d total %d saldo %d", inv.Subtotal, inv.DiscountTotal, inv.Total, inv.AmountDue)
 				}
+				// A cobrança vem antes do crédito; o percentual do cupom já está nos itens.
 				items := a.itemsOf(t, tn.ID, inv.ID)
-				if len(items) != 2 || items[0].Kind != string(billing.ItemProration) || items[0].Amount != -tc.wantCredit ||
-					items[1].Kind != string(billing.ItemProration) || items[1].Amount != tc.wantCharge {
+				if len(items) != 2 || items[0].Kind != string(billing.ItemProration) || items[0].Amount != tc.wantCharge ||
+					items[1].Kind != string(billing.ItemProration) || items[1].Amount != -tc.wantCredit {
 					t.Fatalf("itens da prorrata: %+v", items)
 				}
-				if *items[0].PlanID != fromPlan.ID || *items[1].PlanID != toPlan.ID || items[1].snap(t, "remaining_days") != "10" ||
-					items[1].snap(t, "period_days") != "31" {
+				if *items[0].PlanID != toPlan.ID || *items[1].PlanID != fromPlan.ID || items[0].snap(t, "remaining_days") != "10" ||
+					items[0].snap(t, "period_days") != "31" {
 					t.Errorf("snapshot da prorrata: %s | %s", items[0].Snapshot, items[1].Snapshot)
+				}
+				wantBP := ""
+				if tc.couponBP > 0 {
+					wantBP = fmt.Sprint(tc.couponBP)
+				}
+				if items[0].snap(t, "discount_percent_bp") != wantBP || items[1].snap(t, "discount_percent_bp") != wantBP {
+					t.Errorf("percentual do cupom no snapshot: %s | %s", items[0].Snapshot, items[1].Snapshot)
 				}
 			} else {
 				if res.InvoiceID != nil || res.CreditGranted == nil || res.CreditGranted.Amount() != tc.wantCustomerCredit {
@@ -946,13 +949,13 @@ func TestPriceAdjustmentsAppliedAtCorrectCycle(t *testing.T) {
 			continue
 		}
 		if c.status != subscriptions.AdjustmentApplied {
-			if adj.AppliedAt != nil || adj.CanceledAt == nil {
-				t.Errorf("reajuste cancelado com aplicação registrada: %+v", adj)
+			if adj.AppliedAt != nil || adj.CanceledAt == nil || adj.CancelReason != subscriptions.AdjustmentCanceledManually {
+				t.Errorf("reajuste cancelado com aplicação registrada ou sem motivo: %+v", adj)
 			}
 			continue
 		}
-		if adj.PreviousAmount == nil || adj.PreviousAmount.Amount() != c.previous || adj.ResultingAmount == nil ||
-			adj.ResultingAmount.Amount() != c.result || adj.AppliedPeriodStart == nil || !adj.AppliedPeriodStart.Equal(c.periodStart) {
+		if adj.PreviousAmount == nil || adj.PreviousAmount.Cmp(big.NewRat(c.previous, 1)) != 0 || adj.ResultingAmount == nil ||
+			adj.ResultingAmount.Cmp(big.NewRat(c.result, 1)) != 0 || adj.AppliedPeriodStart == nil || !adj.AppliedPeriodStart.Equal(c.periodStart) {
 			t.Errorf("reajuste aplicado %s: anterior %v resultante %v período %v", c.id, adj.PreviousAmount, adj.ResultingAmount, adj.AppliedPeriodStart)
 		}
 	}
@@ -960,7 +963,8 @@ func TestPriceAdjustmentsAppliedAtCorrectCycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.PriceOverride == nil || got.PriceOverride.Amount() != 12000 || got.PriceOverrideAdjustmentID == nil || *got.PriceOverrideAdjustmentID != renegotiated.ID {
+	if got.PriceOverride == nil || got.PriceOverride.Cmp(big.NewRat(12000, 1)) != 0 || got.PriceOverrideAdjustmentID == nil ||
+		*got.PriceOverrideAdjustmentID != renegotiated.ID {
 		t.Errorf("valor vigente da assinatura: %v %v", got.PriceOverride, got.PriceOverrideAdjustmentID)
 	}
 }
@@ -1428,9 +1432,6 @@ func TestLateUsageReducingAmountBecomesCustomerCredit(t *testing.T) {
 // evento começa nesse intervalo. Depois de tudo confirmado e da correção de
 // atrasados, o evento precisa estar faturado (no agregado ou corrigido).
 func TestUsageIngestedWhileEngineClosesPeriodIsBilled(t *testing.T) {
-	t.Skip("bug: a ingestão consulta se o período está fechado (PeriodClosed) sem bloquear a assinatura nem o agregado; " +
-		"com o motor entre a agregação e o commit, o agregado ainda não é visível, o evento é gravado como accepted depois do " +
-		"commit do motor, fica sem aggregate_id e nunca é faturado nem corrigido (LateUsageGroups considera somente status late)")
 	ctx := context.Background()
 	a := newAdvEnv(t, 8)
 	tn := a.NewTenant(t, "adv-consumo-corrida")
@@ -1487,6 +1488,11 @@ func TestUsageIngestedWhileEngineClosesPeriodIsBilled(t *testing.T) {
 	out := <-ingestResult
 	if out.err != nil {
 		t.Fatalf("ingestão: %v", out.err)
+	}
+	// A leitura da assinatura com bloqueio compartilhado espera o commit do
+	// motor; a verificação seguinte já enxerga o período fechado.
+	if len(out.res) != 1 || out.res[0].Outcome != metering.OutcomeLate {
+		t.Fatalf("evento concorrente ao fechamento: %+v, esperado late", out.res)
 	}
 	if _, err := a.Corrector.RunAll(ctx); err != nil {
 		t.Fatal(err)

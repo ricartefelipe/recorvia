@@ -274,7 +274,7 @@ func TestStateTransitionsThroughMethods(t *testing.T) {
 	ops := []op{
 		{"suspender", func(s *Subscription) error { return s.Suspend("inadimplência", at) },
 			map[Status]Status{Trialing: Suspended, Active: Suspended, PastDue: Suspended}},
-		{"cancelar imediatamente", func(s *Subscription) error { return s.Cancel(CancelImmediately, "", false, at) },
+		{"cancelar imediatamente", func(s *Subscription) error { return s.Cancel(CancelImmediately, "", false, false, at) },
 			map[Status]Status{Trialing: Canceled, Active: Canceled, PastDue: Canceled, Suspended: Canceled}},
 		{"marcar inadimplente", func(s *Subscription) error { return s.MarkPastDue(at) },
 			map[Status]Status{Active: PastDue, PastDue: PastDue}},
@@ -463,7 +463,7 @@ func TestCancelAtPeriodEndEndsAtNextPeriodStart(t *testing.T) {
 	s.PopEvents()
 
 	at := start.Add(72 * time.Hour)
-	if err := s.Cancel(CancelAtPeriodEnd, "troca de fornecedor", false, at); err != nil {
+	if err := s.Cancel(CancelAtPeriodEnd, "troca de fornecedor", false, false, at); err != nil {
 		t.Fatal(err)
 	}
 	if !s.CancelAtPeriodEnd || s.CanceledAt == nil || !s.CanceledAt.Equal(at) || s.Status != Active || s.CancelReason != "troca de fornecedor" {
@@ -473,7 +473,7 @@ func TestCancelAtPeriodEndEndsAtNextPeriodStart(t *testing.T) {
 	if len(ev) != 1 || ev[0].Event != "cancel_scheduled" || ev[0].Details["effective_at"] != sched.Period(0).End {
 		t.Fatalf("evento de agendamento: %+v", ev)
 	}
-	wantKind(t, s.Cancel(CancelAtPeriodEnd, "", false, at), apperr.KindConflict, "already_scheduled")
+	wantKind(t, s.Cancel(CancelAtPeriodEnd, "", false, false, at), apperr.KindConflict, "already_scheduled")
 
 	end := sched.Period(1).Start
 	step, ok, err := s.NextStep(end)
@@ -498,13 +498,13 @@ func TestCancelAtPeriodEndEndsAtNextPeriodStart(t *testing.T) {
 	if _, ok, _ := s.NextStep(end.AddDate(1, 0, 0)); ok {
 		t.Fatal("assinatura encerrada não fatura mais")
 	}
-	wantKind(t, s.Cancel(CancelAtPeriodEnd, "", false, end), apperr.KindConflict, "invalid_transition")
+	wantKind(t, s.Cancel(CancelAtPeriodEnd, "", false, false, end), apperr.KindConflict, "invalid_transition")
 }
 
 func TestCancelAtTrialEndEndsWithoutBilling(t *testing.T) {
 	start := local(2026, time.March, 10, 10, 0)
 	s := mustNew(t, newInput(start, 14, start))
-	if err := s.Cancel(CancelAtPeriodEnd, "", false, start.Add(time.Hour)); err != nil {
+	if err := s.Cancel(CancelAtPeriodEnd, "", false, false, start.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	step, ok, err := s.NextStep(*s.TrialEndsAt)
@@ -524,7 +524,7 @@ func TestResumeRenewal(t *testing.T) {
 	s := mustNew(t, newInput(at, 0, at))
 	wantKind(t, s.ResumeRenewal(at), apperr.KindConflict, "no_scheduled_cancel")
 
-	if err := s.Cancel(CancelAtPeriodEnd, "orçamento", false, at); err != nil {
+	if err := s.Cancel(CancelAtPeriodEnd, "orçamento", false, false, at); err != nil {
 		t.Fatal(err)
 	}
 	s.PopEvents()
@@ -551,13 +551,13 @@ func TestCancelImmediatelyWithUsageBillsFinalUsage(t *testing.T) {
 	s := mustNew(t, newInput(start, 0, start))
 	sched := schedule(t, s)
 	billOnce(t, &s, start)
-	if err := s.Cancel(CancelAtPeriodEnd, "", false, start); err != nil {
+	if err := s.Cancel(CancelAtPeriodEnd, "", false, false, start); err != nil {
 		t.Fatal(err)
 	}
 	s.PopEvents()
 
 	at := start.Add(10 * 24 * time.Hour)
-	if err := s.Cancel(CancelImmediately, "encerramento do contrato", true, at); err != nil {
+	if err := s.Cancel(CancelImmediately, "encerramento do contrato", true, false, at); err != nil {
 		t.Fatal(err)
 	}
 	if s.Status != Canceled || !s.CanceledAt.Equal(at) || !s.EndedAt.Equal(at) || s.CancelAtPeriodEnd {
@@ -612,7 +612,7 @@ func TestCancelImmediatelyWithoutFinalUsage(t *testing.T) {
 				billOnce(t, &s, start)
 			}
 			at := c.at(s)
-			if err := s.Cancel(CancelImmediately, "", c.hasUsage, at); err != nil {
+			if err := s.Cancel(CancelImmediately, "", c.hasUsage, false, at); err != nil {
 				t.Fatal(err)
 			}
 			if s.NextBillingAt != nil {
@@ -620,6 +620,39 @@ func TestCancelImmediatelyWithoutFinalUsage(t *testing.T) {
 			}
 			if _, ok, _ := s.NextStep(at.AddDate(0, 1, 0)); ok {
 				t.Fatal("nenhum passo esperado")
+			}
+		})
+	}
+}
+
+func TestCancelImmediatelyWithPendingItemsSchedulesFinalStep(t *testing.T) {
+	start := local(2026, time.November, 16, 12, 0)
+	cases := []struct {
+		name      string
+		bill      bool
+		at        func(Subscription) time.Time
+		wantUsage bool
+	}{
+		{"plano sem consumo com período faturado", true, func(s Subscription) time.Time { return s.CurrentPeriod.Start.Add(5 * 24 * time.Hour) }, true},
+		{"cancelado no primeiro instante do período", true, func(s Subscription) time.Time { return s.CurrentPeriod.Start }, false},
+		{"nenhum período faturado ainda", false, func(Subscription) time.Time { return start.Add(time.Hour) }, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := mustNew(t, newInput(start, 0, start))
+			if c.bill {
+				billOnce(t, &s, start)
+			}
+			at := c.at(s)
+			if err := s.Cancel(CancelImmediately, "", false, true, at); err != nil {
+				t.Fatal(err)
+			}
+			if s.NextBillingAt == nil || !s.NextBillingAt.Equal(at) {
+				t.Fatalf("itens pendentes agendam o fechamento no encerramento: %v", s.NextBillingAt)
+			}
+			step, ok, err := s.NextStep(at)
+			if err != nil || !ok || step.Kind != StepFinalUsage || (step.UsagePeriod != nil) != c.wantUsage {
+				t.Fatalf("passo final: %+v ok=%v err=%v", step, ok, err)
 			}
 		})
 	}
@@ -649,16 +682,16 @@ func TestNextStepForCanceledEdgeCases(t *testing.T) {
 func TestCancelValidation(t *testing.T) {
 	at := local(2026, time.November, 16, 12, 0)
 	s := mustNew(t, newInput(at, 0, at))
-	wantKind(t, s.Cancel("amanha", "", false, at), apperr.KindInvalid, "invalid_cancel_mode")
-	wantKind(t, s.Cancel(CancelImmediately, strings.Repeat("ç", 501), false, at), apperr.KindInvalid, "invalid_reason")
+	wantKind(t, s.Cancel("amanha", "", false, false, at), apperr.KindInvalid, "invalid_cancel_mode")
+	wantKind(t, s.Cancel(CancelImmediately, strings.Repeat("ç", 501), false, false, at), apperr.KindInvalid, "invalid_reason")
 	if s.Status != Active {
 		t.Fatal("validação não altera a assinatura")
 	}
 	// O limite é em caracteres, não em bytes.
-	if err := s.Cancel(CancelImmediately, strings.Repeat("ç", 500), false, at); err != nil {
+	if err := s.Cancel(CancelImmediately, strings.Repeat("ç", 500), false, false, at); err != nil {
 		t.Fatalf("500 caracteres devem ser aceitos: %v", err)
 	}
-	wantKind(t, s.Cancel(CancelImmediately, "", false, at), apperr.KindConflict, "invalid_transition")
+	wantKind(t, s.Cancel(CancelImmediately, "", false, false, at), apperr.KindConflict, "invalid_transition")
 }
 
 func TestSuspend(t *testing.T) {

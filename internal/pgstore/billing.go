@@ -78,7 +78,8 @@ func (tx billingTx) ClaimDueSubscription(ctx context.Context, now time.Time, exc
 	if err != nil {
 		return subscriptions.Subscription{}, false, err
 	}
-	return subscriptionFromRow(r), true, nil
+	sub, err := subscriptionFromRow(r)
+	return sub, err == nil, err
 }
 
 func (tx billingTx) UpdateSubscription(ctx context.Context, s subscriptions.Subscription) error {
@@ -253,8 +254,8 @@ func (tx billingTx) PendingItems(ctx context.Context, subscriptionID uuid.UUID) 
 			p = &calendar.Period{Start: *r.PeriodStart, End: *r.PeriodEnd}
 		}
 		details["source"] = r.Source
-		out = append(out, billing.PendingItem{ID: r.ID, Kind: billing.ItemKind(r.Kind), Description: r.Description, Amount: brl(r.Amount),
-			Quantity: qty, UnitAmount: unit, Period: p, Details: details})
+		out = append(out, billing.PendingItem{ID: r.ID, Kind: billing.ItemKind(r.Kind), Source: r.Source, Description: r.Description,
+			Amount: brl(r.Amount), Quantity: qty, UnitAmount: unit, Period: p, Details: details})
 	}
 	return out, nil
 }

@@ -196,7 +196,9 @@ em cascata nem queda das sessões existentes.
 ## ADR-022 Idempotência HTTP com chave de negócio persistente
 **Decisão:** além da tabela `idempotency_keys` (resultado registrado por 24 h), operações
 financeiras sem chave natural recebem uma chave de negócio derivada do `Idempotency-Key`
-(`payments.request_key`, `customer_credit_entries.request_key`, ambas únicas por tenant).
+(`payments.request_key`, `customer_credit_entries.request_key` e `credit_notes.request_key`, únicas
+por tenant). A chave é `hex(SHA-256(cliente|operação|chave))`, com 64 caracteres para qualquer
+`Idempotency-Key` aceito (8 a 255 caracteres).
 **Justificativa:** cobre a janela entre o commit do efeito e o registro do resultado HTTP e
 continua protegendo após a expiração da chave.
 
@@ -229,11 +231,18 @@ documento da fatura usa estilos inline.
 é positiva e crédito do cliente quando é negativa; itens pendentes são sempre positivos.
 **Justificativa:** créditos como itens negativos poderiam tornar uma fatura futura negativa e
 travar o motor; o crédito do cliente já é consumido automaticamente na emissão.
-**Consequências:** o desconto de valor fixo não é prorrateado; o percentual reduz a diferença.
+**Consequências:** o desconto de valor fixo não é prorrateado. O cupom percentual reduz cada lado
+separadamente: o crédito, pelo percentual vigente no período pago; a cobrança, pelo percentual que
+continua valendo no novo plano (cada valor arredondado uma vez). O item de cobrança entra antes do
+crédito, para que o rascunho nunca tenha total parcial negativo.
 
 ## ADR-027 Reajuste como valor da assinatura, sem versões de preço privadas
 **Decisão:** o reajuste grava o valor resultante na assinatura (`price_override_amount`) e no
-histórico do reajuste; a versão de preço do catálogo não muda.
+histórico do reajuste; a versão de preço do catálogo não muda. Os valores são `numeric(24,10)`:
+no preço por unidade, o percentual incide sobre o preço unitário exato e o total do item é
+arredondado uma vez. A troca da versão de preço cancela os reajustes programados; um reajuste que
+não pode valer no ciclo (preço somente por consumo ou valor acima do limite) é cancelado com o
+motivo, sem bloquear o faturamento.
 **Justificativa:** versões imutáveis continuam sendo do catálogo; criar versões por assinatura
 poluiria o catálogo e a numeração de versões.
 **Consequências:** a fatura registra no snapshot a versão de preço e o reajuste aplicado.
@@ -244,10 +253,16 @@ por job: a diferença contra o valor já faturado (mais correções anteriores) 
 fatura imediata (assinatura encerrada) ou crédito do cliente.
 **Justificativa:** preserva a imutabilidade da fatura emitida e mantém rastreabilidade
 (agregado → item → correção).
+**Consequências:** a diferença é calculada sobre valores líquidos de desconto (o novo valor recebe a
+proporção de desconto do item corrigido) e o ajuste positivo não recebe novo desconto; itens
+pendentes também entram na fatura de encerramento.
 
 ## ADR-029 Nota de crédito limitada ao saldo em aberto
 **Decisão:** a nota de crédito reduz somente o saldo devedor; valores já pagos são tratados por
 reembolso ou crédito do cliente. Após a nota, a cobrança com valor divergente é cancelada
 localmente e uma nova é solicitada pelo saldo.
 **Consequências:** a cobrança antiga pode continuar aberta no provedor até a etapa de
-reembolsos e conciliação; um pagamento por ela é aplicado e o excedente vira crédito do cliente.
+reembolsos e conciliação; um pagamento por ela é aplicado e o excedente vira crédito do cliente
+(a confirmação do provedor é a única transição que tira a cobrança de `canceled`). Cobrança
+ainda em criação no provedor não bloqueia o consumidor da nota: o ajuste ocorre quando a
+operação de criação é concluída, sem depender de reentrega da mensagem.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -22,11 +23,22 @@ const (
 type idemKey struct{}
 
 // idempotencyKeyFrom retorna a chave de negócio derivada do Idempotency-Key
-// (cliente + operação + chave), usada pelos casos de uso como proteção
-// persistente contra duplicidade.
+// (ver businessKey), usada pelos casos de uso como proteção persistente
+// contra duplicidade.
 func idempotencyKeyFrom(ctx context.Context) string {
 	k, _ := ctx.Value(idemKey{}).(string)
 	return k
+}
+
+// businessKey deriva a chave de negócio gravada pelos casos de uso
+// (payments.request_key, customer_credit_entries.request_key e
+// credit_notes.request_key): hex(SHA-256(cliente|operação|chave)). O tamanho
+// é fixo (64 caracteres) para qualquer Idempotency-Key aceito, o que mantém a
+// chave dentro do limite das colunas, e o escopo por cliente e operação
+// impede que a mesma chave colida entre usuários ou rotas diferentes.
+func businessKey(clientID, operation, key string) string {
+	sum := sha256.Sum256([]byte(clientID + "|" + operation + "|" + key))
+	return hex.EncodeToString(sum[:])
 }
 
 func validIdempotencyKey(k string) bool {
@@ -121,7 +133,7 @@ func (a *API) idempotency(info RouteInfo, next http.Handler) http.Handler {
 			}
 		}
 		bw := &bufferedWriter{header: http.Header{}}
-		ctx := context.WithValue(r.Context(), idemKey{}, k.ClientID+"|"+operation+"|"+key)
+		ctx := context.WithValue(r.Context(), idemKey{}, businessKey(k.ClientID, operation, key))
 		next.ServeHTTP(bw, r.WithContext(ctx))
 		if bw.status == 0 {
 			bw.status = http.StatusOK

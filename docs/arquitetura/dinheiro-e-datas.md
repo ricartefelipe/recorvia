@@ -83,35 +83,70 @@ componente fixo anterior e cobra-se a mesma fração do novo, cada valor arredon
 
 | Diferença | Efeito |
 |---|---|
-| positiva | fatura de prorrata imediata (itens de crédito e cobrança proporcionais) |
+| positiva | fatura de prorrata imediata (item de cobrança proporcional seguido do item de crédito proporcional) |
 | negativa | crédito do cliente (`customer_credit_entries`, tipo `proration`), consumido nas próximas faturas |
 | zero | nenhum documento; somente histórico |
 
-Cupom percentual vigente reduz a diferença na mesma proporção; cupom de valor fixo não é
-prorrateado (continua valendo por fatura). Planos com consumo medido só mudam no próximo ciclo, para
-que cada período de consumo seja precificado por uma única versão de preço.
+Cupom percentual: o crédito desconta o percentual do cupom vigente no período já pago (o cliente
+pagou o período com desconto) e a cobrança desconta o percentual do cupom que continua valendo no
+novo plano (zero quando o cupom não vale para ele e é encerrado na troca). Cada valor é arredondado
+uma única vez: crédito = anterior × fração × (1 − p_anterior); cobrança = novo × fração × (1 −
+p_novo). Exemplo: cupom de 10% válido nos dois planos, troca no dia 21 de 30 de R$ 100,00 para
+R$ 160,00 → crédito R$ 30,00, cobrança R$ 48,00, diferença R$ 18,00; com o cupom restrito ao plano
+anterior, troca de R$ 160,00 para R$ 100,00 → crédito R$ 48,00, cobrança R$ 33,33, crédito do
+cliente de R$ 14,67. O percentual fica no próprio item (descrição e snapshot), sem desconto
+adicional sobre a diferença. Cupom de valor fixo não é prorrateado (continua valendo por fatura).
+Planos com consumo medido só mudam no próximo ciclo, para que cada período de consumo seja
+precificado por uma única versão de preço.
 
 ### Mudança no próximo ciclo e reajustes
 
 - Mudança agendada vale no início do período seguinte, com a versão de preço fixada no agendamento;
   o consumo do período anterior continua precificado pela versão anterior.
 - Reajuste programado (percentual em pontos-base ou novo valor) vale no primeiro período iniciado
-  na data efetiva ou depois, sobre o componente fixo vigente (valor fixo ou preço por unidade),
-  arredondado a centavos. Ciclos já faturados nunca mudam. Mudança de versão de preço remove o
-  reajuste; cancelamento da assinatura descarta mudanças e reajustes pendentes.
+  na data efetiva ou depois, sobre o componente fixo vigente. No valor fixo, o resultado é
+  arredondado a centavos uma única vez. No preço por unidade, o percentual incide sobre o preço
+  unitário exato e o resultado é arredondado (half-even) a 10 casas, a escala da coluna
+  (`price_override_amount` e `previous_amount`/`resulting_amount` são `numeric(24,10)`); o total do
+  item (preço unitário × quantidade) é arredondado a centavos uma única vez. Exemplo: R$ 0,045 por
+  unidade + 5% = R$ 0,04725; 100.000 unidades = R$ 4.725,00. A API devolve os valores anterior e
+  resultante arredondados a centavos (exibição) e exatos em texto (`*_decimal`).
+- O limite do valor resultante (`money.MaxAmount`, inclusive no total com a quantidade contratada)
+  é verificado no agendamento. Ciclos já faturados nunca mudam.
+- Mudança de versão de preço (mudança agendada aplicada pelo motor ou mudança imediata) remove o
+  reajuste vigente e cancela os reajustes programados (`cancel_reason = price_version_changed`),
+  com registro no histórico: foram programados sobre o preço anterior. Troca de quantidade na
+  mesma versão mantém o reajuste.
+- No início do ciclo, um reajuste vencido que não pode valer para o preço vigente (preço somente
+  por consumo ou valor acima do limite) é cancelado com o motivo, com evento no histórico e
+  auditoria, sem interromper o faturamento do ciclo.
+- Cancelamento da assinatura descarta mudanças e reajustes pendentes.
 
 ### Consumo recebido depois do fechamento
 
 O período de consumo fecha quando o motor fatura o período seguinte. Evento posterior para um
 período fechado é aceito como `late` até `late_grace_hours` (configuração da métrica) após o fim
-do período; depois disso, é rejeitado. A correção (job `billing.correct_late_usage`, a cada 5
-minutos) recalcula a quantidade com a mesma semântica de agregação, precifica pela versão usada no
-fechamento e compara com o valor já faturado mais correções anteriores:
+do período; depois disso, é rejeitado. A métrica vale para o período fechado mesmo que o plano
+tenha mudado na virada do ciclo (o agregado guarda a versão de preço do fechamento). Consumo
+ocorrido durante uma suspensão é rejeitado pelo histórico da assinatura, também depois da
+reativação. A correção (job `billing.correct_late_usage`, a cada 5 minutos) trata os eventos
+`late` e, como defesa, eventos `accepted` que tenham ficado sem agregado num período já fechado
+(a situação do evento não muda; ele passa a apontar o agregado). Ela recalcula a quantidade com a
+mesma semântica de agregação, precifica pela versão usada no fechamento e compara com o valor já
+faturado mais correções anteriores. A comparação usa valores líquidos de desconto: o valor
+faturado é o do item menos o desconto distribuído nele, e o novo valor recebe a mesma proporção de
+desconto do item original, arredondado uma única vez (`corrected_amount` guarda o líquido; a
+proporção usada fica nos detalhes da correção). Exemplo: item de R$ 100,00 com R$ 50,00 de
+desconto e recontagem para R$ 60,00 → novo líquido R$ 30,00, crédito de R$ 20,00.
 
 | Diferença | Efeito |
 |---|---|
-| positiva, assinatura com próximo ciclo | item de ajuste na próxima fatura |
+| positiva, assinatura com próximo ciclo | item de ajuste na próxima fatura, sem novo desconto |
 | positiva, assinatura encerrada | fatura de ajuste imediata |
 | negativa | crédito do cliente (tipo `usage_correction`) |
+
+Itens pendentes ainda abertos entram também na fatura de encerramento (fim do período ou consumo
+final após cancelamento imediato); sem consumo a faturar, vão para uma fatura de ajuste. O
+cancelamento imediato com itens pendentes abertos agenda o fechamento mesmo em plano sem consumo.
 
 A fatura emitida não é alterada (gatilho `app_invoice_guard`).

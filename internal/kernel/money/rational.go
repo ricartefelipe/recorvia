@@ -77,6 +77,15 @@ func FromRat(r *big.Rat, c Currency, mode RoundingMode) (Money, error) {
 	return Money{amount: i.Int64(), currency: c}, nil
 }
 
+// RoundToScale arredonda r para scale casas decimais segundo mode. Serve
+// para guardar um racional na escala de uma coluna NUMERIC sem perder a
+// fração representável (por exemplo, preço unitário reajustado).
+func RoundToScale(r *big.Rat, scale int, mode RoundingMode) *big.Rat {
+	p := pow10Rat(scale)
+	i := RoundRat(new(big.Rat).Mul(r, p), mode)
+	return new(big.Rat).Quo(new(big.Rat).SetInt(i), p)
+}
+
 // MaxDecimalScale limita casas decimais aceitas em quantidades e preços
 // unitários fracionários (por exemplo, R$ 0,0035 por requisição).
 const MaxDecimalScale = 10

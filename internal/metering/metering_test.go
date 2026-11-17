@@ -189,10 +189,13 @@ func TestIngestMaxBatchUsesCachedLookups(t *testing.T) {
 	if n := len(e.st().events); n != MaxBatch {
 		t.Fatalf("eventos gravados = %d, esperava %d", n, MaxBatch)
 	}
-	for _, op := range []string{"InTenant", "Subscription", "MetricByCode", "PriceVersion"} {
+	for _, op := range []string{"InTenant", "SubscriptionForShare", "SuspensionHistory", "MetricByCode", "PriceVersion"} {
 		if e.store.calls[op] != 1 {
 			t.Fatalf("%s chamado %d vezes, esperava 1 (consulta em cache no lote)", op, e.store.calls[op])
 		}
+	}
+	if e.store.calls["Subscription"] != 0 {
+		t.Fatalf("a ingestão deve ler a assinatura com bloqueio compartilhado: %d leituras sem bloqueio", e.store.calls["Subscription"])
 	}
 }
 
@@ -268,6 +271,9 @@ func TestIngestAcceptsBoundaries(t *testing.T) {
 		}, func(in *EventInput) { in.UniqueKey = "user-1" }},
 		{"properties vazias", nil, func(in *EventInput) { in.Properties = map[string]any{} }},
 		{"occurred_at no limite da tolerância de relógio", nil, func(in *EventInput) { in.OccurredAt = testNow.Add(MaxFutureSkew) }},
+		{"nanossegundos além do limite são truncados", nil, func(in *EventInput) {
+			in.OccurredAt = testNow.Add(MaxFutureSkew + 999*time.Nanosecond)
+		}},
 		{"occurred_at igual ao início da assinatura", nil, func(in *EventInput) { in.OccurredAt = startedAt }},
 		{"occurred_at igual ao fim do trial", func(e *env) {
 			e.editSub(func(s *subscriptions.Subscription) { s.TrialEndsAt = &occurredAt })
@@ -351,7 +357,7 @@ func TestIngestRejections(t *testing.T) {
 		}, msgPropertiesMax},
 		{"properties não serializáveis", nil, func(in *EventInput) { in.Properties = map[string]any{"valor": math.Inf(1)} }, msgPropertiesMax},
 		{"occurred_at ausente", nil, func(in *EventInput) { in.OccurredAt = time.Time{} }, "Informe occurred_at."},
-		{"occurred_at no futuro", nil, func(in *EventInput) { in.OccurredAt = testNow.Add(MaxFutureSkew + time.Nanosecond) },
+		{"occurred_at no futuro", nil, func(in *EventInput) { in.OccurredAt = testNow.Add(MaxFutureSkew + time.Microsecond) },
 			"occurred_at está no futuro."},
 		{"occurred_at antes do início", nil, func(in *EventInput) { in.OccurredAt = startedAt.Add(-time.Nanosecond) },
 			"occurred_at é anterior ao início da assinatura."},
@@ -404,7 +410,7 @@ func TestIngestCachesMissingLookups(t *testing.T) {
 		op   string
 		want string
 	}{
-		{"assinatura inexistente", func(in *EventInput) { in.SubscriptionID = uuid.Nil }, "Subscription", "Assinatura não encontrada."},
+		{"assinatura inexistente", func(in *EventInput) { in.SubscriptionID = uuid.Nil }, "SubscriptionForShare", "Assinatura não encontrada."},
 		{"métrica inexistente", func(in *EventInput) { in.MetricCode = "inexistente" }, "MetricByCode", "Métrica não encontrada."},
 	}
 	for _, tc := range cases {
@@ -469,8 +475,6 @@ func TestIngestDeduplicatesWithinBatch(t *testing.T) {
 }
 
 func TestIngestWithinBatchDivergentContentIsRejected(t *testing.T) {
-	t.Skip("bug: no mesmo lote, external_id repetido com conteúdo diferente é marcado como duplicate sem comparar o conteúdo " +
-		"(metering.go:170), enquanto o mesmo reenvio em outro lote é rejeitado")
 	e := newEnv()
 	other := e.input()
 	other.Quantity = "99"
@@ -562,8 +566,6 @@ func TestIngestRejectsDivergentContent(t *testing.T) {
 }
 
 func TestIngestRetransmissionWithSubMicrosecondOccurredAt(t *testing.T) {
-	t.Skip("bug: occurred_at com nanossegundos é gravado com precisão de microssegundos (timestamptz) e o reenvio idêntico " +
-		"é rejeitado como conteúdo diferente, pois sameContent compara o instante exato (metering.go:101 e metering.go:333)")
 	e := newEnv()
 	in := e.input()
 	in.OccurredAt = occurredAt.Add(123456789 * time.Nanosecond)
@@ -577,8 +579,6 @@ func TestIngestRetransmissionWithSubMicrosecondOccurredAt(t *testing.T) {
 }
 
 func TestIngestRetransmissionAfterPriceChangeIsDuplicate(t *testing.T) {
-	t.Skip("bug: o reenvio de um evento já gravado é revalidado contra o preço vigente antes da consulta por external_id; " +
-		"após mudança para um preço sem a métrica, o evento persistido e faturado é respondido como rejected (metering.go:240-247)")
 	e := newEnv()
 	e.clock.Set(lateAt.Add(time.Hour))
 	in := e.input()
@@ -685,8 +685,6 @@ func TestIngestLateRetransmissionAfterGraceIsDuplicate(t *testing.T) {
 }
 
 func TestIngestLateEventAfterPlanChangeAtCycleBoundary(t *testing.T) {
-	t.Skip("bug: evento atrasado dentro da tolerância é validado contra o preço vigente, não contra o preço do período em que ocorreu; " +
-		"após mudança de plano na virada do ciclo para um preço sem a métrica, o consumo do período anterior é rejeitado (metering.go:298)")
 	e := newEnv()
 	flat := catalog.PriceVersion{ID: uuid.New(), TenantID: e.tenantID, PlanID: uuid.New(), Version: 1, Model: catalog.Flat,
 		FlatAmount: new(money.New(5000, money.BRL)), Currency: money.BRL}
@@ -747,7 +745,8 @@ func TestIngestInfrastructureErrorRollsBackBatch(t *testing.T) {
 		call int
 	}{
 		{"abertura da transação", "InTenant", 0},
-		{"consulta da assinatura", "Subscription", 0},
+		{"consulta da assinatura", "SubscriptionForShare", 0},
+		{"consulta do histórico de suspensões", "SuspensionHistory", 0},
 		{"consulta da métrica", "MetricByCode", 0},
 		{"consulta do preço", "PriceVersion", 0},
 		{"consulta por external_id", "EventByExternalID", 2},

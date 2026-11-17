@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"math/big"
 	"time"
 
 	"github.com/google/uuid"
@@ -9,6 +10,9 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/kernel/calendar"
 	"github.com/ricartefelipe/recorvia/internal/subscriptions"
 )
+
+// isCents informa se o valor exato r é igual a cents centavos.
+func isCents(r *big.Rat, cents int64) bool { return r != nil && r.Cmp(big.NewRat(cents, 1)) == 0 }
 
 func (s *cycleFake) PendingChange(_ context.Context, subID uuid.UUID) (*subscriptions.ScheduledChange, error) {
 	if err := s.fail("PendingChange"); err != nil {
@@ -58,6 +62,35 @@ func (s *cycleFake) MarkAdjustmentApplied(_ context.Context, a subscriptions.Pri
 		}
 	}
 	return nil
+}
+
+func (s *cycleFake) CancelAdjustment(_ context.Context, a subscriptions.PriceAdjustment) error {
+	if err := s.fail("CancelAdjustment"); err != nil {
+		return err
+	}
+	list := s.adjustments[a.SubscriptionID]
+	for i := range list {
+		if list[i].ID == a.ID && list[i].Status == subscriptions.AdjustmentScheduled {
+			list[i] = a
+		}
+	}
+	return nil
+}
+
+func (s *cycleFake) CancelScheduledAdjustments(_ context.Context, subID uuid.UUID, reason subscriptions.AdjustmentCancelReason,
+	at time.Time) ([]uuid.UUID, error) {
+	if err := s.fail("CancelScheduledAdjustments"); err != nil {
+		return nil, err
+	}
+	var ids []uuid.UUID
+	list := s.adjustments[subID]
+	for i := range list {
+		if list[i].Status == subscriptions.AdjustmentScheduled {
+			list[i].Status, list[i].CanceledAt, list[i].CancelReason = subscriptions.AdjustmentCanceled, &at, reason
+			ids = append(ids, list[i].ID)
+		}
+	}
+	return ids, nil
 }
 
 func (s *cycleFake) CancelPendingTerms(_ context.Context, subID uuid.UUID, _ time.Time) error {

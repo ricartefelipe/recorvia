@@ -4,6 +4,8 @@ package httpapi_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -291,6 +293,13 @@ func TestAdvancedAPICoupons(t *testing.T) {
 			"duration": "once", "applies_to_plan_ids": []string{uuid.NewString()}}, "invalid_coupon"},
 		{"campo desconhecido", map[string]any{"code": "EXTRA", "name": "Extra", "discount_type": "percent", "percent_off_bp": 500,
 			"duration": "once", "campo": true}, "invalid_json"},
+		// Acima do máximo aceito: antes era truncado para int32 (4294967297 virava 1) ou violava o CHECK da coluna (500).
+		{"limite de usos acima do máximo", map[string]any{"code": "LIMITE1", "name": "Limite", "discount_type": "percent", "percent_off_bp": 500,
+			"duration": "once", "max_redemptions": 1000000001}, "invalid_coupon"},
+		{"limite de usos que trunca para int32", map[string]any{"code": "LIMITE2", "name": "Limite", "discount_type": "percent", "percent_off_bp": 500,
+			"duration": "once", "max_redemptions": int64(4294967297)}, "invalid_coupon"},
+		{"limite de usos que vira negativo em int32", map[string]any{"code": "LIMITE3", "name": "Limite", "discount_type": "percent",
+			"percent_off_bp": 500, "duration": "once", "max_redemptions": int64(2147483648)}, "invalid_coupon"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c.expectProblem(http.StatusUnprocessableEntity, tc.code, http.MethodPost, "/api/v1/coupons", tc.body)
@@ -526,8 +535,6 @@ func TestAdvancedAPIChangeQuantityRequiresIfMatch(t *testing.T) {
 }
 
 func TestAdvancedAPIImmediateUpgradeIssuesProrationInvoice(t *testing.T) {
-	t.Skip("bug: aumento imediato com o período já faturado responde 422 negative_invoice; settleProration inclui primeiro o item " +
-		"negativo de crédito e o recálculo do rascunho rejeita o total parcial negativo antes do item de cobrança")
 	a := newAdvancedAPI(t)
 	tn := a.env.NewTenant(t, "upgrade")
 	c := a.login(tn.Owner, &tn.ID)
@@ -568,7 +575,8 @@ func TestAdvancedAPIPriceAdjustments(t *testing.T) {
 	adj, _ := c.expect(http.StatusCreated, http.MethodPost, path, map[string]any{"effective_date": first.String(), "kind": "percent",
 		"percent_bp": 450, "index_name": "IPCA", "reason": "Reajuste anual pelo IPCA"})
 	if adj["status"] != "scheduled" || adj["effective_date"] != first.String() || adj["percent_bp"] != float64(450) || adj["index_name"] != "IPCA" ||
-		adj["applied_at"] != nil || adj["previous_amount"] != nil || adj["resulting_amount"] != nil {
+		adj["applied_at"] != nil || adj["previous_amount"] != nil || adj["resulting_amount"] != nil || adj["previous_amount_decimal"] != nil ||
+		adj["resulting_amount_decimal"] != nil || adj["canceled_at"] != nil || adj["cancel_reason"] != nil {
 		t.Fatalf("reajuste percentual: %v", adj)
 	}
 	fixed, _ := c.expect(http.StatusCreated, http.MethodPost, path, map[string]any{"effective_date": second.String(), "kind": "fixed_amount",
@@ -616,11 +624,15 @@ func TestAdvancedAPIPriceAdjustments(t *testing.T) {
 
 	list, _ = c.expect(http.StatusOK, http.MethodGet, path, nil)
 	status := map[string]any{}
-	for _, it := range objects(t, list["data"]) {
-		status[it["id"].(string)] = it["status"]
+	listed := byField(t, objects(t, list["data"]), "id")
+	for id, it := range listed {
+		status[id] = it["status"]
 	}
 	if status[adj["id"].(string)] != "canceled" || status[fixed["id"].(string)] != "scheduled" {
 		t.Fatalf("situação após cancelamento: %v", status)
+	}
+	if canceled := listed[adj["id"].(string)]; canceled["cancel_reason"] != "manual" || canceled["canceled_at"] == nil {
+		t.Fatalf("motivo do cancelamento manual: %v", canceled)
 	}
 	// Cancelado o reajuste, a data fica livre para outro.
 	c.expect(http.StatusCreated, http.MethodPost, path, map[string]any{"effective_date": first.String(), "kind": "percent", "percent_bp": 300,
@@ -635,6 +647,47 @@ func TestAdvancedAPIPriceAdjustments(t *testing.T) {
 		t.Fatalf("histórico de reajustes: %v", events)
 	}
 	c.expectProblem(http.StatusNotFound, "subscription_not_found", http.MethodGet, "/api/v1/subscriptions/"+uuid.NewString()+"/price-adjustments", nil)
+}
+
+// Reajuste percentual de preço por unidade com fração de centavo: a API
+// devolve os valores arredondados a centavos para exibição e os valores
+// exatos em texto; a fatura do ciclo seguinte arredonda o total uma vez.
+func TestAdvancedAPIPerUnitAdjustmentExposesExactAmounts(t *testing.T) {
+	a := newAdvancedAPI(t)
+	tn := a.env.NewTenant(t, "reajuste-unidade")
+	c := a.login(tn.Owner, &tn.ID)
+	plan := newPlan(t, a.env, tn, "Plano por requisição", catalog.PriceInput{Model: catalog.PerUnit, UnitAmount: "4.5"})
+	sub := newSubscription(t, a.env, tn, plan.ID, 100_000, nil)
+	issuedInvoice(c, sub.ID)
+	path := "/api/v1/subscriptions/" + sub.ID.String() + "/price-adjustments"
+	c.expect(http.StatusCreated, http.MethodPost, path, map[string]any{"effective_date": tenantToday(t, a.env).AddDays(1).String(),
+		"kind": "percent", "percent_bp": 500, "reason": "Reajuste anual"})
+	c.expectProblem(http.StatusUnprocessableEntity, "invalid_adjustment", http.MethodPost, path, map[string]any{
+		"effective_date": tenantToday(t, a.env).AddDays(2).String(), "kind": "fixed_amount", "new_amount": 1_000_000_000_000,
+		"reason": "Valor acima do limite"})
+
+	a.env.Clock.Set(sub.CurrentPeriod.End.Add(10 * time.Hour))
+	c = a.login(tn.Owner, &tn.ID)
+	runBilling(c)
+	var cycle map[string]any
+	for _, inv := range subscriptionInvoices(c, sub.ID) {
+		if inv["total"] == float64(472500) {
+			cycle = inv
+		}
+	}
+	if cycle == nil {
+		t.Fatalf("fatura com 100.000 × R$ 0,04725 = R$ 4.725,00: %v", subscriptionInvoices(c, sub.ID))
+	}
+	list, _ := c.expect(http.StatusOK, http.MethodGet, path, nil)
+	items := objects(t, list["data"])
+	if len(items) != 1 {
+		t.Fatalf("reajustes: %v", items)
+	}
+	adj := items[0]
+	if adj["status"] != "applied" || adj["previous_amount"] != float64(4) || adj["resulting_amount"] != float64(5) ||
+		adj["previous_amount_decimal"] != "4.5" || adj["resulting_amount_decimal"] != "4.725" || adj["cancel_reason"] != nil {
+		t.Fatalf("valores do reajuste aplicado: %v", adj)
+	}
 }
 
 // usageEvent monta um evento de consumo para a ingestão.
@@ -1144,8 +1197,6 @@ func TestAdvancedAPITenantIsolation(t *testing.T) {
 }
 
 func TestAdvancedAPIUsageRetryWithNanosecondTimestampIsDuplicate(t *testing.T) {
-	t.Skip("bug: occurred_at com nanossegundos é gravado com precisão de microssegundos (timestamptz) e o reenvio idêntico " +
-		"é comparado com o valor sem truncar, sendo rejeitado como conteúdo diferente em vez de duplicate")
 	a := newAdvancedAPI(t)
 	tn := a.env.NewTenant(t, "consumo-ns")
 	enableUsageBilling(t, a.env, tn)
@@ -1171,8 +1222,6 @@ func TestAdvancedAPIUsageRetryWithNanosecondTimestampIsDuplicate(t *testing.T) {
 }
 
 func TestAdvancedAPIUsageSameBatchConflictingEventIsRejected(t *testing.T) {
-	t.Skip("bug: no mesmo lote, external_id repetido com conteúdo diferente é respondido como duplicate sem comparar o conteúdo; " +
-		"a quantidade divergente é descartada em silêncio")
 	a := newAdvancedAPI(t)
 	tn := a.env.NewTenant(t, "consumo-lote")
 	enableUsageBilling(t, a.env, tn)
@@ -1197,9 +1246,86 @@ func TestAdvancedAPIUsageSameBatchConflictingEventIsRejected(t *testing.T) {
 	}
 }
 
+// Caractere NUL (\u0000 no JSON) em external_id, metric_code, unique_key ou
+// properties é rejeitado por evento: a resposta é 200 com os demais eventos
+// gravados, sem erro interno.
+func TestAdvancedAPIUsageRejectsNULWithoutFailingBatch(t *testing.T) {
+	a := newAdvancedAPI(t)
+	tn := a.env.NewTenant(t, "consumo-nul")
+	enableUsageBilling(t, a.env, tn)
+	c := a.login(tn.Owner, &tn.ID)
+	plan, metric := usagePlan(t, a.env, tn, "10")
+	start := tenantToday(t, a.env)
+	sub := newSubscription(t, a.env, tn, plan.ID, 1, &start)
+	at := a.env.Clock.Now().Truncate(time.Microsecond)
+	ev := func(id string) map[string]any { return usageEvent(id, sub.ID, metric.Code, "1", at) }
+
+	events := []map[string]any{
+		ev("nul\x00id"),
+		with(ev("nul-codigo"), "metric_code", metric.Code+"\x00"),
+		with(ev("nul-chave"), "unique_key", "chave\x00"),
+		with(ev("nul-propriedade"), "properties", map[string]any{"nota": "a\x00b"}),
+		ev("valido"),
+	}
+	out, _ := c.expect(http.StatusOK, http.MethodPost, "/api/v1/usage-events", map[string]any{"events": events})
+	results := objects(t, out["results"])
+	if len(results) != len(events) {
+		t.Fatalf("resultados: %v", results)
+	}
+	for i, r := range results[:4] {
+		if msg, _ := r["error"].(string); r["outcome"] != "rejected" || r["event_id"] != nil || !strings.Contains(msg, "NUL") {
+			t.Fatalf("evento %d com NUL deveria ser rejeitado com motivo: %v", i, r)
+		}
+	}
+	if results[4]["outcome"] != "accepted" {
+		t.Fatalf("evento válido do mesmo lote: %v", results[4])
+	}
+}
+
+// requestKey devolve a chave de negócio gravada pelo caso de uso para a
+// Idempotency-Key informada: hex(SHA-256(cliente|operação|chave)).
+func requestKey(userID uuid.UUID, operation, key string) string {
+	sum := sha256.Sum256([]byte("user:" + userID.String() + "|" + operation + "|" + key))
+	return hex.EncodeToString(sum[:])
+}
+
+// forgetIdempotencyKey remove o registro HTTP da chave, como a expurgação
+// após a validade de 24 h; a partir daí só a chave de negócio protege contra
+// duplicidade.
+func forgetIdempotencyKey(t *testing.T, env *fixture.Env, tenantID uuid.UUID, operation, key string) {
+	t.Helper()
+	err := env.DB.InTenantTx(context.Background(), tenantID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(context.Background(), `DELETE FROM idempotency_keys WHERE tenant_id = $1 AND operation = $2 AND idempotency_key = $3`,
+			tenantID, operation, key)
+		if err == nil && tag.RowsAffected() != 1 {
+			t.Errorf("registros de idempotência removidos: %d", tag.RowsAffected())
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// storedRequestKeys lista as chaves de negócio gravadas numa tabela do tenant.
+func storedRequestKeys(t *testing.T, env *fixture.Env, tenantID uuid.UUID, table string) []string {
+	t.Helper()
+	var keys []string
+	err := env.DB.InTenantTx(context.Background(), tenantID, func(tx pgx.Tx) error {
+		rows, err := tx.Query(context.Background(), `SELECT request_key FROM `+table+` WHERE tenant_id = $1 AND request_key IS NOT NULL ORDER BY created_at`, tenantID)
+		if err != nil {
+			return err
+		}
+		keys, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return keys
+}
+
 func TestAdvancedAPICreditNoteAcceptsMaximumIdempotencyKey(t *testing.T) {
-	t.Skip("bug: Idempotency-Key com 219 a 255 caracteres (aceito pelo middleware) gera request_key acima de 300 caracteres; " +
-		"a constraint de credit_notes.request_key falha e a API responde 500")
 	a := newAdvancedAPI(t)
 	tn := a.env.NewTenant(t, "nota-chave")
 	c := a.login(tn.Owner, &tn.ID)
@@ -1207,6 +1333,7 @@ func TestAdvancedAPICreditNoteAcceptsMaximumIdempotencyKey(t *testing.T) {
 	sub := newSubscription(t, a.env, tn, plan.ID, 1, nil)
 	inv := issuedInvoice(c, sub.ID)
 	path := "/api/v1/invoices/" + inv["id"].(string) + "/credit-notes"
+	const operation = "POST /api/v1/invoices/{id}/credit-notes"
 	// 255 caracteres visíveis: o maior Idempotency-Key aceito pela API.
 	key := strings.Repeat("k", 255)
 	body := map[string]any{"amount": 1000, "reason": "Chave de tamanho máximo"}
@@ -1215,5 +1342,63 @@ func TestAdvancedAPICreditNoteAcceptsMaximumIdempotencyKey(t *testing.T) {
 	second, h := c.expect(http.StatusCreated, http.MethodPost, path, body, "Idempotency-Key", key)
 	if h.Get("Idempotent-Replayed") != "true" || !reflect.DeepEqual(first, second) || len(objects(t, first["credit_notes"])) != 1 {
 		t.Fatalf("repetição com chave longa: %v / %v", first, second)
+	}
+	keys := storedRequestKeys(t, a.env, tn.ID, "credit_notes")
+	if len(keys) != 1 || keys[0] != requestKey(tn.Owner.ID, operation, key) {
+		t.Fatalf("chave de negócio da nota com tamanho fixo: %q", keys)
+	}
+
+	// Sem o registro HTTP, a chave de negócio devolve a nota já emitida.
+	forgetIdempotencyKey(t, a.env, tn.ID, operation, key)
+	third, h3 := c.expect(http.StatusCreated, http.MethodPost, path, body, "Idempotency-Key", key)
+	notes := objects(t, third["credit_notes"])
+	if h3.Get("Idempotent-Replayed") != "" || len(notes) != 1 || notes[0]["id"] != objects(t, first["credit_notes"])[0]["id"] ||
+		third["amount_credited"] != float64(1000) || third["amount_due"] != float64(9000) {
+		t.Fatalf("repetição após a expiração da chave HTTP não emite outra nota: %v", third)
+	}
+}
+
+// A chave de negócio de pagamentos manuais e de créditos concedidos também
+// tem tamanho fixo: Idempotency-Key de 255 caracteres não viola o limite das
+// colunas request_key e a repetição continua idempotente.
+func TestAdvancedAPIManualPaymentAndCreditAcceptMaximumIdempotencyKey(t *testing.T) {
+	a := newAdvancedAPI(t)
+	tn := a.env.NewTenant(t, "chave-longa")
+	c := a.login(tn.Owner, &tn.ID)
+	plan := newPlan(t, a.env, tn, "Plano Chave Longa", flatPrice(10000))
+	sub := newSubscription(t, a.env, tn, plan.ID, 1, nil)
+	inv := issuedInvoice(c, sub.ID)
+	key := strings.Repeat("p", 255)
+
+	payPath := "/api/v1/invoices/" + inv["id"].(string) + "/payments"
+	const payOperation = "POST /api/v1/invoices/{id}/payments"
+	payBody := map[string]any{"amount": 2500, "method": "pix", "note": "Transferência identificada no extrato"}
+	paid, _ := c.expect(http.StatusCreated, http.MethodPost, payPath, payBody, "Idempotency-Key", key)
+	forgetIdempotencyKey(t, a.env, tn.ID, payOperation, key)
+	again, h := c.expect(http.StatusCreated, http.MethodPost, payPath, payBody, "Idempotency-Key", key)
+	if h.Get("Idempotent-Replayed") != "" || again["id"] != paid["id"] {
+		t.Fatalf("pagamento repetido com chave longa: %v / %v", paid, again)
+	}
+	if keys := storedRequestKeys(t, a.env, tn.ID, "payments"); len(keys) != 1 || keys[0] != requestKey(tn.Owner.ID, payOperation, key) {
+		t.Fatalf("chave de negócio do pagamento: %q", keys)
+	}
+	got, _ := c.expect(http.StatusOK, http.MethodGet, "/api/v1/invoices/"+inv["id"].(string), nil)
+	if got["amount_paid"] != float64(2500) || got["amount_due"] != float64(7500) {
+		t.Fatalf("pagamento aplicado uma única vez: %v", got)
+	}
+
+	customerID := got["customer_id"].(string)
+	creditPath := "/api/v1/customers/" + customerID + "/credits"
+	const creditOperation = "POST /api/v1/customers/{id}/credits"
+	creditBody := map[string]any{"amount": 1500, "reason": "Cortesia comercial"}
+	c.expect(http.StatusCreated, http.MethodPost, creditPath, creditBody, "Idempotency-Key", key)
+	forgetIdempotencyKey(t, a.env, tn.ID, creditOperation, key)
+	bal, _ := c.expect(http.StatusCreated, http.MethodPost, creditPath, creditBody, "Idempotency-Key", key)
+	if bal["balance"] != float64(1500) {
+		t.Fatalf("crédito concedido uma única vez: %v", bal)
+	}
+	keys := storedRequestKeys(t, a.env, tn.ID, "customer_credit_entries")
+	if len(keys) != 1 || keys[0] != requestKey(tn.Owner.ID, creditOperation, key) {
+		t.Fatalf("chave de negócio do crédito: %q", keys)
 	}
 }

@@ -226,13 +226,13 @@ func (s *TermsService) CancelAdjustment(ctx context.Context, tenantID uuid.UUID,
 			return err
 		}
 		now := s.clock.Now()
-		if err := a.Cancel(now); err != nil {
+		if err := a.Cancel(AdjustmentCanceledManually, now); err != nil {
 			return err
 		}
 		if err := tx.CancelAdjustment(ctx, a); err != nil {
 			return err
 		}
-		details := map[string]any{"adjustment_id": a.ID}
+		details := map[string]any{"adjustment_id": a.ID, "reason": a.CancelReason}
 		sub.record("price_adjustment_canceled", nil, now, details)
 		return s.finish(ctx, tx, &sub, actor, "subscription.price_adjustment_canceled", details, now)
 	})

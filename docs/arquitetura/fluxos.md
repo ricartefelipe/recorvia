@@ -92,16 +92,33 @@ efeito; saltos (por exemplo, reembolso antes da confirmação) levam à consulta
 3. O consumidor `payments.invoice_credited` cancela localmente a cobrança aguardando pagamento
    com valor divergente e solicita nova cobrança pelo saldo atualizado. Pagamento que ainda chegue
    pela cobrança antiga é aplicado e o excedente vira crédito do cliente.
+4. Se a cobrança ainda está em criação no provedor (`pending`), o consumidor apenas registra a
+   mensagem. Ao concluir a operação de criação, o registro do resultado compara o valor criado com
+   o saldo da fatura: havendo divergência, cancela a cobrança localmente, grava na mesma transação
+   a nova cobrança pelo saldo (com auditoria `charge.canceled_after_balance_change`) e a cria no
+   provedor depois do commit; uma falha nessa criação fica com a recuperação de operações.
 
 ## Ingestão de consumo
 
 1. `POST /api/v1/usage-events` com até 500 eventos; resultado por evento (`accepted`, `duplicate`,
    `late` ou `rejected` com motivo).
-2. Validações: métrica do preço vigente, unidade, quantidade decimal não negativa com até 6 casas e
-   máximo por evento, `unique_key` para contagem distinta, instante dentro da vigência faturável.
-3. `external_id` único por tenant: reenvio idêntico é `duplicate`; conteúdo diferente é rejeitado.
+2. `external_id` único por tenant: reenvio idêntico é `duplicate`; conteúdo diferente é rejeitado,
+   inclusive quando o `external_id` se repete no mesmo lote. A deduplicação vem antes das validações
+   que dependem do estado atual: o reenvio de um evento gravado é respondido pelo conteúdo, mesmo
+   que a assinatura, o preço ou a métrica tenham mudado depois. `occurred_at` é truncado a
+   microssegundos (precisão do `timestamptz`) antes de validar, gravar e comparar.
+3. Validações: textos sem caractere NUL (nem UTF-8 inválido) e `properties` sem `\u0000`, unidade,
+   quantidade decimal não negativa com até 6 casas e máximo por evento, `unique_key` para contagem
+   distinta, instante dentro da vigência faturável e fora de suspensões (pelo histórico da
+   assinatura, mesmo depois da reativação). A métrica precisa fazer parte do preço vigente quando o
+   período está aberto; período já fechado com agregado da métrica aceita o evento como `late`
+   (dentro da tolerância), ainda que o plano tenha mudado. Período cujo fechamento já passou sem
+   agregado da métrica rejeita o evento. Rejeições valem por evento e não desfazem o lote.
 4. O fechamento agrega por período conforme a métrica (`sum`, `max`, `unique_count`, `last`) e
    vincula o agregado ao item da fatura.
+5. A ingestão lê a assinatura com `FOR SHARE`; o motor a reivindica com `FOR UPDATE SKIP LOCKED` e
+   fecha o período na mesma transação. Um evento que chega durante o fechamento espera o commit e é
+   classificado como `late`, nunca como `accepted` num período já fechado.
 
 ## Conciliação
 

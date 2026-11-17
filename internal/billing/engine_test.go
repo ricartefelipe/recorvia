@@ -755,7 +755,7 @@ func TestEngineEndsSubscriptionAtPeriodEnd(t *testing.T) {
 	if err := stored.ApplyStep(subscriptions.BillingStep{Kind: subscriptions.StepBill, Index: 0, Period: sched.Period(0)}, sched.Period(0).Start); err != nil {
 		t.Fatal(err)
 	}
-	if err := stored.Cancel(subscriptions.CancelAtPeriodEnd, "", true, sched.Period(0).Start); err != nil {
+	if err := stored.Cancel(subscriptions.CancelAtPeriodEnd, "", true, false, sched.Period(0).Start); err != nil {
 		t.Fatal(err)
 	}
 	stored.PopEvents()
@@ -776,8 +776,8 @@ func TestEngineEndsSubscriptionAtPeriodEnd(t *testing.T) {
 	if len(inv.Items) != 1 || inv.Items[0].Kind != ItemOverage || inv.Items[0].Amount.Amount() != 1200 {
 		t.Fatalf("somente o excedente, sem mensalidade: %+v", inv.Items)
 	}
-	if !inv.DiscountTotal.IsZero() || f.store.pendingQueries != 0 {
-		t.Fatal("encerramento não aplica descontos nem itens pendentes")
+	if !inv.DiscountTotal.IsZero() || f.store.pendingQueries != 1 {
+		t.Fatal("encerramento não aplica descontos e consulta os itens pendentes")
 	}
 	got := f.store.sub(sub.ID)
 	if got.Status != subscriptions.Canceled || !got.EndedAt.Equal(sched.Period(1).Start) || got.NextBillingAt != nil {
@@ -790,7 +790,7 @@ func TestEngineEndsTrialWithScheduledCancelWithoutInvoice(t *testing.T) {
 	start := engineNow.AddDate(0, 0, -7)
 	sub := f.addSub(t, start, func(in *subscriptions.NewInput) { in.TrialDays = 7 })
 	stored := f.store.subs[0]
-	if err := stored.Cancel(subscriptions.CancelAtPeriodEnd, "não converteu", true, start); err != nil {
+	if err := stored.Cancel(subscriptions.CancelAtPeriodEnd, "não converteu", true, false, start); err != nil {
 		t.Fatal(err)
 	}
 	stored.PopEvents()
@@ -815,7 +815,7 @@ func TestEngineBillsFinalUsageAfterImmediateCancel(t *testing.T) {
 	if err := stored.ApplyStep(subscriptions.BillingStep{Kind: subscriptions.StepBill, Index: 0, Period: sched.Period(0)}, start); err != nil {
 		t.Fatal(err)
 	}
-	if err := stored.Cancel(subscriptions.CancelImmediately, "", true, engineNow); err != nil {
+	if err := stored.Cancel(subscriptions.CancelImmediately, "", true, false, engineNow); err != nil {
 		t.Fatal(err)
 	}
 	stored.PopEvents()

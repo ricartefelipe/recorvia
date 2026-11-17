@@ -12,6 +12,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/catalog"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/calendar"
+	"github.com/ricartefelipe/recorvia/internal/kernel/money"
 	"github.com/ricartefelipe/recorvia/internal/ledger"
 	"github.com/ricartefelipe/recorvia/internal/outbox"
 	"github.com/ricartefelipe/recorvia/internal/subscriptions"
@@ -23,13 +24,16 @@ import (
 const prorationSpan = "21/11/2026 a 30/11/2026, 10 de 30 dias"
 
 func TestChangeImmediateIncreaseWithPreviousFixedCharge(t *testing.T) {
-	t.Skip("bug: settleProration (changes.go:278) adiciona o item de crédito proporcional antes do item de cobrança; " +
-		"Invoice.AddItem recalcula o rascunho a cada item e rejeita o total parcial negativo (negative_invoice), " +
-		"então toda mudança imediata com diferença positiva a partir de componente fixo não nulo falha")
 	percent := &Discount{ID: uuid.New(), CouponCode: "DEZ", PercentBP: 1000}
 	fixedOff := brl(5000)
 	amountOff := &Discount{ID: uuid.New(), CouponCode: "CINQUENTA", AmountOff: &fixedOff}
 	upgrade := func(f *changeFixture) (offer, int, ChangeInput) { return f.basic, 1, immediate(f.pro.plan.ID) }
+	// O cupom vale só para o plano anterior: reduz o crédito do período pago e
+	// é encerrado na troca, sem desconto na cobrança do novo plano.
+	restrictedUpgrade := func(f *changeFixture) (offer, int, ChangeInput) {
+		f.store.discount = &Discount{ID: uuid.New(), CouponCode: "BASICO10", PercentBP: 1000, AppliesToPlanIDs: []uuid.UUID{f.basic.plan.ID}}
+		return upgrade(f)
+	}
 	moreSeats := func(f *changeFixture) (offer, int, ChangeInput) {
 		return f.seats, 2, ChangeInput{Quantity: intPtr(5), Timing: subscriptions.ChangeImmediately}
 	}
@@ -53,8 +57,13 @@ func TestChangeImmediateIncreaseWithPreviousFixedCharge(t *testing.T) {
 		{"aumento de quantidade", moreSeats, nil, 0, 2000, 5000, 0, 3000, 3000, 5,
 			"Crédito proporcional de Plano Equipe: 2 unidade(s) (" + prorationSpan + ")",
 			"Cobrança proporcional de Plano Equipe: 5 unidade(s) (" + prorationSpan + ")"},
-		{"cupom percentual reduz a diferença", upgrade, percent, 0, 3333, 5333, 200, 1800, 1800, 1, basicCredit, proCharge},
+		// 10% nos dois lados: crédito 10.000 × 1/3 × 0,9 = 3.000; cobrança 16.000 × 1/3 × 0,9 = 4.800.
+		{"cupom percentual reduz crédito e cobrança", upgrade, percent, 0, 3000, 4800, 0, 1800, 1800, 1,
+			"Crédito proporcional de Plano Básico (" + prorationSpan + ", desconto de 10%)",
+			"Cobrança proporcional de Plano Pro (" + prorationSpan + ", desconto de 10%)"},
 		{"cupom de valor fixo não é prorrateado", upgrade, amountOff, 0, 3333, 5333, 0, 2000, 2000, 1, basicCredit, proCharge},
+		{"cupom que não vale para o novo plano reduz só o crédito", restrictedUpgrade, nil, 0, 3000, 5333, 0, 2333, 2333, 1,
+			"Crédito proporcional de Plano Básico (" + prorationSpan + ", desconto de 10%)", proCharge},
 		{"crédito do cliente é consumido", upgrade, nil, 500, 3333, 5333, 0, 2000, 1500, 1, basicCredit, proCharge},
 	}
 	for _, c := range cases {
@@ -80,10 +89,8 @@ func TestChangeImmediateIncreaseWithPreviousFixedCharge(t *testing.T) {
 			if inv.ID != *res.InvoiceID || inv.Kind != KindProration || inv.Status != Open || len(inv.Items) != 2 {
 				t.Fatalf("fatura de prorrata com itens de crédito e cobrança: %+v", inv)
 			}
-			credit, charge := inv.Items[0], inv.Items[1]
-			if credit.Amount.IsPositive() {
-				credit, charge = charge, credit
-			}
+			// A cobrança vem antes do crédito: o total parcial do rascunho nunca fica negativo.
+			charge, credit := inv.Items[0], inv.Items[1]
 			if credit.Kind != ItemProration || credit.Amount.Amount() != -c.wantCredit || credit.Description != c.wantCreditDesc ||
 				*credit.PriceVersionID != sub.PriceVersionID {
 				t.Fatalf("item de crédito proporcional: %+v", credit)
@@ -206,7 +213,10 @@ func TestChangeValidationOfTargetPlan(t *testing.T) {
 	}
 }
 
-func TestEngineCatchUpAppliesChangeAndLaterAdjustment(t *testing.T) {
+// A mudança agendada para novembro troca a versão de preço: o reajuste
+// programado para dezembro foi definido sobre o plano anterior e é cancelado
+// na mesma recuperação de períodos, com registro no histórico.
+func TestEngineCatchUpChangeCancelsLaterAdjustment(t *testing.T) {
 	f := newTermsFixture(t)
 	sub := f.addSub(t, f.basic, 1, true, nil)
 	ch := f.schedule(t, sub, &f.pro, nil)
@@ -221,37 +231,37 @@ func TestEngineCatchUpAppliesChangeAndLaterAdjustment(t *testing.T) {
 	if !samePeriod(*nov.BillingPeriod, f.period(t, sub, 1)) || nov.Total.Amount() != 16000 || *nov.Items[0].PlanID != f.pro.plan.ID {
 		t.Fatalf("novembro já no novo plano, sem reajuste: %+v", nov.Items)
 	}
-	if _, ok := nov.Items[0].PriceSnapshot["price_adjustment_id"]; ok {
-		t.Fatal("o reajuste de dezembro não pode alterar novembro")
+	if !samePeriod(*dec.BillingPeriod, f.period(t, sub, 2)) || dec.Total.Amount() != 16000 {
+		t.Fatalf("dezembro pelo preço contratado do novo plano: %+v", dec.Items)
 	}
-	if !samePeriod(*dec.BillingPeriod, f.period(t, sub, 2)) || dec.Total.Amount() != 17600 ||
-		dec.Items[0].PriceSnapshot["price_adjustment_id"] != adj.ID {
-		t.Fatalf("dezembro com 10%% sobre o novo plano (R$ 176,00): %+v", dec.Items)
+	if _, ok := dec.Items[0].PriceSnapshot["price_adjustment_id"]; ok {
+		t.Fatal("o reajuste do plano anterior não vale para o novo plano")
 	}
 	if len(f.store.resolved) != 1 || f.store.resolved[ch.ID] != subscriptions.ChangeApplied {
 		t.Fatalf("a mudança é aplicada uma única vez: %+v", f.store.resolved)
 	}
-	counts := map[string]int{}
-	for _, a := range f.store.audits {
-		counts[a.Action]++
+	canceled := f.store.adjustments[sub.ID][0]
+	if canceled.ID != adj.ID || canceled.Status != subscriptions.AdjustmentCanceled ||
+		canceled.CancelReason != subscriptions.AdjustmentCanceledPriceChanged || canceled.CanceledAt == nil {
+		t.Fatalf("reajuste programado cancelado pela troca de preço: %+v", canceled)
 	}
-	if counts["subscription.plan_changed"] != 1 || counts["subscription.price_adjusted"] != 1 || counts["invoice.issued"] != 2 {
-		t.Fatalf("auditorias: %v", counts)
+	ev, ok := historyEvent(f.store.subHistory, "price_adjustment_canceled")
+	if !ok || ev.Details["adjustment_id"] != adj.ID || ev.Details["reason"] != subscriptions.AdjustmentCanceledPriceChanged {
+		t.Fatalf("histórico do cancelamento: %+v", ev)
 	}
-	applied := f.store.adjustments[sub.ID][0]
-	if applied.Status != subscriptions.AdjustmentApplied || applied.PreviousAmount.Amount() != 16000 || applied.ResultingAmount.Amount() != 17600 ||
-		!applied.AppliedPeriodStart.Equal(f.period(t, sub, 2).Start) {
-		t.Fatalf("reajuste aplicado no período de dezembro: %+v", applied)
+	a, ok := findAudit(f.store.audits, "subscription.plan_changed")
+	if ids, _ := a.Details["canceled_adjustment_ids"].([]uuid.UUID); !ok || len(ids) != 1 || ids[0] != adj.ID {
+		t.Fatalf("auditoria da mudança com os reajustes cancelados: %+v", a.Details)
 	}
-	if got := f.store.sub(sub.ID); got.NextBillingIndex != 3 || got.PriceOverride == nil || got.PriceOverride.Amount() != 17600 {
+	if _, ok := findAudit(f.store.audits, "subscription.price_adjusted"); ok {
+		t.Fatal("nenhum reajuste aplicado")
+	}
+	if got := f.store.sub(sub.ID); got.NextBillingIndex != 3 || got.PriceOverride != nil {
 		t.Fatalf("assinatura após a recuperação dos períodos: %+v", got)
 	}
 }
 
 func TestEngineDueAdjustmentAfterChangeToUsageOnlyPlan(t *testing.T) {
-	t.Skip("bug: applyTerms (engine.go:340) aplica o reajuste programado depois da mudança agendada para um plano somente por consumo; " +
-		"PriceAdjustment.Apply falha com price_without_fixed_component e a assinatura deixa de ser faturada em todas as execuções " +
-		"seguintes (estado alcançável pela API: reajuste programado no plano fixo e mudança no próximo ciclo para plano por consumo)")
 	cases := []struct {
 		name      string
 		effective calendar.Date
@@ -278,9 +288,61 @@ func TestEngineDueAdjustmentAfterChangeToUsageOnlyPlan(t *testing.T) {
 				t.Fatal("a mudança agendada é aplicada")
 			}
 			for _, a := range f.store.adjustments[sub.ID] {
-				if a.ID == adj.ID && a.Status == subscriptions.AdjustmentApplied {
-					t.Fatal("o reajuste não pode valer para um preço sem componente fixo")
+				if a.ID == adj.ID && (a.Status != subscriptions.AdjustmentCanceled || a.CancelReason != subscriptions.AdjustmentCanceledPriceChanged) {
+					t.Fatalf("o reajuste é cancelado pela troca da versão de preço: %+v", a)
 				}
+			}
+		})
+	}
+}
+
+// Reajuste vencido que não pode valer para o preço vigente é cancelado com o
+// motivo, sem interromper o faturamento do ciclo.
+func TestEngineCancelsUnapplicableAdjustment(t *testing.T) {
+	cases := []struct {
+		name   string
+		offer  func(f *termsFixture) offer
+		bp     int64
+		reason subscriptions.AdjustmentCancelReason
+		total  int64
+	}{
+		{"preço somente por consumo", func(f *termsFixture) offer { return f.metered }, 1000,
+			subscriptions.AdjustmentCanceledNoFixedComponent, 0},
+		{"valor resultante acima do limite", func(f *termsFixture) offer {
+			return f.add(newOffer("enterprise", "Plano Enterprise", calendar.Monthly, catalog.Flat, money.MaxAmount/5))
+		}, 100000, subscriptions.AdjustmentCanceledAmountLimit, money.MaxAmount / 5},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newTermsFixture(t)
+			o := c.offer(f)
+			sub := f.addSub(t, o, 1, true, nil)
+			adj := f.adjustment(sub, calendar.Date{Year: 2026, Month: time.November, Day: 1}, subscriptions.AdjustPercent, c.bp)
+
+			f.run(t)
+			got := f.store.sub(sub.ID)
+			if got.NextBillingIndex != 2 || got.PriceOverride != nil {
+				t.Fatalf("o ciclo avança sem reajuste: %+v", got)
+			}
+			stored := f.store.adjustments[sub.ID][0]
+			if stored.ID != adj.ID || stored.Status != subscriptions.AdjustmentCanceled || stored.CancelReason != c.reason ||
+				stored.CanceledAt == nil || stored.ResultingAmount != nil {
+				t.Fatalf("reajuste cancelado com motivo: %+v", stored)
+			}
+			ev, ok := historyEvent(f.store.subHistory, "price_adjustment_canceled")
+			if !ok || ev.Details["adjustment_id"] != adj.ID || ev.Details["reason"] != c.reason {
+				t.Fatalf("histórico do cancelamento: %+v", ev)
+			}
+			a, ok := findAudit(f.store.audits, "subscription.price_adjustment_canceled")
+			if !ok || a.Actor != audit.System("billing.engine") || a.Details["adjustment_id"] != adj.ID || a.Details["reason"] != c.reason {
+				t.Fatalf("auditoria do cancelamento: %+v", f.store.audits)
+			}
+			var total int64
+			for _, inv := range f.store.invoices {
+				total += inv.Total.Amount()
+			}
+			if total != c.total {
+				t.Fatalf("faturado pelo preço contratado: %d", total)
 			}
 		})
 	}

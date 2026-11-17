@@ -67,11 +67,16 @@ func (d Discount) Amount(base money.Money) (money.Money, error) {
 	return base.MulRat(money.Percent(d.PercentBP), money.DefaultRounding)
 }
 
+// PendingSourceUsageCorrection é a origem dos itens pendentes gerados pela
+// correção de consumo atrasado.
+const PendingSourceUsageCorrection = "usage_correction"
+
 // PendingItem é um ajuste (por exemplo, prorrata ou correção de consumo)
-// aguardando a próxima fatura da assinatura.
+// aguardando a próxima fatura da assinatura. Source identifica a origem.
 type PendingItem struct {
 	ID          uuid.UUID
 	Kind        ItemKind
+	Source      string
 	Description string
 	Amount      money.Money
 	Quantity    *big.Rat
@@ -79,6 +84,11 @@ type PendingItem struct {
 	Period      *calendar.Period
 	Details     map[string]any
 }
+
+// discountExempt informa se o item pendente fica fora dos descontos da
+// fatura: a correção de consumo já aplica a proporção de desconto do item
+// corrigido e não recebe um novo desconto.
+func (p PendingItem) discountExempt() bool { return p.Source == PendingSourceUsageCorrection }
 
 // CycleTx são as operações do motor de recorrência na transação do tenant.
 type CycleTx interface {
@@ -112,6 +122,13 @@ type CycleTx interface {
 	ResolveChange(ctx context.Context, id uuid.UUID, status subscriptions.ChangeStatus, at time.Time) error
 	DueAdjustments(ctx context.Context, subscriptionID uuid.UUID, onDate calendar.Date) ([]subscriptions.PriceAdjustment, error)
 	MarkAdjustmentApplied(ctx context.Context, a subscriptions.PriceAdjustment) error
+	// CancelAdjustment grava o cancelamento de um reajuste programado
+	// (situação, instante e motivo já definidos no reajuste).
+	CancelAdjustment(ctx context.Context, a subscriptions.PriceAdjustment) error
+	// CancelScheduledAdjustments cancela todos os reajustes programados da
+	// assinatura com o motivo informado e devolve os identificadores.
+	CancelScheduledAdjustments(ctx context.Context, subscriptionID uuid.UUID, reason subscriptions.AdjustmentCancelReason,
+		at time.Time) ([]uuid.UUID, error)
 	CancelPendingTerms(ctx context.Context, subscriptionID uuid.UUID, at time.Time) error
 	EndActiveDiscount(ctx context.Context, subscriptionID uuid.UUID, at time.Time) (bool, error)
 }
@@ -284,6 +301,11 @@ func (e *Engine) processSubscription(ctx context.Context, tx CycleTx, sub *subsc
 
 // applyTerms aplica, no início do período do passo, a mudança agendada e os
 // reajustes vencidos. Informa se plano ou versão de preço mudaram.
+//
+// Quando a mudança troca a versão de preço, os reajustes programados são
+// cancelados (foram programados sobre o preço anterior). Um reajuste vencido
+// que não pode valer para o preço vigente (preço somente por consumo ou valor
+// acima do limite) é cancelado com o motivo, sem interromper o ciclo.
 func (e *Engine) applyTerms(ctx context.Context, tx CycleTx, sub *subscriptions.Subscription, step subscriptions.BillingStep, now time.Time) (bool, error) {
 	changed := false
 	ch, err := tx.PendingChange(ctx, sub.ID)
@@ -310,16 +332,26 @@ func (e *Engine) applyTerms(ctx context.Context, tx CycleTx, sub *subscriptions.
 		if ch.Kind == subscriptions.PlanChange {
 			event = "plan_changed"
 		}
+		priceChanged := price.ID != sub.PriceVersionID
 		sub.ApplyChange(plan, price, qty, event, now, map[string]any{"scheduled_change_id": ch.ID, "timing": subscriptions.ChangeNextCycle,
 			"period_start": step.Period.Start})
 		if err := tx.ResolveChange(ctx, ch.ID, subscriptions.ChangeApplied, now); err != nil {
 			return false, err
 		}
+		details := map[string]any{"scheduled_change_id": ch.ID, "plan_id": plan.ID, "price_version": price.Version, "quantity": qty}
+		if priceChanged {
+			canceled, err := cancelAdjustmentsOnPriceChange(ctx, tx, sub, now)
+			if err != nil {
+				return false, err
+			}
+			if len(canceled) > 0 {
+				details["canceled_adjustment_ids"] = canceled
+			}
+		}
 		if err := endInapplicableDiscount(ctx, tx, sub, now); err != nil {
 			return false, err
 		}
-		if err := tx.Audit(ctx, audit.New(sub.TenantID, now, engineActor, "subscription."+event, "subscription", sub.ID.String(),
-			map[string]any{"scheduled_change_id": ch.ID, "plan_id": plan.ID, "price_version": price.Version, "quantity": qty})); err != nil {
+		if err := tx.Audit(ctx, audit.New(sub.TenantID, now, engineActor, "subscription."+event, "subscription", sub.ID.String(), details)); err != nil {
 			return false, err
 		}
 		changed = true
@@ -337,19 +369,50 @@ func (e *Engine) applyTerms(ctx context.Context, tx CycleTx, sub *subscriptions.
 		return false, err
 	}
 	for i := range adjs {
-		if err := adjs[i].Apply(sub, price, step.Period.Start, now); err != nil {
+		a := &adjs[i]
+		applied, err := a.ApplyOrCancel(sub, price, step.Period.Start, now)
+		if err != nil {
 			return false, err
 		}
-		if err := tx.MarkAdjustmentApplied(ctx, adjs[i]); err != nil {
+		if !applied {
+			if err := tx.CancelAdjustment(ctx, *a); err != nil {
+				return false, err
+			}
+			if err := tx.Audit(ctx, audit.New(sub.TenantID, now, engineActor, "subscription.price_adjustment_canceled", "subscription",
+				sub.ID.String(), map[string]any{"adjustment_id": a.ID, "reason": a.CancelReason})); err != nil {
+				return false, err
+			}
+			continue
+		}
+		if err := tx.MarkAdjustmentApplied(ctx, *a); err != nil {
 			return false, err
 		}
 		if err := tx.Audit(ctx, audit.New(sub.TenantID, now, engineActor, "subscription.price_adjusted", "subscription", sub.ID.String(),
-			map[string]any{"adjustment_id": adjs[i].ID, "previous_amount": adjs[i].PreviousAmount.Amount(),
-				"resulting_amount": adjs[i].ResultingAmount.Amount()})); err != nil {
+			map[string]any{"adjustment_id": a.ID, "previous_amount": roundedCents(a.PreviousAmount), "resulting_amount": roundedCents(a.ResultingAmount),
+				"previous_amount_decimal": money.RatString(a.PreviousAmount), "resulting_amount_decimal": money.RatString(a.ResultingAmount)})); err != nil {
 			return false, err
 		}
 	}
 	return changed, nil
+}
+
+// roundedCents arredonda um valor exato a centavos (half-even) para exibição
+// e auditoria.
+func roundedCents(r *big.Rat) int64 { return money.RoundRat(r, money.DefaultRounding).Int64() }
+
+// cancelAdjustmentsOnPriceChange cancela os reajustes programados quando a
+// versão de preço da assinatura muda (mudança agendada aplicada pelo motor
+// ou mudança imediata) e registra o cancelamento no histórico.
+func cancelAdjustmentsOnPriceChange(ctx context.Context, tx interface {
+	CancelScheduledAdjustments(ctx context.Context, subscriptionID uuid.UUID, reason subscriptions.AdjustmentCancelReason,
+		at time.Time) ([]uuid.UUID, error)
+}, sub *subscriptions.Subscription, now time.Time) ([]uuid.UUID, error) {
+	ids, err := tx.CancelScheduledAdjustments(ctx, sub.ID, subscriptions.AdjustmentCanceledPriceChanged, now)
+	if err != nil {
+		return nil, err
+	}
+	sub.RecordAdjustmentsCanceled(ids, subscriptions.AdjustmentCanceledPriceChanged, now)
+	return ids, nil
 }
 
 // endInapplicableDiscount encerra o desconto cujo cupom não vale para o novo
@@ -392,26 +455,63 @@ func priceSnapshot(plan catalog.Plan, pv catalog.PriceVersion) map[string]any {
 	return s
 }
 
+// stepInvoice define o tipo e o período da fatura de um passo. No
+// encerramento (StepEnd e StepFinalUsage), a fatura de consumo final cobre o
+// período de consumo quando o preço tem consumo medido; sem consumo a
+// faturar, os itens pendentes vão para uma fatura de ajuste (manual) com o
+// período coberto pelos itens. ok é falso quando não há o que faturar.
+func stepInvoice(step subscriptions.BillingStep, price catalog.PriceVersion, pending []PendingItem) (kind Kind, period *calendar.Period, ok bool) {
+	switch {
+	case step.Kind == subscriptions.StepBill:
+		p := step.Period
+		return KindSubscriptionCycle, &p, true
+	case step.UsagePeriod != nil && price.HasUsage():
+		p := *step.UsagePeriod
+		return KindFinalUsage, &p, true
+	case len(pending) > 0:
+		return KindManual, pendingSpan(pending), true
+	}
+	return "", nil, false
+}
+
+// pendingSpan é o menor período que contém os períodos dos itens pendentes
+// (nulo se nenhum item informa período).
+func pendingSpan(pending []PendingItem) *calendar.Period {
+	var span *calendar.Period
+	for _, p := range pending {
+		switch {
+		case p.Period == nil:
+		case span == nil:
+			s := *p.Period
+			span = &s
+		default:
+			if p.Period.Start.Before(span.Start) {
+				span.Start = p.Period.Start
+			}
+			if p.Period.End.After(span.End) {
+				span.End = p.Period.End
+			}
+		}
+	}
+	return span
+}
+
 // BuildCycleInvoice monta o rascunho de um passo de faturamento. É pura
 // (sem persistência) para permitir testes de cálculo isolados.
 func BuildCycleInvoice(sub subscriptions.Subscription, plan catalog.Plan, price catalog.PriceVersion, step subscriptions.BillingStep,
 	snapshot customers.Snapshot, usage []UsageLine, pending []PendingItem, discount *Discount, loc *time.Location, now time.Time) (*Invoice, []usageItemLink, error) {
-	kind := KindSubscriptionCycle
-	period := step.Period
-	if step.Kind != subscriptions.StepBill {
-		kind = KindFinalUsage
-		if step.UsagePeriod == nil {
-			return nil, nil, nil
-		}
-		period = *step.UsagePeriod
+	kind, period, ok := stepInvoice(step, price, pending)
+	if !ok {
+		return nil, nil, nil
 	}
 	subID := sub.ID
-	inv := NewDraft(ids.New(), sub.TenantID, sub.CustomerID, &subID, kind, price.Currency, &period, snapshot, now)
+	inv := NewDraft(ids.New(), sub.TenantID, sub.CustomerID, &subID, kind, price.Currency, period, snapshot, now)
 	fixed := sub.EffectivePrice(price)
 	snap := priceSnapshot(plan, fixed)
-	if sub.PriceOverrideAdjustmentID != nil {
+	if sub.PriceOverrideAdjustmentID != nil && sub.PriceOverride != nil {
 		snap["price_adjustment_id"] = *sub.PriceOverrideAdjustmentID
-		snap["adjusted_fixed_amount"] = sub.PriceOverride.Amount()
+		snap["adjusted_fixed_amount"] = roundedCents(sub.PriceOverride)
+		snap["adjusted_amount_decimal"] = money.RatString(sub.PriceOverride)
 	}
 	if step.Kind == subscriptions.StepBill && price.HasFixed() {
 		amount, qty, unit, err := fixed.FixedCharge(sub.Quantity)
@@ -429,7 +529,7 @@ func BuildCycleInvoice(sub subscriptions.Subscription, plan catalog.Plan, price 
 		}
 	}
 	var links []usageItemLink
-	if step.UsagePeriod != nil {
+	if step.UsagePeriod != nil && kind != KindManual {
 		up := *step.UsagePeriod
 		for _, u := range usage {
 			lplan, lprice, lsnap := plan, price, snap
@@ -473,7 +573,7 @@ func BuildCycleInvoice(sub subscriptions.Subscription, plan catalog.Plan, price 
 			unit = p.Amount.Rat()
 		}
 		if err := inv.AddItem(Item{ID: ids.New(), Kind: p.Kind, Description: p.Description, Quantity: qty, UnitAmount: unit,
-			Amount: p.Amount, Period: p.Period, PriceSnapshot: p.Details}); err != nil {
+			Amount: p.Amount, Period: p.Period, PriceSnapshot: p.Details, DiscountExempt: p.discountExempt()}); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -481,7 +581,7 @@ func BuildCycleInvoice(sub subscriptions.Subscription, plan catalog.Plan, price 
 		return nil, nil, nil
 	}
 	if discount != nil {
-		base, err := inv.Subtotal.Sub(inv.DiscountTotal)
+		base, err := inv.DiscountableBase()
 		if err != nil {
 			return nil, nil, err
 		}
@@ -498,28 +598,34 @@ func BuildCycleInvoice(sub subscriptions.Subscription, plan catalog.Plan, price 
 
 type usageItemLink struct{ aggregateID, itemID uuid.UUID }
 
+// issueForStep emite a fatura do passo. Itens pendentes entram na fatura do
+// ciclo e também na de encerramento (StepEnd e StepFinalUsage); sem consumo
+// a faturar no encerramento, viram uma fatura de ajuste.
 func (e *Engine) issueForStep(ctx context.Context, tx CycleTx, sub *subscriptions.Subscription, plan catalog.Plan, price catalog.PriceVersion,
 	usagePlan catalog.Plan, usagePrice catalog.PriceVersion, step subscriptions.BillingStep, settings TenantSettings, actor audit.Actor,
 	now time.Time) (*Invoice, error) {
-	kind := KindSubscriptionCycle
-	periodStart := step.Period.Start
-	if step.Kind != subscriptions.StepBill {
-		kind = KindFinalUsage
-		if step.UsagePeriod == nil {
-			return nil, nil
-		}
-		periodStart = step.UsagePeriod.Start
-	}
-	exists, err := tx.CycleInvoiceExists(ctx, sub.ID, kind, periodStart)
-	if err != nil || exists {
+	pending, err := tx.PendingItems(ctx, sub.ID)
+	if err != nil {
 		return nil, err
+	}
+	kind, period, ok := stepInvoice(step, usagePrice, pending)
+	if !ok {
+		return nil, nil
+	}
+	// Faturas de ciclo e de consumo final são únicas por assinatura e
+	// período; a fatura de ajuste é protegida pela marcação dos itens.
+	if kind != KindManual {
+		exists, err := tx.CycleInvoiceExists(ctx, sub.ID, kind, period.Start)
+		if err != nil || exists {
+			return nil, err
+		}
 	}
 	snapshot, customerTerms, err := tx.CustomerForInvoice(ctx, sub.CustomerID, now)
 	if err != nil {
 		return nil, err
 	}
 	var usage []UsageLine
-	if usagePrice.HasUsage() && step.UsagePeriod != nil {
+	if kind != KindManual && usagePrice.HasUsage() && step.UsagePeriod != nil {
 		if usage, err = tx.UsageFor(ctx, *sub, usagePrice, *step.UsagePeriod); err != nil {
 			return nil, err
 		}
@@ -529,12 +635,8 @@ func (e *Engine) issueForStep(ctx context.Context, tx CycleTx, sub *subscription
 			}
 		}
 	}
-	var pending []PendingItem
 	var discount *Discount
 	if step.Kind == subscriptions.StepBill {
-		if pending, err = tx.PendingItems(ctx, sub.ID); err != nil {
-			return nil, err
-		}
 		if discount, err = tx.ActiveDiscount(ctx, sub.ID); err != nil {
 			return nil, err
 		}

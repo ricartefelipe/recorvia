@@ -80,6 +80,7 @@ type advancedFake struct {
 	metrics        map[uuid.UUID]catalog.Metric
 	recompute      map[string]recomputed
 	itemAmounts    map[uuid.UUID]money.Money
+	itemDiscounts  map[uuid.UUID]money.Money
 	lateTenants    []uuid.UUID
 	lateTenantsErr error
 	calls          map[string]int
@@ -93,7 +94,7 @@ func newAdvancedFake() *advancedFake {
 		platformPlan: platformbilling.Plan{Code: "growth", Name: "Growth", Active: true,
 			Features: []platformbilling.Feature{platformbilling.FeatureUsageBilling}},
 		metrics: map[uuid.UUID]catalog.Metric{}, recompute: map[string]recomputed{}, itemAmounts: map[uuid.UUID]money.Money{},
-		calls: map[string]int{}, failAt: map[string]int{},
+		itemDiscounts: map[uuid.UUID]money.Money{}, calls: map[string]int{}, failAt: map[string]int{},
 	}
 }
 
@@ -312,15 +313,19 @@ func (s *advancedFake) RecomputeUsage(_ context.Context, subscriptionID uuid.UUI
 	return new(big.Rat).Set(r.qty), r.events, nil
 }
 
-func (s *advancedFake) InvoiceItemAmount(_ context.Context, id uuid.UUID) (money.Money, error) {
-	if err := s.hit("InvoiceItemAmount"); err != nil {
-		return money.Money{}, err
+func (s *advancedFake) InvoiceItemAmounts(_ context.Context, id uuid.UUID) (money.Money, money.Money, error) {
+	if err := s.hit("InvoiceItemAmounts"); err != nil {
+		return money.Money{}, money.Money{}, err
 	}
 	m, ok := s.itemAmounts[id]
 	if !ok {
-		return money.Money{}, apperr.NotFound("invoice_item_not_found", "Item de fatura não encontrado.")
+		return money.Money{}, money.Money{}, apperr.NotFound("invoice_item_not_found", "Item de fatura não encontrado.")
 	}
-	return m, nil
+	d, ok := s.itemDiscounts[id]
+	if !ok {
+		d = money.Zero(m.Currency())
+	}
+	return m, d, nil
 }
 
 func (s *advancedFake) SetAggregateCorrection(_ context.Context, id uuid.UUID, qty *big.Rat, amount money.Money) error {
@@ -359,7 +364,7 @@ func (s *advancedFake) InsertPendingItem(_ context.Context, it NewPendingItem) e
 	}
 	s.newPending = append(s.newPending, it)
 	// O item passa a ser lido pelo motor como pendente da assinatura.
-	s.pending[it.SubscriptionID] = append(slices.Clone(s.pending[it.SubscriptionID]), PendingItem{ID: it.ID, Kind: it.Kind,
+	s.pending[it.SubscriptionID] = append(slices.Clone(s.pending[it.SubscriptionID]), PendingItem{ID: it.ID, Kind: it.Kind, Source: it.Source,
 		Description: it.Description, Amount: it.Amount, Quantity: it.Quantity, Period: it.Period, Details: it.Details})
 	return nil
 }

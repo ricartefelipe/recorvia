@@ -119,6 +119,11 @@ func TestNewCouponValid(t *testing.T) {
 				t.Fatalf("limite = %v", c.MaxRedemptions)
 			}
 		}},
+		{"limite de usos no máximo aceito", func(in *CouponInput) { in.MaxRedemptions = ptr(MaxCouponRedemptions) }, func(t *testing.T, c Coupon) {
+			if c.MaxRedemptions == nil || *c.MaxRedemptions != 1_000_000_000 {
+				t.Fatalf("limite = %v", c.MaxRedemptions)
+			}
+		}},
 		{"validade com início no passado", func(in *CouponInput) { in.ValidFrom, in.ValidUntil = &past, &future }, func(t *testing.T, c Coupon) {
 			if !c.ValidFrom.Equal(past) || !c.ValidUntil.Equal(future) {
 				t.Fatalf("validade = %v a %v", c.ValidFrom, c.ValidUntil)
@@ -246,13 +251,16 @@ func TestNewCouponCollectsAllErrors(t *testing.T) {
 	}
 }
 
+// O limite de usos é gravado em coluna integer: valores acima do máximo de
+// negócio (inclusive os que truncariam para int32) são rejeitados na
+// validação, com erro de campo, em vez de gravados com outro valor.
 func TestNewCouponMaxRedemptionsWithinStorageRange(t *testing.T) {
-	t.Skip("bug: NewCoupon não limita max_redemptions ao intervalo da coluna integer; acima de 2.147.483.647 o adaptador trunca o valor para int32")
-	limit := int64(math.MaxInt32) + 1
-	_, err := NewCoupon(uuid.New(), uuid.New(), money.BRL, couponWith(func(in *CouponInput) { in.MaxRedemptions = ptr(int(limit)) }), testNow)
-	got := assertAppErr(t, err, apperr.KindInvalid, "invalid_coupon")
-	if !slices.Equal(got, []string{"max_redemptions"}) {
-		t.Fatalf("campos = %v, esperado [max_redemptions]", got)
+	for _, v := range []int64{MaxCouponRedemptions + 1, math.MaxInt32, int64(math.MaxInt32) + 1, 1<<32 + 1, math.MaxInt64} {
+		_, err := NewCoupon(uuid.New(), uuid.New(), money.BRL, couponWith(func(in *CouponInput) { in.MaxRedemptions = ptr(int(v)) }), testNow)
+		got := assertAppErr(t, err, apperr.KindInvalid, "invalid_coupon")
+		if !slices.Equal(got, []string{"max_redemptions"}) {
+			t.Fatalf("max_redemptions=%d: campos = %v, esperado [max_redemptions]", v, got)
+		}
 	}
 }
 

@@ -46,12 +46,32 @@ func optAmount(m *money.Money) *int64 {
 	return &v
 }
 
-func adjustmentFromRow(r dbgen.SubscriptionPriceAdjustment) subscriptions.PriceAdjustment {
+func adjustmentFromRow(r dbgen.SubscriptionPriceAdjustment) (subscriptions.PriceAdjustment, error) {
+	prev, err := ratFromNumeric(r.PreviousAmount)
+	if err != nil {
+		return subscriptions.PriceAdjustment{}, err
+	}
+	res, err := ratFromNumeric(r.ResultingAmount)
+	if err != nil {
+		return subscriptions.PriceAdjustment{}, err
+	}
 	return subscriptions.PriceAdjustment{ID: r.ID, TenantID: r.TenantID, SubscriptionID: r.SubscriptionID, EffectiveDate: dateFromPg(r.EffectiveDate),
 		Kind: subscriptions.AdjustmentKind(r.Kind), PercentBP: intFromPtr32(r.PercentBp), NewAmount: optMoney(r.NewAmount), IndexName: r.IndexName,
-		Reason: r.Reason, Status: subscriptions.AdjustmentStatus(r.Status), PreviousAmount: optMoney(r.PreviousAmount),
-		ResultingAmount: optMoney(r.ResultingAmount), AppliedPeriodStart: r.AppliedPeriodStart, AppliedAt: r.AppliedAt, CanceledAt: r.CanceledAt,
-		CreatedBy: r.CreatedBy, CreatedAt: r.CreatedAt}
+		Reason: r.Reason, Status: subscriptions.AdjustmentStatus(r.Status), PreviousAmount: prev, ResultingAmount: res,
+		AppliedPeriodStart: r.AppliedPeriodStart, AppliedAt: r.AppliedAt, CanceledAt: r.CanceledAt,
+		CancelReason: subscriptions.AdjustmentCancelReason(deref(r.CancelReason)), CreatedBy: r.CreatedBy, CreatedAt: r.CreatedAt}, nil
+}
+
+func adjustmentsFromRows(rows []dbgen.SubscriptionPriceAdjustment) ([]subscriptions.PriceAdjustment, error) {
+	out := make([]subscriptions.PriceAdjustment, len(rows))
+	for i, r := range rows {
+		a, err := adjustmentFromRow(r)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = a
+	}
+	return out, nil
 }
 
 func (b base) pendingChange(ctx context.Context, subscriptionID uuid.UUID) (*subscriptions.ScheduledChange, error) {
@@ -71,9 +91,23 @@ func (b base) cancelPendingTerms(ctx context.Context, subscriptionID uuid.UUID, 
 		SubscriptionID: subscriptionID}); err != nil {
 		return err
 	}
-	_, err := b.q.CancelScheduledPriceAdjustments(ctx, dbgen.CancelScheduledPriceAdjustmentsParams{CanceledAt: &at, TenantID: b.tenantID,
-		SubscriptionID: subscriptionID})
+	_, err := b.cancelScheduledAdjustments(ctx, subscriptionID, subscriptions.AdjustmentCanceledSubscriptionEnded, at)
 	return err
+}
+
+func (b base) cancelScheduledAdjustments(ctx context.Context, subscriptionID uuid.UUID, reason subscriptions.AdjustmentCancelReason,
+	at time.Time) ([]uuid.UUID, error) {
+	return b.q.CancelScheduledPriceAdjustments(ctx, dbgen.CancelScheduledPriceAdjustmentsParams{CanceledAt: &at,
+		CancelReason: strPtr(string(reason)), TenantID: b.tenantID, SubscriptionID: subscriptionID})
+}
+
+func (b base) cancelAdjustment(ctx context.Context, a subscriptions.PriceAdjustment) error {
+	n, err := b.q.CancelPriceAdjustment(ctx, dbgen.CancelPriceAdjustmentParams{CanceledAt: a.CanceledAt, CancelReason: strPtr(string(a.CancelReason)),
+		TenantID: b.tenantID, ID: a.ID})
+	if err != nil {
+		return err
+	}
+	return versionConflict(n, "O reajuste já foi aplicado ou cancelado.")
 }
 
 func (b base) endActiveDiscount(ctx context.Context, subscriptionID uuid.UUID, at time.Time) (bool, error) {
@@ -126,20 +160,33 @@ func (tx billingTx) DueAdjustments(ctx context.Context, subscriptionID uuid.UUID
 	if err != nil {
 		return nil, err
 	}
-	out := make([]subscriptions.PriceAdjustment, len(rows))
-	for i, r := range rows {
-		out[i] = adjustmentFromRow(r)
-	}
-	return out, nil
+	return adjustmentsFromRows(rows)
 }
 
 func (tx billingTx) MarkAdjustmentApplied(ctx context.Context, a subscriptions.PriceAdjustment) error {
-	n, err := tx.q.MarkPriceAdjustmentApplied(ctx, dbgen.MarkPriceAdjustmentAppliedParams{PreviousAmount: optAmount(a.PreviousAmount),
-		ResultingAmount: optAmount(a.ResultingAmount), AppliedPeriodStart: a.AppliedPeriodStart, AppliedAt: a.AppliedAt, TenantID: tx.tenantID, ID: a.ID})
+	prev, err := numericPtr(a.PreviousAmount)
+	if err != nil {
+		return err
+	}
+	res, err := numericPtr(a.ResultingAmount)
+	if err != nil {
+		return err
+	}
+	n, err := tx.q.MarkPriceAdjustmentApplied(ctx, dbgen.MarkPriceAdjustmentAppliedParams{PreviousAmount: prev, ResultingAmount: res,
+		AppliedPeriodStart: a.AppliedPeriodStart, AppliedAt: a.AppliedAt, TenantID: tx.tenantID, ID: a.ID})
 	if err != nil {
 		return err
 	}
 	return versionConflict(n, "O reajuste já foi aplicado ou cancelado.")
+}
+
+func (tx billingTx) CancelAdjustment(ctx context.Context, a subscriptions.PriceAdjustment) error {
+	return tx.cancelAdjustment(ctx, a)
+}
+
+func (tx billingTx) CancelScheduledAdjustments(ctx context.Context, subscriptionID uuid.UUID, reason subscriptions.AdjustmentCancelReason,
+	at time.Time) ([]uuid.UUID, error) {
+	return tx.cancelScheduledAdjustments(ctx, subscriptionID, reason, at)
 }
 
 func (tx billingTx) CancelPendingTerms(ctx context.Context, subscriptionID uuid.UUID, at time.Time) error {
@@ -214,12 +261,12 @@ func (tx billingTx) RecomputeUsage(ctx context.Context, subscriptionID uuid.UUID
 	return tx.aggregate(ctx, subscriptionID, metric, periodStart)
 }
 
-func (tx billingTx) InvoiceItemAmount(ctx context.Context, id uuid.UUID) (money.Money, error) {
-	v, err := tx.q.GetInvoiceItemAmount(ctx, dbgen.GetInvoiceItemAmountParams{TenantID: tx.tenantID, ID: id})
+func (tx billingTx) InvoiceItemAmounts(ctx context.Context, id uuid.UUID) (amount, discount money.Money, err error) {
+	r, err := tx.q.GetInvoiceItemAmounts(ctx, dbgen.GetInvoiceItemAmountsParams{TenantID: tx.tenantID, ID: id})
 	if err != nil {
-		return money.Money{}, notFound(err, "invoice_item_not_found", "Item de fatura não encontrado.")
+		return money.Money{}, money.Money{}, notFound(err, "invoice_item_not_found", "Item de fatura não encontrado.")
 	}
-	return brl(v), nil
+	return brl(r.Amount), brl(r.DiscountAmount), nil
 }
 
 func (tx billingTx) SetAggregateCorrection(ctx context.Context, id uuid.UUID, qty *big.Rat, amount money.Money) error {
@@ -311,6 +358,10 @@ func (tx subscriptionsTx) CancelPendingTerms(ctx context.Context, subscriptionID
 	return tx.cancelPendingTerms(ctx, subscriptionID, at)
 }
 
+func (tx subscriptionsTx) HasOpenPendingItems(ctx context.Context, subscriptionID uuid.UUID) (bool, error) {
+	return tx.q.HasOpenPendingItems(ctx, dbgen.HasOpenPendingItemsParams{TenantID: tx.tenantID, SubscriptionID: subscriptionID})
+}
+
 // --- condições comerciais da assinatura ---
 
 type termsTx struct{ base }
@@ -381,11 +432,7 @@ func (tx termsTx) Adjustments(ctx context.Context, subscriptionID uuid.UUID) ([]
 	if err != nil {
 		return nil, err
 	}
-	out := make([]subscriptions.PriceAdjustment, len(rows))
-	for i, r := range rows {
-		out[i] = adjustmentFromRow(r)
-	}
-	return out, nil
+	return adjustmentsFromRows(rows)
 }
 
 func (tx termsTx) Adjustment(ctx context.Context, subscriptionID, id uuid.UUID) (subscriptions.PriceAdjustment, error) {
@@ -393,15 +440,11 @@ func (tx termsTx) Adjustment(ctx context.Context, subscriptionID, id uuid.UUID) 
 	if err != nil {
 		return subscriptions.PriceAdjustment{}, notFound(err, "adjustment_not_found", "Reajuste não encontrado.")
 	}
-	return adjustmentFromRow(r), nil
+	return adjustmentFromRow(r)
 }
 
 func (tx termsTx) CancelAdjustment(ctx context.Context, a subscriptions.PriceAdjustment) error {
-	n, err := tx.q.CancelPriceAdjustment(ctx, dbgen.CancelPriceAdjustmentParams{CanceledAt: a.CanceledAt, TenantID: tx.tenantID, ID: a.ID})
-	if err != nil {
-		return err
-	}
-	return versionConflict(n, "O reajuste já foi aplicado ou cancelado.")
+	return tx.cancelAdjustment(ctx, a)
 }
 
 func (tx termsTx) ScheduledChanges(ctx context.Context, subscriptionID uuid.UUID) ([]subscriptions.ScheduledChange, error) {
@@ -508,6 +551,29 @@ func (m *Metering) InTenant(ctx context.Context, tenantID uuid.UUID, fn func(met
 
 func (tx meteringTx) Subscription(ctx context.Context, id uuid.UUID) (subscriptions.Subscription, error) {
 	return tx.subscription(ctx, id, false)
+}
+
+// SubscriptionForShare lê a assinatura com FOR SHARE: a ingestão espera o
+// fechamento de período em andamento (o motor reivindica a assinatura com
+// FOR UPDATE) antes de verificar se o período está fechado.
+func (tx meteringTx) SubscriptionForShare(ctx context.Context, id uuid.UUID) (subscriptions.Subscription, error) {
+	r, err := tx.q.GetSubscriptionForShare(ctx, dbgen.GetSubscriptionForShareParams{TenantID: tx.tenantID, ID: id})
+	if err != nil {
+		return subscriptions.Subscription{}, notFound(err, "subscription_not_found", "Assinatura não encontrada.")
+	}
+	return subscriptionFromRow(r)
+}
+
+func (tx meteringTx) SuspensionHistory(ctx context.Context, subscriptionID uuid.UUID) ([]metering.SuspensionChange, error) {
+	rows, err := tx.q.ListSubscriptionSuspensions(ctx, dbgen.ListSubscriptionSuspensionsParams{TenantID: tx.tenantID, SubscriptionID: subscriptionID})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]metering.SuspensionChange, len(rows))
+	for i, r := range rows {
+		out[i] = metering.SuspensionChange{At: r.OccurredAt, Suspended: r.Event == "suspended"}
+	}
+	return out, nil
 }
 
 func (tx meteringTx) PriceVersion(ctx context.Context, id uuid.UUID) (catalog.PriceVersion, error) {

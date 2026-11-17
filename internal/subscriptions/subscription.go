@@ -11,6 +11,7 @@ package subscriptions
 
 import (
 	"fmt"
+	"math/big"
 	"slices"
 	"time"
 
@@ -19,7 +20,6 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/catalog"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/calendar"
-	"github.com/ricartefelipe/recorvia/internal/kernel/money"
 )
 
 // Status é a situação da assinatura.
@@ -81,9 +81,10 @@ type Subscription struct {
 	SuspendedAt       *time.Time
 	SuspensionReason  string
 	PaymentTermsDays  *int
-	// PriceOverride substitui o componente fixo da versão de preço (valor
-	// fixo ou preço por unidade) após um reajuste programado.
-	PriceOverride             *money.Money
+	// PriceOverride substitui o componente fixo da versão de preço após um
+	// reajuste programado, em centavos: valor fixo (inteiro) ou preço por
+	// unidade (até money.MaxDecimalScale casas).
+	PriceOverride             *big.Rat
 	PriceOverrideAdjustmentID *uuid.UUID
 	CreatedAt                 time.Time
 	UpdatedAt                 time.Time
@@ -221,9 +222,11 @@ type StepKind string
 const (
 	// StepBill fatura o próximo período (fixo antecipado e consumo anterior).
 	StepBill StepKind = "bill"
-	// StepEnd encerra a assinatura no fim do período, faturando só o consumo final.
+	// StepEnd encerra a assinatura no fim do período, faturando só o consumo
+	// final e os itens pendentes.
 	StepEnd StepKind = "end"
-	// StepFinalUsage fatura o consumo do período interrompido por cancelamento imediato.
+	// StepFinalUsage fatura o consumo do período interrompido por cancelamento
+	// imediato e os itens pendentes.
 	StepFinalUsage StepKind = "final_usage"
 )
 
@@ -245,7 +248,9 @@ func (s Subscription) NextStep(now time.Time) (BillingStep, bool, error) {
 			return BillingStep{}, false, nil
 		}
 		usage := calendar.Period{Start: s.CurrentPeriod.Start, End: *s.EndedAt}
-		if !usage.Start.Before(usage.End) {
+		// Sem período faturado (avaliação) ou sem tempo decorrido, não há
+		// consumo a faturar; o passo final ainda fatura itens pendentes.
+		if s.NextBillingIndex == 0 || !usage.Start.Before(usage.End) {
 			return BillingStep{Kind: StepFinalUsage, Index: s.NextBillingIndex}, true, nil
 		}
 		return BillingStep{Kind: StepFinalUsage, Index: s.NextBillingIndex, Period: usage, UsagePeriod: &usage}, true, nil
@@ -306,8 +311,11 @@ const (
 
 // Cancel cancela a assinatura. Imediato: encerra agora; se o plano tiver
 // consumo, o consumo do período interrompido é faturado no fechamento
-// final. Ao fim do período: mantém o acesso até o fim do período corrente.
-func (s *Subscription) Cancel(mode CancelMode, reason string, hasUsage bool, at time.Time) error {
+// final, e itens pendentes em aberto (hasPendingItems) também agendam o
+// fechamento, mesmo sem consumo. Ao fim do período: mantém o acesso até o
+// fim do período corrente; o passo de encerramento fatura o consumo final e
+// os itens pendentes.
+func (s *Subscription) Cancel(mode CancelMode, reason string, hasUsage, hasPendingItems bool, at time.Time) error {
 	if len([]rune(reason)) > 500 {
 		return apperr.Invalid("invalid_reason", "O motivo deve ter no máximo 500 caracteres.")
 	}
@@ -318,7 +326,7 @@ func (s *Subscription) Cancel(mode CancelMode, reason string, hasUsage bool, at 
 		}
 		s.CanceledAt, s.EndedAt, s.CancelReason = &at, &at, reason
 		s.CancelAtPeriodEnd = false
-		if hasUsage && s.NextBillingIndex > 0 && at.After(s.CurrentPeriod.Start) {
+		if (hasUsage && s.NextBillingIndex > 0 && at.After(s.CurrentPeriod.Start)) || hasPendingItems {
 			s.NextBillingAt = &at
 		} else {
 			s.NextBillingAt = nil

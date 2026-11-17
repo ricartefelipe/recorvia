@@ -320,8 +320,6 @@ func TestChangeNextCycleToMeteredPlanRequiresPlatformFeature(t *testing.T) {
 }
 
 func TestChangeImmediateUpgradeIssuesProrationInvoice(t *testing.T) {
-	t.Skip("bug: settleProration adiciona primeiro o item negativo de crédito; o recálculo do rascunho rejeita o total parcial " +
-		"negativo (negative_invoice) e toda mudança imediata com diferença positiva a partir de plano com valor fixo falha")
 	f := newChangeFixture(t)
 	sub := f.addSub(t, f.basic, 1, true, nil)
 
@@ -345,10 +343,8 @@ func TestChangeImmediateUpgradeIssuesProrationInvoice(t *testing.T) {
 	if len(inv.Items) != 2 {
 		t.Fatalf("itens de crédito e cobrança proporcionais: %+v", inv.Items)
 	}
-	credit, charge := inv.Items[0], inv.Items[1]
-	if credit.Amount.IsPositive() {
-		credit, charge = charge, credit
-	}
+	// A cobrança entra antes do crédito: o total parcial do rascunho nunca fica negativo.
+	charge, credit := inv.Items[0], inv.Items[1]
 	if credit.Kind != ItemProration || credit.Amount.Amount() != -3333 || *credit.PlanID != f.basic.plan.ID ||
 		credit.Description != "Crédito proporcional de Plano Básico (21/11/2026 a 30/11/2026, 10 de 30 dias)" {
 		t.Fatalf("item de crédito: %+v", credit)
@@ -357,7 +353,11 @@ func TestChangeImmediateUpgradeIssuesProrationInvoice(t *testing.T) {
 		charge.Description != "Cobrança proporcional de Plano Pro (21/11/2026 a 30/11/2026, 10 de 30 dias)" {
 		t.Fatalf("item de cobrança: %+v", charge)
 	}
-	if inv.Total.Amount() != 2000 || inv.AmountDue.Amount() != 2000 || !inv.DueAt.Equal(DueAt(changeNow, 5, saoPaulo)) {
+	if credit.UnitAmount.Cmp(big.NewRat(-10000, 1)) != 0 || charge.UnitAmount.Cmp(big.NewRat(16000, 1)) != 0 ||
+		credit.Quantity.Cmp(big.NewRat(1, 3)) != 0 || charge.Quantity.Cmp(big.NewRat(1, 3)) != 0 {
+		t.Fatalf("fração e valores unitários dos itens: %+v | %+v", credit, charge)
+	}
+	if inv.Total.Amount() != 2000 || inv.AmountDue.Amount() != 2000 || !inv.DiscountTotal.IsZero() || !inv.DueAt.Equal(DueAt(changeNow, 5, saoPaulo)) {
 		t.Fatalf("total e vencimento: %v %v", inv.Total, inv.DueAt)
 	}
 	if net := ledgerNet(t, f.store.posted); net[ledger.AccountsReceivable] != 2000 || net[ledger.BilledRevenue] != -2000 {
@@ -382,17 +382,18 @@ func TestChangeImmediateUpgradeWithoutPreviousFixedCharge(t *testing.T) {
 		credit       int64
 		customerDays *int
 		subDays      *int
-		wantDiscount int64
+		wantCharge   int64
 		wantTotal    int64
 		wantDue      int64
 		wantTermDays int
 	}{
-		{"sem desconto", nil, 0, nil, nil, 0, 5333, 5333, 5},
-		{"cupom percentual reduz a diferença", percent, 0, nil, nil, 533, 4800, 4800, 5},
-		{"cupom de valor fixo não é prorrateado", amountOff, 0, nil, nil, 0, 5333, 5333, 5},
-		{"crédito do cliente é consumido", nil, 1000, nil, nil, 0, 5333, 4333, 5},
-		{"prazo do cliente", nil, 0, intPtr(10), nil, 0, 5333, 5333, 10},
-		{"prazo da assinatura prevalece", nil, 0, intPtr(10), intPtr(15), 0, 5333, 5333, 15},
+		{"sem desconto", nil, 0, nil, nil, 5333, 5333, 5333, 5},
+		// 16.000 × 1/3 × 0,9 = 4.800, arredondado uma única vez.
+		{"cupom percentual reduz a cobrança proporcional", percent, 0, nil, nil, 4800, 4800, 4800, 5},
+		{"cupom de valor fixo não é prorrateado", amountOff, 0, nil, nil, 5333, 5333, 5333, 5},
+		{"crédito do cliente é consumido", nil, 1000, nil, nil, 5333, 5333, 4333, 5},
+		{"prazo do cliente", nil, 0, intPtr(10), nil, 5333, 5333, 5333, 10},
+		{"prazo da assinatura prevalece", nil, 0, intPtr(10), intPtr(15), 5333, 5333, 5333, 15},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -405,23 +406,39 @@ func TestChangeImmediateUpgradeWithoutPreviousFixedCharge(t *testing.T) {
 			}
 
 			res := f.change(t, sub.ID, immediate(f.pro.plan.ID))
-			if res.Proration == nil || res.Proration.Net.Amount() != 5333 || !res.Proration.Credit.IsZero() {
+			if res.Proration == nil || res.Proration.Net.Amount() != c.wantCharge || !res.Proration.Credit.IsZero() {
 				t.Fatalf("prorrata sem crédito do plano anterior: %+v", res.Proration)
 			}
 			if res.InvoiceID == nil || len(f.store.invoices) != 1 {
 				t.Fatalf("fatura de prorrata: %+v", res)
 			}
 			inv := f.store.invoices[0]
-			if len(inv.Items) != 1 || inv.Items[0].Amount.Amount() != 5333 || inv.Items[0].Kind != ItemProration ||
-				inv.Items[0].Quantity.Cmp(big.NewRat(1, 3)) != 0 || *inv.Items[0].PriceVersionID != f.pro.price.ID {
+			it := inv.Items[0]
+			if len(inv.Items) != 1 || it.Amount.Amount() != c.wantCharge || it.Kind != ItemProration ||
+				it.Quantity.Cmp(big.NewRat(1, 3)) != 0 || *it.PriceVersionID != f.pro.price.ID {
 				t.Fatalf("somente a cobrança proporcional do novo plano: %+v", inv.Items)
 			}
-			if inv.Items[0].PriceSnapshot["proration"] != true || inv.Items[0].PriceSnapshot["remaining_days"] != 10 ||
-				inv.Items[0].PriceSnapshot["plan_code"] != "pro" {
-				t.Fatalf("snapshot do item de prorrata: %+v", inv.Items[0].PriceSnapshot)
+			if exact := new(big.Rat).Mul(it.Quantity, it.UnitAmount); money.RoundRat(exact, money.DefaultRounding).Int64() != c.wantCharge {
+				t.Fatalf("quantidade × valor unitário arredonda para o valor do item: %s", exact.RatString())
 			}
-			if inv.DiscountTotal.Amount() != c.wantDiscount || inv.Total.Amount() != c.wantTotal || inv.AmountDue.Amount() != c.wantDue {
-				t.Fatalf("desconto=%v total=%v saldo=%v", inv.DiscountTotal, inv.Total, inv.AmountDue)
+			if it.PriceSnapshot["proration"] != true || it.PriceSnapshot["remaining_days"] != 10 || it.PriceSnapshot["plan_code"] != "pro" {
+				t.Fatalf("snapshot do item de prorrata: %+v", it.PriceSnapshot)
+			}
+			wantDesc := "Cobrança proporcional de Plano Pro (21/11/2026 a 30/11/2026, 10 de 30 dias)"
+			if c.discount == percent {
+				wantDesc = "Cobrança proporcional de Plano Pro (21/11/2026 a 30/11/2026, 10 de 30 dias, desconto de 10%)"
+				if it.PriceSnapshot["discount_percent_bp"] != int64(1000) || it.PriceSnapshot["coupon_code"] != "DEZ" ||
+					it.PriceSnapshot["discount_id"] != percent.ID {
+					t.Fatalf("snapshot com o cupom da cobrança: %+v", it.PriceSnapshot)
+				}
+			} else if _, ok := it.PriceSnapshot["discount_percent_bp"]; ok {
+				t.Fatalf("sem cupom percentual, o snapshot não registra desconto: %+v", it.PriceSnapshot)
+			}
+			if it.Description != wantDesc {
+				t.Fatalf("descrição do item: %q", it.Description)
+			}
+			if !inv.DiscountTotal.IsZero() || inv.Total.Amount() != c.wantTotal || inv.AmountDue.Amount() != c.wantDue {
+				t.Fatalf("o percentual já está no item: desconto=%v total=%v saldo=%v", inv.DiscountTotal, inv.Total, inv.AmountDue)
 			}
 			if !inv.DueAt.Equal(DueAt(changeNow, c.wantTermDays, saoPaulo)) {
 				t.Fatalf("vencimento %v, esperado prazo de %d dias", inv.DueAt, c.wantTermDays)
@@ -433,7 +450,7 @@ func TestChangeImmediateUpgradeWithoutPreviousFixedCharge(t *testing.T) {
 			if c.discount != nil && f.store.discountUses[c.discount.ID] != 0 {
 				t.Fatal("a fatura de prorrata não consome ciclo do desconto")
 			}
-			if res.Subscription.PlanID != f.pro.plan.ID || f.store.audits[1].Details["proration_net"] != int64(5333) {
+			if res.Subscription.PlanID != f.pro.plan.ID || f.store.audits[1].Details["proration_net"] != c.wantCharge {
 				t.Fatalf("assinatura e auditoria da mudança: %+v", f.store.audits)
 			}
 		})
@@ -441,6 +458,8 @@ func TestChangeImmediateUpgradeWithoutPreviousFixedCharge(t *testing.T) {
 }
 
 func TestChangeImmediateDowngradeGrantsCredit(t *testing.T) {
+	// Do Pro (R$ 160,00) para o Básico (R$ 100,00) com 10 de 30 dias restantes:
+	// crédito de 16.000 × 1/3 × (1 − p_antigo) e cobrança de 10.000 × 1/3 × (1 − p_novo).
 	cases := []struct {
 		name       string
 		discount   func(f *changeFixture) *Discount
@@ -448,19 +467,20 @@ func TestChangeImmediateDowngradeGrantsCredit(t *testing.T) {
 		wantEnded  bool
 	}{
 		{"sem desconto", func(*changeFixture) *Discount { return nil }, 2000, false},
-		{"cupom percentual reduz o crédito", func(*changeFixture) *Discount {
+		{"cupom percentual reduz crédito e cobrança", func(*changeFixture) *Discount {
 			return &Discount{ID: uuid.New(), CouponCode: "DEZ", PercentBP: 1000}
 		}, 1800, false},
 		{"cupom de valor fixo não é prorrateado", func(*changeFixture) *Discount {
 			off := brl(3000)
 			return &Discount{ID: uuid.New(), CouponCode: "TRINTA", AmountOff: &off}
 		}, 2000, false},
-		{"cupom de 100% anula o crédito", func(*changeFixture) *Discount {
+		{"cupom de 100% nos dois planos não gera diferença", func(*changeFixture) *Discount {
 			return &Discount{ID: uuid.New(), CouponCode: "CORTESIA", PercentBP: 10000}
 		}, 0, false},
+		// O período pago teve 10% de desconto e o novo plano não tem: 4.800 − 3.333.
 		{"cupom que não vale para o novo plano é encerrado", func(f *changeFixture) *Discount {
 			return &Discount{ID: uuid.New(), CouponCode: "PRO10", PercentBP: 1000, AppliesToPlanIDs: []uuid.UUID{f.pro.plan.ID}}
-		}, 2000, true},
+		}, 1467, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -469,8 +489,11 @@ func TestChangeImmediateDowngradeGrantsCredit(t *testing.T) {
 			sub := f.addSub(t, f.pro, 1, true, nil)
 
 			res := f.change(t, sub.ID, immediate(f.basic.plan.ID))
-			if res.Proration == nil || res.Proration.Net.Amount() != -2000 || res.InvoiceID != nil || len(f.store.invoices) != 0 {
-				t.Fatalf("diferença negativa não emite fatura: %+v", res)
+			if res.InvoiceID != nil || len(f.store.invoices) != 0 {
+				t.Fatalf("diferença negativa ou nula não emite fatura: %+v", res)
+			}
+			if (c.wantCredit == 0) != (res.Proration == nil) || (res.Proration != nil && res.Proration.Net.Amount() != -c.wantCredit) {
+				t.Fatalf("diferença da prorrata: %+v", res.Proration)
 			}
 			if got := f.store.sub(sub.ID); got.PlanID != f.basic.plan.ID || got.PriceVersionID != f.basic.price.ID {
 				t.Fatal("o plano é trocado imediatamente")
@@ -521,7 +544,7 @@ func TestChangeImmediateDowngradeGrantsCredit(t *testing.T) {
 			if d := f.store.audits[0].Details; d["amount"] != c.wantCredit || d["subscription_id"] != sub.ID {
 				t.Fatalf("auditoria do crédito: %+v", d)
 			}
-			if f.store.audits[1].Details["proration_net"] != int64(-2000) {
+			if f.store.audits[1].Details["proration_net"] != -c.wantCredit {
 				t.Fatalf("auditoria da mudança: %+v", f.store.audits[1].Details)
 			}
 		})
@@ -553,8 +576,7 @@ func TestChangeImmediateQuantity(t *testing.T) {
 			adjID := uuid.New()
 			sub := f.addSub(t, f.seats, c.from, true, nil)
 			if c.override > 0 {
-				m := brl(c.override)
-				f.store.subs[0].PriceOverride, f.store.subs[0].PriceOverrideAdjustmentID = &m, &adjID
+				f.store.subs[0].PriceOverride, f.store.subs[0].PriceOverrideAdjustmentID = big.NewRat(c.override, 1), &adjID
 			}
 			res := f.change(t, sub.ID, ChangeInput{PlanID: c.plan(f), Quantity: c.to, Timing: subscriptions.ChangeImmediately})
 			if res.Proration == nil || res.Proration.Net.Amount() != c.wantNet {
@@ -567,7 +589,7 @@ func TestChangeImmediateQuantity(t *testing.T) {
 			if got.Quantity != c.wantQty || res.Subscription.Quantity != c.wantQty {
 				t.Fatalf("quantidade: %d", got.Quantity)
 			}
-			if c.override > 0 && (got.PriceOverride == nil || got.PriceOverride.Amount() != c.override) {
+			if c.override > 0 && !isCents(got.PriceOverride, c.override) {
 				t.Fatal("troca de quantidade na mesma versão de preço mantém o reajuste")
 			}
 			if acts := auditActions(f.store.audits); acts[len(acts)-1] != c.wantKind {
@@ -721,8 +743,9 @@ func TestChangeRollsBackOnFailure(t *testing.T) {
 		{"novo plano", upgrade, "Plan", 2},
 		{"novo preço", upgrade, "PriceVersion", 2},
 		{"cancelamento de pendentes", upgrade, "CancelPendingChanges", 0},
-		{"desconto na troca", upgrade, "ActiveDiscount", 1},
-		{"desconto na prorrata", upgrade, "ActiveDiscount", 2},
+		{"desconto antes da prorrata", upgrade, "ActiveDiscount", 1},
+		{"desconto na troca", upgrade, "ActiveDiscount", 2},
+		{"cancelamento dos reajustes", upgrade, "CancelScheduledAdjustments", 0},
 		{"configuração do tenant", upgrade, "TenantSettings", 0},
 		{"dados do cliente", upgrade, "CustomerForInvoice", 0},
 		{"saldo de crédito", upgrade, "CustomerCreditBalance", 0},

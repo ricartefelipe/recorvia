@@ -1,7 +1,6 @@
 package subscriptions
 
 import (
-	"errors"
 	"math"
 	"math/big"
 	"slices"
@@ -258,6 +257,9 @@ func TestNewPriceAdjustmentRejectsSubscriptionState(t *testing.T) {
 	})
 }
 
+// isCents informa se o valor exato r é igual a cents centavos.
+func isCents(r *big.Rat, cents int64) bool { return r != nil && r.Cmp(big.NewRat(cents, 1)) == 0 }
+
 func scheduledAdjustment(t *testing.T, sub Subscription, price catalog.PriceVersion, in AdjustmentInput) PriceAdjustment {
 	t.Helper()
 	a, err := NewPriceAdjustment(uuid.New(), sub, price, in, nil, fixtureNow)
@@ -292,13 +294,13 @@ func TestPriceAdjustmentApplyPercentRoundsHalfEven(t *testing.T) {
 			if err := a.Apply(&sub, price, periodStart, at); err != nil {
 				t.Fatal(err)
 			}
-			if sub.PriceOverride == nil || sub.PriceOverride.Amount() != c.want || sub.PriceOverride.Currency() != money.BRL {
+			if !isCents(sub.PriceOverride, c.want) {
 				t.Fatalf("valor reajustado: obtive %v, esperava %d", sub.PriceOverride, c.want)
 			}
 			if sub.PriceOverrideAdjustmentID == nil || *sub.PriceOverrideAdjustmentID != a.ID {
 				t.Fatal("a assinatura deve apontar o reajuste aplicado")
 			}
-			if a.Status != AdjustmentApplied || a.PreviousAmount.Amount() != c.prev || a.ResultingAmount.Amount() != c.want {
+			if a.Status != AdjustmentApplied || !isCents(a.PreviousAmount, c.prev) || !isCents(a.ResultingAmount, c.want) {
 				t.Fatalf("resultado do reajuste: %+v", a)
 			}
 			if !a.AppliedPeriodStart.Equal(periodStart) || !a.AppliedAt.Equal(at) {
@@ -310,6 +312,7 @@ func TestPriceAdjustmentApplyPercentRoundsHalfEven(t *testing.T) {
 			}
 			d := ev[0].Details
 			if d["adjustment_id"] != a.ID || d["kind"] != AdjustPercent || d["previous_amount"] != c.prev || d["resulting_amount"] != c.want ||
+				d["previous_amount_decimal"] != money.RatString(big.NewRat(c.prev, 1)) || d["resulting_amount_decimal"] != money.RatString(big.NewRat(c.want, 1)) ||
 				d["period_start"] != periodStart || d["percent_bp"] != c.bp || d["index_name"] != "IPCA" {
 				t.Fatalf("detalhes do histórico: %+v", d)
 			}
@@ -324,7 +327,7 @@ func TestPriceAdjustmentApplyFixedAmount(t *testing.T) {
 	if err := a.Apply(&sub, price, local(2026, time.December, 1, 0, 0), at); err != nil {
 		t.Fatal(err)
 	}
-	if sub.PriceOverride.Amount() != 12900 || a.PreviousAmount.Amount() != 9900 || a.ResultingAmount.Amount() != 12900 {
+	if !isCents(sub.PriceOverride, 12900) || !isCents(a.PreviousAmount, 9900) || !isCents(a.ResultingAmount, 12900) {
 		t.Fatalf("valor fixo: override=%v anterior=%v resultado=%v", sub.PriceOverride, a.PreviousAmount, a.ResultingAmount)
 	}
 	d := sub.PopEvents()[0].Details
@@ -352,7 +355,7 @@ func TestPriceAdjustmentApplyChainsOverEffectivePrice(t *testing.T) {
 	if err := second.Apply(&sub, price, local(2027, time.January, 1, 0, 0), local(2027, time.January, 1, 3, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if second.PreviousAmount.Amount() != 10890 || second.ResultingAmount.Amount() != 11979 || sub.PriceOverride.Amount() != 11979 {
+	if !isCents(second.PreviousAmount, 10890) || !isCents(second.ResultingAmount, 11979) || !isCents(sub.PriceOverride, 11979) {
 		t.Fatalf("o segundo reajuste parte do valor já reajustado: anterior=%v resultado=%v", second.PreviousAmount, second.ResultingAmount)
 	}
 	if *sub.PriceOverrideAdjustmentID != second.ID {
@@ -371,7 +374,7 @@ func TestPriceAdjustmentApplyByPricingModel(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if sub.PriceOverride.Amount() != 2750 || amount.Amount() != 8250 {
+		if !isCents(sub.PriceOverride, 2750) || amount.Amount() != 8250 {
 			t.Fatalf("preço unitário reajustado: override=%v cobrança=%v", sub.PriceOverride, amount)
 		}
 	})
@@ -446,50 +449,75 @@ func TestPriceAdjustmentApplyRejections(t *testing.T) {
 		if err := a.Apply(&sub, price, periodStart, at); err != nil {
 			t.Fatal(err)
 		}
-		if sub.PriceOverride.Amount() != 0 || sub.PriceOverride.Currency() != money.BRL || a.ResultingAmount.Amount() != 0 {
+		if !isCents(sub.PriceOverride, 0) || !isCents(a.ResultingAmount, 0) {
 			t.Fatalf("valor negativo deve ser limitado a zero: %v", sub.PriceOverride)
 		}
 	})
 
-	t.Run("estouro do cálculo é reportado", func(t *testing.T) {
+	t.Run("valor além do limite de int64 é rejeitado sem estouro", func(t *testing.T) {
 		sub, price := adjustmentSubscription(t, flatOf(math.MaxInt64/2), 1)
 		bp := 100000
 		a := PriceAdjustment{ID: uuid.New(), Kind: AdjustPercent, PercentBP: &bp, Status: AdjustmentScheduled}
-		if err := a.Apply(&sub, price, periodStart, at); !errors.Is(err, money.ErrOverflow) {
-			t.Fatalf("esperava estouro, obtive %v", err)
-		}
+		wantKind(t, a.Apply(&sub, price, periodStart, at), apperr.KindInvalid, "adjustment_amount_limit")
 		if sub.PriceOverride != nil || a.Status != AdjustmentScheduled {
-			t.Fatal("estouro não pode alterar a assinatura nem o reajuste")
+			t.Fatal("valor fora do limite não pode alterar a assinatura nem o reajuste")
 		}
+	})
+
+	t.Run("total do preço por unidade acima do limite", func(t *testing.T) {
+		// R$ 10 bilhões por unidade × 100.000 unidades excede o limite do item.
+		unit := big.NewRat(1_000_000_000_000, 1)
+		sub, price := adjustmentSubscription(t, func(p catalog.Plan) catalog.PriceVersion { return pricePerUnit(p, unit) }, 100_000)
+		bp := 1000
+		a := PriceAdjustment{ID: uuid.New(), Kind: AdjustPercent, PercentBP: &bp, Status: AdjustmentScheduled}
+		wantKind(t, a.Apply(&sub, price, periodStart, at), apperr.KindInvalid, "adjustment_amount_limit")
 	})
 }
 
 func TestPriceAdjustmentApplyFractionalUnitPriceRoundsOnce(t *testing.T) {
-	t.Skip("bug: Apply calcula o percentual sobre FixedBase, que arredonda o preço unitário fracionário a centavos antes de aplicar o percentual e a quantidade (arredondamento duplo; preços abaixo de meio centavo viram zero)")
 	cases := []struct {
-		name string
-		unit *big.Rat
-		qty  int
-		want int64
+		name     string
+		unit     *big.Rat
+		qty      int
+		bp       int
+		wantUnit *big.Rat
+		want     int64
 	}{
-		// 3 × R$ 49,905 × 1,10 = R$ 164,6865 → R$ 164,69 (o código obtém 3 × R$ 54,89 = R$ 164,67).
-		{"R$ 49,905 por usuário com reajuste de 10%", big.NewRat(49905, 10), 3, 16469},
-		// 1.000 × R$ 0,0035 × 1,10 = R$ 3,85 (o código obtém R$ 0,00).
-		{"R$ 0,0035 por unidade com reajuste de 10%", big.NewRat(35, 100), 1000, 385},
+		// 3 × R$ 49,905 × 1,10 = R$ 164,6865 → R$ 164,69 (o preço unitário passa a R$ 54,8955).
+		{"R$ 49,905 por usuário com reajuste de 10%", big.NewRat(49905, 10), 3, 1000, big.NewRat(548955, 100), 16469},
+		// 1.000 × R$ 0,0035 × 1,10 = R$ 3,85.
+		{"R$ 0,0035 por unidade com reajuste de 10%", big.NewRat(35, 100), 1000, 1000, big.NewRat(385, 1000), 385},
+		// 100.000 × R$ 0,045 × 1,05 = R$ 4.725,00.
+		{"R$ 0,045 por unidade com reajuste de 5%", big.NewRat(45, 10), 100_000, 500, big.NewRat(4725, 1000), 472500},
+		// 10.000 × R$ 0,025 × 1,10 = R$ 275,00.
+		{"R$ 0,025 por unidade com reajuste de 10%", big.NewRat(25, 10), 10_000, 1000, big.NewRat(275, 100), 27500},
+		// 0,0000000003 × 1,5 = 0,00000000045 → 0,0000000004 (half-even na décima casa).
+		{"fração além da escala arredonda uma vez na décima casa", big.NewRat(3, 10_000_000_000), 1, 5000,
+			big.NewRat(4, 10_000_000_000), 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			sub, price := adjustmentSubscription(t, func(p catalog.Plan) catalog.PriceVersion { return pricePerUnit(p, c.unit) }, c.qty)
-			a := scheduledAdjustment(t, sub, price, percentInput(t, 1000))
+			a := scheduledAdjustment(t, sub, price, percentInput(t, c.bp))
 			if err := a.Apply(&sub, price, local(2026, time.December, 1, 0, 0), local(2026, time.December, 1, 3, 0)); err != nil {
 				t.Fatal(err)
 			}
-			amount, _, _, err := sub.EffectivePrice(price).FixedCharge(sub.Quantity)
+			amount, _, unit, err := sub.EffectivePrice(price).FixedCharge(sub.Quantity)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if amount.Amount() != c.want {
 				t.Fatalf("cobrança após o reajuste: obtive %d centavos, esperava %d", amount.Amount(), c.want)
+			}
+			if unit.Cmp(c.wantUnit) != 0 || sub.PriceOverride.Cmp(c.wantUnit) != 0 || a.ResultingAmount.Cmp(c.wantUnit) != 0 {
+				t.Fatalf("preço unitário reajustado: obtive %s, esperava %s", unit.RatString(), c.wantUnit.RatString())
+			}
+			if a.PreviousAmount.Cmp(c.unit) != 0 || price.UnitAmount.Cmp(c.unit) != 0 {
+				t.Fatalf("o valor anterior é o preço unitário exato e a versão contratada não muda: %s", a.PreviousAmount.RatString())
+			}
+			d := sub.PopEvents()[0].Details
+			if d["resulting_amount_decimal"] != money.RatString(c.wantUnit) || d["previous_amount_decimal"] != money.RatString(c.unit) {
+				t.Fatalf("histórico com os valores exatos: %+v", d)
 			}
 		})
 	}
@@ -500,10 +528,10 @@ func TestPriceAdjustmentCancel(t *testing.T) {
 	at := local(2026, time.November, 20, 10, 0)
 
 	a := scheduledAdjustment(t, sub, price, percentInput(t, 450))
-	if err := a.Cancel(at); err != nil {
+	if err := a.Cancel(AdjustmentCanceledManually, at); err != nil {
 		t.Fatal(err)
 	}
-	if a.Status != AdjustmentCanceled || a.CanceledAt == nil || !a.CanceledAt.Equal(at) {
+	if a.Status != AdjustmentCanceled || a.CanceledAt == nil || !a.CanceledAt.Equal(at) || a.CancelReason != AdjustmentCanceledManually {
 		t.Fatalf("cancelamento: %+v", a)
 	}
 
@@ -518,11 +546,129 @@ func TestPriceAdjustmentCancel(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			adj := scheduledAdjustment(t, sub, price, percentInput(t, 450))
 			adj.Status = c.status
-			err := adj.Cancel(at.Add(time.Hour))
+			err := adj.Cancel(AdjustmentCanceledManually, at.Add(time.Hour))
 			wantKind(t, err, apperr.KindConflict, "adjustment_not_scheduled")
 			if adj.Status != c.status || adj.CanceledAt != nil {
 				t.Fatalf("reajuste não programado não pode mudar: %+v", adj)
 			}
 		})
+	}
+}
+
+func TestNewPriceAdjustmentRejectsResultAboveLimit(t *testing.T) {
+	cases := []struct {
+		name  string
+		price func(catalog.Plan) catalog.PriceVersion
+		qty   int
+		in    func(t *testing.T) AdjustmentInput
+		field string
+	}{
+		{"percentual que leva o valor fixo acima do limite", flatOf(money.MaxAmount / 10), 1,
+			func(t *testing.T) AdjustmentInput { return percentInput(t, 100000) }, "percent_bp"},
+		{"novo preço unitário que leva o total acima do limite", func(p catalog.Plan) catalog.PriceVersion {
+			return pricePerUnit(p, big.NewRat(100, 1))
+		}, 1_000_000, func(t *testing.T) AdjustmentInput { return fixedInput(t, money.MaxAmount) }, "new_amount"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			sub, price := adjustmentSubscription(t, c.price, c.qty)
+			_, err := NewPriceAdjustment(uuid.New(), sub, price, c.in(t), nil, fixtureNow)
+			wantKind(t, err, apperr.KindInvalid, "invalid_adjustment")
+			if got := fieldNames(err); !slices.Equal(got, []string{c.field}) {
+				t.Fatalf("campos: %v", got)
+			}
+		})
+	}
+
+	t.Run("o limite considera o reajuste já vigente", func(t *testing.T) {
+		sub, price := adjustmentSubscription(t, flatOf(9900), 1)
+		sub.PriceOverride = big.NewRat(money.MaxAmount/2+1, 1)
+		_, err := NewPriceAdjustment(uuid.New(), sub, price, percentInput(t, 10000), nil, fixtureNow)
+		wantKind(t, err, apperr.KindInvalid, "invalid_adjustment")
+	})
+}
+
+func TestPriceAdjustmentApplyOrCancel(t *testing.T) {
+	periodStart, at := local(2026, time.December, 1, 0, 0), local(2026, time.December, 1, 3, 0)
+
+	t.Run("reajuste aplicável é aplicado", func(t *testing.T) {
+		sub, price := adjustmentSubscription(t, flatOf(10000), 1)
+		a := scheduledAdjustment(t, sub, price, percentInput(t, 1000))
+		applied, err := a.ApplyOrCancel(&sub, price, periodStart, at)
+		if err != nil || !applied || a.Status != AdjustmentApplied || !isCents(sub.PriceOverride, 11000) {
+			t.Fatalf("aplicado=%v err=%v reajuste=%+v", applied, err, a)
+		}
+	})
+
+	cases := []struct {
+		name   string
+		price  func(catalog.Plan) catalog.PriceVersion
+		bp     int
+		reason AdjustmentCancelReason
+	}{
+		{"preço somente por consumo", priceUsage, 1000, AdjustmentCanceledNoFixedComponent},
+		{"valor resultante acima do limite", flatOf(money.MaxAmount / 2), 100000, AdjustmentCanceledAmountLimit},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			sub, _ := adjustmentSubscription(t, flatOf(9900), 1)
+			price := c.price(fixturePlan(calendar.Monthly))
+			bp := c.bp
+			a := PriceAdjustment{ID: uuid.New(), SubscriptionID: sub.ID, Kind: AdjustPercent, PercentBP: &bp, Status: AdjustmentScheduled}
+			applied, err := a.ApplyOrCancel(&sub, price, periodStart, at)
+			if err != nil || applied {
+				t.Fatalf("o reajuste inaplicável é cancelado sem erro: aplicado=%v err=%v", applied, err)
+			}
+			if a.Status != AdjustmentCanceled || a.CancelReason != c.reason || a.CanceledAt == nil || !a.CanceledAt.Equal(at) ||
+				a.ResultingAmount != nil || a.AppliedAt != nil {
+				t.Fatalf("reajuste cancelado com motivo: %+v", a)
+			}
+			if sub.PriceOverride != nil || sub.PriceOverrideAdjustmentID != nil {
+				t.Fatal("o cancelamento não altera o preço da assinatura")
+			}
+			ev := sub.PopEvents()
+			if len(ev) != 1 || ev[0].Event != "price_adjustment_canceled" || ev[0].Details["adjustment_id"] != a.ID ||
+				ev[0].Details["reason"] != c.reason || ev[0].Details["period_start"] != periodStart {
+				t.Fatalf("histórico do cancelamento: %+v", ev)
+			}
+		})
+	}
+
+	t.Run("outros erros são devolvidos", func(t *testing.T) {
+		sub, price := adjustmentSubscription(t, flatOf(9900), 1)
+		a := scheduledAdjustment(t, sub, price, percentInput(t, 1000))
+		a.Status = AdjustmentApplied
+		applied, err := a.ApplyOrCancel(&sub, price, periodStart, at)
+		wantKind(t, err, apperr.KindConflict, "adjustment_not_scheduled")
+		if applied || len(sub.PopEvents()) != 0 {
+			t.Fatal("erro não pode registrar efeitos")
+		}
+		a.Status, a.Kind = AdjustmentScheduled, "index"
+		_, err = a.ApplyOrCancel(&sub, price, periodStart, at)
+		wantKind(t, err, apperr.KindInvalid, "invalid_adjustment")
+		if a.Status != AdjustmentScheduled {
+			t.Fatal("tipo desconhecido não cancela o reajuste")
+		}
+	})
+}
+
+func TestRecordAdjustmentsCanceled(t *testing.T) {
+	sub, _ := adjustmentSubscription(t, flatOf(9900), 1)
+	ids := []uuid.UUID{uuid.New(), uuid.New()}
+	at := local(2026, time.November, 21, 15, 0)
+	sub.RecordAdjustmentsCanceled(ids, AdjustmentCanceledPriceChanged, at)
+	ev := sub.PopEvents()
+	if len(ev) != 2 {
+		t.Fatalf("um evento por reajuste: %+v", ev)
+	}
+	for i, e := range ev {
+		if e.Event != "price_adjustment_canceled" || e.Details["adjustment_id"] != ids[i] || e.Details["reason"] != AdjustmentCanceledPriceChanged ||
+			!e.At.Equal(at) {
+			t.Fatalf("evento %d: %+v", i, e)
+		}
+	}
+	sub.RecordAdjustmentsCanceled(nil, AdjustmentCanceledPriceChanged, at)
+	if len(sub.PopEvents()) != 0 {
+		t.Fatal("sem reajustes cancelados, nenhum evento")
 	}
 }

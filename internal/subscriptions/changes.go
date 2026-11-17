@@ -64,25 +64,28 @@ func (s Subscription) EffectivePrice(p catalog.PriceVersion) catalog.PriceVersio
 	}
 	switch p.Model {
 	case catalog.Flat, catalog.FlatPlusOverage:
-		m := *s.PriceOverride
-		p.FlatAmount = &m
+		// O valor fixo reajustado é inteiro em centavos e limitado a
+		// money.MaxAmount pelo próprio reajuste; a conversão não arredonda.
+		if m, err := money.FromRat(s.PriceOverride, p.Currency, money.DefaultRounding); err == nil {
+			p.FlatAmount = &m
+		}
 	case catalog.PerUnit:
-		p.UnitAmount = s.PriceOverride.Rat()
+		p.UnitAmount = new(big.Rat).Set(s.PriceOverride)
 	}
 	return p
 }
 
-// FixedBase é o valor sujeito a reajuste: valor fixo (flat e
-// flat_plus_overage) ou preço por unidade (per_unit), arredondado a
-// centavos. Preços somente por consumo não têm componente fixo.
-func FixedBase(p catalog.PriceVersion) (money.Money, error) {
+// FixedBase é o valor sujeito a reajuste, exato e em centavos: valor fixo
+// (flat e flat_plus_overage) ou preço por unidade (per_unit, que pode ter
+// fração de centavo). Preços somente por consumo não têm componente fixo.
+func FixedBase(p catalog.PriceVersion) (*big.Rat, error) {
 	switch p.Model {
 	case catalog.Flat, catalog.FlatPlusOverage:
-		return *p.FlatAmount, nil
+		return p.FlatAmount.Rat(), nil
 	case catalog.PerUnit:
-		return money.FromRat(p.UnitAmount, p.Currency, money.DefaultRounding)
+		return new(big.Rat).Set(p.UnitAmount), nil
 	}
-	return money.Money{}, apperr.Invalid("price_without_fixed_component",
+	return nil, apperr.Invalid("price_without_fixed_component",
 		"O preço desta assinatura é somente por consumo e não tem componente fixo para reajustar.")
 }
 
@@ -138,7 +141,8 @@ func (s Subscription) ValidateChange(current catalog.PriceVersion, plan catalog.
 
 // ApplyChange troca plano, versão de preço e quantidade. Quando a versão de
 // preço muda, o reajuste da assinatura deixa de valer (o novo preço é o da
-// versão contratada).
+// versão contratada); os reajustes ainda programados devem ser cancelados
+// pelo chamador na mesma transação (CancelScheduledAdjustments).
 func (s *Subscription) ApplyChange(plan catalog.Plan, price catalog.PriceVersion, qty int, event string, at time.Time, details map[string]any) {
 	if details == nil {
 		details = map[string]any{}
@@ -180,6 +184,13 @@ func (s Subscription) CurrentPeriodBilled() (bool, error) {
 // arredondado uma única vez (half-even). Exemplo: período de 30 dias, troca
 // no dia 21 de R$ 100,00 para R$ 160,00 → fração 10/30; crédito R$ 33,33;
 // cobrança R$ 53,33; diferença R$ 20,00.
+//
+// Cupom percentual: o crédito desconta o percentual do cupom vigente no
+// período já pago (o cliente pagou o valor com desconto) e a cobrança
+// desconta o percentual do cupom que continua valendo no novo plano. Com
+// cupom de 10% válido nos dois planos, o exemplo acima fica com crédito de
+// R$ 30,00 e cobrança de R$ 48,00 (diferença R$ 18,00). Cupom de valor fixo
+// não é prorrateado.
 type Proration struct {
 	Period        calendar.Period
 	Fraction      *big.Rat
@@ -187,15 +198,33 @@ type Proration struct {
 	PeriodDays    int
 	OldAmount     money.Money
 	NewAmount     money.Money
+	Discount      ProrationDiscount
 	Credit        money.Money
 	Charge        money.Money
 	Net           money.Money
 }
 
+// ProrationDiscount são os percentuais de cupom, em pontos-base, aplicados à
+// prorrata: OldBP ao crédito da parte não usufruída (cupom vigente no
+// período pago) e NewBP à cobrança proporcional (cupom que continua valendo
+// no novo plano). Zero indica ausência de desconto percentual.
+type ProrationDiscount struct {
+	OldBP int64
+	NewBP int64
+}
+
+// discountFactor é 1 − bp/10000, limitado ao intervalo [0, 1].
+func discountFactor(bp int64) *big.Rat {
+	bp = min(max(bp, 0), 10000)
+	return big.NewRat(10000-bp, 10000)
+}
+
 // ProrateChange calcula a prorrata entre os componentes fixos anterior e
-// novo (já com reajustes aplicados). ok é falso quando não há prorrata: o
-// período corrente ainda não foi faturado ou a mudança ocorre fora dele.
-func ProrateChange(s Subscription, oldPrice, newPrice catalog.PriceVersion, oldQty, newQty int, at time.Time) (Proration, bool, error) {
+// novo (já com reajustes aplicados), com os percentuais de cupom de cada
+// lado. ok é falso quando não há prorrata: o período corrente ainda não foi
+// faturado ou a mudança ocorre fora dele.
+func ProrateChange(s Subscription, oldPrice, newPrice catalog.PriceVersion, oldQty, newQty int, at time.Time,
+	discount ProrationDiscount) (Proration, bool, error) {
 	billed, err := s.CurrentPeriodBilled()
 	if err != nil || !billed || !s.CurrentPeriod.Contains(at) {
 		return Proration{}, false, err
@@ -216,11 +245,11 @@ func ProrateChange(s Subscription, oldPrice, newPrice catalog.PriceVersion, oldQ
 	if err != nil {
 		return Proration{}, false, err
 	}
-	credit, err := oldAmount.MulRat(frac, money.DefaultRounding)
+	credit, err := oldAmount.MulRat(new(big.Rat).Mul(frac, discountFactor(discount.OldBP)), money.DefaultRounding)
 	if err != nil {
 		return Proration{}, false, err
 	}
-	charge, err := newAmount.MulRat(frac, money.DefaultRounding)
+	charge, err := newAmount.MulRat(new(big.Rat).Mul(frac, discountFactor(discount.NewBP)), money.DefaultRounding)
 	if err != nil {
 		return Proration{}, false, err
 	}
@@ -235,7 +264,21 @@ func ProrateChange(s Subscription, oldPrice, newPrice catalog.PriceVersion, oldQ
 		start = s.CurrentPeriod.Start
 	}
 	return Proration{Period: calendar.Period{Start: start, End: s.CurrentPeriod.End}, Fraction: frac, RemainingDays: remaining,
-		PeriodDays: total, OldAmount: oldAmount, NewAmount: newAmount, Credit: credit, Charge: charge, Net: net}, true, nil
+		PeriodDays: total, OldAmount: oldAmount, NewAmount: newAmount, Discount: discount, Credit: credit, Charge: charge, Net: net}, true, nil
+}
+
+// CreditUnitAmount é o valor unitário exato do item de crédito (negativo):
+// componente fixo anterior com o desconto do período pago. Multiplicado pela
+// fração, resulta no crédito antes do arredondamento.
+func (p Proration) CreditUnitAmount() *big.Rat {
+	r := new(big.Rat).Mul(p.OldAmount.Rat(), discountFactor(p.Discount.OldBP))
+	return r.Neg(r)
+}
+
+// ChargeUnitAmount é o valor unitário exato do item de cobrança: novo
+// componente fixo com o desconto que continua valendo.
+func (p Proration) ChargeUnitAmount() *big.Rat {
+	return new(big.Rat).Mul(p.NewAmount.Rat(), discountFactor(p.Discount.NewBP))
 }
 
 // AdjustmentKind é o tipo de reajuste.
@@ -257,12 +300,37 @@ const (
 	AdjustmentCanceled  AdjustmentStatus = "canceled"
 )
 
+// AdjustmentCancelReason informa por que um reajuste programado foi
+// cancelado.
+type AdjustmentCancelReason string
+
+const (
+	// AdjustmentCanceledManually: cancelado por um usuário.
+	AdjustmentCanceledManually AdjustmentCancelReason = "manual"
+	// AdjustmentCanceledSubscriptionEnded: assinatura cancelada ou encerrada.
+	AdjustmentCanceledSubscriptionEnded AdjustmentCancelReason = "subscription_ended"
+	// AdjustmentCanceledPriceChanged: a versão de preço da assinatura mudou;
+	// o reajuste foi programado sobre o preço anterior.
+	AdjustmentCanceledPriceChanged AdjustmentCancelReason = "price_version_changed"
+	// AdjustmentCanceledNoFixedComponent: o preço vigente no início do ciclo
+	// é somente por consumo.
+	AdjustmentCanceledNoFixedComponent AdjustmentCancelReason = "price_without_fixed_component"
+	// AdjustmentCanceledAmountLimit: o valor resultante excede o limite.
+	AdjustmentCanceledAmountLimit AdjustmentCancelReason = "adjustment_amount_limit"
+)
+
 // MaxAdjustmentHorizon limita a antecedência de um reajuste programado.
 const MaxAdjustmentHorizon = 3 * 366
 
 // PriceAdjustment é um reajuste programado do componente fixo. Vale a partir
 // do primeiro período iniciado na data efetiva ou depois; períodos já
 // faturados nunca são alterados.
+//
+// PreviousAmount e ResultingAmount são exatos, em centavos: no valor fixo o
+// resultado é arredondado a centavos uma única vez; no preço por unidade o
+// percentual incide sobre o preço unitário exato e o resultado é arredondado
+// (half-even) a money.MaxDecimalScale casas, deixando o arredondamento a
+// centavos para o total do item (preço unitário × quantidade).
 type PriceAdjustment struct {
 	ID                 uuid.UUID
 	TenantID           uuid.UUID
@@ -274,11 +342,12 @@ type PriceAdjustment struct {
 	IndexName          string
 	Reason             string
 	Status             AdjustmentStatus
-	PreviousAmount     *money.Money
-	ResultingAmount    *money.Money
+	PreviousAmount     *big.Rat
+	ResultingAmount    *big.Rat
 	AppliedPeriodStart *time.Time
 	AppliedAt          *time.Time
 	CanceledAt         *time.Time
+	CancelReason       AdjustmentCancelReason
 	CreatedBy          *uuid.UUID
 	CreatedAt          time.Time
 }
@@ -353,11 +422,67 @@ func NewPriceAdjustment(id uuid.UUID, s Subscription, price catalog.PriceVersion
 	if len([]rune(in.IndexName)) > 50 {
 		add("index_name", "O índice deve ter no máximo 50 caracteres.")
 	}
+	if len(f) == 0 {
+		// O limite do valor resultante é verificado já no agendamento, sobre o
+		// componente fixo vigente.
+		if _, _, err := a.resulting(s, price); err != nil {
+			e, ok := apperr.As(err)
+			if !ok || e.Code != "adjustment_amount_limit" {
+				return PriceAdjustment{}, err
+			}
+			field := "percent_bp"
+			if a.Kind == AdjustFixedAmount {
+				field = "new_amount"
+			}
+			add(field, "O valor reajustado excede o limite permitido.")
+		}
+	}
 	if len(f) > 0 {
 		return PriceAdjustment{}, apperr.Invalid("invalid_adjustment", "Reajuste inválido.", f...)
 	}
 	return a, nil
 }
+
+// resulting calcula o valor anterior (componente fixo vigente da
+// assinatura) e o valor resultante do reajuste, com o arredondamento único
+// da política (centavos no valor fixo; escala do preço unitário no preço por
+// unidade). O resultado negativo é limitado a zero; acima do limite de
+// negócio (no valor ou no total do componente fixo com a quantidade atual),
+// devolve adjustment_amount_limit.
+func (a PriceAdjustment) resulting(s Subscription, price catalog.PriceVersion) (prev, res *big.Rat, err error) {
+	eff := s.EffectivePrice(price)
+	if prev, err = FixedBase(eff); err != nil {
+		return nil, nil, err
+	}
+	switch a.Kind {
+	case AdjustPercent:
+		factor := new(big.Rat).Add(big.NewRat(1, 1), money.Percent(int64(*a.PercentBP)))
+		scale := 0
+		if eff.Model == catalog.PerUnit {
+			scale = money.MaxDecimalScale
+		}
+		res = money.RoundToScale(new(big.Rat).Mul(prev, factor), scale, money.DefaultRounding)
+	case AdjustFixedAmount:
+		res = a.NewAmount.Rat()
+	default:
+		return nil, nil, apperr.Invalid("invalid_adjustment", "Tipo de reajuste desconhecido.")
+	}
+	if res.Sign() < 0 {
+		res = new(big.Rat)
+	}
+	limit := apperr.Invalid("adjustment_amount_limit", "O valor reajustado excede o limite permitido.")
+	if res.Cmp(new(big.Rat).SetInt64(money.MaxAmount)) > 0 {
+		return nil, nil, limit
+	}
+	adjusted := Subscription{PriceOverride: res}.EffectivePrice(eff)
+	if total, _, _, err := adjusted.FixedCharge(s.Quantity); err != nil || total.CheckBusinessRange() != nil {
+		return nil, nil, limit
+	}
+	return prev, res, nil
+}
+
+// cents arredonda um valor exato a centavos (exibição e auditoria).
+func cents(r *big.Rat) int64 { return money.RoundRat(r, money.DefaultRounding).Int64() }
 
 // Apply aplica o reajuste ao componente fixo vigente da assinatura no início
 // do período informado, registrando os valores anterior e resultante.
@@ -365,32 +490,15 @@ func (a *PriceAdjustment) Apply(s *Subscription, price catalog.PriceVersion, per
 	if a.Status != AdjustmentScheduled {
 		return apperr.Conflict("adjustment_not_scheduled", "O reajuste não está programado.")
 	}
-	prev, err := FixedBase(s.EffectivePrice(price))
+	prev, res, err := a.resulting(*s, price)
 	if err != nil {
 		return err
 	}
-	var res money.Money
-	switch a.Kind {
-	case AdjustPercent:
-		factor := new(big.Rat).Add(big.NewRat(1, 1), money.Percent(int64(*a.PercentBP)))
-		if res, err = prev.MulRat(factor, money.DefaultRounding); err != nil {
-			return err
-		}
-	case AdjustFixedAmount:
-		res = *a.NewAmount
-	default:
-		return apperr.Invalid("invalid_adjustment", "Tipo de reajuste desconhecido.")
-	}
-	if res.IsNegative() {
-		res = money.Zero(prev.Currency())
-	}
-	if err := res.CheckBusinessRange(); err != nil {
-		return apperr.Invalid("adjustment_amount_limit", "O valor reajustado excede o limite permitido.")
-	}
-	s.PriceOverride, s.PriceOverrideAdjustmentID = &res, &a.ID
-	a.Status, a.PreviousAmount, a.ResultingAmount, a.AppliedPeriodStart, a.AppliedAt = AdjustmentApplied, &prev, &res, &periodStart, &at
-	details := map[string]any{"adjustment_id": a.ID, "kind": a.Kind, "previous_amount": prev.Amount(), "resulting_amount": res.Amount(),
-		"period_start": periodStart}
+	id := a.ID
+	s.PriceOverride, s.PriceOverrideAdjustmentID = new(big.Rat).Set(res), &id
+	a.Status, a.PreviousAmount, a.ResultingAmount, a.AppliedPeriodStart, a.AppliedAt = AdjustmentApplied, prev, res, &periodStart, &at
+	details := map[string]any{"adjustment_id": a.ID, "kind": a.Kind, "previous_amount": cents(prev), "resulting_amount": cents(res),
+		"previous_amount_decimal": money.RatString(prev), "resulting_amount_decimal": money.RatString(res), "period_start": periodStart}
 	if a.PercentBP != nil {
 		details["percent_bp"] = *a.PercentBP
 	}
@@ -401,11 +509,54 @@ func (a *PriceAdjustment) Apply(s *Subscription, price catalog.PriceVersion, per
 	return nil
 }
 
-// Cancel cancela um reajuste ainda não aplicado.
-func (a *PriceAdjustment) Cancel(at time.Time) error {
+// ApplyOrCancel aplica o reajuste no início do período ou, quando ele não
+// pode valer para o preço vigente (preço somente por consumo ou valor
+// resultante acima do limite), cancela-o com o motivo e registra o
+// cancelamento no histórico da assinatura, sem interromper o faturamento.
+// applied informa o desfecho; os demais erros são devolvidos.
+func (a *PriceAdjustment) ApplyOrCancel(s *Subscription, price catalog.PriceVersion, periodStart, at time.Time) (applied bool, err error) {
+	err = a.Apply(s, price, periodStart, at)
+	if err == nil {
+		return true, nil
+	}
+	reason, ok := unapplicableReason(err)
+	if !ok {
+		return false, err
+	}
+	if err := a.Cancel(reason, at); err != nil {
+		return false, err
+	}
+	s.record("price_adjustment_canceled", nil, at, map[string]any{"adjustment_id": a.ID, "reason": reason, "period_start": periodStart})
+	return false, nil
+}
+
+func unapplicableReason(err error) (AdjustmentCancelReason, bool) {
+	e, ok := apperr.As(err)
+	if !ok {
+		return "", false
+	}
+	switch e.Code {
+	case "price_without_fixed_component":
+		return AdjustmentCanceledNoFixedComponent, true
+	case "adjustment_amount_limit":
+		return AdjustmentCanceledAmountLimit, true
+	}
+	return "", false
+}
+
+// Cancel cancela um reajuste ainda não aplicado, registrando o motivo.
+func (a *PriceAdjustment) Cancel(reason AdjustmentCancelReason, at time.Time) error {
 	if a.Status != AdjustmentScheduled {
 		return apperr.Conflict("adjustment_not_scheduled", "Somente reajustes programados podem ser cancelados.")
 	}
-	a.Status, a.CanceledAt = AdjustmentCanceled, &at
+	a.Status, a.CanceledAt, a.CancelReason = AdjustmentCanceled, &at, reason
 	return nil
+}
+
+// RecordAdjustmentsCanceled registra no histórico o cancelamento de reajustes
+// programados (por exemplo, após a troca da versão de preço).
+func (s *Subscription) RecordAdjustmentsCanceled(ids []uuid.UUID, reason AdjustmentCancelReason, at time.Time) {
+	for _, id := range ids {
+		s.record("price_adjustment_canceled", nil, at, map[string]any{"adjustment_id": id, "reason": reason})
+	}
 }

@@ -33,41 +33,66 @@ func (q *Queries) CancelPendingScheduledChanges(ctx context.Context, arg CancelP
 }
 
 const cancelPriceAdjustment = `-- name: CancelPriceAdjustment :execrows
-UPDATE subscription_price_adjustments SET status = 'canceled', canceled_at = $1
- WHERE tenant_id = $2 AND id = $3 AND status = 'scheduled'
+UPDATE subscription_price_adjustments SET status = 'canceled', canceled_at = $1, cancel_reason = $2
+ WHERE tenant_id = $3 AND id = $4 AND status = 'scheduled'
 `
 
 type CancelPriceAdjustmentParams struct {
-	CanceledAt *time.Time
-	TenantID   uuid.UUID
-	ID         uuid.UUID
+	CanceledAt   *time.Time
+	CancelReason *string
+	TenantID     uuid.UUID
+	ID           uuid.UUID
 }
 
 func (q *Queries) CancelPriceAdjustment(ctx context.Context, arg CancelPriceAdjustmentParams) (int64, error) {
-	result, err := q.db.Exec(ctx, cancelPriceAdjustment, arg.CanceledAt, arg.TenantID, arg.ID)
+	result, err := q.db.Exec(ctx, cancelPriceAdjustment,
+		arg.CanceledAt,
+		arg.CancelReason,
+		arg.TenantID,
+		arg.ID,
+	)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected(), nil
 }
 
-const cancelScheduledPriceAdjustments = `-- name: CancelScheduledPriceAdjustments :execrows
-UPDATE subscription_price_adjustments SET status = 'canceled', canceled_at = $1
- WHERE tenant_id = $2 AND subscription_id = $3 AND status = 'scheduled'
+const cancelScheduledPriceAdjustments = `-- name: CancelScheduledPriceAdjustments :many
+UPDATE subscription_price_adjustments SET status = 'canceled', canceled_at = $1, cancel_reason = $2
+ WHERE tenant_id = $3 AND subscription_id = $4 AND status = 'scheduled'
+RETURNING id
 `
 
 type CancelScheduledPriceAdjustmentsParams struct {
 	CanceledAt     *time.Time
+	CancelReason   *string
 	TenantID       uuid.UUID
 	SubscriptionID uuid.UUID
 }
 
-func (q *Queries) CancelScheduledPriceAdjustments(ctx context.Context, arg CancelScheduledPriceAdjustmentsParams) (int64, error) {
-	result, err := q.db.Exec(ctx, cancelScheduledPriceAdjustments, arg.CanceledAt, arg.TenantID, arg.SubscriptionID)
+func (q *Queries) CancelScheduledPriceAdjustments(ctx context.Context, arg CancelScheduledPriceAdjustmentsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, cancelScheduledPriceAdjustments,
+		arg.CanceledAt,
+		arg.CancelReason,
+		arg.TenantID,
+		arg.SubscriptionID,
+	)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return result.RowsAffected(), nil
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const claimDueSubscription = `-- name: ClaimDueSubscription :one
@@ -143,7 +168,7 @@ func (q *Queries) ConsumeDiscountCycle(ctx context.Context, arg ConsumeDiscountC
 }
 
 const duePriceAdjustments = `-- name: DuePriceAdjustments :many
-SELECT id, tenant_id, subscription_id, effective_date, kind, percent_bp, new_amount, index_name, reason, status, previous_amount, resulting_amount, applied_period_start, applied_at, canceled_at, created_by, created_at FROM subscription_price_adjustments
+SELECT id, tenant_id, subscription_id, effective_date, kind, percent_bp, new_amount, index_name, reason, status, previous_amount, resulting_amount, applied_period_start, applied_at, canceled_at, cancel_reason, created_by, created_at FROM subscription_price_adjustments
  WHERE tenant_id = $1 AND subscription_id = $2 AND status = 'scheduled' AND effective_date <= $3
  ORDER BY effective_date, created_at, id FOR UPDATE
 `
@@ -179,6 +204,7 @@ func (q *Queries) DuePriceAdjustments(ctx context.Context, arg DuePriceAdjustmen
 			&i.AppliedPeriodStart,
 			&i.AppliedAt,
 			&i.CanceledAt,
+			&i.CancelReason,
 			&i.CreatedBy,
 			&i.CreatedAt,
 		); err != nil {
@@ -295,7 +321,7 @@ func (q *Queries) GetPendingScheduledChange(ctx context.Context, arg GetPendingS
 }
 
 const getPriceAdjustmentForUpdate = `-- name: GetPriceAdjustmentForUpdate :one
-SELECT id, tenant_id, subscription_id, effective_date, kind, percent_bp, new_amount, index_name, reason, status, previous_amount, resulting_amount, applied_period_start, applied_at, canceled_at, created_by, created_at FROM subscription_price_adjustments
+SELECT id, tenant_id, subscription_id, effective_date, kind, percent_bp, new_amount, index_name, reason, status, previous_amount, resulting_amount, applied_period_start, applied_at, canceled_at, cancel_reason, created_by, created_at FROM subscription_price_adjustments
  WHERE tenant_id = $1 AND subscription_id = $2 AND id = $3 FOR UPDATE
 `
 
@@ -324,6 +350,7 @@ func (q *Queries) GetPriceAdjustmentForUpdate(ctx context.Context, arg GetPriceA
 		&i.AppliedPeriodStart,
 		&i.AppliedAt,
 		&i.CanceledAt,
+		&i.CancelReason,
 		&i.CreatedBy,
 		&i.CreatedAt,
 	)
@@ -418,6 +445,23 @@ func (q *Queries) GetSubscriptionForUpdate(ctx context.Context, arg GetSubscript
 		&i.PriceOverrideAdjustmentID,
 	)
 	return i, err
+}
+
+const hasOpenPendingItems = `-- name: HasOpenPendingItems :one
+SELECT EXISTS (SELECT 1 FROM pending_invoice_items WHERE tenant_id = $1 AND subscription_id = $2
+                AND invoice_id IS NULL)::boolean
+`
+
+type HasOpenPendingItemsParams struct {
+	TenantID       uuid.UUID
+	SubscriptionID uuid.UUID
+}
+
+func (q *Queries) HasOpenPendingItems(ctx context.Context, arg HasOpenPendingItemsParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasOpenPendingItems, arg.TenantID, arg.SubscriptionID)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const hasOverdueInvoices = `-- name: HasOverdueInvoices :one
@@ -741,7 +785,7 @@ func (q *Queries) ListOpenPendingItems(ctx context.Context, arg ListOpenPendingI
 }
 
 const listPriceAdjustments = `-- name: ListPriceAdjustments :many
-SELECT id, tenant_id, subscription_id, effective_date, kind, percent_bp, new_amount, index_name, reason, status, previous_amount, resulting_amount, applied_period_start, applied_at, canceled_at, created_by, created_at FROM subscription_price_adjustments WHERE tenant_id = $1 AND subscription_id = $2
+SELECT id, tenant_id, subscription_id, effective_date, kind, percent_bp, new_amount, index_name, reason, status, previous_amount, resulting_amount, applied_period_start, applied_at, canceled_at, cancel_reason, created_by, created_at FROM subscription_price_adjustments WHERE tenant_id = $1 AND subscription_id = $2
  ORDER BY effective_date, created_at, id LIMIT 200
 `
 
@@ -775,6 +819,7 @@ func (q *Queries) ListPriceAdjustments(ctx context.Context, arg ListPriceAdjustm
 			&i.AppliedPeriodStart,
 			&i.AppliedAt,
 			&i.CanceledAt,
+			&i.CancelReason,
 			&i.CreatedBy,
 			&i.CreatedAt,
 		); err != nil {
@@ -920,7 +965,7 @@ type ListSubscriptionsRow struct {
 	CreatedAt                 time.Time
 	UpdatedAt                 time.Time
 	Version                   int32
-	PriceOverrideAmount       *int64
+	PriceOverrideAmount       pgtype.Numeric
 	PriceOverrideAdjustmentID *uuid.UUID
 	CustomerName              string
 	PlanName                  string
@@ -1007,8 +1052,8 @@ UPDATE subscription_price_adjustments
 `
 
 type MarkPriceAdjustmentAppliedParams struct {
-	PreviousAmount     *int64
-	ResultingAmount    *int64
+	PreviousAmount     pgtype.Numeric
+	ResultingAmount    pgtype.Numeric
 	AppliedPeriodStart *time.Time
 	AppliedAt          *time.Time
 	TenantID           uuid.UUID
@@ -1138,7 +1183,7 @@ type UpdateSubscriptionParams struct {
 	SuspendedAt               *time.Time
 	SuspensionReason          *string
 	PaymentTermsDays          *int32
-	PriceOverrideAmount       *int64
+	PriceOverrideAmount       pgtype.Numeric
 	PriceOverrideAdjustmentID *uuid.UUID
 	TenantID                  uuid.UUID
 	ID                        uuid.UUID
