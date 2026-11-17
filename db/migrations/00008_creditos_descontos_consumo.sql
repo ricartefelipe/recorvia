@@ -14,7 +14,9 @@ CREATE TABLE customer_credit_entries (
   invoice_id  uuid,
   reason      text NOT NULL DEFAULT '' CHECK (length(reason) <= 500),
   created_by  uuid REFERENCES users (id),
+  request_key text CHECK (request_key IS NULL OR length(request_key) <= 300),
   created_at  timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT customer_credit_entries_request_key UNIQUE (tenant_id, request_key),
   CONSTRAINT customer_credit_entries_customer_fk FOREIGN KEY (tenant_id, customer_id) REFERENCES customers (tenant_id, id),
   CONSTRAINT customer_credit_entries_invoice_fk FOREIGN KEY (tenant_id, invoice_id) REFERENCES invoices (tenant_id, id),
   CONSTRAINT customer_credit_entries_sign CHECK ((kind = 'consumption') = (amount < 0))
