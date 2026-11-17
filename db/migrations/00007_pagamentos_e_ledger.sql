@@ -151,9 +151,13 @@ CREATE TABLE payments (
   paid_at     timestamptz NOT NULL,
   note        text NOT NULL DEFAULT '' CHECK (length(note) <= 500),
   recorded_by uuid REFERENCES users (id),
+  -- Chave de negócio de registros manuais (derivada do Idempotency-Key):
+  -- protege contra duplicidade mesmo após a expiração da chave HTTP.
+  request_key text CHECK (request_key IS NULL OR length(request_key) <= 300),
   created_at  timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT payments_tenant_id_key UNIQUE (tenant_id, id),
   CONSTRAINT payments_charge_key UNIQUE (tenant_id, charge_id),
+  CONSTRAINT payments_request_key UNIQUE (tenant_id, request_key),
   CONSTRAINT payments_invoice_fk FOREIGN KEY (tenant_id, invoice_id) REFERENCES invoices (tenant_id, id),
   CONSTRAINT payments_charge_fk FOREIGN KEY (tenant_id, charge_id) REFERENCES charges (tenant_id, id),
   CONSTRAINT payments_source_charge CHECK ((source = 'provider') = (charge_id IS NOT NULL))

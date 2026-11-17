@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -37,6 +38,7 @@ type Payment struct {
 	PaidAt     time.Time
 	Note       string
 	RecordedBy *uuid.UUID
+	RequestKey string
 	CreatedAt  time.Time
 }
 
@@ -89,6 +91,7 @@ type Tx interface {
 	DueOperationIDs(ctx context.Context, now time.Time, limit int) ([]uuid.UUID, error)
 
 	InsertPayment(ctx context.Context, p Payment) (bool, error)
+	PaymentByRequestKey(ctx context.Context, key string) (Payment, error)
 	GrantCustomerCredit(ctx context.Context, customerID uuid.UUID, amount money.Money, kind string, invoiceID *uuid.UUID, reason string, at time.Time) error
 
 	InsertWebhook(ctx context.Context, w StoredWebhook) (bool, error)
@@ -116,6 +119,8 @@ type Config struct {
 	// Lease deve exceder CallTimeout com folga, para que duas instâncias
 	// nunca executem a mesma operação ao mesmo tempo.
 	Lease time.Duration
+	// Log registra falhas tratadas em melhor esforço (opcional).
+	Log *slog.Logger
 }
 
 // Service implementa os casos de uso de pagamentos.
@@ -212,11 +217,13 @@ func (s *Service) RequestCharge(ctx context.Context, tenantID, invoiceID uuid.UU
 	if err != nil {
 		return nil, err
 	}
-	// Execução imediata em melhor esforço; falhas ficam para a recuperação.
-	if err := s.ExecuteOperation(ctx, tenantID, opID); err != nil && ctx.Err() != nil {
-		return &charge, nil
+	// Execução imediata em melhor esforço: em caso de falha a operação
+	// permanece registrada e é retomada pela recuperação agendada.
+	if err := s.ExecuteOperation(ctx, tenantID, opID); err != nil && s.cfg.Log != nil {
+		s.cfg.Log.WarnContext(ctx, "criação da cobrança adiada para a recuperação", slog.String("charge_id", charge.ID.String()),
+			slog.String("error", err.Error()))
 	}
-	return s.chargeAfter(ctx, tenantID, charge.ID)
+	return s.chargeAfter(context.WithoutCancel(ctx), tenantID, charge.ID)
 }
 
 func (s *Service) chargeAfter(ctx context.Context, tenantID, id uuid.UUID) (*Charge, error) {
@@ -259,6 +266,10 @@ func (s *Service) ExecuteOperation(ctx context.Context, tenantID, opID uuid.UUID
 		if !op.Claimable(now) {
 			return errNothingToDo
 		}
+		if op.Kind != OpCreateCharge {
+			// Não reivindica operações que esta execução não sabe realizar.
+			return fmt.Errorf("payments: operação %s ainda não suportada pela execução genérica", op.Kind)
+		}
 		lease := now.Add(s.cfg.Lease)
 		op.Status, op.LeaseUntil, op.UpdatedAt = OpInFlight, &lease, now
 		op.Attempts++
@@ -283,9 +294,6 @@ func (s *Service) ExecuteOperation(ctx context.Context, tenantID, opID uuid.UUID
 	}
 	if err != nil {
 		return err
-	}
-	if op.Kind != OpCreateCharge {
-		return fmt.Errorf("payments: operação %s ainda não suportada pela execução genérica", op.Kind)
 	}
 	gw, err := s.resolver.Gateway(account)
 	if err != nil {
@@ -711,10 +719,21 @@ func (s *Service) confirmPayment(ctx context.Context, tx Tx, c *Charge, pc Provi
 
 func (s *Service) applyToInvoice(ctx context.Context, tx Tx, inv *billing.Invoice, pay Payment, viaProvider bool, actor audit.Actor, now time.Time) error {
 	if inv.Status == billing.Void || inv.Status == billing.Paid {
-		// Fatura já quitada ou cancelada: o valor vira crédito do cliente.
-		return s.creditOverpayment(ctx, tx, inv, pay, pay.Amount, viaProvider, actor, now)
+		// Fatura já quitada ou cancelada: o valor bruto vira crédito do
+		// cliente e a taxa do provedor é reconhecida como despesa.
+		if err := s.creditOverpayment(ctx, tx, inv, pay, pay.Amount, viaProvider, actor, now); err != nil {
+			return err
+		}
+		if !viaProvider || !pay.Fee.IsPositive() {
+			return nil
+		}
+		t, ok, err := ledger.ProviderFeeCharged(ids.New(), pay.TenantID, pay.ID, pay.Fee, now)
+		if err != nil || !ok {
+			return err
+		}
+		return tx.PostLedger(ctx, t)
 	}
-	applied, excess, err := inv.ApplyPayment(pay.Amount, now)
+	applied, excess, recovered, err := inv.ApplyPaymentWithRecovery(pay.Amount, now)
 	if err != nil {
 		return err
 	}
@@ -737,6 +756,17 @@ func (s *Service) applyToInvoice(ctx context.Context, tx Tx, inv *billing.Invoic
 	if ok {
 		if err := tx.PostLedger(ctx, t); err != nil {
 			return err
+		}
+	}
+	if recovered.IsPositive() {
+		t, ok, err := ledger.BadDebtRecovered(ids.New(), pay.TenantID, pay.ID, recovered, now)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if err := tx.PostLedger(ctx, t); err != nil {
+				return err
+			}
 		}
 	}
 	if excess.IsPositive() {
@@ -793,6 +823,9 @@ type ManualPaymentInput struct {
 	PaidAt    time.Time
 	Method    string
 	Note      string
+	// RequestKey identifica o pedido (derivado do Idempotency-Key); um
+	// segundo registro com a mesma chave devolve o pagamento existente.
+	RequestKey string
 }
 
 var manualMethods = map[string]bool{"pix": true, "bank_transfer": true, "boleto": true, "cash": true, "other": true}
@@ -827,13 +860,39 @@ func (s *Service) RecordManualPayment(ctx context.Context, tenantID uuid.UUID, a
 		if err != nil {
 			return err
 		}
+		if in.RequestKey != "" {
+			// Retentativa de um pedido já registrado devolve o pagamento
+			// existente mesmo que ele tenha quitado a fatura.
+			existing, err := tx.PaymentByRequestKey(ctx, in.RequestKey)
+			if err == nil {
+				if existing.InvoiceID != inv.ID {
+					return apperr.Conflict("request_key_reused", "A chave do pedido já foi usada em outra fatura.")
+				}
+				pay = existing
+				return nil
+			}
+			if !apperr.IsKind(err, apperr.KindNotFound) {
+				return err
+			}
+		}
 		if inv.Status != billing.Open && inv.Status != billing.PartiallyPaid && inv.Status != billing.Uncollectible {
 			return apperr.Conflict("invoice_not_payable", "A fatura não aceita pagamentos nesta situação.")
 		}
 		pay = Payment{ID: ids.New(), TenantID: tenantID, InvoiceID: inv.ID, CustomerID: inv.CustomerID, Amount: in.Amount,
-			Fee: money.Zero(in.Amount.Currency()), Method: in.Method, Source: "manual", PaidAt: in.PaidAt, Note: in.Note, RecordedBy: userID, CreatedAt: now}
-		if _, err := tx.InsertPayment(ctx, pay); err != nil {
+			Fee: money.Zero(in.Amount.Currency()), Method: in.Method, Source: "manual", PaidAt: in.PaidAt, Note: in.Note, RecordedBy: userID,
+			RequestKey: in.RequestKey, CreatedAt: now}
+		inserted, err := tx.InsertPayment(ctx, pay)
+		if err != nil {
 			return err
+		}
+		if !inserted {
+			// Mesmo pedido já registrado (retentativa após falha): devolve o existente.
+			existing, err := tx.PaymentByRequestKey(ctx, in.RequestKey)
+			if err != nil {
+				return err
+			}
+			pay = existing
+			return nil
 		}
 		return s.applyToInvoice(ctx, tx, &inv, pay, false, actor, now)
 	})
@@ -868,9 +927,10 @@ func (s *Service) CancelOpenCharges(ctx context.Context, tenantID, invoiceID, me
 // ConsumerInvoiceIssued identifica o consumidor que cria cobranças.
 const ConsumerInvoiceIssued = "payments.invoice_issued"
 
-// HandleInvoiceIssued cria a cobrança de uma fatura emitida. O inbox é
-// registrado numa transação própria antes da criação: a cobrança em si é
-// idempotente por fatura (RequestCharge retorna a existente).
+// HandleInvoiceIssued cria a cobrança de uma fatura emitida e depois
+// registra o inbox numa transação própria. A cobrança é idempotente por
+// fatura (RequestCharge retorna a existente), então uma reentrega após falha
+// entre as duas etapas não duplica a cobrança.
 func (s *Service) HandleInvoiceIssued(ctx context.Context, tenantID, invoiceID, messageID uuid.UUID) error {
 	_, err := s.RequestCharge(ctx, tenantID, invoiceID, systemActor)
 	if err != nil {

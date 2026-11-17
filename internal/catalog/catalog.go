@@ -230,6 +230,8 @@ func NewPriceVersion(id, tenantID, planID uuid.UUID, version int, cur money.Curr
 		} else {
 			pv.IncludedQuantity = r
 		}
+	} else if in.IncludedQuantity != "" {
+		add("included_quantity", "Este modelo não usa franquia.")
 	}
 	if len(f) > 0 {
 		return PriceVersion{}, apperr.Invalid("invalid_price", "Preço inválido.", f...)

@@ -14,6 +14,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"net/url"
 	"strings"
 	"time"
 
@@ -120,10 +121,20 @@ func (s Session) ValidCSRF(token string) bool {
 }
 
 // SafeReturnPath aceita somente caminhos relativos da própria aplicação,
-// impedindo redirecionamento aberto após o login.
+// impedindo redirecionamento aberto após o login. Caracteres de controle
+// são rejeitados porque navegadores removem TAB e quebras de linha da URL
+// (o que transformaria "/\t/host" em "//host").
 func SafeReturnPath(p string) string {
-	if p == "" || !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.HasPrefix(p, "/\\") ||
-		strings.ContainsAny(p, "\r\n\\") || len(p) > 512 {
+	if p == "" || len(p) > 512 || !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.ContainsRune(p, '\\') {
+		return "/"
+	}
+	for _, r := range p {
+		if r < 0x20 || r == 0x7f {
+			return "/"
+		}
+	}
+	u, err := url.Parse(p)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil {
 		return "/"
 	}
 	return p

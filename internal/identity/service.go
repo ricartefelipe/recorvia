@@ -53,10 +53,14 @@ func (s *Service) BeginLogin(ctx context.Context, returnTo string) (string, erro
 		State: RandomToken(32), Nonce: RandomToken(32), PKCEVerifier: s.idp.NewPKCEVerifier(),
 		ReturnTo: SafeReturnPath(returnTo), CreatedAt: s.clock.Now(),
 	}
+	target := s.idp.AuthCodeURL(f.State, f.Nonce, f.PKCEVerifier)
+	if target == "" {
+		return "", apperr.Unavailable("identity_provider_unavailable", "Provedor de identidade indisponível. Tente novamente em instantes.")
+	}
 	if err := s.sessions.SaveLoginFlow(ctx, f, s.policy.LoginFlowTTL); err != nil {
 		return "", fmt.Errorf("identity: estado de login: %w", err)
 	}
-	return s.idp.AuthCodeURL(f.State, f.Nonce, f.PKCEVerifier), nil
+	return target, nil
 }
 
 // CompleteLogin valida o callback, troca o código com o verificador PKCE,
@@ -174,7 +178,9 @@ func (s *Service) SwitchTenant(ctx context.Context, sess Session, tenantID uuid.
 		return Session{}, err
 	}
 	if err := s.sessions.Delete(ctx, sess.ID); err != nil {
-		return Session{}, err
+		// Sem revogar a anterior, a nova sessão é descartada: o usuário
+		// continua apenas com a sessão original.
+		return Session{}, errors.Join(err, s.sessions.Delete(ctx, next.ID))
 	}
 	return next, nil
 }

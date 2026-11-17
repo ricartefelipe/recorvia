@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"time"
@@ -70,7 +71,9 @@ type PendingItem struct {
 // CycleTx são as operações do motor de recorrência na transação do tenant.
 type CycleTx interface {
 	TenantSettings(ctx context.Context) (TenantSettings, error)
-	ClaimDueSubscription(ctx context.Context, now time.Time) (subscriptions.Subscription, bool, error)
+	// ClaimDueSubscription reivindica uma assinatura vencida, ignorando as
+	// que falharam nesta execução.
+	ClaimDueSubscription(ctx context.Context, now time.Time, exclude []uuid.UUID) (subscriptions.Subscription, bool, error)
 	UpdateSubscription(ctx context.Context, s subscriptions.Subscription) error
 	InsertSubscriptionHistory(ctx context.Context, subscriptionID uuid.UUID, actor audit.Actor, ev []subscriptions.HistoryEvent) error
 	Plan(ctx context.Context, id uuid.UUID) (catalog.Plan, error)
@@ -152,37 +155,53 @@ func (e *Engine) RunAll(ctx context.Context) (RunResult, error) {
 	return total, nil
 }
 
-// RunTenant processa as assinaturas vencidas de um tenant.
+// RunTenant processa as assinaturas vencidas de um tenant. A falha de uma
+// assinatura desfaz apenas a transação dela: as demais continuam sendo
+// processadas e os erros são devolvidos juntos ao final (a assinatura com
+// falha é tentada de novo na próxima execução).
 func (e *Engine) RunTenant(ctx context.Context, tenantID uuid.UUID, actor audit.Actor) (RunResult, error) {
-	var res RunResult
+	var (
+		res    RunResult
+		failed []uuid.UUID
+		errs   []error
+		seen   = map[uuid.UUID]bool{}
+	)
 	for range e.MaxSubscriptionsPerRun {
 		if err := ctx.Err(); err != nil {
-			return res, err
+			return res, errors.Join(append(errs, err)...)
 		}
-		found := false
+		var claimed uuid.UUID
 		var created []uuid.UUID
 		err := e.store.InCycleTx(ctx, tenantID, func(tx CycleTx) error {
 			created = nil
 			now := e.clock.Now()
-			sub, ok, err := tx.ClaimDueSubscription(ctx, now)
+			sub, ok, err := tx.ClaimDueSubscription(ctx, now, failed)
 			if err != nil || !ok {
 				return err
 			}
-			found = true
+			claimed = sub.ID
 			created, err = e.processSubscription(ctx, tx, &sub, actor, now)
 			return err
 		})
 		if err != nil {
-			return res, err
+			if claimed == uuid.Nil || ctx.Err() != nil {
+				return res, errors.Join(append(errs, err)...)
+			}
+			failed = append(failed, claimed)
+			errs = append(errs, fmt.Errorf("assinatura %s: %w", claimed, err))
+			continue
 		}
-		if !found {
-			return res, nil
+		if claimed == uuid.Nil {
+			break
 		}
-		res.Subscriptions++
+		if !seen[claimed] {
+			seen[claimed] = true
+			res.Subscriptions++
+		}
 		res.Invoices += len(created)
 		res.InvoiceIDs = append(res.InvoiceIDs, created...)
 	}
-	return res, nil
+	return res, errors.Join(errs...)
 }
 
 func (e *Engine) processSubscription(ctx context.Context, tx CycleTx, sub *subscriptions.Subscription, actor audit.Actor, now time.Time) ([]uuid.UUID, error) {

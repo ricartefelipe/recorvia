@@ -168,13 +168,19 @@ func (s *Service) ResolveAccess(ctx context.Context, tenantID, userID uuid.UUID)
 	var a Access
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		t, err := tx.Tenant(ctx)
-		if err != nil {
+		if apperr.IsKind(err, apperr.KindNotFound) {
 			return apperr.Forbidden("no_membership", "Você não tem acesso a esta organização.")
+		}
+		if err != nil {
+			return err
 		}
 		if t.Status != TenantActive {
 			return apperr.Forbidden("organization_inactive", "Esta organização não está ativa.")
 		}
 		m, err := tx.Membership(ctx, userID, false)
+		if err != nil && !apperr.IsKind(err, apperr.KindNotFound) {
+			return err
+		}
 		if err != nil || m.Status != MembershipActive {
 			return apperr.Forbidden("no_membership", "Você não tem acesso a esta organização.")
 		}
@@ -318,6 +324,7 @@ func (s *Service) AcceptInvitation(ctx context.Context, user UserRef, token stri
 			if err := tx.UpdateMembership(ctx, existing); err != nil {
 				return err
 			}
+			existing.Version++
 			m = existing
 		case apperr.IsKind(err, apperr.KindNotFound):
 			m = Membership{TenantID: tenantID, UserID: user.ID, Role: inv.Role, Status: MembershipActive,

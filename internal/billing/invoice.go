@@ -38,7 +38,7 @@ var transitions = map[Status][]Status{
 	Draft:         {Open, Paid},
 	Open:          {PartiallyPaid, Paid, Void, Uncollectible},
 	PartiallyPaid: {Paid, Uncollectible},
-	Uncollectible: {PartiallyPaid, Paid},
+	Uncollectible: {Paid},
 	Paid:          {},
 	Void:          {},
 }
@@ -170,7 +170,11 @@ func (inv *Invoice) AddItem(it Item) error {
 	}
 	it.Position = len(inv.Items)
 	inv.Items = append(inv.Items, it)
-	return inv.recalc()
+	if err := inv.recalc(); err != nil {
+		inv.Items = inv.Items[:len(inv.Items)-1]
+		return err
+	}
+	return nil
 }
 
 // ApplyDiscount distribui um desconto entre os itens positivos pelo maior
@@ -191,22 +195,34 @@ func (inv *Invoice) ApplyDiscount(d money.Money) (money.Money, error) {
 			positive += remaining
 		}
 	}
-	if positive == 0 {
+	// O desconto é limitado ao subtotal líquido (itens negativos, como
+	// créditos de prorrata, reduzem a base) e distribuído entre os itens
+	// positivos.
+	limit := min(positive, inv.Total.Amount())
+	if limit <= 0 {
 		return money.Zero(inv.Currency), nil
 	}
-	if d.Amount() > positive {
-		d = money.New(positive, inv.Currency)
+	if d.Amount() > limit {
+		d = money.New(limit, inv.Currency)
 	}
 	shares, err := money.Allocate(d, weights)
 	if err != nil {
 		return money.Money{}, err
 	}
+	before := make([]money.Money, len(inv.Items))
 	for i := range inv.Items {
+		before[i] = inv.Items[i].DiscountAmount
 		if inv.Items[i].DiscountAmount, err = inv.Items[i].DiscountAmount.Add(shares[i]); err != nil {
 			return money.Money{}, err
 		}
 	}
-	return d, inv.recalc()
+	if err := inv.recalc(); err != nil {
+		for i := range inv.Items {
+			inv.Items[i].DiscountAmount = before[i]
+		}
+		return money.Money{}, err
+	}
+	return d, nil
 }
 
 // ApplyCredit consome até available do crédito do cliente, limitado ao total.
@@ -317,50 +333,68 @@ func (inv *Invoice) IsOverdue(now time.Time) bool {
 // (pago a maior), que o chamador converte em crédito do cliente. Pagamento de
 // fatura baixada como incobrável reverte a baixa na mesma proporção.
 func (inv *Invoice) ApplyPayment(amount money.Money, at time.Time) (applied, excess money.Money, err error) {
+	applied, excess, _, err = inv.ApplyPaymentWithRecovery(amount, at)
+	return applied, excess, err
+}
+
+// ApplyPaymentWithRecovery é ApplyPayment informando também quanto da baixa
+// como incobrável foi revertido (o chamador estorna a perda no ledger). Uma
+// fatura incobrável só fica paga quando toda a baixa é recuperada.
+func (inv *Invoice) ApplyPaymentWithRecovery(amount money.Money, at time.Time) (applied, excess, recovered money.Money, err error) {
+	recovered = money.Zero(inv.Currency)
 	if !amount.IsPositive() {
-		return money.Money{}, money.Money{}, apperr.Invalid("invalid_amount", "O valor do pagamento deve ser positivo.")
+		return money.Money{}, money.Money{}, money.Money{}, apperr.Invalid("invalid_amount", "O valor do pagamento deve ser positivo.")
+	}
+	fail := func(e error) (money.Money, money.Money, money.Money, error) {
+		return money.Money{}, money.Money{}, money.Money{}, e
 	}
 	switch inv.Status {
 	case Open, PartiallyPaid:
-		applied, err = money.Min(amount, inv.AmountDue)
+		if applied, err = money.Min(amount, inv.AmountDue); err != nil {
+			return fail(err)
+		}
 	case Uncollectible:
 		owed, e := inv.AmountDue.Add(inv.AmountWrittenOff)
 		if e != nil {
-			return money.Money{}, money.Money{}, e
+			return fail(e)
 		}
-		applied, err = money.Min(amount, owed)
-		if err == nil {
-			reverse, e := money.Min(applied, inv.AmountWrittenOff)
-			if e != nil {
-				return money.Money{}, money.Money{}, e
-			}
-			if inv.AmountWrittenOff, err = inv.AmountWrittenOff.Sub(reverse); err != nil {
-				return money.Money{}, money.Money{}, err
-			}
+		if applied, err = money.Min(amount, owed); err != nil {
+			return fail(err)
+		}
+		if recovered, err = money.Min(applied, inv.AmountWrittenOff); err != nil {
+			return fail(err)
+		}
+		if inv.AmountWrittenOff, err = inv.AmountWrittenOff.Sub(recovered); err != nil {
+			return fail(err)
 		}
 	default:
-		return money.Money{}, money.Money{}, apperr.Conflict("invoice_not_payable", "A fatura não aceita pagamentos nesta situação.")
-	}
-	if err != nil {
-		return money.Money{}, money.Money{}, err
+		return fail(apperr.Conflict("invoice_not_payable", "A fatura não aceita pagamentos nesta situação."))
 	}
 	if inv.AmountPaid, err = inv.AmountPaid.Add(applied); err != nil {
-		return money.Money{}, money.Money{}, err
+		return fail(err)
 	}
 	if err = inv.recalc(); err != nil {
-		return money.Money{}, money.Money{}, err
+		return fail(err)
 	}
 	if excess, err = amount.Sub(applied); err != nil {
-		return money.Money{}, money.Money{}, err
+		return fail(err)
 	}
 	details := map[string]any{"applied": applied.Amount(), "excess": excess.Amount()}
-	if inv.AmountDue.IsZero() {
+	switch {
+	case inv.AmountDue.IsZero() && inv.AmountWrittenOff.IsZero():
 		inv.PaidAt = &at
 		err = inv.transition(Paid, at, "payment", details)
-	} else if inv.Status != PartiallyPaid {
+	case inv.Status == Uncollectible:
+		// Recuperação parcial: o restante continua baixado.
+		details["recovered"], details["still_written_off"] = recovered.Amount(), inv.AmountWrittenOff.Amount()
+		inv.changes = append(inv.changes, StatusChange{From: ptr(inv.Status), To: inv.Status, At: at, Reason: "payment", Details: details})
+	case inv.Status != PartiallyPaid:
 		err = inv.transition(PartiallyPaid, at, "payment", details)
 	}
-	return applied, excess, err
+	if err != nil {
+		return fail(err)
+	}
+	return applied, excess, recovered, nil
 }
 
 // Void cancela uma fatura em aberto sem pagamentos nem notas de crédito. O

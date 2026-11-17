@@ -6,6 +6,7 @@
 package platformbilling
 
 import (
+	"fmt"
 	"slices"
 	"time"
 
@@ -63,6 +64,9 @@ type Subscription struct {
 	PlanCode    string
 	Status      Status
 	TrialEndsAt *time.Time
+	// Anchor é a data civil que ancora os ciclos mensais (dias 29 a 31
+	// são preservados nos meses seguintes).
+	Anchor      calendar.Date
 	PeriodStart time.Time
 	PeriodEnd   time.Time
 	Version     int
@@ -74,20 +78,30 @@ type Usage struct {
 	ActiveSubscriptions int
 }
 
-// NewSubscription inicia a assinatura da plataforma com o período de
-// avaliação do plano, em ciclos mensais ancorados na data local de início.
+// NewSubscription inicia a assinatura da plataforma. Sem avaliação, os ciclos
+// mensais são ancorados na data local de início. Com avaliação, o primeiro
+// período é a própria avaliação (sem cobrança do plano) e os ciclos seguintes
+// são ancorados na data local de fim da avaliação.
 func NewSubscription(tenantID uuid.UUID, plan Plan, now time.Time, loc *time.Location) (Subscription, error) {
-	sched, err := calendar.NewSchedule(calendar.Monthly, now, loc)
+	if loc == nil {
+		return Subscription{}, calendar.ErrNilLocation
+	}
+	today := calendar.DateOf(now, loc)
+	s := Subscription{TenantID: tenantID, PlanCode: plan.Code, Status: StatusActive, Anchor: today, Version: 1}
+	if plan.TrialDays > 0 {
+		end := today.AddDays(plan.TrialDays).StartIn(loc)
+		s.Status = StatusTrialing
+		s.TrialEndsAt = &end
+		s.Anchor = today.AddDays(plan.TrialDays)
+		s.PeriodStart, s.PeriodEnd = today.StartIn(loc), end
+		return s, nil
+	}
+	sched, err := calendar.NewScheduleFromAnchor(calendar.Monthly, s.Anchor, loc)
 	if err != nil {
 		return Subscription{}, err
 	}
 	p := sched.Period(0)
-	s := Subscription{TenantID: tenantID, PlanCode: plan.Code, Status: StatusActive, PeriodStart: p.Start, PeriodEnd: p.End, Version: 1}
-	if plan.TrialDays > 0 {
-		end := calendar.DateOf(now, loc).AddDays(plan.TrialDays).StartIn(loc)
-		s.Status = StatusTrialing
-		s.TrialEndsAt = &end
-	}
+	s.PeriodStart, s.PeriodEnd = p.Start, p.End
 	return s, nil
 }
 
@@ -163,14 +177,22 @@ func CloseStatement(id uuid.UUID, s Subscription, plan Plan, addons money.Money,
 	}, nil
 }
 
-// Advance move a assinatura para o próximo período mensal, encerrando a
-// avaliação quando vencida.
+// Advance move a assinatura para o período mensal que começa no fim do
+// período corrente, calculado a partir da âncora (sem sobreposição e sem
+// perder dias 29 a 31), encerrando a avaliação quando vencida.
 func (s *Subscription) Advance(loc *time.Location) error {
-	sched, err := calendar.NewSchedule(calendar.Monthly, s.PeriodStart, loc)
+	sched, err := calendar.NewScheduleFromAnchor(calendar.Monthly, s.Anchor, loc)
 	if err != nil {
 		return err
 	}
-	next := sched.Period(1)
+	idx := sched.IndexOf(s.PeriodEnd)
+	if idx < 0 {
+		return fmt.Errorf("platformbilling: fim do período anterior à âncora")
+	}
+	next := sched.Period(idx)
+	if !next.Start.Equal(s.PeriodEnd) {
+		return fmt.Errorf("platformbilling: período corrente fora do ciclo ancorado")
+	}
 	s.PeriodStart, s.PeriodEnd = next.Start, next.End
 	if s.Status == StatusTrialing && s.TrialEndsAt != nil && !s.TrialEndsAt.After(s.PeriodStart) {
 		s.Status = StatusActive
