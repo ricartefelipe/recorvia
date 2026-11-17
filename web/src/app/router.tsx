@@ -62,6 +62,16 @@ export const appRoutes: RouteObject[] = [
 export const routes: RouteObject[] = [
   { path: '/entrar', Component: LoginPage, ErrorBoundary: RouteErrorBoundary },
   {
+    path: '/portal',
+    lazy: async () => ({ Component: (await import('../features/portal/PortalLayout')).PortalLayout }),
+    ErrorBoundary: RouteErrorBoundary,
+    children: [
+      { index: true, lazy: async () => ({ Component: (await import('../features/portal/PortalPages')).PortalInvoicesPage }) },
+      { path: 'faturas/:id', lazy: async () => ({ Component: (await import('../features/portal/PortalPages')).PortalInvoicePage }) },
+      { path: 'preferencias', lazy: async () => ({ Component: (await import('../features/portal/PortalPages')).PortalPreferencesPage }) },
+    ],
+  },
+  {
     element: <SessionGate />,
     ErrorBoundary: RouteErrorBoundary,
     children: [
