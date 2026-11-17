@@ -18,6 +18,7 @@ const (
 	EventInvoicePaid            = "invoice.paid"
 	EventInvoicePartiallyPaid   = "invoice.partially_paid"
 	EventInvoiceVoided          = "invoice.voided"
+	EventInvoiceCredited        = "invoice.credited"
 	EventInvoiceOverdue         = "invoice.overdue"
 	EventInvoiceUncollectible   = "invoice.uncollectible"
 	EventChargeCreated          = "charge.created"

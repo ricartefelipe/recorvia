@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,15 +37,26 @@ type UsageLine struct {
 	Aggregation string
 	Quantity    *big.Rat
 	AggregateID *uuid.UUID
+	// Plan e Price identificam a versão que precifica o consumo quando ela
+	// difere da versão do componente fixo (mudança de plano no início do
+	// período: o consumo do período anterior usa o preço anterior).
+	Plan  *catalog.Plan
+	Price *catalog.PriceVersion
 }
 
 // Discount é um desconto recorrente vigente na assinatura.
 type Discount struct {
-	ID          uuid.UUID
-	CouponCode  string
-	PercentBP   int64
-	AmountOff   *money.Money
-	Description string
+	ID               uuid.UUID
+	CouponCode       string
+	PercentBP        int64
+	AmountOff        *money.Money
+	Description      string
+	AppliesToPlanIDs []uuid.UUID
+}
+
+// AppliesTo informa se o desconto vale para o plano.
+func (d Discount) AppliesTo(planID uuid.UUID) bool {
+	return len(d.AppliesToPlanIDs) == 0 || slices.Contains(d.AppliesToPlanIDs, planID)
 }
 
 // Amount calcula o desconto sobre a base informada.
@@ -94,6 +106,14 @@ type CycleTx interface {
 	PostLedger(ctx context.Context, t ledger.Transaction) error
 	Audit(ctx context.Context, e audit.Entry) error
 	Emit(ctx context.Context, e outbox.Event) error
+
+	// Condições programadas aplicadas no início de cada ciclo.
+	PendingChange(ctx context.Context, subscriptionID uuid.UUID) (*subscriptions.ScheduledChange, error)
+	ResolveChange(ctx context.Context, id uuid.UUID, status subscriptions.ChangeStatus, at time.Time) error
+	DueAdjustments(ctx context.Context, subscriptionID uuid.UUID, onDate calendar.Date) ([]subscriptions.PriceAdjustment, error)
+	MarkAdjustmentApplied(ctx context.Context, a subscriptions.PriceAdjustment) error
+	CancelPendingTerms(ctx context.Context, subscriptionID uuid.UUID, at time.Time) error
+	EndActiveDiscount(ctx context.Context, subscriptionID uuid.UUID, at time.Time) (bool, error)
 }
 
 // CycleStore abre transações do motor e descobre tenants com trabalho.
@@ -226,7 +246,26 @@ func (e *Engine) processSubscription(ctx context.Context, tx CycleTx, sub *subsc
 		if !ok {
 			break
 		}
-		inv, err := e.issueForStep(ctx, tx, sub, plan, price, step, settings, actor, now)
+		// O consumo do período anterior é precificado pela versão vigente
+		// naquele período, mesmo que uma mudança valha a partir deste.
+		usagePlan, usagePrice := plan, price
+		if step.Kind == subscriptions.StepBill {
+			changed, err := e.applyTerms(ctx, tx, sub, step, now)
+			if err != nil {
+				return nil, err
+			}
+			if changed {
+				if plan, err = tx.Plan(ctx, sub.PlanID); err != nil {
+					return nil, err
+				}
+				if price, err = tx.PriceVersion(ctx, sub.PriceVersionID); err != nil {
+					return nil, err
+				}
+			}
+		} else if err := tx.CancelPendingTerms(ctx, sub.ID, now); err != nil {
+			return nil, err
+		}
+		inv, err := e.issueForStep(ctx, tx, sub, plan, price, usagePlan, usagePrice, step, settings, actor, now)
 		if err != nil {
 			return nil, err
 		}
@@ -241,6 +280,93 @@ func (e *Engine) processSubscription(ctx context.Context, tx CycleTx, sub *subsc
 		return nil, err
 	}
 	return created, tx.InsertSubscriptionHistory(ctx, sub.ID, actor, sub.PopEvents())
+}
+
+// applyTerms aplica, no início do período do passo, a mudança agendada e os
+// reajustes vencidos. Informa se plano ou versão de preço mudaram.
+func (e *Engine) applyTerms(ctx context.Context, tx CycleTx, sub *subscriptions.Subscription, step subscriptions.BillingStep, now time.Time) (bool, error) {
+	changed := false
+	ch, err := tx.PendingChange(ctx, sub.ID)
+	if err != nil {
+		return false, err
+	}
+	if ch != nil && !ch.EffectiveAt.After(step.Period.Start) {
+		planID, priceID, qty := sub.PlanID, sub.PriceVersionID, sub.Quantity
+		if ch.NewPlanID != nil && ch.NewPriceVersionID != nil {
+			planID, priceID = *ch.NewPlanID, *ch.NewPriceVersionID
+		}
+		if ch.NewQuantity != nil {
+			qty = *ch.NewQuantity
+		}
+		plan, err := tx.Plan(ctx, planID)
+		if err != nil {
+			return false, err
+		}
+		price, err := tx.PriceVersion(ctx, priceID)
+		if err != nil {
+			return false, err
+		}
+		event := "quantity_changed"
+		if ch.Kind == subscriptions.PlanChange {
+			event = "plan_changed"
+		}
+		sub.ApplyChange(plan, price, qty, event, now, map[string]any{"scheduled_change_id": ch.ID, "timing": subscriptions.ChangeNextCycle,
+			"period_start": step.Period.Start})
+		if err := tx.ResolveChange(ctx, ch.ID, subscriptions.ChangeApplied, now); err != nil {
+			return false, err
+		}
+		if err := endInapplicableDiscount(ctx, tx, sub, now); err != nil {
+			return false, err
+		}
+		if err := tx.Audit(ctx, audit.New(sub.TenantID, now, engineActor, "subscription."+event, "subscription", sub.ID.String(),
+			map[string]any{"scheduled_change_id": ch.ID, "plan_id": plan.ID, "price_version": price.Version, "quantity": qty})); err != nil {
+			return false, err
+		}
+		changed = true
+	}
+	loc, err := sub.Location()
+	if err != nil {
+		return false, err
+	}
+	adjs, err := tx.DueAdjustments(ctx, sub.ID, calendar.DateOf(step.Period.Start, loc))
+	if err != nil || len(adjs) == 0 {
+		return changed, err
+	}
+	price, err := tx.PriceVersion(ctx, sub.PriceVersionID)
+	if err != nil {
+		return false, err
+	}
+	for i := range adjs {
+		if err := adjs[i].Apply(sub, price, step.Period.Start, now); err != nil {
+			return false, err
+		}
+		if err := tx.MarkAdjustmentApplied(ctx, adjs[i]); err != nil {
+			return false, err
+		}
+		if err := tx.Audit(ctx, audit.New(sub.TenantID, now, engineActor, "subscription.price_adjusted", "subscription", sub.ID.String(),
+			map[string]any{"adjustment_id": adjs[i].ID, "previous_amount": adjs[i].PreviousAmount.Amount(),
+				"resulting_amount": adjs[i].ResultingAmount.Amount()})); err != nil {
+			return false, err
+		}
+	}
+	return changed, nil
+}
+
+// endInapplicableDiscount encerra o desconto cujo cupom não vale para o novo
+// plano da assinatura.
+func endInapplicableDiscount(ctx context.Context, tx interface {
+	ActiveDiscount(ctx context.Context, subscriptionID uuid.UUID) (*Discount, error)
+	EndActiveDiscount(ctx context.Context, subscriptionID uuid.UUID, at time.Time) (bool, error)
+}, sub *subscriptions.Subscription, now time.Time) error {
+	d, err := tx.ActiveDiscount(ctx, sub.ID)
+	if err != nil || d == nil || d.AppliesTo(sub.PlanID) {
+		return err
+	}
+	if _, err := tx.EndActiveDiscount(ctx, sub.ID, now); err != nil {
+		return err
+	}
+	sub.RecordEvent("discount_removed", now, map[string]any{"discount_id": d.ID, "reason": "coupon_not_applicable_to_plan"})
+	return nil
 }
 
 func localRange(p calendar.Period, loc *time.Location) string {
@@ -281,9 +407,14 @@ func BuildCycleInvoice(sub subscriptions.Subscription, plan catalog.Plan, price 
 	}
 	subID := sub.ID
 	inv := NewDraft(ids.New(), sub.TenantID, sub.CustomerID, &subID, kind, price.Currency, &period, snapshot, now)
-	snap := priceSnapshot(plan, price)
+	fixed := sub.EffectivePrice(price)
+	snap := priceSnapshot(plan, fixed)
+	if sub.PriceOverrideAdjustmentID != nil {
+		snap["price_adjustment_id"] = *sub.PriceOverrideAdjustmentID
+		snap["adjusted_fixed_amount"] = sub.PriceOverride.Amount()
+	}
 	if step.Kind == subscriptions.StepBill && price.HasFixed() {
-		amount, qty, unit, err := price.FixedCharge(sub.Quantity)
+		amount, qty, unit, err := fixed.FixedCharge(sub.Quantity)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -298,26 +429,33 @@ func BuildCycleInvoice(sub subscriptions.Subscription, plan catalog.Plan, price 
 		}
 	}
 	var links []usageItemLink
-	if price.HasUsage() && step.UsagePeriod != nil {
+	if step.UsagePeriod != nil {
 		up := *step.UsagePeriod
 		for _, u := range usage {
-			amount, billable, err := price.UsageCharge(u.Quantity)
+			lplan, lprice, lsnap := plan, price, snap
+			if u.Price != nil && u.Plan != nil {
+				lplan, lprice, lsnap = *u.Plan, *u.Price, priceSnapshot(*u.Plan, *u.Price)
+			}
+			if !lprice.HasUsage() {
+				continue
+			}
+			amount, billable, err := lprice.UsageCharge(u.Quantity)
 			if err != nil {
 				return nil, nil, err
 			}
 			kindItem := ItemUsage
 			desc := fmt.Sprintf("Consumo de %s: %s %s (%s)", u.MetricName, money.RatString(billable), u.Unit, localRange(up, loc))
-			if price.Model == catalog.FlatPlusOverage {
+			if lprice.Model == catalog.FlatPlusOverage {
 				kindItem = ItemOverage
 				desc = fmt.Sprintf("Excedente de %s: %s %s acima da franquia de %s (%s)", u.MetricName, money.RatString(billable), u.Unit,
-					money.RatString(price.IncludedQuantity), localRange(up, loc))
+					money.RatString(lprice.IncludedQuantity), localRange(up, loc))
 			}
 			us := map[string]any{"aggregated_quantity": money.RatString(u.Quantity), "aggregation": u.Aggregation, "metric_code": u.MetricCode}
-			for k, v := range snap {
+			for k, v := range lsnap {
 				us[k] = v
 			}
-			item := Item{ID: ids.New(), Kind: kindItem, Description: desc, Quantity: billable, UnitAmount: price.UnitAmount,
-				Amount: amount, Period: &up, PlanID: &plan.ID, PriceVersionID: &price.ID, PriceSnapshot: us, UsageAggregateID: u.AggregateID}
+			item := Item{ID: ids.New(), Kind: kindItem, Description: desc, Quantity: billable, UnitAmount: lprice.UnitAmount,
+				Amount: amount, Period: &up, PlanID: &lplan.ID, PriceVersionID: &lprice.ID, PriceSnapshot: us, UsageAggregateID: u.AggregateID}
 			if err := inv.AddItem(item); err != nil {
 				return nil, nil, err
 			}
@@ -361,7 +499,8 @@ func BuildCycleInvoice(sub subscriptions.Subscription, plan catalog.Plan, price 
 type usageItemLink struct{ aggregateID, itemID uuid.UUID }
 
 func (e *Engine) issueForStep(ctx context.Context, tx CycleTx, sub *subscriptions.Subscription, plan catalog.Plan, price catalog.PriceVersion,
-	step subscriptions.BillingStep, settings TenantSettings, actor audit.Actor, now time.Time) (*Invoice, error) {
+	usagePlan catalog.Plan, usagePrice catalog.PriceVersion, step subscriptions.BillingStep, settings TenantSettings, actor audit.Actor,
+	now time.Time) (*Invoice, error) {
 	kind := KindSubscriptionCycle
 	periodStart := step.Period.Start
 	if step.Kind != subscriptions.StepBill {
@@ -380,9 +519,14 @@ func (e *Engine) issueForStep(ctx context.Context, tx CycleTx, sub *subscription
 		return nil, err
 	}
 	var usage []UsageLine
-	if price.HasUsage() && step.UsagePeriod != nil {
-		if usage, err = tx.UsageFor(ctx, *sub, price, *step.UsagePeriod); err != nil {
+	if usagePrice.HasUsage() && step.UsagePeriod != nil {
+		if usage, err = tx.UsageFor(ctx, *sub, usagePrice, *step.UsagePeriod); err != nil {
 			return nil, err
+		}
+		if usagePrice.ID != price.ID {
+			for i := range usage {
+				usage[i].Plan, usage[i].Price = &usagePlan, &usagePrice
+			}
 		}
 	}
 	var pending []PendingItem
@@ -399,14 +543,6 @@ func (e *Engine) issueForStep(ctx context.Context, tx CycleTx, sub *subscription
 	if err != nil || inv == nil {
 		return nil, err
 	}
-	credit, err := tx.CustomerCreditBalance(ctx, sub.CustomerID)
-	if err != nil {
-		return nil, err
-	}
-	used, err := inv.ApplyCredit(credit)
-	if err != nil {
-		return nil, err
-	}
 	terms := settings.PaymentTermsDays
 	if customerTerms != nil {
 		terms = *customerTerms
@@ -414,18 +550,7 @@ func (e *Engine) issueForStep(ctx context.Context, tx CycleTx, sub *subscription
 	if sub.PaymentTermsDays != nil {
 		terms = *sub.PaymentTermsDays
 	}
-	seq, err := tx.NextInvoiceNumber(ctx)
-	if err != nil {
-		return nil, err
-	}
-	number := FormatNumber(settings.InvoicePrefix, calendar.DateOf(now, settings.Location).Year, seq)
-	if err := inv.Issue(number, now, DueAt(now, terms, settings.Location)); err != nil {
-		return nil, err
-	}
-	if err := tx.InsertInvoice(ctx, inv); err != nil {
-		return nil, err
-	}
-	if err := tx.InsertStatusHistory(ctx, inv.ID, actor, inv.PopChanges()); err != nil {
+	if err := issueDraft(ctx, tx, inv, terms, settings, actor, now); err != nil {
 		return nil, err
 	}
 	for _, l := range links {
@@ -447,23 +572,67 @@ func (e *Engine) issueForStep(ctx context.Context, tx CycleTx, sub *subscription
 			return nil, err
 		}
 	}
+	return inv, nil
+}
+
+// IssueTx são as operações de emissão de uma fatura montada.
+type IssueTx interface {
+	CustomerCreditBalance(ctx context.Context, customerID uuid.UUID) (money.Money, error)
+	ConsumeCustomerCredit(ctx context.Context, customerID, invoiceID uuid.UUID, amount money.Money, at time.Time) error
+	NextInvoiceNumber(ctx context.Context) (int64, error)
+	InsertInvoice(ctx context.Context, inv *Invoice) error
+	InsertStatusHistory(ctx context.Context, invoiceID uuid.UUID, actor audit.Actor, changes []StatusChange) error
+	PostLedger(ctx context.Context, t ledger.Transaction) error
+	Audit(ctx context.Context, e audit.Entry) error
+	Emit(ctx context.Context, e outbox.Event) error
+}
+
+// issueDraft emite um rascunho: aplica o crédito disponível do cliente,
+// numera, define o vencimento, grava fatura, histórico, lançamento no
+// ledger, evento de emissão e auditoria, tudo na transação corrente.
+func issueDraft(ctx context.Context, tx IssueTx, inv *Invoice, termsDays int, settings TenantSettings, actor audit.Actor, now time.Time) error {
+	credit, err := tx.CustomerCreditBalance(ctx, inv.CustomerID)
+	if err != nil {
+		return err
+	}
+	used, err := inv.ApplyCredit(credit)
+	if err != nil {
+		return err
+	}
+	seq, err := tx.NextInvoiceNumber(ctx)
+	if err != nil {
+		return err
+	}
+	number := FormatNumber(settings.InvoicePrefix, calendar.DateOf(now, settings.Location).Year, seq)
+	if err := inv.Issue(number, now, DueAt(now, termsDays, settings.Location)); err != nil {
+		return err
+	}
+	if err := tx.InsertInvoice(ctx, inv); err != nil {
+		return err
+	}
+	if err := tx.InsertStatusHistory(ctx, inv.ID, actor, inv.PopChanges()); err != nil {
+		return err
+	}
 	if used.IsPositive() {
-		if err := tx.ConsumeCustomerCredit(ctx, sub.CustomerID, inv.ID, used, now); err != nil {
-			return nil, err
+		if err := tx.ConsumeCustomerCredit(ctx, inv.CustomerID, inv.ID, used, now); err != nil {
+			return err
 		}
 	}
 	if t, ok, err := ledger.InvoiceIssued(ids.New(), inv.TenantID, inv.ID, inv.Number, inv.Total, inv.CreditApplied, now); err != nil {
-		return nil, err
+		return err
 	} else if ok {
 		if err := tx.PostLedger(ctx, t); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if err := tx.Emit(ctx, IssuedEvent(inv, settings.Location, now)); err != nil {
-		return nil, err
+		return err
 	}
-	return inv, tx.Audit(ctx, audit.New(inv.TenantID, now, actor, "invoice.issued", "invoice", inv.ID.String(),
-		map[string]any{"number": inv.Number, "total": inv.Total.Amount(), "kind": inv.Kind, "subscription_id": sub.ID}))
+	details := map[string]any{"number": inv.Number, "total": inv.Total.Amount(), "kind": inv.Kind}
+	if inv.SubscriptionID != nil {
+		details["subscription_id"] = *inv.SubscriptionID
+	}
+	return tx.Audit(ctx, audit.New(inv.TenantID, now, actor, "invoice.issued", "invoice", inv.ID.String(), details))
 }
 
 // IssuedEvent monta o evento de emissão consumido pela cobrança e pelas
