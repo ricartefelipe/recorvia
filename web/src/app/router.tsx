@@ -1,4 +1,4 @@
-import { createBrowserRouter, type RouteObject } from 'react-router';
+import { createBrowserRouter, Navigate, type RouteObject } from 'react-router';
 import { AcceptInvitationPage } from '../features/auth/AcceptInvitationPage';
 import { LoginPage } from '../features/auth/LoginPage';
 import { OnboardingPage } from '../features/auth/OnboardingPage';
@@ -12,6 +12,18 @@ export const appRoutes: RouteObject[] = [
   { index: true, lazy: async () => ({ Component: (await import('../features/dashboard/DashboardPage')).DashboardPage }) },
   { path: 'clientes', lazy: async () => ({ Component: (await import('../features/customers/CustomersPage')).CustomersPage }) },
   { path: 'clientes/:id', lazy: async () => ({ Component: (await import('../features/customers/CustomerDetailPage')).CustomerDetailPage }) },
+  {
+    path: 'catalogo',
+    lazy: async () => ({ Component: (await import('../features/catalog/CatalogLayout')).CatalogLayout }),
+    children: [
+      { index: true, element: <Navigate to="planos" replace /> },
+      { path: 'planos', lazy: async () => ({ Component: (await import('../features/catalog/PlansPage')).PlansPage }) },
+      { path: 'planos/:id', lazy: async () => ({ Component: (await import('../features/catalog/PlanDetailPage')).PlanDetailPage }) },
+      { path: 'produtos', lazy: async () => ({ Component: (await import('../features/catalog/ProductsPage')).ProductsPage }) },
+      { path: 'metricas', lazy: async () => ({ Component: (await import('../features/catalog/MetricsPage')).MetricsPage }) },
+      { path: 'cupons', lazy: async () => ({ Component: (await import('../features/catalog/CouponsPage')).CouponsPage }) },
+    ],
+  },
   { path: '*', Component: NotFoundPage },
 ];
 
