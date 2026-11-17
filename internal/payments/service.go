@@ -924,6 +924,65 @@ func (s *Service) CancelOpenCharges(ctx context.Context, tenantID, invoiceID, me
 	})
 }
 
+// ConsumerInvoiceCredited identifica o consumidor que ajusta cobranças após
+// nota de crédito.
+const ConsumerInvoiceCredited = "payments.invoice_credited"
+
+// errChargeBeingCreated adia o ajuste enquanto a criação de uma cobrança
+// ainda está em andamento no provedor (a mensagem é reentregue).
+var errChargeBeingCreated = errors.New("payments: cobrança em criação; ajuste adiado")
+
+// HandleInvoiceCredited ajusta a cobrança depois de uma nota de crédito:
+// cobranças aguardando pagamento com valor diferente do novo saldo são
+// canceladas localmente e, havendo saldo, uma nova cobrança é solicitada
+// pelo valor atualizado. É repetível: na reentrega não há cobrança
+// divergente a cancelar e a solicitação devolve a cobrança já criada. Um
+// pagamento que ainda chegue pela cobrança antiga é aplicado normalmente e o
+// excedente vira crédito do cliente.
+func (s *Service) HandleInvoiceCredited(ctx context.Context, tenantID, invoiceID, messageID uuid.UUID) error {
+	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		inv, err := tx.Invoice(ctx, invoiceID, true)
+		if err != nil {
+			return err
+		}
+		charges, err := tx.OpenChargesForInvoice(ctx, invoiceID)
+		if err != nil {
+			return err
+		}
+		now := s.clock.Now()
+		for i := range charges {
+			c := &charges[i]
+			if c.Amount == inv.AmountDue && inv.AmountDue.IsPositive() {
+				continue
+			}
+			if c.Status == ChargePending {
+				return errChargeBeingCreated
+			}
+			if err := c.MarkCanceled(now); err != nil {
+				return err
+			}
+			if err := tx.UpdateCharge(ctx, c); err != nil {
+				return err
+			}
+			if err := tx.Audit(ctx, audit.New(tenantID, now, systemActor, "charge.canceled_after_credit_note", "charge", c.ID.String(),
+				map[string]any{"invoice_id": invoiceID, "charge_amount": c.Amount.Amount(), "amount_due": inv.AmountDue.Amount()})); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := s.RequestCharge(ctx, tenantID, invoiceID, systemActor); err != nil {
+		return err
+	}
+	return s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		_, err := tx.MarkInbox(ctx, ConsumerInvoiceCredited, messageID)
+		return err
+	})
+}
+
 // ConsumerInvoiceIssued identifica o consumidor que cria cobranças.
 const ConsumerInvoiceIssued = "payments.invoice_issued"
 

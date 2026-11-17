@@ -79,6 +79,7 @@ var consumerSpecs = []rabbit.ConsumerSpec{
 	{Name: payments.ConsumerInvoiceIssued, EventTypes: []string{outbox.EventInvoiceIssued}},
 	{Name: payments.ConsumerWebhooks, EventTypes: []string{outbox.EventProviderWebhook}},
 	{Name: "payments.invoice_voided", EventTypes: []string{outbox.EventInvoiceVoided}},
+	{Name: payments.ConsumerInvoiceCredited, EventTypes: []string{outbox.EventInvoiceCredited}},
 }
 
 // Worker é o processo de eventos, agendamentos e integrações.
@@ -147,6 +148,17 @@ func (w *Worker) handlers() map[string]rabbit.Handler {
 			}
 			return pay.CancelOpenCharges(ctx, tenantID, invoiceID, msgID)
 		},
+		payments.ConsumerInvoiceCredited: func(ctx context.Context, m rabbit.Message) error {
+			tenantID, msgID, err := parseMessage(m)
+			if err != nil {
+				return err
+			}
+			invoiceID, err := payloadID(m, "invoice_id")
+			if err != nil {
+				return err
+			}
+			return pay.HandleInvoiceCredited(ctx, tenantID, invoiceID, msgID)
+		},
 	}
 }
 
@@ -188,6 +200,10 @@ func (w *Worker) Jobs() []scheduler.Job {
 		{Name: "billing.run_cycle", Interval: time.Minute, Timeout: 10 * time.Minute, Run: func(ctx context.Context) error {
 			res, err := c.Engine.RunAll(ctx)
 			w.Metrics.InvoicesIssued.Add(float64(res.Invoices))
+			return err
+		}},
+		{Name: "billing.correct_late_usage", Interval: 5 * time.Minute, Timeout: 10 * time.Minute, Run: func(ctx context.Context) error {
+			_, err := c.Corrector.RunAll(ctx)
 			return err
 		}},
 		{Name: "payments.recover_operations", Interval: time.Minute, Timeout: 5 * time.Minute, Run: func(ctx context.Context) error {

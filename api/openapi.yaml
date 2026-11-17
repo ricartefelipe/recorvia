@@ -2176,12 +2176,23 @@ components:
       allOf:
         - { $ref: "#/components/schemas/Invoice" }
         - type: object
-          required: [items, history, charges, customer_snapshot]
+          required: [items, history, charges, customer_snapshot, credit_notes]
           properties:
             items: { type: array, items: { $ref: "#/components/schemas/InvoiceItem" } }
             history: { type: array, items: { $ref: "#/components/schemas/InvoiceHistoryEntry" } }
             charges: { type: array, items: { $ref: "#/components/schemas/Charge" } }
             customer_snapshot: { type: object, additionalProperties: true }
+            credit_notes: { type: array, items: { $ref: "#/components/schemas/CreditNote" } }
+    CreditNote:
+      type: object
+      description: Reduz o saldo devedor de uma fatura emitida sem reescrevê-la; limitada ao saldo em aberto.
+      required: [id, number, amount, reason, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: string, description: "Número da fatura seguido de -NCnn" }
+        amount: { type: integer, format: int64 }
+        reason: { type: string }
+        created_at: { type: string, format: date-time }
     InvoicePage:
       type: object
       required: [data]
