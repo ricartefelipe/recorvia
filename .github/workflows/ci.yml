@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOLANGCI_LINT_VERSION: v2.15.0
+
+jobs:
+  go-quality:
+    name: go-quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: govulncheck com versão fixada
+        run: make tools-vuln
+      - name: Formatação
+        run: make fmt-check
+      - name: go vet
+        run: make vet
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+      - name: Testes unitários com detector de corridas
+        run: make test
+      - name: Cobertura de domínio e aplicação
+        run: make coverage | tee coverage-summary.txt
+      - name: Fuzz (execução curta)
+        run: FUZZTIME=5s make fuzz
+      - name: govulncheck
+        run: make vulncheck
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: coverage
+          path: |
+            coverage.out
+            coverage-summary.txt
+          retention-days: 14
+
+  go-integration:
+    name: go-integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Testes de integração (PostgreSQL, RabbitMQ e Redis reais)
+        run: make test-integration
+
+  secrets-scan:
+    name: secrets-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gitleaks (histórico completo)
+        run: |
+          make tools-gitleaks
+          make secrets-scan
