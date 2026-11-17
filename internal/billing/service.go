@@ -10,6 +10,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
 	"github.com/ricartefelipe/recorvia/internal/kernel/ids"
+	"github.com/ricartefelipe/recorvia/internal/kernel/money"
 	"github.com/ricartefelipe/recorvia/internal/ledger"
 	"github.com/ricartefelipe/recorvia/internal/outbox"
 )
@@ -56,6 +57,7 @@ type Tx interface {
 	ReverseLedger(ctx context.Context, originalKey string, description string, at time.Time) error
 	PostLedger(ctx context.Context, t ledger.Transaction) error
 	ReturnCustomerCredit(ctx context.Context, customerID, invoiceID uuid.UUID, amount int64, at time.Time) error
+	GrantCustomerCredit(ctx context.Context, customerID uuid.UUID, amount money.Money, reason string, by uuid.UUID, requestKey string) (uuid.UUID, bool, error)
 	Audit(ctx context.Context, e audit.Entry) error
 	Emit(ctx context.Context, e outbox.Event) error
 }
@@ -213,5 +215,34 @@ func (s *Service) MarkUncollectible(ctx context.Context, tenantID uuid.UUID, act
 		}
 		return tx.Audit(ctx, audit.New(tenantID, now, actor, "invoice.marked_uncollectible", "invoice", inv.ID.String(),
 			map[string]any{"written_off": amount.Amount()}))
+	})
+}
+
+// GrantCredit concede crédito ao cliente para abatimento em faturas futuras.
+// requestKey (derivado do Idempotency-Key) impede concessão duplicada.
+func (s *Service) GrantCredit(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, by, customerID uuid.UUID, amount money.Money, reason, requestKey string) error {
+	if !amount.IsPositive() || amount.CheckBusinessRange() != nil {
+		return apperr.Invalid("invalid_amount", "Valor inválido.", apperr.FieldError{Field: "amount", Message: "Informe um valor positivo em centavos."})
+	}
+	if l := len([]rune(reason)); l < 3 || l > 500 {
+		return apperr.Invalid("invalid_reason", "Motivo inválido.", apperr.FieldError{Field: "reason", Message: "Informe de 3 a 500 caracteres."})
+	}
+	return s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		creditID, inserted, err := tx.GrantCustomerCredit(ctx, customerID, amount, reason, by, requestKey)
+		if err != nil || !inserted {
+			return err
+		}
+		now := s.clock.Now()
+		t, ok, err := ledger.CustomerCreditGranted(ids.New(), tenantID, creditID, amount, now)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if err := tx.PostLedger(ctx, t); err != nil {
+				return err
+			}
+		}
+		return tx.Audit(ctx, audit.New(tenantID, now, actor, "customer.credit_granted", "customer", customerID.String(),
+			map[string]any{"amount": amount.Amount(), "credit_id": creditID}))
 	})
 }
