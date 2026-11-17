@@ -1,0 +1,130 @@
+{
+  "realm": "recorvia",
+  "enabled": true,
+  "displayName": "Recorvia (ambiente local)",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "bruteForceProtected": true,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 7200,
+  "ssoSessionMaxLifespan": 43200,
+  "internationalizationEnabled": true,
+  "supportedLocales": [
+    "pt-BR",
+    "en"
+  ],
+  "defaultLocale": "pt-BR",
+  "clients": [
+    {
+      "clientId": "recorvia-web",
+      "name": "Recorvia",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "local-oidc-client-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8080/auth/callback",
+        "http://localhost:18081/auth/callback",
+        "http://localhost:5173/auth/callback"
+      ],
+      "webOrigins": [
+        "http://localhost:8080",
+        "http://localhost:5173"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8080/*##http://localhost:5173/*##http://localhost:18081/*"
+      }
+    }
+  ],
+  "users": [
+    {
+      "id": "7f3c6a2e-0b1d-4c55-9a8e-1a2b3c4d5e01",
+      "username": "ana.owner@acme.test",
+      "email": "ana.owner@acme.test",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Ana",
+      "lastName": "Proprietária Demonstração",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Recorvia#Demo2026",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "id": "7f3c6a2e-0b1d-4c55-9a8e-1a2b3c4d5e02",
+      "username": "bruno.finance@acme.test",
+      "email": "bruno.finance@acme.test",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Bruno",
+      "lastName": "Financeiro Demonstração",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Recorvia#Demo2026",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "id": "7f3c6a2e-0b1d-4c55-9a8e-1a2b3c4d5e03",
+      "username": "davi.auditor@acme.test",
+      "email": "davi.auditor@acme.test",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Davi",
+      "lastName": "Auditor Demonstração",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Recorvia#Demo2026",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "id": "7f3c6a2e-0b1d-4c55-9a8e-1a2b3c4d5e04",
+      "username": "carla.owner@beta.test",
+      "email": "carla.owner@beta.test",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Carla",
+      "lastName": "Proprietária Demonstração",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Recorvia#Demo2026",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "id": "7f3c6a2e-0b1d-4c55-9a8e-1a2b3c4d5e05",
+      "username": "nova.empresa@exemplo.test",
+      "email": "nova.empresa@exemplo.test",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Nina",
+      "lastName": "Nova Empresa Demonstração",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Recorvia#Demo2026",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

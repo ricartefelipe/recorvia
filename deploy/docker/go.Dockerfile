@@ -8,11 +8,13 @@ RUN go mod download
 COPY . .
 ARG CMD
 ARG VERSION=dev
-RUN test -n "${CMD}" && go build -ldflags="-s -w -X main.version=${VERSION}" -o /out/app "./cmd/${CMD}"
+RUN test -n "${CMD}" && go build -ldflags="-s -w -X main.version=${VERSION}" -o /out/app "./cmd/${CMD}" && mkdir -p /out/data
 
 # Imagem final mínima: sem shell, executada como usuário sem privilégios.
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/app /app
+# Diretório gravável para estado local (usado pelo simulador de pagamentos).
+COPY --from=build --chown=65532:65532 /out/data /data
 USER 65532:65532
 ENTRYPOINT ["/app"]
