@@ -2299,10 +2299,27 @@ export interface components {
             status: "scheduled" | "applied" | "canceled";
             /** Format: date-time */
             applied_at?: string | null;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Componente fixo antes do reajuste, em centavos, arredondado (half-even) para exibição
+             */
             previous_amount?: number | null;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Componente fixo após o reajuste, em centavos, arredondado (half-even) para exibição
+             */
             resulting_amount?: number | null;
+            /** @description Valor exato antes do reajuste, em centavos (no preço por unidade pode ter até 10 casas decimais) */
+            previous_amount_decimal?: string | null;
+            /** @description Valor exato após o reajuste, em centavos. No preço por unidade, o percentual incide sobre o preço unitário exato, arredondado a 10 casas; o total do item é arredondado a centavos uma única vez. */
+            resulting_amount_decimal?: string | null;
+            /** Format: date-time */
+            canceled_at?: string | null;
+            /**
+             * @description Motivo do cancelamento: manual; assinatura encerrada; troca da versão de preço; preço somente por consumo no início do ciclo; valor resultante acima do limite
+             * @enum {string|null}
+             */
+            cancel_reason?: "manual" | "subscription_ended" | "price_version_changed" | "price_without_fixed_component" | "adjustment_amount_limit" | null;
             /** Format: date-time */
             created_at: string;
         };
@@ -2335,8 +2352,12 @@ export interface components {
             quantity: string;
             /** @description Chave para métricas unique_count */
             unique_key?: string;
-            /** Format: date-time */
+            /**
+             * Format: date-time
+             * @description Precisão de microssegundos; frações menores são descartadas
+             */
             occurred_at: string;
+            /** @description Até 4 KB serializado, sem o caractere NUL (\u0000) */
             properties?: {
                 [key: string]: unknown;
             };
@@ -2475,6 +2496,19 @@ export interface components {
             customer_snapshot: {
                 [key: string]: unknown;
             };
+            credit_notes: components["schemas"]["CreditNote"][];
+        };
+        /** @description Reduz o saldo devedor de uma fatura emitida sem reescrevê-la; limitada ao saldo em aberto. */
+        CreditNote: {
+            /** Format: uuid */
+            id: string;
+            /** @description Número da fatura seguido de -NCnn */
+            number: string;
+            /** Format: int64 */
+            amount: number;
+            reason: string;
+            /** Format: date-time */
+            created_at: string;
         };
         InvoicePage: {
             data: components["schemas"]["Invoice"][];

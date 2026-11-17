@@ -37,6 +37,29 @@ describe('detalhe da fatura', () => {
     expect(screen.getByRole('link', { name: /Abrir checkout/ })).toHaveAttribute('href', 'https://pagamentos.exemplo.test/checkout/abc');
   });
 
+  it('lista as notas de crédito emitidas com número, motivo e valor', async () => {
+    serveInvoice(
+      makeInvoice({
+        credit_notes: [
+          { id: '0195f1a0-0000-7000-8000-00000000c001', number: 'ACME-000123-NC01', amount: 10000, reason: 'Desconto comercial acordado', created_at: '2026-11-18T13:00:00Z' },
+        ],
+      }),
+    );
+    renderPage(<InvoiceDetailPage />, { path: '/faturas/:id', route });
+
+    const notes = await screen.findByRole('table', { name: 'Notas de crédito' });
+    const row = within(notes).getByRole('row', { name: /ACME-000123-NC01/ });
+    expect(row).toHaveTextContent('Desconto comercial acordado');
+    expect(row).toHaveTextContent('R$ 100,00');
+  });
+
+  it('informa quando não há notas de crédito', async () => {
+    serveInvoice();
+    renderPage(<InvoiceDetailPage />, { path: '/faturas/:id', route });
+
+    expect(await screen.findByText('Nenhuma nota de crédito emitida.')).toBeInTheDocument();
+  });
+
   it('mostra as ações financeiras permitidas para a situação', async () => {
     serveInvoice();
     const { user } = renderPage(<InvoiceDetailPage />, { path: '/faturas/:id', route });

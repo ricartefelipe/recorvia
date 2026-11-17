@@ -107,6 +107,7 @@ export function makeInvoice(overrides: Partial<InvoiceDetails> = {}): InvoiceDet
       },
     ],
     charges: [makeCharge()],
+    credit_notes: [],
     customer_snapshot: { name: 'Cliente Exemplo Ltda', document_number: '11222333000181' },
     ...overrides,
   };

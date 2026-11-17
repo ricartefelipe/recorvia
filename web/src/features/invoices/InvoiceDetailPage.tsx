@@ -160,6 +160,41 @@ function HistoryTable({ invoice }: { invoice: InvoiceDetails }) {
   );
 }
 
+function CreditNotesTable({ invoice }: { invoice: InvoiceDetails }) {
+  const notes = invoice.credit_notes ?? [];
+  if (notes.length === 0) return <Text size="sm" c="dimmed">Nenhuma nota de crédito emitida.</Text>;
+  return (
+    <Table.ScrollContainer minWidth={560}>
+      <Table aria-label="Notas de crédito">
+        <Table.Thead>
+          <Table.Tr>
+            <Table.Th scope="col">Número</Table.Th>
+            <Table.Th scope="col">Emitida em</Table.Th>
+            <Table.Th scope="col">Motivo</Table.Th>
+            <Table.Th scope="col" ta="right">
+              Valor
+            </Table.Th>
+          </Table.Tr>
+        </Table.Thead>
+        <Table.Tbody>
+          {notes.map((n) => (
+            <Table.Tr key={n.id}>
+              <Table.Td>{n.number}</Table.Td>
+              <Table.Td>
+                <DateTime value={n.created_at} />
+              </Table.Td>
+              <Table.Td>{n.reason}</Table.Td>
+              <Table.Td ta="right">
+                <Money value={n.amount} currency={invoice.currency} />
+              </Table.Td>
+            </Table.Tr>
+          ))}
+        </Table.Tbody>
+      </Table>
+    </Table.ScrollContainer>
+  );
+}
+
 export function InvoiceDetailView({ invoice }: { invoice: InvoiceDetails }) {
   const snapshot = invoice.customer_snapshot ?? {};
   return (
@@ -244,6 +279,15 @@ export function InvoiceDetailView({ invoice }: { invoice: InvoiceDetails }) {
         ) : (
           <ChargesTable charges={invoice.charges} />
         )}
+      </Stack>
+      <Stack gap="xs">
+        <Title order={2} size="h4">
+          Notas de crédito
+        </Title>
+        <Text size="sm" c="dimmed">
+          Reduzem o saldo em aberto sem reescrever a fatura emitida; cada nota gera lançamento no ledger.
+        </Text>
+        <CreditNotesTable invoice={invoice} />
       </Stack>
       <Stack gap="xs">
         <Title order={2} size="h4">
