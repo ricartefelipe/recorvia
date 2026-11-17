@@ -40,6 +40,7 @@ curl -s http://localhost:18081/readyz
 
 | Serviço | Endereço |
 |---|---|
+| Interface web | http://localhost:8080 |
 | API | http://localhost:18081 |
 | Keycloak (realm `recorvia`) | http://localhost:8180 |
 | Simulador de pagamentos | http://localhost:8090 |
@@ -58,6 +59,8 @@ make test              # unitários com -race (sem Docker, rede ou credenciais)
 make coverage          # cobertura de domínio e aplicação (mínimo 90%)
 make fuzz              # fuzz tests curtos
 make test-integration  # PostgreSQL, RabbitMQ e Redis reais via Testcontainers
+make web-install web-verify  # interface: tipos, lint, testes de componente (Vitest) e build
+make web-e2e           # roteiros Playwright contra o ambiente em execução (make up)
 make lint vulncheck sqlc-check secrets-scan
 ```
 

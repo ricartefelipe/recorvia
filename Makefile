@@ -105,6 +105,19 @@ build: ## Compila os executáveis em ./bin
 env: ## Cria .env a partir de .env.example (se ausente)
 	@test -f .env || cp .env.example .env
 
+.PHONY: web-install web-verify web-gen-check web-e2e
+web-install: ## Instala as dependências da interface web (npm ci)
+	cd web && npm ci
+
+web-verify: ## Tipos, lint, testes de componente e build da interface web
+	cd web && npm run verify
+
+web-gen-check: ## Verifica se os tipos gerados do OpenAPI estão atualizados
+	cd web && npm run gen:api && git diff --exit-code -- src/api/schema.d.ts
+
+web-e2e: ## Roteiros E2E (Playwright) contra o ambiente em execução (make up)
+	cd web && npx playwright test
+
 .PHONY: up
 up: env ## Sobe o ambiente local completo e carrega os dados de demonstração
 	$(COMPOSE) up -d --build --wait
