@@ -261,12 +261,63 @@ func (tx billingTx) RecomputeUsage(ctx context.Context, subscriptionID uuid.UUID
 	return tx.aggregate(ctx, subscriptionID, metric, periodStart)
 }
 
-func (tx billingTx) InvoiceItemAmounts(ctx context.Context, id uuid.UUID) (amount, discount money.Money, err error) {
+func (tx billingTx) BilledItem(ctx context.Context, id uuid.UUID) (billing.BilledItem, error) {
 	r, err := tx.q.GetInvoiceItemAmounts(ctx, dbgen.GetInvoiceItemAmountsParams{TenantID: tx.tenantID, ID: id})
 	if err != nil {
-		return money.Money{}, money.Money{}, notFound(err, "invoice_item_not_found", "Item de fatura não encontrado.")
+		return billing.BilledItem{}, notFound(err, "invoice_item_not_found", "Item de fatura não encontrado.")
 	}
-	return brl(r.Amount), brl(r.DiscountAmount), nil
+	return billing.BilledItem{Amount: brl(r.Amount), Discount: brl(r.DiscountAmount), DiscountType: catalog.DiscountType(r.DiscountType)}, nil
+}
+
+func (tx billingTx) CycleFeeItem(ctx context.Context, subscriptionID uuid.UUID, periodStart time.Time) (*billing.CycleFeeItem, error) {
+	r, err := tx.q.GetCycleFeeItem(ctx, dbgen.GetCycleFeeItemParams{TenantID: tx.tenantID, SubscriptionID: &subscriptionID, PeriodStart: &periodStart})
+	if postgres.IsNoRows(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &billing.CycleFeeItem{InvoiceID: r.InvoiceID, InvoiceStatus: billing.Status(r.InvoiceStatus), ItemID: r.ItemID, Amount: brl(r.Amount),
+		Discount: brl(r.DiscountAmount)}, nil
+}
+
+func (tx billingTx) PeriodProrations(ctx context.Context, subscriptionID uuid.UUID, periodStart time.Time) ([]billing.ProrationRecord, error) {
+	rows, err := tx.q.ListPeriodProrations(ctx, dbgen.ListPeriodProrationsParams{TenantID: tx.tenantID, SubscriptionID: subscriptionID,
+		PeriodStart: periodStart})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]billing.ProrationRecord, len(rows))
+	for i, r := range rows {
+		creditBase, err := ratFromNumeric(r.CreditBase)
+		if err != nil {
+			return nil, err
+		}
+		chargeBase, err := ratFromNumeric(r.ChargeBase)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = billing.ProrationRecord{ID: r.ID, SubscriptionID: r.SubscriptionID, Period: calendar.Period{Start: r.PeriodStart, End: r.PeriodEnd},
+			EffectiveAt: r.EffectiveAt, PriceVersionID: r.PriceVersionID, Quantity: int(r.Quantity), RemainingDays: int(r.RemainingDays),
+			PeriodDays: int(r.PeriodDays), CreditBase: creditBase, Credit: brl(r.CreditAmount), ChargeBase: chargeBase, Charge: brl(r.ChargeAmount),
+			InvoiceID: r.InvoiceID, InvoiceStatus: billing.Status(deref(r.InvoiceStatus)), CreatedAt: r.CreatedAt}
+	}
+	return out, nil
+}
+
+func (tx billingTx) InsertProration(ctx context.Context, p billing.ProrationRecord) error {
+	creditBase, err := numericFromRat(p.CreditBase)
+	if err != nil {
+		return err
+	}
+	chargeBase, err := numericFromRat(p.ChargeBase)
+	if err != nil {
+		return err
+	}
+	return tx.q.InsertSubscriptionProration(ctx, dbgen.InsertSubscriptionProrationParams{ID: p.ID, TenantID: tx.tenantID, SubscriptionID: p.SubscriptionID,
+		PeriodStart: p.Period.Start, PeriodEnd: p.Period.End, EffectiveAt: p.EffectiveAt, PriceVersionID: p.PriceVersionID, Quantity: int32(p.Quantity),
+		RemainingDays: int32(p.RemainingDays), PeriodDays: int32(p.PeriodDays), CreditBase: creditBase, CreditAmount: p.Credit.Amount(),
+		ChargeBase: chargeBase, ChargeAmount: p.Charge.Amount(), InvoiceID: p.InvoiceID, CreatedAt: p.CreatedAt})
 }
 
 func (tx billingTx) SetAggregateCorrection(ctx context.Context, id uuid.UUID, qty *big.Rat, amount money.Money) error {
@@ -574,6 +625,21 @@ func (tx meteringTx) SuspensionHistory(ctx context.Context, subscriptionID uuid.
 		out[i] = metering.SuspensionChange{At: r.OccurredAt, Suspended: r.Event == "suspended"}
 	}
 	return out, nil
+}
+
+// PendingChange lê a mudança agendada pendente sem bloqueio (a ingestão já
+// mantém a assinatura em FOR SHARE).
+func (tx meteringTx) PendingChange(ctx context.Context, subscriptionID uuid.UUID) (*subscriptions.ScheduledChange, error) {
+	r, err := tx.q.GetPendingScheduledChangeForUsage(ctx, dbgen.GetPendingScheduledChangeForUsageParams{TenantID: tx.tenantID,
+		SubscriptionID: subscriptionID})
+	if postgres.IsNoRows(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	c := scheduledChangeFromRow(r)
+	return &c, nil
 }
 
 func (tx meteringTx) PriceVersion(ctx context.Context, id uuid.UUID) (catalog.PriceVersion, error) {

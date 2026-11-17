@@ -231,14 +231,22 @@ documento da fatura usa estilos inline.
 é positiva e crédito do cliente quando é negativa; itens pendentes são sempre positivos.
 **Justificativa:** créditos como itens negativos poderiam tornar uma fatura futura negativa e
 travar o motor; o crédito do cliente já é consumido automaticamente na emissão.
-**Consequências:** o desconto de valor fixo não é prorrateado. O cupom percentual reduz cada lado
-separadamente: o crédito, pelo percentual vigente no período pago; a cobrança, pelo percentual que
-continua valendo no novo plano (cada valor arredondado uma vez). O item de cobrança entra antes do
-crédito, para que o rascunho nunca tenha total parcial negativo.
+**Consequências:** o crédito incide sobre o valor efetivamente faturado pelo componente fixo
+vigente no período: o item `subscription_fee` da fatura de ciclo (`amount − discount_amount`, com
+o desconto percentual ou de valor fixo distribuído na emissão) ou, depois de uma mudança imediata no
+mesmo período, o valor cobrado pelo componente que ela pôs em vigor, registrado em
+`subscription_prorations`; fatura cancelada não serve de base e, sem base válida, não há crédito.
+O cupom ativo no momento da mudança não altera o crédito (um cupom aplicado no meio do período ou
+um cupom de uso único já encerrado distorceriam o valor pago); a cobrança desconta o percentual do
+cupom ativo que vale para o novo plano e o desconto de valor fixo não é prorrateado na cobrança.
+Cada valor é arredondado uma vez. O item de cobrança entra antes do crédito, para que o rascunho
+nunca tenha total parcial negativo.
 
 ## ADR-027 Reajuste como valor da assinatura, sem versões de preço privadas
 **Decisão:** o reajuste grava o valor resultante na assinatura (`price_override_amount`) e no
-histórico do reajuste; a versão de preço do catálogo não muda. Os valores são `numeric(24,10)`:
+histórico do reajuste; a versão de preço do catálogo não muda. Os valores são `numeric(28,10)`
+(18 dígitos inteiros: `money.MaxAmount`, 10¹⁴ centavos, cabe no limite exato, assim como nas
+colunas de preço unitário das versões de preço e dos itens):
 no preço por unidade, o percentual incide sobre o preço unitário exato e o total do item é
 arredondado uma vez. A troca da versão de preço cancela os reajustes programados; um reajuste que
 não pode valer no ciclo (preço somente por consumo ou valor acima do limite) é cancelado com o
@@ -253,9 +261,12 @@ por job: a diferença contra o valor já faturado (mais correções anteriores) 
 fatura imediata (assinatura encerrada) ou crédito do cliente.
 **Justificativa:** preserva a imutabilidade da fatura emitida e mantém rastreabilidade
 (agregado → item → correção).
-**Consequências:** a diferença é calculada sobre valores líquidos de desconto (o novo valor recebe a
-proporção de desconto do item corrigido) e o ajuste positivo não recebe novo desconto; itens
-pendentes também entram na fatura de encerramento.
+**Consequências:** a diferença é calculada sobre valores líquidos de desconto, conforme o tipo de
+desconto que a emissão registra no snapshot do item: o percentual mantém a proporção do item
+corrigido; o de valor fixo mantém o valor absoluto descontado (novo bruto menos o mesmo desconto,
+nunca negativo); item sem desconto segue o bruto. Itens faturados antes do registro do tipo usam a
+proporção. O ajuste positivo não recebe novo desconto; itens pendentes também entram na fatura de
+encerramento.
 
 ## ADR-029 Nota de crédito limitada ao saldo em aberto
 **Decisão:** a nota de crédito reduz somente o saldo devedor; valores já pagos são tratados por
@@ -263,6 +274,58 @@ reembolso ou crédito do cliente. Após a nota, a cobrança com valor divergente
 localmente e uma nova é solicitada pelo saldo.
 **Consequências:** a cobrança antiga pode continuar aberta no provedor até a etapa de
 reembolsos e conciliação; um pagamento por ela é aplicado e o excedente vira crédito do cliente
-(a confirmação do provedor é a única transição que tira a cobrança de `canceled`). Cobrança
-ainda em criação no provedor não bloqueia o consumidor da nota: o ajuste ocorre quando a
-operação de criação é concluída, sem depender de reentrega da mensagem.
+(ADR-030). Cobrança ainda em criação no provedor não bloqueia o consumidor da nota: o ajuste
+ocorre quando a operação de criação é concluída, sem depender de reentrega da mensagem. A mesma
+comparação com o saldo vale para qualquer mudança durante a criação (por exemplo, pagamento manual
+parcial), e a solicitação síncrona devolve a cobrança vigente (a substituta).
+
+## ADR-030 Confirmação do provedor prevalece sobre recusa e cancelamento locais
+**Decisão:** dinheiro recebido nunca é descartado. A confirmação de pagamento pelo provedor leva a
+`paid` também a cobrança `failed` ou `canceled` e segue a aplicação normal: quita o saldo da
+fatura, o excedente (ou o valor integral, com a fatura já paga ou cancelada) vira crédito do
+cliente e a taxa do provedor é lançada no ledger. A transição é auditada
+(`charge.paid_after_failure` ou `charge.paid_after_local_cancellation`) com a situação anterior e,
+na recusa, o motivo, que deixa de constar na cobrança paga.
+**Justificativa:** o cancelamento no Recorvia (fatura cancelada, nota de crédito, substituição por
+mudança de saldo) é apenas local e não encerra a cobrança no provedor; uma recusa (por exemplo, do
+cartão) não impede o pagamento posterior por outro meio no mesmo checkout. Ignorar a confirmação
+deixaria o valor recebido fora da fatura, do crédito do cliente e do ledger.
+**Consequências:** outras cobranças da mesma fatura (nova tentativa) continuam abertas no provedor;
+um segundo recebimento vira crédito do cliente e é tratado na etapa de reembolsos e conciliação.
+
+## ADR-031 Ordem única de bloqueio de linhas
+**Decisão:** transações que alteram as mesmas linhas bloqueiam na ordem cobrança, fatura,
+assinatura e cliente. A aplicação de pagamento atualiza a situação da assinatura antes de conceder
+o crédito do excedente, e o vínculo do cliente no provedor é gravado depois da aplicação de um
+pagamento já confirmado na criação.
+**Justificativa:** o motor, as mudanças de assinatura, a correção de consumo e a ingestão bloqueiam
+a assinatura antes do cliente; a ordem inversa no pagamento permitia impasse (detectado pelo
+PostgreSQL com o aborto de uma das transações). Inserções com chave estrangeira para `customers`
+bloqueiam a linha do cliente em modo compartilhado e contam nessa ordem.
+**Consequências:** o resultado não muda (mesmos lançamentos, créditos e eventos); novas transações
+que tocam essas tabelas seguem a mesma ordem. A ordem do pagamento é verificada por teste de
+integração concorrente, que reproduzia o impasse com a ordem anterior.
+
+## ADR-032 Consumo anterior à suspensão fechado após a reativação
+**Decisão:** quando a reativação pula os passos dos períodos inteiramente suspensos, os períodos
+com consumo anterior à suspensão cujo fechamento ficaria nesses passos são gravados na assinatura
+(`pending_usage_starts`) e fechados pelo primeiro faturamento após a reativação, no lugar do
+período anterior regular. A lista é limpa no mesmo passo.
+**Justificativa:** o componente fixo dos períodos suspensos continua sem cobrança, mas o consumo
+ocorrido antes da suspensão foi prestado e precisa ser faturado uma única vez; um campo explícito
+evita reconstruir o histórico de suspensões no motor.
+**Consequências:** a ingestão aceita eventos desses períodos até o fechamento e rejeita os de
+períodos inteiramente suspensos. Com faturamento atrasado na suspensão ou nova suspensão antes do
+faturamento da reativação, vários períodos podem ficar pendentes; cada um é fechado com a sua
+agregação e precificado pela versão vigente nele. O cancelamento imediato antes desse
+faturamento inclui os períodos pendentes na fatura de consumo final.
+
+## ADR-033 Período aberto validado pela versão de preço que vai fechá-lo
+**Decisão:** para período de consumo ainda aberto, a ingestão e a estimativa do consumo corrente
+usam a versão de preço da mudança agendada pendente cuja data efetiva é até o início do período;
+sem ela, a versão vigente na assinatura.
+**Justificativa:** entre o início do novo período e a execução do motor, a mudança já vale, mas a
+assinatura ainda aponta a versão anterior; validar pela versão anterior aceitaria eventos que o
+fechamento não fatura e rejeitaria os que ele fatura.
+**Consequências:** a mudança é lida sem bloqueio dentro da transação da ingestão, que já mantém a
+assinatura em `FOR SHARE`.

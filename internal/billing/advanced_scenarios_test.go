@@ -57,13 +57,17 @@ func TestChangeImmediateIncreaseWithPreviousFixedCharge(t *testing.T) {
 		{"aumento de quantidade", moreSeats, nil, 0, 2000, 5000, 0, 3000, 3000, 5,
 			"Crédito proporcional de Plano Equipe: 2 unidade(s) (" + prorationSpan + ")",
 			"Cobrança proporcional de Plano Equipe: 5 unidade(s) (" + prorationSpan + ")"},
-		// 10% nos dois lados: crédito 10.000 × 1/3 × 0,9 = 3.000; cobrança 16.000 × 1/3 × 0,9 = 4.800.
+		// 10% nos dois lados: crédito de 1/3 dos 9.000 faturados = 3.000;
+		// cobrança 16.000 × 1/3 × 0,9 = 4.800.
 		{"cupom percentual reduz crédito e cobrança", upgrade, percent, 0, 3000, 4800, 0, 1800, 1800, 1,
-			"Crédito proporcional de Plano Básico (" + prorationSpan + ", desconto de 10%)",
+			"Crédito proporcional de Plano Básico (" + prorationSpan + ", líquido de desconto)",
 			"Cobrança proporcional de Plano Pro (" + prorationSpan + ", desconto de 10%)"},
-		{"cupom de valor fixo não é prorrateado", upgrade, amountOff, 0, 3333, 5333, 0, 2000, 2000, 1, basicCredit, proCharge},
+		// O período foi faturado por 10.000 − 5.000: crédito de 5.000 × 1/3 =
+		// 1.667; o valor fixo não é prorrateado na cobrança.
+		{"desconto de valor fixo reduz o crédito pelo valor faturado", upgrade, amountOff, 0, 1667, 5333, 0, 3666, 3666, 1,
+			"Crédito proporcional de Plano Básico (" + prorationSpan + ", líquido de desconto)", proCharge},
 		{"cupom que não vale para o novo plano reduz só o crédito", restrictedUpgrade, nil, 0, 3000, 5333, 0, 2333, 2333, 1,
-			"Crédito proporcional de Plano Básico (" + prorationSpan + ", desconto de 10%)", proCharge},
+			"Crédito proporcional de Plano Básico (" + prorationSpan + ", líquido de desconto)", proCharge},
 		{"crédito do cliente é consumido", upgrade, nil, 500, 3333, 5333, 0, 2000, 1500, 1, basicCredit, proCharge},
 	}
 	for _, c := range cases {

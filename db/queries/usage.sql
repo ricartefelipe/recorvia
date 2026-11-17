@@ -24,6 +24,13 @@ SELECT event, occurred_at FROM subscription_history
  WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id AND event IN ('suspended', 'reactivated')
  ORDER BY occurred_at, id;
 
+-- name: GetPendingScheduledChangeForUsage :one
+-- Mudança agendada pendente lida pela ingestão de consumo, sem bloqueio: o
+-- agendamento e a aplicação da mudança bloqueiam a assinatura com FOR UPDATE
+-- antes de alterá-la, e a ingestão já mantém a assinatura em FOR SHARE.
+SELECT * FROM subscription_scheduled_changes
+ WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id AND status = 'pending';
+
 -- name: UsageAggregateExists :one
 SELECT EXISTS (SELECT 1 FROM usage_aggregates WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id
                 AND metric_id = @metric_id AND period_start = @period_start)::boolean;
@@ -73,7 +80,10 @@ UPDATE usage_events SET aggregate_id = @aggregate_id, corrected_at = @corrected_
    AND corrected_at IS NULL AND (status = 'late' OR (status = 'accepted' AND aggregate_id IS NULL));
 
 -- name: GetInvoiceItemAmounts :one
-SELECT amount, discount_amount FROM invoice_items WHERE tenant_id = @tenant_id AND id = @id;
+-- Valor bruto, desconto distribuído e o tipo do desconto registrado no
+-- snapshot na emissão ('' em itens faturados antes do registro).
+SELECT amount, discount_amount, COALESCE(price_snapshot->>'discount_type', '')::text AS discount_type
+  FROM invoice_items WHERE tenant_id = @tenant_id AND id = @id;
 
 -- name: TenantsWithLateUsage :many
 SELECT app_tenants_with_late_usage()::uuid AS tenant_id;

@@ -1,7 +1,20 @@
 -- Faturamento avançado: mudanças agendadas de plano e quantidade, reajustes
--- programados de preço, correção de consumo atrasado e notas de crédito.
+-- programados de preço, prorrata de mudanças imediatas, correção de consumo
+-- atrasado e notas de crédito.
+--
+-- Valores na escala do preço unitário (centavos com até 10 casas) usam
+-- numeric(28, 10): 18 dígitos inteiros comportam money.MaxAmount (10^14
+-- centavos) inclusive no limite exato; numeric(24, 10) só guardava valores
+-- menores que 10^14.
 
 -- +goose Up
+
+-- Colunas de preço unitário das etapas anteriores passam à mesma escala: um
+-- preço ou valor reajustado no limite precisa caber na versão de preço, no
+-- item pendente e no item da fatura.
+ALTER TABLE plan_price_versions ALTER COLUMN unit_amount TYPE numeric(28, 10);
+ALTER TABLE pending_invoice_items ALTER COLUMN unit_amount TYPE numeric(28, 10);
+ALTER TABLE invoice_items ALTER COLUMN unit_amount TYPE numeric(28, 10);
 
 -- Mudanças de plano ou quantidade agendadas para o próximo ciclo. A versão de
 -- preço é fixada no agendamento: o cliente contratou aquele preço.
@@ -34,7 +47,7 @@ GRANT SELECT, INSERT, UPDATE ON subscription_scheduled_changes TO recorvia_app;
 -- Reajustes programados do componente fixo da assinatura (valor fixo ou
 -- preço por unidade). Aplicados no primeiro ciclo iniciado na data efetiva
 -- ou depois; ciclos já faturados nunca são alterados. Os valores anterior e
--- resultante usam a escala do preço unitário (10 casas em centavos): no
+-- resultante usam a escala do preço unitário (numeric(28, 10)): no
 -- preço por unidade o reajuste percentual mantém a fração de centavo e o
 -- arredondamento a centavos acontece uma única vez, no total do item.
 -- cancel_reason registra por que um reajuste programado deixou de valer.
@@ -49,8 +62,8 @@ CREATE TABLE subscription_price_adjustments (
   index_name           text NOT NULL DEFAULT '' CHECK (length(index_name) <= 50),
   reason               text NOT NULL CHECK (length(reason) BETWEEN 3 AND 500),
   status               text NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'applied', 'canceled')),
-  previous_amount      numeric(24, 10) CHECK (previous_amount IS NULL OR previous_amount >= 0),
-  resulting_amount     numeric(24, 10) CHECK (resulting_amount IS NULL OR resulting_amount >= 0),
+  previous_amount      numeric(28, 10) CHECK (previous_amount IS NULL OR previous_amount >= 0),
+  resulting_amount     numeric(28, 10) CHECK (resulting_amount IS NULL OR resulting_amount >= 0),
   applied_period_start timestamptz,
   applied_at           timestamptz,
   canceled_at          timestamptz,
@@ -78,11 +91,56 @@ GRANT SELECT, INSERT, UPDATE ON subscription_price_adjustments TO recorvia_app;
 -- unitário. Mudança de versão de preço remove o reajuste vigente e cancela os
 -- reajustes programados.
 ALTER TABLE subscriptions
-  ADD COLUMN price_override_amount numeric(24, 10) CHECK (price_override_amount IS NULL OR price_override_amount >= 0),
+  ADD COLUMN price_override_amount numeric(28, 10) CHECK (price_override_amount IS NULL OR price_override_amount >= 0),
   ADD COLUMN price_override_adjustment_id uuid,
   ADD CONSTRAINT subscriptions_override_adjustment_fk FOREIGN KEY (tenant_id, price_override_adjustment_id)
     REFERENCES subscription_price_adjustments (tenant_id, id),
   ADD CONSTRAINT subscriptions_override_consistency CHECK ((price_override_amount IS NULL) = (price_override_adjustment_id IS NULL));
+
+-- Prorratas de mudanças imediatas com o período corrente já faturado. Cada
+-- linha registra o componente fixo que passou a valer no período e o valor
+-- efetivamente cobrado por ele para o período integral (charge_base, já com
+-- o desconto percentual da cobrança): uma nova mudança no mesmo período
+-- credita a parte não usufruída sobre esse valor, e não sobre a fatura de
+-- ciclo, que faturou o componente anterior. credit_base é a base usada no
+-- crédito da própria mudança. invoice_id aponta a fatura de prorrata
+-- (diferença positiva); fatura cancelada deixa de valer como base.
+CREATE TABLE subscription_prorations (
+  id               uuid PRIMARY KEY,
+  tenant_id        uuid NOT NULL,
+  subscription_id  uuid NOT NULL,
+  period_start     timestamptz NOT NULL,
+  period_end       timestamptz NOT NULL,
+  effective_at     timestamptz NOT NULL,
+  price_version_id uuid NOT NULL,
+  quantity         integer NOT NULL CHECK (quantity BETWEEN 1 AND 1000000),
+  remaining_days   integer NOT NULL CHECK (remaining_days >= 1),
+  period_days      integer NOT NULL CHECK (period_days >= remaining_days),
+  credit_base      numeric(28, 10) NOT NULL CHECK (credit_base >= 0),
+  credit_amount    bigint NOT NULL CHECK (credit_amount >= 0),
+  charge_base      numeric(28, 10) NOT NULL CHECK (charge_base >= 0),
+  charge_amount    bigint NOT NULL CHECK (charge_amount >= 0),
+  invoice_id       uuid,
+  created_at       timestamptz NOT NULL,
+  CONSTRAINT subscription_prorations_tenant_id_key UNIQUE (tenant_id, id),
+  CONSTRAINT subscription_prorations_subscription_fk FOREIGN KEY (tenant_id, subscription_id) REFERENCES subscriptions (tenant_id, id),
+  CONSTRAINT subscription_prorations_price_fk FOREIGN KEY (tenant_id, price_version_id) REFERENCES plan_price_versions (tenant_id, id),
+  CONSTRAINT subscription_prorations_invoice_fk FOREIGN KEY (tenant_id, invoice_id) REFERENCES invoices (tenant_id, id),
+  CONSTRAINT subscription_prorations_period CHECK (period_start < period_end AND effective_at >= period_start AND effective_at < period_end)
+);
+CREATE INDEX subscription_prorations_period_idx ON subscription_prorations (tenant_id, subscription_id, period_start, effective_at);
+CREATE TRIGGER subscription_prorations_immutable BEFORE UPDATE OR DELETE ON subscription_prorations
+  FOR EACH ROW EXECUTE FUNCTION app_reject_mutation();
+SELECT app_enable_tenant_rls('subscription_prorations');
+GRANT SELECT, INSERT ON subscription_prorations TO recorvia_app;
+
+-- Inícios dos períodos com consumo anterior a uma suspensão cujo passo de
+-- fechamento foi pulado pela reativação (junto com os períodos inteiramente
+-- suspensos). O próximo passo de faturamento fecha esses períodos no lugar do
+-- período anterior regular e limpa a lista.
+ALTER TABLE subscriptions
+  ADD COLUMN pending_usage_starts timestamptz[] NOT NULL DEFAULT '{}',
+  ADD CONSTRAINT subscriptions_pending_usage_starts_elements CHECK (array_position(pending_usage_starts, NULL) IS NULL);
 
 -- Correção de consumo atrasado: o agregado registra a versão de preço usada
 -- no fechamento; a correção vira item pendente (valor positivo) ou crédito do
@@ -177,9 +235,17 @@ ALTER TABLE pending_invoice_items DROP COLUMN IF EXISTS usage_aggregate_id;
 ALTER TABLE usage_aggregates DROP COLUMN IF EXISTS corrected_amount;
 ALTER TABLE usage_aggregates DROP COLUMN IF EXISTS corrected_quantity;
 ALTER TABLE usage_aggregates DROP COLUMN IF EXISTS price_version_id;
+DROP TABLE IF EXISTS subscription_prorations;
+
+ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_pending_usage_starts_elements;
+ALTER TABLE subscriptions DROP COLUMN IF EXISTS pending_usage_starts;
 ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_override_consistency;
 ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_override_adjustment_fk;
 ALTER TABLE subscriptions DROP COLUMN IF EXISTS price_override_adjustment_id;
 ALTER TABLE subscriptions DROP COLUMN IF EXISTS price_override_amount;
 DROP TABLE IF EXISTS subscription_price_adjustments;
 DROP TABLE IF EXISTS subscription_scheduled_changes;
+-- A volta à escala anterior falha se houver valor de 10^14 centavos ou mais.
+ALTER TABLE invoice_items ALTER COLUMN unit_amount TYPE numeric(24, 10);
+ALTER TABLE pending_invoice_items ALTER COLUMN unit_amount TYPE numeric(24, 10);
+ALTER TABLE plan_price_versions ALTER COLUMN unit_amount TYPE numeric(24, 10);

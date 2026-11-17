@@ -189,7 +189,7 @@ func TestIngestMaxBatchUsesCachedLookups(t *testing.T) {
 	if n := len(e.st().events); n != MaxBatch {
 		t.Fatalf("eventos gravados = %d, esperava %d", n, MaxBatch)
 	}
-	for _, op := range []string{"InTenant", "SubscriptionForShare", "SuspensionHistory", "MetricByCode", "PriceVersion"} {
+	for _, op := range []string{"InTenant", "SubscriptionForShare", "SuspensionHistory", "MetricByCode", "PendingChange", "PriceVersion"} {
 		if e.store.calls[op] != 1 {
 			t.Fatalf("%s chamado %d vezes, esperava 1 (consulta em cache no lote)", op, e.store.calls[op])
 		}
@@ -748,6 +748,7 @@ func TestIngestInfrastructureErrorRollsBackBatch(t *testing.T) {
 		{"consulta da assinatura", "SubscriptionForShare", 0},
 		{"consulta do histórico de suspensões", "SuspensionHistory", 0},
 		{"consulta da métrica", "MetricByCode", 0},
+		{"consulta da mudança agendada", "PendingChange", 0},
 		{"consulta do preço", "PriceVersion", 0},
 		{"consulta por external_id", "EventByExternalID", 2},
 		{"consulta de fechamento", "PeriodClosed", 2},
@@ -1032,7 +1033,7 @@ func TestCurrentUsageErrors(t *testing.T) {
 			t.Fatalf("erro = %v, esperava money.ErrOverflow", err)
 		}
 	})
-	for _, op := range []string{"InTenant", "Subscription", "PriceVersion", "Metric", "Aggregate"} {
+	for _, op := range []string{"InTenant", "Subscription", "PendingChange", "PriceVersion", "Metric", "Aggregate"} {
 		t.Run("falha em "+op, func(t *testing.T) {
 			e := newEnv()
 			e.store.fail[op] = failure{err: errBoom}

@@ -540,6 +540,7 @@ type Subscription struct {
 	Version                   int32
 	PriceOverrideAmount       pgtype.Numeric
 	PriceOverrideAdjustmentID *uuid.UUID
+	PendingUsageStarts        []time.Time
 }
 
 type SubscriptionHistory struct {

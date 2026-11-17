@@ -21,6 +21,7 @@ erDiagram
   plans ||--o{ subscriptions : contratado
   plan_price_versions ||--o{ subscriptions : fixa_preco
   subscriptions ||--o{ subscription_history : registra
+  subscriptions ||--o{ subscription_prorations : prorrateia
   subscriptions ||--o{ invoices : gera
   invoices ||--o{ invoice_items : discrimina
   invoices ||--o{ invoice_status_history : registra
@@ -46,7 +47,7 @@ erDiagram
 | Plataforma | `platform_plans`, `platform_addons`, `tenant_platform_subscriptions`, `platform_addon_orders`, `platform_statements` |
 | Clientes | `customers`, `customer_contacts`, `customer_billing_addresses`, `customer_provider_refs`, `customer_credit_entries` |
 | Catálogo | `products`, `billable_metrics`, `plans`, `plan_price_versions`, `coupons` |
-| Assinaturas | `subscriptions`, `subscription_history`, `subscription_discounts`, `pending_invoice_items`, `subscription_scheduled_changes`, `subscription_price_adjustments` |
+| Assinaturas | `subscriptions`, `subscription_history`, `subscription_discounts`, `pending_invoice_items`, `subscription_scheduled_changes`, `subscription_price_adjustments`, `subscription_prorations` |
 | Consumo | `usage_events`, `usage_aggregates` |
 | Faturamento | `invoice_number_sequences`, `invoices`, `invoice_items`, `invoice_status_history`, `credit_notes` |
 | Pagamentos | `payment_provider_accounts`, `charges`, `payment_operations`, `payments`, `provider_webhook_events` |
@@ -71,4 +72,6 @@ erDiagram
 | Uma mudança pendente por assinatura; um reajuste programado por data | `subscription_scheduled_changes_pending_key`, `subscription_price_adjustments_date_key` |
 | Item pendente sempre positivo (créditos viram crédito do cliente) | `pending_invoice_items_positive` |
 | Valor reajustado sempre ligado ao reajuste que o originou | `subscriptions_override_consistency` |
+| Prorrata registrada imutável, dentro do período de cobrança | `app_reject_mutation`, `subscription_prorations_period` |
+| Valores na escala do preço unitário comportam `money.MaxAmount` | colunas `numeric(28,10)` (`unit_amount`, reajustes, bases de prorrata) |
 | Total da fatura coerente | `total = subtotal - desconto`; `saldo = total - crédito - pago - creditado - baixado` |

@@ -11,6 +11,7 @@ import (
 
 	"github.com/ricartefelipe/recorvia/internal/audit"
 	"github.com/ricartefelipe/recorvia/internal/catalog"
+	"github.com/ricartefelipe/recorvia/internal/customers"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/calendar"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
@@ -88,7 +89,8 @@ func (f *changeFixture) addOffer(o offer) offer {
 }
 
 // addSub cria uma assinatura iniciada em 01/11/2026; billed indica se o
-// período 0 já foi faturado (cobrança antecipada).
+// período 0 já foi faturado (cobrança antecipada), com a fatura de ciclo
+// montada com o desconto ativo no momento.
 func (f *changeFixture) addSub(t *testing.T, o offer, qty int, billed bool, mutate func(*subscriptions.NewInput)) subscriptions.Subscription {
 	t.Helper()
 	in := subscriptions.NewInput{ID: uuid.New(), TenantID: f.tenantID, CustomerID: uuid.New(), Plan: o.plan, Price: o.price, Quantity: qty,
@@ -108,10 +110,39 @@ func (f *changeFixture) addSub(t *testing.T, o offer, qty int, billed bool, muta
 		if err := sub.ApplyStep(subscriptions.BillingStep{Kind: subscriptions.StepBill, Index: 0, Period: sched.Period(0)}, changeStart); err != nil {
 			t.Fatal(err)
 		}
+		f.seedCycleFee(t, sub)
 	}
 	sub.PopEvents()
 	f.store.subs = append(f.store.subs, sub)
 	return sub
+}
+
+// seedCycleFee registra o item do componente fixo da fatura de ciclo do
+// período corrente da assinatura, montada pelo motor com o desconto ativo no
+// momento da chamada. Sem valor a faturar (plano gratuito), não há fatura de
+// ciclo e nada é registrado.
+func (f *changeFixture) seedCycleFee(t *testing.T, sub subscriptions.Subscription) *CycleFeeItem {
+	t.Helper()
+	key := cycleFeeKey(sub.ID, sub.CurrentPeriod.Start)
+	delete(f.store.cycleFees, key)
+	step := subscriptions.BillingStep{Kind: subscriptions.StepBill, Index: 0, Period: sub.CurrentPeriod}
+	inv, _, err := BuildCycleInvoice(sub, f.store.plans[sub.PlanID], f.store.prices[sub.PriceVersionID], step, customers.Snapshot{Name: "Cliente"},
+		nil, nil, f.store.discount, saoPaulo, changeStart)
+	if err != nil {
+		t.Fatalf("fatura de ciclo do período: %v", err)
+	}
+	if inv == nil {
+		return nil
+	}
+	for _, it := range inv.Items {
+		if it.Kind == ItemSubscriptionFee {
+			fee := CycleFeeItem{InvoiceID: inv.ID, InvoiceStatus: Open, ItemID: it.ID, Amount: it.Amount, Discount: it.DiscountAmount}
+			f.store.cycleFees[key] = fee
+			return &fee
+		}
+	}
+	t.Fatalf("fatura de ciclo sem componente fixo: %+v", inv.Items)
+	return nil
 }
 
 func (f *changeFixture) change(t *testing.T, subID uuid.UUID, in ChangeInput) ChangeResult {
@@ -136,9 +167,9 @@ func (f *changeFixture) assertNoChangeEffects(t *testing.T, before subscriptions
 	t.Helper()
 	s := f.store
 	if len(s.invoices) != 0 || len(s.posted) != 0 || len(s.events) != 0 || len(s.audits) != 0 || len(s.grants) != 0 ||
-		len(s.scheduled) != 0 || len(s.subHistory) != 0 || len(s.creditUses) != 0 || s.seq != 0 || s.subUpdates != 0 {
-		t.Fatalf("nenhum efeito deveria ser gravado: faturas=%d lançamentos=%d eventos=%d auditorias=%d créditos=%d agendamentos=%d",
-			len(s.invoices), len(s.posted), len(s.events), len(s.audits), len(s.grants), len(s.scheduled))
+		len(s.scheduled) != 0 || len(s.subHistory) != 0 || len(s.creditUses) != 0 || s.seq != 0 || s.subUpdates != 0 || len(s.prorations) != 0 {
+		t.Fatalf("nenhum efeito deveria ser gravado: faturas=%d lançamentos=%d eventos=%d auditorias=%d créditos=%d agendamentos=%d prorratas=%d",
+			len(s.invoices), len(s.posted), len(s.events), len(s.audits), len(s.grants), len(s.scheduled), len(s.prorations))
 	}
 	got := s.sub(before.ID)
 	if got.PlanID != before.PlanID || got.PriceVersionID != before.PriceVersionID || got.Quantity != before.Quantity || got.Version != before.Version {
@@ -459,7 +490,8 @@ func TestChangeImmediateUpgradeWithoutPreviousFixedCharge(t *testing.T) {
 
 func TestChangeImmediateDowngradeGrantsCredit(t *testing.T) {
 	// Do Pro (R$ 160,00) para o Básico (R$ 100,00) com 10 de 30 dias restantes:
-	// crédito de 16.000 × 1/3 × (1 − p_antigo) e cobrança de 10.000 × 1/3 × (1 − p_novo).
+	// crédito de 1/3 do valor faturado no período (com o desconto que a fatura
+	// de ciclo recebeu) e cobrança de 10.000 × 1/3 × (1 − p_novo).
 	cases := []struct {
 		name       string
 		discount   func(f *changeFixture) *Discount
@@ -470,10 +502,12 @@ func TestChangeImmediateDowngradeGrantsCredit(t *testing.T) {
 		{"cupom percentual reduz crédito e cobrança", func(*changeFixture) *Discount {
 			return &Discount{ID: uuid.New(), CouponCode: "DEZ", PercentBP: 1000}
 		}, 1800, false},
-		{"cupom de valor fixo não é prorrateado", func(*changeFixture) *Discount {
+		// O período foi faturado por 16.000 − 3.000: crédito de 13.000 × 1/3 =
+		// 4.333; a cobrança não recebe o valor fixo (3.333).
+		{"desconto de valor fixo reduz o crédito pelo valor faturado", func(*changeFixture) *Discount {
 			off := brl(3000)
 			return &Discount{ID: uuid.New(), CouponCode: "TRINTA", AmountOff: &off}
-		}, 2000, false},
+		}, 1000, false},
 		{"cupom de 100% nos dois planos não gera diferença", func(*changeFixture) *Discount {
 			return &Discount{ID: uuid.New(), CouponCode: "CORTESIA", PercentBP: 10000}
 		}, 0, false},
@@ -576,7 +610,9 @@ func TestChangeImmediateQuantity(t *testing.T) {
 			adjID := uuid.New()
 			sub := f.addSub(t, f.seats, c.from, true, nil)
 			if c.override > 0 {
+				// O período foi faturado com o valor reajustado.
 				f.store.subs[0].PriceOverride, f.store.subs[0].PriceOverrideAdjustmentID = big.NewRat(c.override, 1), &adjID
+				f.seedCycleFee(t, f.store.subs[0])
 			}
 			res := f.change(t, sub.ID, ChangeInput{PlanID: c.plan(f), Quantity: c.to, Timing: subscriptions.ChangeImmediately})
 			if res.Proration == nil || res.Proration.Net.Amount() != c.wantNet {
@@ -744,6 +780,10 @@ func TestChangeRollsBackOnFailure(t *testing.T) {
 		{"novo preço", upgrade, "PriceVersion", 2},
 		{"cancelamento de pendentes", upgrade, "CancelPendingChanges", 0},
 		{"desconto antes da prorrata", upgrade, "ActiveDiscount", 1},
+		{"prorratas do período", upgrade, "PeriodProrations", 0},
+		{"fatura de ciclo do período", downgrade, "CycleFeeItem", 0},
+		{"registro da prorrata com fatura", upgrade, "InsertProration", 0},
+		{"registro da prorrata com crédito", downgrade, "InsertProration", 0},
 		{"desconto na troca", upgrade, "ActiveDiscount", 2},
 		{"cancelamento dos reajustes", upgrade, "CancelScheduledAdjustments", 0},
 		{"configuração do tenant", upgrade, "TenantSettings", 0},

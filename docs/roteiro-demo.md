@@ -67,4 +67,6 @@ curl -X POST http://localhost:8090/sim/scenarios -d '{"api_key":"sim_acme_demons
 | `out_of_order` | `charge.paid` chega antes de `charge.created`; sem regressão |
 
 Ações sobre uma cobrança: `pay`, `pay_silently` (sem webhook), `fail`, `refund`, `chargeback`
-(`stage`: `requested`, `won`, `lost`), `diverge` e `replay`.
+(`stage`: `requested`, `won`, `lost`), `diverge` e `replay`. Uma cobrança recusada (`fail`) ainda
+aceita `pay`, como o pagamento por outro meio depois da recusa do cartão; no Recorvia, a cobrança
+recusada passa a paga e o valor é aplicado à fatura.

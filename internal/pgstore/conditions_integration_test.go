@@ -270,6 +270,11 @@ func TestLateUsageCorrectionUsesNetOfDiscount(t *testing.T) {
 	if closing.Subtotal != 4000 || closing.DiscountTotal != 2000 || closing.Total != 2000 {
 		t.Fatalf("fechamento com 50%% de desconto: %+v", closing)
 	}
+	// O item de consumo registra o tipo e o cupom do desconto aplicado na emissão.
+	if items := a.itemsOf(t, tn.ID, closing.ID); len(items) != 1 || items[0].snap(t, "discount_type") != "percent" ||
+		items[0].snap(t, "coupon_code") != "METADE" || items[0].snap(t, "discount_percent_bp") != "5000" {
+		t.Fatalf("snapshot do item com o desconto: %+v", items)
+	}
 	period0 := spTime(t, 2026, time.March, 10, 0)
 
 	// 30 unidades valem 3.000 bruto e 1.500 líquido: crédito de 500 (2.000 − 1.500).
@@ -285,7 +290,8 @@ func TestLateUsageCorrectionUsesNetOfDiscount(t *testing.T) {
 	}
 	if n := countRows(t, a.Env, tn.ID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'usage.corrected'
 		AND (details->>'previous_amount')::int = 2000 AND (details->>'corrected_amount')::int = 1500
-		AND (details->>'corrected_gross_amount')::int = 3000 AND details->>'discount_ratio' = '0.5'`, tn.ID); n != 1 {
+		AND (details->>'corrected_gross_amount')::int = 3000 AND details->>'discount_ratio' = '0.5'
+		AND details->>'billed_discount_type' = 'percent' AND details->>'discount_rule' = 'percent'`, tn.ID); n != 1 {
 		t.Errorf("auditoria da correção líquida = %d, esperado 1", n)
 	}
 

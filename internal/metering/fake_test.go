@@ -40,17 +40,19 @@ type meterState struct {
 	// suspensions é o histórico de suspensões e reativações por assinatura,
 	// em ordem cronológica.
 	suspensions map[uuid.UUID][]SuspensionChange
+	// changes é a mudança agendada pendente por assinatura.
+	changes map[uuid.UUID]*subscriptions.ScheduledChange
 }
 
 func newMeterState() *meterState {
 	return &meterState{subs: map[uuid.UUID]subscriptions.Subscription{}, prices: map[uuid.UUID]catalog.PriceVersion{},
 		metrics: map[uuid.UUID]catalog.Metric{}, events: map[string]Event{}, closed: map[periodKey]bool{},
-		suspensions: map[uuid.UUID][]SuspensionChange{}}
+		suspensions: map[uuid.UUID][]SuspensionChange{}, changes: map[uuid.UUID]*subscriptions.ScheduledChange{}}
 }
 
 func (s *meterState) clone() *meterState {
 	return &meterState{subs: maps.Clone(s.subs), prices: maps.Clone(s.prices), metrics: maps.Clone(s.metrics),
-		events: maps.Clone(s.events), closed: maps.Clone(s.closed), suspensions: maps.Clone(s.suspensions)}
+		events: maps.Clone(s.events), closed: maps.Clone(s.closed), suspensions: maps.Clone(s.suspensions), changes: maps.Clone(s.changes)}
 }
 
 // failure programa a falha de uma operação; call zero falha em todas as
@@ -145,6 +147,13 @@ func (t *meterTx) SuspensionHistory(_ context.Context, subscriptionID uuid.UUID)
 		return nil, err
 	}
 	return slices.Clone(t.st.suspensions[subscriptionID]), nil
+}
+
+func (t *meterTx) PendingChange(_ context.Context, subscriptionID uuid.UUID) (*subscriptions.ScheduledChange, error) {
+	if err := t.s.hit("PendingChange"); err != nil {
+		return nil, err
+	}
+	return t.st.changes[subscriptionID], nil
 }
 
 func (t *meterTx) PriceVersion(_ context.Context, id uuid.UUID) (catalog.PriceVersion, error) {

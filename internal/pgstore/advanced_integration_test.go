@@ -702,16 +702,19 @@ func TestScheduledChangeAppliedByEngineAtCycleStart(t *testing.T) {
 // 10/04 (31 dias), troca em 31/03: fração 10/31. De R$ 100,00 para R$ 160,00,
 // crédito de 3.226 (3.225,81 arredondado) e cobrança de 5.161 (5.161,29),
 // diferença de 1.935. Diferença negativa vira crédito do cliente, consumido
-// na fatura seguinte. Com cupom percentual de 10% válido nos dois planos, o
-// crédito e a cobrança descontam o percentual, cada um arredondado uma vez:
-// 10.000 × 10/31 × 0,9 = 2.903,23 → 2.903 e 16.000 × 10/31 × 0,9 =
-// 4.645,16 → 4.645, diferença de 1.742.
+// na fatura seguinte. O crédito incide sobre o valor faturado no período: com
+// cupom de 10% aplicado antes da fatura de ciclo (válido nos dois planos),
+// 9.000 × 10/31 = 2.903,23 → 2.903 e a cobrança 16.000 × 10/31 × 0,9 =
+// 4.645,16 → 4.645, diferença de 1.742; com o cupom aplicado depois da
+// fatura de ciclo, o crédito é o do valor cheio (3.226) e só a cobrança tem
+// o desconto, diferença de 1.419.
 func TestImmediateChangeProratesCurrentPeriod(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
 		name                          string
 		from, to                      int64
 		couponBP                      int
+		couponBeforeBilling           bool
 		wantCredit, wantCharge        int64
 		wantNet                       int64
 		wantTotal                     int64
@@ -721,12 +724,17 @@ func TestImmediateChangeProratesCurrentPeriod(t *testing.T) {
 	}{
 		{name: "upgrade gera fatura de prorrata", from: 10000, to: 16000, wantCredit: 3226, wantCharge: 5161, wantNet: 1935,
 			wantTotal: 1935, wantNextTotal: 16000, wantNextDue: 16000},
-		{name: "upgrade com cupom percentual", from: 10000, to: 16000, couponBP: 1000, wantCredit: 2903, wantCharge: 4645, wantNet: 1742,
-			wantTotal: 1742, wantNextTotal: 14400, wantNextDue: 14400},
+		{name: "upgrade com cupom percentual aplicado antes da fatura do período", from: 10000, to: 16000, couponBP: 1000,
+			couponBeforeBilling: true, wantCredit: 2903, wantCharge: 4645, wantNet: 1742, wantTotal: 1742, wantNextTotal: 14400, wantNextDue: 14400},
+		{name: "upgrade com cupom percentual aplicado no meio do período", from: 10000, to: 16000, couponBP: 1000, wantCredit: 3226,
+			wantCharge: 4645, wantNet: 1419, wantTotal: 1419, wantNextTotal: 14400, wantNextDue: 14400},
 		{name: "downgrade gera crédito do cliente", from: 16000, to: 10000, wantCredit: 5161, wantCharge: 3226, wantNet: -1935,
 			wantCustomerCredit: 1935, wantNextTotal: 10000, wantNextCredit: 1935, wantNextDue: 8065},
-		{name: "downgrade com cupom percentual", from: 16000, to: 10000, couponBP: 1000, wantCredit: 4645, wantCharge: 2903, wantNet: -1742,
-			wantCustomerCredit: 1742, wantNextTotal: 9000, wantNextCredit: 1742, wantNextDue: 7258},
+		{name: "downgrade com cupom percentual aplicado antes da fatura do período", from: 16000, to: 10000, couponBP: 1000,
+			couponBeforeBilling: true, wantCredit: 4645, wantCharge: 2903, wantNet: -1742, wantCustomerCredit: 1742, wantNextTotal: 9000,
+			wantNextCredit: 1742, wantNextDue: 7258},
+		{name: "downgrade com cupom percentual aplicado no meio do período", from: 16000, to: 10000, couponBP: 1000, wantCredit: 5161,
+			wantCharge: 2903, wantNet: -2258, wantCustomerCredit: 2258, wantNextTotal: 9000, wantNextCredit: 2258, wantNextDue: 6742},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -735,8 +743,8 @@ func TestImmediateChangeProratesCurrentPeriod(t *testing.T) {
 			fromPlan, toPlan := a.newFlatPlan(t, tn, tc.from), a.newFlatPlan(t, tn, tc.to)
 			cust := a.NewCustomer(t, tn)
 			sub := a.NewSubscription(t, tn, cust.ID, fromPlan.ID, nil)
-			a.runEngine(t, tn, 1)
-			if tc.couponBP > 0 {
+			applyCoupon := func() {
+				t.Helper()
 				bp := tc.couponBP
 				c, err := a.Coupons.Create(ctx, tn.ID, tn.Actor, catalog.CouponInput{Code: "FIDELIDADE", Name: "Fidelidade",
 					Type: catalog.DiscountPercent, PercentOffBP: &bp, Duration: catalog.DurationForever})
@@ -746,6 +754,13 @@ func TestImmediateChangeProratesCurrentPeriod(t *testing.T) {
 				if _, err := a.Terms.ApplyCoupon(ctx, tn.ID, tn.Actor, &tn.Owner.ID, sub.ID, c.Code); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if tc.couponBP > 0 && tc.couponBeforeBilling {
+				applyCoupon()
+			}
+			a.runEngine(t, tn, 1)
+			if tc.couponBP > 0 && !tc.couponBeforeBilling {
+				applyCoupon()
 			}
 			a.Clock.Set(spTime(t, 2026, time.March, 31, 12))
 			res, err := a.Changes.Change(ctx, tn.ID, tn.Actor, &tn.Owner.ID, sub.ID,
@@ -794,8 +809,11 @@ func TestImmediateChangeProratesCurrentPeriod(t *testing.T) {
 				if tc.couponBP > 0 {
 					wantBP = fmt.Sprint(tc.couponBP)
 				}
-				if items[0].snap(t, "discount_percent_bp") != wantBP || items[1].snap(t, "discount_percent_bp") != wantBP {
-					t.Errorf("percentual do cupom no snapshot: %s | %s", items[0].Snapshot, items[1].Snapshot)
+				// O percentual vale só para a cobrança; o crédito registra a fatura
+				// de ciclo que serviu de base.
+				if items[0].snap(t, "discount_percent_bp") != wantBP || items[1].snap(t, "discount_percent_bp") != "" ||
+					items[1].snap(t, "credit_basis") != "cycle_invoice" || items[1].snap(t, "billed_invoice_id") != invs[0].ID.String() {
+					t.Errorf("snapshot da prorrata: %s | %s", items[0].Snapshot, items[1].Snapshot)
 				}
 			} else {
 				if res.InvoiceID != nil || res.CreditGranted == nil || res.CreditGranted.Amount() != tc.wantCustomerCredit {
@@ -813,8 +831,17 @@ func TestImmediateChangeProratesCurrentPeriod(t *testing.T) {
 					t.Errorf("lançamentos de crédito concedido = %d, esperado 1", n)
 				}
 			}
-			if invs[0].Total != tc.from || invs[0].Version != 1 {
+			wantCycleTotal := tc.from
+			if tc.couponBeforeBilling {
+				wantCycleTotal = tc.from * int64(10000-tc.couponBP) / 10000
+			}
+			if invs[0].Total != wantCycleTotal || invs[0].Version != 1 {
 				t.Errorf("fatura do período corrente foi alterada: %+v", invs[0])
+			}
+			if n := countRows(t, a.Env, tn.ID, `SELECT count(*) FROM subscription_prorations WHERE tenant_id = $1 AND subscription_id = $2
+				AND period_start = $3 AND credit_amount = $4 AND charge_amount = $5 AND price_version_id = $6`, tn.ID, sub.ID,
+				spTime(t, 2026, time.March, 10, 0), tc.wantCredit, tc.wantCharge, *toPlan.CurrentPriceVersionID); n != 1 {
+				t.Errorf("prorrata registrada = %d, esperado 1", n)
 			}
 
 			a.Clock.Set(spTime(t, 2026, time.April, 10, 9))

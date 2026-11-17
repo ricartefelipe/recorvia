@@ -16,18 +16,24 @@
 //     suspensão (pelo histórico da assinatura, mesmo depois da reativação)
 //     ou mais de 5 minutos no futuro são rejeitados.
 //   - Se o período ainda não foi fechado pelo faturamento, a métrica precisa
-//     fazer parte do preço vigente e o evento é "accepted" e entra no
-//     fechamento. Período cujo fechamento já passou sem agregado da métrica
-//     não é mais faturável e o evento é rejeitado.
+//     fazer parte da versão de preço que vai precificá-lo e o evento é
+//     "accepted" e entra no fechamento. Essa versão é a da mudança agendada
+//     pendente que já vale no início do período (o motor a aplica no passo
+//     desse período, antes de fechá-lo) ou, sem ela, a vigente. Período cujo
+//     fechamento já passou sem agregado da métrica não é mais faturável e o
+//     evento é rejeitado. O período em que uma suspensão começou continua
+//     aberto depois de uma reativação que pulou o passo seguinte a ele (o
+//     consumo anterior à suspensão é fechado pelo primeiro passo após a
+//     reativação); períodos inteiramente suspensos nunca são fechados.
 //   - Se o período já foi fechado (há agregado da métrica), a métrica é
 //     válida para ele, ainda que o preço vigente tenha mudado. O evento é
 //     "late" quando recebido até late_grace_hours (configuração da métrica)
 //     após o fim do período, e corrige o faturamento por ajuste posterior,
 //     sem alterar a fatura emitida; depois da tolerância, é rejeitado.
-//   - A ingestão lê a assinatura com bloqueio compartilhado, e o
-//     faturamento a reivindica com bloqueio exclusivo: a decisão entre
-//     "accepted" e "late" nunca é tomada durante um fechamento ainda não
-//     confirmado.
+//   - A ingestão lê as assinaturas do lote com bloqueio compartilhado antes
+//     de qualquer outra leitura ou gravação, e o faturamento as reivindica
+//     com bloqueio exclusivo: a decisão entre "accepted" e "late" nunca é
+//     tomada durante um fechamento ainda não confirmado.
 //   - Textos com caractere NUL ou UTF-8 inválido e properties com NUL são
 //     rejeitados por evento, sem desfazer o lote.
 package metering
@@ -164,6 +170,11 @@ type Tx interface {
 	// SuspensionHistory lista as suspensões e reativações da assinatura em
 	// ordem cronológica.
 	SuspensionHistory(ctx context.Context, subscriptionID uuid.UUID) ([]SuspensionChange, error)
+	// PendingChange devolve a mudança agendada pendente da assinatura (nula
+	// se não houver), sem bloqueio: o agendamento e a aplicação da mudança
+	// bloqueiam a assinatura com exclusividade, e a ingestão a mantém com
+	// bloqueio compartilhado.
+	PendingChange(ctx context.Context, subscriptionID uuid.UUID) (*subscriptions.ScheduledChange, error)
 	PriceVersion(ctx context.Context, id uuid.UUID) (catalog.PriceVersion, error)
 	Metric(ctx context.Context, id uuid.UUID) (catalog.Metric, error)
 	MetricByCode(ctx context.Context, code string) (catalog.Metric, error)
@@ -246,11 +257,13 @@ type batchCache struct {
 	metrics     map[string]*catalog.Metric
 	prices      map[uuid.UUID]catalog.PriceVersion
 	suspensions map[uuid.UUID][]SuspensionChange
+	changes     map[uuid.UUID]*subscriptions.ScheduledChange
 }
 
 func newBatchCache(tx Tx) *batchCache {
 	return &batchCache{tx: tx, subs: map[uuid.UUID]*subscriptions.Subscription{}, metrics: map[string]*catalog.Metric{},
-		prices: map[uuid.UUID]catalog.PriceVersion{}, suspensions: map[uuid.UUID][]SuspensionChange{}}
+		prices: map[uuid.UUID]catalog.PriceVersion{}, suspensions: map[uuid.UUID][]SuspensionChange{},
+		changes: map[uuid.UUID]*subscriptions.ScheduledChange{}}
 }
 
 // subscription lê a assinatura com bloqueio compartilhado na primeira vez
@@ -298,6 +311,31 @@ func (c *batchCache) price(ctx context.Context, id uuid.UUID) (catalog.PriceVers
 	}
 	c.prices[id] = p
 	return p, nil
+}
+
+// openPeriodPrice devolve a versão de preço do período aberto que começa em
+// periodStart (ver openPeriodPriceID).
+func (c *batchCache) openPeriodPrice(ctx context.Context, sub subscriptions.Subscription, periodStart time.Time) (catalog.PriceVersion, error) {
+	ch, ok := c.changes[sub.ID]
+	if !ok {
+		var err error
+		if ch, err = c.tx.PendingChange(ctx, sub.ID); err != nil {
+			return catalog.PriceVersion{}, err
+		}
+		c.changes[sub.ID] = ch
+	}
+	return c.price(ctx, openPeriodPriceID(sub, ch, periodStart))
+}
+
+// openPeriodPriceID é a versão de preço que vai precificar o consumo de um
+// período ainda aberto: a da mudança agendada pendente com data efetiva até o
+// início do período (já em vigor, ainda não aplicada pelo motor) ou, sem ela,
+// a vigente na assinatura.
+func openPeriodPriceID(sub subscriptions.Subscription, ch *subscriptions.ScheduledChange, periodStart time.Time) uuid.UUID {
+	if ch != nil && ch.NewPriceVersionID != nil && !ch.EffectiveAt.After(periodStart) {
+		return *ch.NewPriceVersionID
+	}
+	return sub.PriceVersionID
 }
 
 // suspendedAt informa se a assinatura estava suspensa no instante at: pela
@@ -532,18 +570,20 @@ func admit(ctx context.Context, c *batchCache, sub subscriptions.Subscription, m
 		return "", "", err
 	}
 	if !closed {
-		price, err := c.price(ctx, sub.PriceVersionID)
+		price, err := c.openPeriodPrice(ctx, sub, period.Start)
 		if err != nil {
 			return "", "", err
 		}
 		if !price.HasUsage() || price.MetricID == nil || *price.MetricID != metric.ID {
 			return "", "A métrica não faz parte do preço vigente da assinatura.", nil
 		}
-		// O consumo do período idx é fechado no passo idx+1. Se o
-		// faturamento já passou desse passo sem agregado da métrica (o
-		// preço daquele período não tinha a métrica), o evento não seria
-		// faturado nem corrigido.
-		if idx+1 < sub.NextBillingIndex {
+		// O consumo do período idx é fechado no passo idx+1 ou, se a
+		// reativação pulou esse passo, no primeiro passo após ela. Se o
+		// faturamento já passou do fechamento sem agregado da métrica (o
+		// preço daquele período não tinha a métrica) ou o período nunca será
+		// fechado (inteiramente suspenso), o evento não seria faturado nem
+		// corrigido.
+		if !sub.UsageOpen(idx, period.Start) {
 			return "", "Período já faturado sem consumo desta métrica.", nil
 		}
 		return OutcomeAccepted, "", nil
@@ -635,7 +675,9 @@ type Usage struct {
 }
 
 // CurrentUsage agrega o consumo do período que contém o instante atual
-// (estimativa: o valor final é calculado no fechamento).
+// (estimativa: o valor final é calculado no fechamento). A versão de preço é
+// a que vai precificar o período, como na ingestão: a da mudança agendada já
+// em vigor no início dele, se houver.
 func (s *Service) CurrentUsage(ctx context.Context, tenantID, subscriptionID uuid.UUID) (Usage, error) {
 	var u Usage
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
@@ -654,7 +696,11 @@ func (s *Service) CurrentUsage(ctx context.Context, tenantID, subscriptionID uui
 		idx := max(sched.IndexOf(now), 0)
 		u.Period = sched.Period(idx)
 		u.Metrics = []MetricUsage{}
-		price, err := tx.PriceVersion(ctx, sub.PriceVersionID)
+		ch, err := tx.PendingChange(ctx, sub.ID)
+		if err != nil {
+			return err
+		}
+		price, err := tx.PriceVersion(ctx, openPeriodPriceID(sub, ch, u.Period.Start))
 		if err != nil || !price.HasUsage() || price.MetricID == nil {
 			return err
 		}

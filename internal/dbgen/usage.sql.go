@@ -14,7 +14,8 @@ import (
 )
 
 const getInvoiceItemAmounts = `-- name: GetInvoiceItemAmounts :one
-SELECT amount, discount_amount FROM invoice_items WHERE tenant_id = $1 AND id = $2
+SELECT amount, discount_amount, COALESCE(price_snapshot->>'discount_type', '')::text AS discount_type
+  FROM invoice_items WHERE tenant_id = $1 AND id = $2
 `
 
 type GetInvoiceItemAmountsParams struct {
@@ -25,17 +26,53 @@ type GetInvoiceItemAmountsParams struct {
 type GetInvoiceItemAmountsRow struct {
 	Amount         int64
 	DiscountAmount int64
+	DiscountType   string
 }
 
+// Valor bruto, desconto distribuído e o tipo do desconto registrado no
+// snapshot na emissão (” em itens faturados antes do registro).
 func (q *Queries) GetInvoiceItemAmounts(ctx context.Context, arg GetInvoiceItemAmountsParams) (GetInvoiceItemAmountsRow, error) {
 	row := q.db.QueryRow(ctx, getInvoiceItemAmounts, arg.TenantID, arg.ID)
 	var i GetInvoiceItemAmountsRow
-	err := row.Scan(&i.Amount, &i.DiscountAmount)
+	err := row.Scan(&i.Amount, &i.DiscountAmount, &i.DiscountType)
+	return i, err
+}
+
+const getPendingScheduledChangeForUsage = `-- name: GetPendingScheduledChangeForUsage :one
+SELECT id, tenant_id, subscription_id, kind, new_plan_id, new_price_version_id, new_quantity, effective_at, status, created_by, created_at, resolved_at FROM subscription_scheduled_changes
+ WHERE tenant_id = $1 AND subscription_id = $2 AND status = 'pending'
+`
+
+type GetPendingScheduledChangeForUsageParams struct {
+	TenantID       uuid.UUID
+	SubscriptionID uuid.UUID
+}
+
+// Mudança agendada pendente lida pela ingestão de consumo, sem bloqueio: o
+// agendamento e a aplicação da mudança bloqueiam a assinatura com FOR UPDATE
+// antes de alterá-la, e a ingestão já mantém a assinatura em FOR SHARE.
+func (q *Queries) GetPendingScheduledChangeForUsage(ctx context.Context, arg GetPendingScheduledChangeForUsageParams) (SubscriptionScheduledChange, error) {
+	row := q.db.QueryRow(ctx, getPendingScheduledChangeForUsage, arg.TenantID, arg.SubscriptionID)
+	var i SubscriptionScheduledChange
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.SubscriptionID,
+		&i.Kind,
+		&i.NewPlanID,
+		&i.NewPriceVersionID,
+		&i.NewQuantity,
+		&i.EffectiveAt,
+		&i.Status,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.ResolvedAt,
+	)
 	return i, err
 }
 
 const getSubscriptionForShare = `-- name: GetSubscriptionForShare :one
-SELECT id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date, trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at, cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days, created_at, updated_at, version, price_override_amount, price_override_adjustment_id FROM subscriptions WHERE tenant_id = $1 AND id = $2 FOR SHARE
+SELECT id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date, trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at, cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days, created_at, updated_at, version, price_override_amount, price_override_adjustment_id, pending_usage_starts FROM subscriptions WHERE tenant_id = $1 AND id = $2 FOR SHARE
 `
 
 type GetSubscriptionForShareParams struct {
@@ -79,6 +116,7 @@ func (q *Queries) GetSubscriptionForShare(ctx context.Context, arg GetSubscripti
 		&i.Version,
 		&i.PriceOverrideAmount,
 		&i.PriceOverrideAdjustmentID,
+		&i.PendingUsageStarts,
 	)
 	return i, err
 }

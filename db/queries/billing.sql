@@ -11,6 +11,34 @@ RETURNING (next_number - 1)::bigint AS number;
 SELECT EXISTS (SELECT 1 FROM invoices WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id
                 AND kind = @kind AND billing_period_start = @billing_period_start)::boolean;
 
+-- name: GetCycleFeeItem :one
+-- Item do componente fixo da fatura de ciclo do período, com a situação da
+-- fatura (há no máximo uma fatura de ciclo por assinatura e período).
+SELECT i.id AS invoice_id, i.status AS invoice_status, it.id AS item_id, it.amount, it.discount_amount
+  FROM invoices i
+  JOIN invoice_items it ON it.tenant_id = i.tenant_id AND it.invoice_id = i.id
+ WHERE i.tenant_id = @tenant_id AND i.subscription_id = @subscription_id AND i.kind = 'subscription_cycle'
+   AND i.billing_period_start = @period_start AND it.tenant_id = @tenant_id AND it.kind = 'subscription_fee'
+ ORDER BY it.position
+ LIMIT 1;
+
+-- name: InsertSubscriptionProration :exec
+INSERT INTO subscription_prorations (id, tenant_id, subscription_id, period_start, period_end, effective_at, price_version_id, quantity,
+                                     remaining_days, period_days, credit_base, credit_amount, charge_base, charge_amount, invoice_id, created_at)
+VALUES (@id, @tenant_id, @subscription_id, @period_start, @period_end, @effective_at, @price_version_id, @quantity, @remaining_days,
+        @period_days, @credit_base, @credit_amount, @charge_base, @charge_amount, sqlc.narg(invoice_id), @created_at);
+
+-- name: ListPeriodProrations :many
+-- Prorratas do período em ordem cronológica, com a situação da fatura de
+-- prorrata (nula quando a mudança não emitiu fatura).
+SELECT p.id, p.subscription_id, p.period_start, p.period_end, p.effective_at, p.price_version_id, p.quantity, p.remaining_days,
+       p.period_days, p.credit_base, p.credit_amount, p.charge_base, p.charge_amount, p.invoice_id, p.created_at,
+       i.status AS invoice_status
+  FROM subscription_prorations p
+  LEFT JOIN invoices i ON i.tenant_id = p.tenant_id AND i.id = p.invoice_id
+ WHERE p.tenant_id = @tenant_id AND p.subscription_id = @subscription_id AND p.period_start = @period_start
+ ORDER BY p.effective_at, p.created_at, p.id;
+
 -- name: InsertInvoice :exec
 INSERT INTO invoices (id, tenant_id, customer_id, subscription_id, number, status, kind, currency, billing_period_start, billing_period_end,
                       issued_at, due_at, subtotal, discount_total, total, credit_applied, amount_paid, amount_credited, amount_written_off,

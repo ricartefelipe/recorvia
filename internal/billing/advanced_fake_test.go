@@ -47,6 +47,7 @@ type advData struct {
 	marks           []lateMark
 	newPending      []NewPendingItem
 	usagePrices     []uuid.UUID
+	prorations      []ProrationRecord
 }
 
 func (d advData) cloneAdvanced() advData {
@@ -62,6 +63,7 @@ func (d advData) cloneAdvanced() advData {
 	c.marks = slices.Clone(d.marks)
 	c.newPending = slices.Clone(d.newPending)
 	c.usagePrices = slices.Clone(d.usagePrices)
+	c.prorations = slices.Clone(d.prorations)
 	return c
 }
 
@@ -76,11 +78,15 @@ func (d advData) cloneAdvanced() advData {
 type advancedFake struct {
 	*cycleFake
 	advData
-	platformPlan   platformbilling.Plan
-	metrics        map[uuid.UUID]catalog.Metric
-	recompute      map[string]recomputed
-	itemAmounts    map[uuid.UUID]money.Money
-	itemDiscounts  map[uuid.UUID]money.Money
+	platformPlan      platformbilling.Plan
+	metrics           map[uuid.UUID]catalog.Metric
+	recompute         map[string]recomputed
+	itemAmounts       map[uuid.UUID]money.Money
+	itemDiscounts     map[uuid.UUID]money.Money
+	itemDiscountTypes map[uuid.UUID]catalog.DiscountType
+	// cycleFees são itens de componente fixo de faturas de ciclo emitidas
+	// antes do teste (chave: assinatura e início do período).
+	cycleFees      map[string]CycleFeeItem
 	lateTenants    []uuid.UUID
 	lateTenantsErr error
 	calls          map[string]int
@@ -94,7 +100,8 @@ func newAdvancedFake() *advancedFake {
 		platformPlan: platformbilling.Plan{Code: "growth", Name: "Growth", Active: true,
 			Features: []platformbilling.Feature{platformbilling.FeatureUsageBilling}},
 		metrics: map[uuid.UUID]catalog.Metric{}, recompute: map[string]recomputed{}, itemAmounts: map[uuid.UUID]money.Money{},
-		itemDiscounts: map[uuid.UUID]money.Money{}, calls: map[string]int{}, failAt: map[string]int{},
+		itemDiscounts: map[uuid.UUID]money.Money{}, itemDiscountTypes: map[uuid.UUID]catalog.DiscountType{}, cycleFees: map[string]CycleFeeItem{},
+		calls: map[string]int{}, failAt: map[string]int{},
 	}
 }
 
@@ -274,6 +281,65 @@ func (s *advancedFake) AddCustomerCredit(_ context.Context, customerID uuid.UUID
 	return id, nil
 }
 
+func cycleFeeKey(subscriptionID uuid.UUID, periodStart time.Time) string {
+	return subscriptionID.String() + "|" + periodStart.UTC().Format(time.RFC3339Nano)
+}
+
+// CycleFeeItem procura o item de componente fixo nas faturas de ciclo
+// gravadas pelo motor e, em seguida, nas emitidas antes do teste.
+func (s *advancedFake) CycleFeeItem(_ context.Context, subscriptionID uuid.UUID, periodStart time.Time) (*CycleFeeItem, error) {
+	if err := s.hit("CycleFeeItem"); err != nil {
+		return nil, err
+	}
+	for _, inv := range s.invoices {
+		if inv.Kind != KindSubscriptionCycle || inv.SubscriptionID == nil || *inv.SubscriptionID != subscriptionID ||
+			inv.BillingPeriod == nil || !inv.BillingPeriod.Start.Equal(periodStart) {
+			continue
+		}
+		for _, it := range inv.Items {
+			if it.Kind == ItemSubscriptionFee {
+				return &CycleFeeItem{InvoiceID: inv.ID, InvoiceStatus: inv.Status, ItemID: it.ID, Amount: it.Amount, Discount: it.DiscountAmount}, nil
+			}
+		}
+	}
+	if fee, ok := s.cycleFees[cycleFeeKey(subscriptionID, periodStart)]; ok {
+		return &fee, nil
+	}
+	return nil, nil
+}
+
+// PeriodProrations devolve as prorratas do período com a situação atual da
+// fatura de prorrata, como a junção da consulta real.
+func (s *advancedFake) PeriodProrations(_ context.Context, subscriptionID uuid.UUID, periodStart time.Time) ([]ProrationRecord, error) {
+	if err := s.hit("PeriodProrations"); err != nil {
+		return nil, err
+	}
+	var out []ProrationRecord
+	for _, p := range s.prorations {
+		if p.SubscriptionID != subscriptionID || !p.Period.Start.Equal(periodStart) {
+			continue
+		}
+		p.InvoiceStatus = ""
+		if p.InvoiceID != nil {
+			for _, inv := range s.invoices {
+				if inv.ID == *p.InvoiceID {
+					p.InvoiceStatus = inv.Status
+				}
+			}
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func (s *advancedFake) InsertProration(_ context.Context, r ProrationRecord) error {
+	if err := s.hit("InsertProration"); err != nil {
+		return err
+	}
+	s.prorations = append(s.prorations, r)
+	return nil
+}
+
 // CorrectionTx.
 
 func (s *advancedFake) LateUsageGroups(_ context.Context, limit int) ([]LateGroup, error) {
@@ -313,19 +379,19 @@ func (s *advancedFake) RecomputeUsage(_ context.Context, subscriptionID uuid.UUI
 	return new(big.Rat).Set(r.qty), r.events, nil
 }
 
-func (s *advancedFake) InvoiceItemAmounts(_ context.Context, id uuid.UUID) (money.Money, money.Money, error) {
-	if err := s.hit("InvoiceItemAmounts"); err != nil {
-		return money.Money{}, money.Money{}, err
+func (s *advancedFake) BilledItem(_ context.Context, id uuid.UUID) (BilledItem, error) {
+	if err := s.hit("BilledItem"); err != nil {
+		return BilledItem{}, err
 	}
 	m, ok := s.itemAmounts[id]
 	if !ok {
-		return money.Money{}, money.Money{}, apperr.NotFound("invoice_item_not_found", "Item de fatura não encontrado.")
+		return BilledItem{}, apperr.NotFound("invoice_item_not_found", "Item de fatura não encontrado.")
 	}
 	d, ok := s.itemDiscounts[id]
 	if !ok {
 		d = money.Zero(m.Currency())
 	}
-	return m, d, nil
+	return BilledItem{Amount: m, Discount: d, DiscountType: s.itemDiscountTypes[id]}, nil
 }
 
 func (s *advancedFake) SetAggregateCorrection(_ context.Context, id uuid.UUID, qty *big.Rat, amount money.Money) error {

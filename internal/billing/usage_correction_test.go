@@ -261,7 +261,7 @@ func TestUsageCorrectorWithoutBilledItemUsesCurrentPrice(t *testing.T) {
 	f.store.aggregates[lateKey(g)] = agg
 
 	f.run(t)
-	if f.store.calls["InvoiceItemAmounts"] != 0 {
+	if f.store.calls["BilledItem"] != 0 {
 		t.Fatal("agregado sem item faturado não consulta o valor do item")
 	}
 	if len(f.store.newPending) != 1 || f.store.newPending[0].Amount.Amount() != 100 {
@@ -479,7 +479,7 @@ func TestUsageCorrectorRollsBackOnFailure(t *testing.T) {
 		{"métrica", pending, 150, "Metric", 0},
 		{"versão de preço", pending, 150, "PriceVersion", 0},
 		{"recálculo", pending, 150, "RecomputeUsage", 0},
-		{"valor faturado", pending, 150, "InvoiceItemAmounts", 0},
+		{"valor faturado", pending, 150, "BilledItem", 0},
 		{"configuração do tenant", pending, 150, "TenantSettings", 0},
 		{"item pendente", pending, 150, "InsertPendingItem", 0},
 		{"correção do agregado", pending, 150, "SetAggregateCorrection", 0},

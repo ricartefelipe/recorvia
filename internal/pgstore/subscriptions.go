@@ -41,8 +41,29 @@ func subscriptionFromRow(r dbgen.Subscription) (subscriptions.Subscription, erro
 		CurrentPeriod: calendar.Period{Start: r.CurrentPeriodStart, End: r.CurrentPeriodEnd}, NextBillingIndex: int(r.NextBillingIndex),
 		NextBillingAt: r.NextBillingAt, CancelAtPeriodEnd: r.CancelAtPeriodEnd, CanceledAt: r.CanceledAt, CancelReason: deref(r.CancelReason),
 		EndedAt: r.EndedAt, SuspendedAt: r.SuspendedAt, SuspensionReason: deref(r.SuspensionReason), PaymentTermsDays: intFromPtr32(r.PaymentTermsDays),
-		PriceOverride: override, PriceOverrideAdjustmentID: r.PriceOverrideAdjustmentID,
+		PriceOverride: override, PriceOverrideAdjustmentID: r.PriceOverrideAdjustmentID, PendingUsageStarts: pendingUsageFromPg(r.PendingUsageStarts),
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: int(r.Version)}, nil
+}
+
+// pendingUsageFromPg normaliza a lista lida do banco: vazia vira nula e os
+// instantes ficam em UTC.
+func pendingUsageFromPg(starts []time.Time) []time.Time {
+	if len(starts) == 0 {
+		return nil
+	}
+	out := make([]time.Time, len(starts))
+	for i, t := range starts {
+		out[i] = t.UTC()
+	}
+	return out
+}
+
+// pendingUsageToPg devolve a lista a gravar; a coluna não aceita nulo.
+func pendingUsageToPg(starts []time.Time) []time.Time {
+	if starts == nil {
+		return []time.Time{}
+	}
+	return starts
 }
 
 func (b base) insertSubscription(ctx context.Context, s subscriptions.Subscription) error {
@@ -65,7 +86,8 @@ func (b base) updateSubscription(ctx context.Context, s subscriptions.Subscripti
 		CurrentPeriodEnd: s.CurrentPeriod.End, NextBillingIndex: int32(s.NextBillingIndex), NextBillingAt: s.NextBillingAt,
 		CancelAtPeriodEnd: s.CancelAtPeriodEnd, CanceledAt: s.CanceledAt, CancelReason: strPtr(s.CancelReason), EndedAt: s.EndedAt,
 		SuspendedAt: s.SuspendedAt, SuspensionReason: strPtr(s.SuspensionReason), PaymentTermsDays: intPtr32(s.PaymentTermsDays),
-		PriceOverrideAmount: override, PriceOverrideAdjustmentID: s.PriceOverrideAdjustmentID, Version: int32(s.Version)})
+		PriceOverrideAmount: override, PriceOverrideAdjustmentID: s.PriceOverrideAdjustmentID, PendingUsageStarts: pendingUsageToPg(s.PendingUsageStarts),
+		Version: int32(s.Version)})
 	if err != nil {
 		return err
 	}
@@ -170,7 +192,8 @@ func (tx subscriptionsTx) List(ctx context.Context, f subscriptions.ListFilter) 
 			CurrentPeriodEnd: r.CurrentPeriodEnd, NextBillingIndex: r.NextBillingIndex, NextBillingAt: r.NextBillingAt,
 			CancelAtPeriodEnd: r.CancelAtPeriodEnd, CanceledAt: r.CanceledAt, CancelReason: r.CancelReason, EndedAt: r.EndedAt,
 			SuspendedAt: r.SuspendedAt, SuspensionReason: r.SuspensionReason, PaymentTermsDays: r.PaymentTermsDays, CreatedAt: r.CreatedAt,
-			UpdatedAt: r.UpdatedAt, Version: r.Version, PriceOverrideAmount: r.PriceOverrideAmount, PriceOverrideAdjustmentID: r.PriceOverrideAdjustmentID})
+			UpdatedAt: r.UpdatedAt, Version: r.Version, PriceOverrideAmount: r.PriceOverrideAmount, PriceOverrideAdjustmentID: r.PriceOverrideAdjustmentID,
+			PendingUsageStarts: r.PendingUsageStarts})
 		if err != nil {
 			return subscriptions.Page{}, err
 		}

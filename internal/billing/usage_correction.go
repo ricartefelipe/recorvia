@@ -66,12 +66,65 @@ type CorrectionTx interface {
 	ClosedAggregate(ctx context.Context, g LateGroup) (ClosedAggregate, error)
 	Metric(ctx context.Context, id uuid.UUID) (catalog.Metric, error)
 	RecomputeUsage(ctx context.Context, subscriptionID uuid.UUID, metric catalog.Metric, periodStart time.Time) (*big.Rat, int, error)
-	// InvoiceItemAmounts devolve o valor bruto e o desconto distribuído de um
-	// item faturado.
-	InvoiceItemAmounts(ctx context.Context, id uuid.UUID) (amount, discount money.Money, err error)
+	// BilledItem devolve o valor bruto, o desconto distribuído e o tipo do
+	// desconto registrado no snapshot de um item faturado.
+	BilledItem(ctx context.Context, id uuid.UUID) (BilledItem, error)
 	SetAggregateCorrection(ctx context.Context, id uuid.UUID, qty *big.Rat, amount money.Money) error
 	MarkLateCorrected(ctx context.Context, g LateGroup, aggregateID uuid.UUID, itemID *uuid.UUID, at time.Time) error
 	InsertPendingItem(ctx context.Context, it NewPendingItem) error
+}
+
+// BilledItem é o item faturado de um agregado de consumo. DiscountType é o
+// tipo do desconto registrado no snapshot na emissão; fica vazio em itens
+// faturados antes desse registro.
+type BilledItem struct {
+	Amount       money.Money
+	Discount     money.Money
+	DiscountType catalog.DiscountType
+}
+
+// Regras de desconto aplicadas ao novo valor na correção de consumo.
+const (
+	// correctionNoDiscount: item faturado sem desconto; vale o novo bruto.
+	correctionNoDiscount = "none"
+	// correctionPercent: desconto percentual; o novo valor mantém a
+	// proporção líquida do item.
+	correctionPercent = "percent"
+	// correctionAmount: desconto de valor fixo; o novo valor mantém o valor
+	// absoluto descontado no item (nunca negativo).
+	correctionAmount = "amount"
+	// correctionUnrecorded: item com desconto sem o tipo registrado
+	// (faturado antes do registro); vale a proporção líquida do item.
+	correctionUnrecorded = "unrecorded_ratio"
+)
+
+// correctedNet calcula o novo valor líquido do consumo corrigido a partir
+// do valor bruto exato (e do mesmo valor arredondado) e do item faturado,
+// com arredondamento único. ratio é a proporção de desconto das regras
+// proporcionais e da regra sem desconto (nula na regra de valor fixo).
+func correctedNet(grossExact *big.Rat, gross money.Money, billed BilledItem) (net money.Money, rule string, ratio *big.Rat, err error) {
+	if !billed.Discount.IsPositive() || !billed.Amount.IsPositive() {
+		return gross, correctionNoDiscount, new(big.Rat), nil
+	}
+	if billed.DiscountType == catalog.DiscountAmount {
+		if net, err = gross.Sub(billed.Discount); err != nil {
+			return money.Money{}, "", nil, err
+		}
+		if net.IsNegative() {
+			net = money.Zero(gross.Currency())
+		}
+		return net, correctionAmount, nil, nil
+	}
+	rule = correctionPercent
+	if billed.DiscountType != catalog.DiscountPercent {
+		rule = correctionUnrecorded
+	}
+	// Proporção líquida do item faturado: (valor − desconto) ÷ valor.
+	netRatio := new(big.Rat).SetFrac(big.NewInt(billed.Amount.Amount()-billed.Discount.Amount()), big.NewInt(billed.Amount.Amount()))
+	if net, err = money.FromRat(new(big.Rat).Mul(grossExact, netRatio), gross.Currency(), money.DefaultRounding); err != nil {
+		return money.Money{}, "", nil, err
+	}
+	return net, rule, new(big.Rat).Sub(big.NewRat(1, 1), netRatio), nil
 }
 
 // CorrectionStore abre transações e descobre tenants com consumo atrasado.
@@ -87,12 +140,17 @@ type CorrectionStore interface {
 // (mesma semântica de agregação) e precificada pela versão usada no
 // fechamento. A comparação usa valores líquidos de desconto: o valor
 // faturado é o do item menos o desconto distribuído nele, e o novo valor
-// recebe a mesma proporção de desconto do item original (arredondado uma
-// única vez). A diferença em relação ao que já foi faturado (incluindo
-// correções anteriores) vira item de ajuste na próxima fatura da assinatura
-// quando positiva (sem novo desconto), ou crédito do cliente quando
-// negativa. Se a assinatura não tiver próximo ciclo (cancelada ou com
-// encerramento agendado), a diferença positiva é faturada imediatamente.
+// segue o tipo do desconto registrado no item na emissão (correctedNet):
+// desconto percentual mantém a proporção líquida do item; desconto de valor
+// fixo mantém o valor absoluto já descontado (novo bruto menos o mesmo
+// desconto, nunca negativo); item sem desconto segue o bruto. Itens com
+// desconto faturados antes do registro do tipo usam a proporção. O novo
+// valor é arredondado uma única vez. A diferença em relação ao que já foi
+// faturado (incluindo correções anteriores) vira item de ajuste na próxima
+// fatura da assinatura quando positiva (sem novo desconto), ou crédito do
+// cliente quando negativa. Se a assinatura não tiver próximo ciclo
+// (cancelada ou com encerramento agendado), a diferença positiva é faturada
+// imediatamente.
 type UsageCorrector struct {
 	store CorrectionStore
 	clock clock.Clock
@@ -174,16 +232,11 @@ func (c *UsageCorrector) correct(ctx context.Context, tx CorrectionTx, g LateGro
 	if err != nil {
 		return err
 	}
-	billedAmount, billedDiscount := money.Zero(price.Currency), money.Zero(price.Currency)
+	billed := BilledItem{Amount: money.Zero(price.Currency), Discount: money.Zero(price.Currency)}
 	if agg.InvoiceItemID != nil {
-		if billedAmount, billedDiscount, err = tx.InvoiceItemAmounts(ctx, *agg.InvoiceItemID); err != nil {
+		if billed, err = tx.BilledItem(ctx, *agg.InvoiceItemID); err != nil {
 			return err
 		}
-	}
-	// Proporção líquida do item faturado: (valor − desconto) ÷ valor.
-	netRatio := big.NewRat(1, 1)
-	if billedAmount.IsPositive() {
-		netRatio = new(big.Rat).SetFrac(big.NewInt(billedAmount.Amount()-billedDiscount.Amount()), big.NewInt(billedAmount.Amount()))
 	}
 	grossExact := new(big.Rat)
 	if billable.Sign() > 0 {
@@ -193,7 +246,7 @@ func (c *UsageCorrector) correct(ctx context.Context, tx CorrectionTx, g LateGro
 	if err != nil {
 		return err
 	}
-	newAmount, err := money.FromRat(new(big.Rat).Mul(grossExact, netRatio), price.Currency, money.DefaultRounding)
+	newAmount, rule, discountRatio, err := correctedNet(grossExact, newGross, billed)
 	if err != nil {
 		return err
 	}
@@ -202,7 +255,7 @@ func (c *UsageCorrector) correct(ctx context.Context, tx CorrectionTx, g LateGro
 	case agg.CorrectedAmount != nil:
 		prevQty, prevAmount = agg.CorrectedQuantity, *agg.CorrectedAmount
 	case agg.InvoiceItemID != nil:
-		if prevAmount, err = billedAmount.Sub(billedDiscount); err != nil {
+		if prevAmount, err = billed.Amount.Sub(billed.Discount); err != nil {
 			return err
 		}
 	}
@@ -217,8 +270,11 @@ func (c *UsageCorrector) correct(ctx context.Context, tx CorrectionTx, g LateGro
 	details := map[string]any{"aggregate_id": agg.ID, "metric_code": metric.Code, "aggregation": metric.Aggregation,
 		"billed_quantity": money.RatString(agg.Quantity), "previous_quantity": money.RatString(prevQty),
 		"corrected_quantity": money.RatString(newQty), "previous_amount": prevAmount.Amount(), "corrected_amount": newAmount.Amount(),
-		"corrected_gross_amount": newGross.Amount(), "billed_amount": billedAmount.Amount(), "billed_discount_amount": billedDiscount.Amount(),
-		"discount_ratio": money.RatString(new(big.Rat).Sub(big.NewRat(1, 1), netRatio)), "events": events, "price_version_id": price.ID}
+		"corrected_gross_amount": newGross.Amount(), "billed_amount": billed.Amount.Amount(), "billed_discount_amount": billed.Discount.Amount(),
+		"billed_discount_type": string(billed.DiscountType), "discount_rule": rule, "events": events, "price_version_id": price.ID}
+	if discountRatio != nil {
+		details["discount_ratio"] = money.RatString(discountRatio)
+	}
 	desc := fmt.Sprintf("Correção de consumo de %s: %s para %s %s (%s)", metric.Name, money.RatString(prevQty), money.RatString(newQty),
 		metric.Unit, localRange(agg.Period, settings.Location))
 	var itemID *uuid.UUID

@@ -208,7 +208,8 @@ type Action struct {
 }
 
 // Apply executa a ação: pay, pay_silently, fail, refund, chargeback,
-// diverge e replay.
+// diverge e replay. Uma cobrança recusada (fail) ainda pode ser paga, como no
+// pagamento por outro meio depois da recusa do cartão no mesmo checkout.
 func (s *Sim) Apply(id string, a Action) (Charge, error) {
 	s.st.mu.Lock()
 	defer s.st.mu.Unlock()
@@ -219,8 +220,8 @@ func (s *Sim) Apply(id string, a Action) (Charge, error) {
 	now := s.now()
 	switch a.Name {
 	case "pay", "pay_silently":
-		if c.Status != "pending" {
-			return *c, fmt.Errorf("cobrança não está pendente")
+		if c.Status != "pending" && c.Status != "failed" {
+			return *c, fmt.Errorf("cobrança não está pendente nem recusada")
 		}
 		paid := c.Amount
 		if a.Amount > 0 {

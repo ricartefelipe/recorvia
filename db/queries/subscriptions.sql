@@ -24,7 +24,8 @@ UPDATE subscriptions
        cancel_at_period_end = @cancel_at_period_end, canceled_at = sqlc.narg(canceled_at), cancel_reason = sqlc.narg(cancel_reason),
        ended_at = sqlc.narg(ended_at), suspended_at = sqlc.narg(suspended_at), suspension_reason = sqlc.narg(suspension_reason),
        payment_terms_days = sqlc.narg(payment_terms_days), price_override_amount = sqlc.narg(price_override_amount),
-       price_override_adjustment_id = sqlc.narg(price_override_adjustment_id), version = version + 1
+       price_override_adjustment_id = sqlc.narg(price_override_adjustment_id), pending_usage_starts = @pending_usage_starts,
+       version = version + 1
  WHERE tenant_id = @tenant_id AND id = @id AND version = @version;
 
 -- name: ClaimDueSubscription :one

@@ -179,37 +179,44 @@ func (s Subscription) CurrentPeriodBilled() (bool, error) {
 // Proration é o cálculo da prorrata de uma mudança imediata.
 //
 // Política: por dias civis no fuso do contrato, contando o dia da mudança
-// como dia restante. Credita-se a parte não usufruída do componente fixo
-// anterior e cobra-se a mesma fração do novo componente fixo, cada valor
-// arredondado uma única vez (half-even). Exemplo: período de 30 dias, troca
-// no dia 21 de R$ 100,00 para R$ 160,00 → fração 10/30; crédito R$ 33,33;
-// cobrança R$ 53,33; diferença R$ 20,00.
-//
-// Cupom percentual: o crédito desconta o percentual do cupom vigente no
-// período já pago (o cliente pagou o valor com desconto) e a cobrança
-// desconta o percentual do cupom que continua valendo no novo plano. Com
-// cupom de 10% válido nos dois planos, o exemplo acima fica com crédito de
-// R$ 30,00 e cobrança de R$ 48,00 (diferença R$ 18,00). Cupom de valor fixo
-// não é prorrateado.
+// como dia restante. Credita-se a fração não usufruída do valor efetivamente
+// faturado pelo componente fixo vigente no período (ProrationBasis.Billed) e
+// cobra-se a mesma fração do novo componente fixo com o desconto percentual
+// que vale para ele, cada valor arredondado uma única vez (half-even).
+// Exemplo: período de 30 dias faturado por R$ 100,00, troca no dia 21 para
+// R$ 160,00 → fração 10/30; crédito R$ 33,33; cobrança R$ 53,33; diferença
+// R$ 20,00. Se o período foi faturado com R$ 10,00 de desconto (R$ 90,00) e
+// um cupom de 10% vale para o novo plano: crédito R$ 30,00, cobrança
+// R$ 48,00, diferença R$ 18,00. Sem faturamento válido do período, não há
+// crédito.
 type Proration struct {
 	Period        calendar.Period
 	Fraction      *big.Rat
 	RemainingDays int
 	PeriodDays    int
-	OldAmount     money.Money
-	NewAmount     money.Money
-	Discount      ProrationDiscount
+	// OldAmount e NewAmount são os componentes fixos anterior e novo pelo
+	// preço vigente, sem desconto (informativos).
+	OldAmount money.Money
+	NewAmount money.Money
+	// CreditBase é o valor faturado pelo componente anterior para o período
+	// integral (zero sem faturamento válido); NewDiscountBP é o percentual
+	// de desconto da cobrança.
+	CreditBase    *big.Rat
+	NewDiscountBP int64
 	Credit        money.Money
 	Charge        money.Money
 	Net           money.Money
 }
 
-// ProrationDiscount são os percentuais de cupom, em pontos-base, aplicados à
-// prorrata: OldBP ao crédito da parte não usufruída (cupom vigente no
-// período pago) e NewBP à cobrança proporcional (cupom que continua valendo
-// no novo plano). Zero indica ausência de desconto percentual.
-type ProrationDiscount struct {
-	OldBP int64
+// ProrationBasis são as bases da prorrata.
+type ProrationBasis struct {
+	// Billed é o valor efetivamente faturado pelo componente fixo vigente
+	// para o período integral, líquido de descontos e já com reajustes. Nulo
+	// quando não há faturamento válido do componente no período: não há
+	// crédito.
+	Billed *big.Rat
+	// NewBP é o percentual de desconto, em pontos-base, que vale para o
+	// novo componente (zero sem desconto percentual).
 	NewBP int64
 }
 
@@ -219,14 +226,25 @@ func discountFactor(bp int64) *big.Rat {
 	return big.NewRat(10000-bp, 10000)
 }
 
-// ProrateChange calcula a prorrata entre os componentes fixos anterior e
-// novo (já com reajustes aplicados), com os percentuais de cupom de cada
-// lado. ok é falso quando não há prorrata: o período corrente ainda não foi
-// faturado ou a mudança ocorre fora dele.
-func ProrateChange(s Subscription, oldPrice, newPrice catalog.PriceVersion, oldQty, newQty int, at time.Time,
-	discount ProrationDiscount) (Proration, bool, error) {
+// ProratesAt informa se uma mudança imediata no instante informado tem
+// prorrata: o período corrente já foi faturado e contém o instante.
+func (s Subscription) ProratesAt(at time.Time) (bool, error) {
 	billed, err := s.CurrentPeriodBilled()
-	if err != nil || !billed || !s.CurrentPeriod.Contains(at) {
+	if err != nil || !billed {
+		return false, err
+	}
+	return s.CurrentPeriod.Contains(at), nil
+}
+
+// ProrateChange calcula a prorrata entre os componentes fixos anterior e
+// novo (já com reajustes aplicados). O crédito usa o valor faturado
+// informado em basis e a cobrança, o novo componente com o percentual de
+// desconto de basis. ok é falso quando não há prorrata: o período corrente
+// ainda não foi faturado ou a mudança ocorre fora dele.
+func ProrateChange(s Subscription, oldPrice, newPrice catalog.PriceVersion, oldQty, newQty int, at time.Time,
+	basis ProrationBasis) (Proration, bool, error) {
+	prorates, err := s.ProratesAt(at)
+	if err != nil || !prorates {
 		return Proration{}, false, err
 	}
 	loc, err := s.Location()
@@ -245,11 +263,16 @@ func ProrateChange(s Subscription, oldPrice, newPrice catalog.PriceVersion, oldQ
 	if err != nil {
 		return Proration{}, false, err
 	}
-	credit, err := oldAmount.MulRat(new(big.Rat).Mul(frac, discountFactor(discount.OldBP)), money.DefaultRounding)
+	base := new(big.Rat)
+	if basis.Billed != nil && basis.Billed.Sign() > 0 {
+		base.Set(basis.Billed)
+	}
+	credit, err := money.FromRat(new(big.Rat).Mul(base, frac), oldAmount.Currency(), money.DefaultRounding)
 	if err != nil {
 		return Proration{}, false, err
 	}
-	charge, err := newAmount.MulRat(new(big.Rat).Mul(frac, discountFactor(discount.NewBP)), money.DefaultRounding)
+	bp := min(max(basis.NewBP, 0), 10000)
+	charge, err := newAmount.MulRat(new(big.Rat).Mul(frac, discountFactor(bp)), money.DefaultRounding)
 	if err != nil {
 		return Proration{}, false, err
 	}
@@ -264,21 +287,26 @@ func ProrateChange(s Subscription, oldPrice, newPrice catalog.PriceVersion, oldQ
 		start = s.CurrentPeriod.Start
 	}
 	return Proration{Period: calendar.Period{Start: start, End: s.CurrentPeriod.End}, Fraction: frac, RemainingDays: remaining,
-		PeriodDays: total, OldAmount: oldAmount, NewAmount: newAmount, Discount: discount, Credit: credit, Charge: charge, Net: net}, true, nil
+		PeriodDays: total, OldAmount: oldAmount, NewAmount: newAmount, CreditBase: base, NewDiscountBP: bp, Credit: credit, Charge: charge,
+		Net: net}, true, nil
 }
 
 // CreditUnitAmount é o valor unitário exato do item de crédito (negativo):
-// componente fixo anterior com o desconto do período pago. Multiplicado pela
-// fração, resulta no crédito antes do arredondamento.
+// valor faturado pelo componente anterior para o período integral.
+// Multiplicado pela fração, resulta no crédito antes do arredondamento.
 func (p Proration) CreditUnitAmount() *big.Rat {
-	r := new(big.Rat).Mul(p.OldAmount.Rat(), discountFactor(p.Discount.OldBP))
-	return r.Neg(r)
+	if p.CreditBase == nil {
+		return new(big.Rat)
+	}
+	return new(big.Rat).Neg(p.CreditBase)
 }
 
 // ChargeUnitAmount é o valor unitário exato do item de cobrança: novo
-// componente fixo com o desconto que continua valendo.
+// componente fixo com o desconto percentual que vale para ele. É também o
+// valor faturado pelo novo componente para o período integral, base do
+// crédito de uma nova mudança no mesmo período.
 func (p Proration) ChargeUnitAmount() *big.Rat {
-	return new(big.Rat).Mul(p.NewAmount.Rat(), discountFactor(p.Discount.NewBP))
+	return new(big.Rat).Mul(p.NewAmount.Rat(), discountFactor(p.NewDiscountBP))
 }
 
 // AdjustmentKind é o tipo de reajuste.

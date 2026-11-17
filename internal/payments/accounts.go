@@ -147,7 +147,8 @@ func (s *Service) Accounts(ctx context.Context, tenantID uuid.UUID) ([]ProviderA
 	return out, err
 }
 
-// RetryCharge cria nova tentativa de cobrança para a fatura, quando a última falhou.
+// RetryCharge cria nova tentativa de cobrança para a fatura, quando a última
+// falhou, e devolve a cobrança vigente (ver RequestCharge).
 func (s *Service) RetryCharge(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, invoiceID uuid.UUID) (*Charge, error) {
 	c, err := s.RequestCharge(ctx, tenantID, invoiceID, actor)
 	if err != nil {

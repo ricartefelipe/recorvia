@@ -115,6 +115,9 @@ type payStore struct {
 	txCount      int
 	dueLimit     int
 	extraOpen    []Charge
+	// locks registra, em ordem, as operações que bloqueiam a assinatura
+	// ("subscription") ou o cliente ("customer") no armazenamento real.
+	locks []string
 }
 
 func newPayStore() *payStore {
@@ -280,6 +283,7 @@ func (s *payStore) RefreshSubscriptionStanding(_ context.Context, id uuid.UUID, 
 	if err := s.fail("RefreshSubscriptionStanding"); err != nil {
 		return err
 	}
+	s.locks = append(s.locks, "subscription")
 	s.standing = append(s.standing, id)
 	return nil
 }
@@ -297,6 +301,7 @@ func (s *payStore) SaveProviderCustomer(_ context.Context, id uuid.UUID, provide
 	if err := s.fail("SaveProviderCustomer"); err != nil {
 		return err
 	}
+	s.locks = append(s.locks, "customer") // a chave estrangeira bloqueia a linha do cliente
 	s.providerCustomers[id.String()+"|"+provider] = providerID
 	return nil
 }
@@ -439,6 +444,7 @@ func (s *payStore) GrantCustomerCredit(_ context.Context, customerID uuid.UUID, 
 	if err := s.fail("GrantCustomerCredit"); err != nil {
 		return err
 	}
+	s.locks = append(s.locks, "customer")
 	s.credits = append(s.credits, creditGrant{customerID, amount, kind, invoiceID, reason})
 	return nil
 }

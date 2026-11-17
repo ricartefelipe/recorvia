@@ -152,7 +152,9 @@ var errNothingToDo = errors.New("payments: nada a fazer")
 
 // RequestCharge cria a cobrança da fatura no provedor padrão do tenant. É
 // idempotente: se já houver cobrança em andamento ou paga, retorna a
-// existente. Sem provedor configurado, não cria cobrança.
+// existente. Sem provedor configurado, não cria cobrança. Devolve a cobrança
+// vigente: se o saldo da fatura mudou enquanto a criação estava em andamento
+// e a cobrança foi substituída na conclusão, devolve a substituta.
 func (s *Service) RequestCharge(ctx context.Context, tenantID, invoiceID uuid.UUID, actor audit.Actor) (*Charge, error) {
 	var charge Charge
 	var opID uuid.UUID
@@ -184,8 +186,8 @@ func (s *Service) RequestCharge(ctx context.Context, tenantID, invoiceID uuid.UU
 	if err != nil {
 		return nil, err
 	}
-	s.executeBestEffort(ctx, tenantID, charge.ID, opID)
-	return s.chargeAfter(context.WithoutCancel(ctx), tenantID, charge.ID)
+	current := s.executeBestEffort(ctx, tenantID, charge.ID, opID)
+	return s.chargeAfter(context.WithoutCancel(ctx), tenantID, current)
 }
 
 // insertChargeForBalance grava, na transação corrente, a cobrança pelo saldo
@@ -231,12 +233,18 @@ func (s *Service) insertChargeForBalance(ctx context.Context, tx Tx, tenantID uu
 
 // executeBestEffort executa a criação no provedor logo após o commit. Em caso
 // de falha a operação permanece registrada e é retomada pela recuperação
-// agendada.
-func (s *Service) executeBestEffort(ctx context.Context, tenantID, chargeID, opID uuid.UUID) {
-	if err := s.ExecuteOperation(ctx, tenantID, opID); err != nil && s.cfg.Log != nil {
+// agendada. Devolve o ID da cobrança vigente: a informada ou, se ela foi
+// substituída na conclusão da criação, a última substituta.
+func (s *Service) executeBestEffort(ctx context.Context, tenantID, chargeID, opID uuid.UUID) uuid.UUID {
+	current, err := s.executeOperation(ctx, tenantID, opID)
+	if err != nil && s.cfg.Log != nil {
 		s.cfg.Log.WarnContext(ctx, "criação da cobrança adiada para a recuperação", slog.String("charge_id", chargeID.String()),
 			slog.String("error", err.Error()))
 	}
+	if current == uuid.Nil {
+		return chargeID
+	}
+	return current
 }
 
 func (s *Service) chargeAfter(ctx context.Context, tenantID, id uuid.UUID) (*Charge, error) {
@@ -263,6 +271,15 @@ const (
 // registra o resultado (transação curta). Em tentativas após falha
 // ambígua, consulta o provedor pela referência externa antes de criar.
 func (s *Service) ExecuteOperation(ctx context.Context, tenantID, opID uuid.UUID) error {
+	_, err := s.executeOperation(ctx, tenantID, opID)
+	return err
+}
+
+// executeOperation implementa ExecuteOperation. Quando a cobrança criada é
+// substituída na conclusão (saldo da fatura alterado durante a criação),
+// executa a substituta e devolve o ID da cobrança vigente; caso contrário,
+// devolve uuid.Nil.
+func (s *Service) executeOperation(ctx context.Context, tenantID, opID uuid.UUID) (uuid.UUID, error) {
 	var (
 		op      Operation
 		charge  Charge
@@ -303,29 +320,29 @@ func (s *Service) ExecuteOperation(ctx context.Context, tenantID, opID uuid.UUID
 		return err
 	})
 	if errors.Is(err, errNothingToDo) {
-		return nil
+		return uuid.Nil, nil
 	}
 	if err != nil {
-		return err
+		return uuid.Nil, err
 	}
 	gw, err := s.resolver.Gateway(account)
 	if err != nil {
 		_, err := s.recordOutcome(ctx, tenantID, opID, outcomePermanent, nil, "", err)
-		return err
+		return uuid.Nil, err
 	}
 	callCtx, cancel := context.WithTimeout(ctx, s.cfg.CallTimeout)
 	pc, providerCustomer, res, callErr := s.createAtProvider(callCtx, gw, op, charge, cust, number)
 	cancel()
 	next, err := s.recordOutcome(ctx, tenantID, opID, res, pc, providerCustomer, callErr)
 	if err != nil {
-		return err
+		return uuid.Nil, err
 	}
-	if next != nil {
-		// A cobrança criada divergia do saldo atual da fatura e foi
-		// substituída na mesma transação; a nova segue o fluxo normal.
-		s.executeBestEffort(ctx, tenantID, next.chargeID, next.opID)
+	if next == nil {
+		return uuid.Nil, nil
 	}
-	return nil
+	// A cobrança criada divergia do saldo atual da fatura e foi substituída
+	// na mesma transação; a nova segue o fluxo normal e passa a ser a vigente.
+	return s.executeBestEffort(ctx, tenantID, next.chargeID, next.opID), nil
 }
 
 func classify(err error) outcome {
@@ -402,11 +419,6 @@ func (s *Service) recordOutcome(ctx context.Context, tenantID, opID uuid.UUID, r
 		}
 		switch res {
 		case outcomeSucceeded:
-			if providerCustomer != "" {
-				if err := tx.SaveProviderCustomer(ctx, charge.CustomerID, charge.Provider, providerCustomer); err != nil {
-					return err
-				}
-			}
 			if err := charge.MarkCreated(pc.ProviderChargeID, pc.CheckoutURL, now); err != nil {
 				return err
 			}
@@ -430,6 +442,15 @@ func (s *Service) recordOutcome(ctx context.Context, tenantID, opID uuid.UUID, r
 			}
 			if pc.Status.IsPaid() {
 				if err := s.applyProviderState(ctx, tx, &charge, *pc, now, providerActor); err != nil {
+					return err
+				}
+			}
+			// O vínculo do cliente no provedor é gravado por último: a
+			// inserção verifica a chave estrangeira do cliente (bloqueio
+			// compartilhado da linha), que precisa vir depois do bloqueio da
+			// assinatura feito na aplicação de um pagamento já confirmado.
+			if providerCustomer != "" {
+				if err := tx.SaveProviderCustomer(ctx, charge.CustomerID, charge.Provider, providerCustomer); err != nil {
 					return err
 				}
 			}
@@ -471,13 +492,14 @@ func chargeMatchesBalance(c Charge, inv billing.Invoice) bool {
 }
 
 // replaceIfBalanceChanged ajusta a cobrança cuja criação no provedor terminou
-// depois de uma alteração do saldo da fatura (por exemplo, nota de crédito
-// emitida enquanto a criação estava em andamento ou em retentativa). Se o
-// valor diverge do saldo, a cobrança é cancelada localmente e, havendo saldo,
-// uma nova cobrança é gravada pelo valor atualizado na mesma transação; a
-// chamada ao provedor ocorre depois do commit e, se falhar, fica com a
-// recuperação agendada. O ajuste não depende de reentrega de mensagens.
-// Faturas canceladas ou baixadas seguem os fluxos próprios.
+// depois de uma alteração do saldo da fatura (por exemplo, nota de crédito ou
+// pagamento manual parcial registrados enquanto a criação estava em andamento
+// ou em retentativa): a cobrança acompanha o saldo vigente. Se o valor
+// diverge do saldo, a cobrança é cancelada localmente e, havendo saldo, uma
+// nova cobrança é gravada pelo valor atualizado na mesma transação; a chamada
+// ao provedor ocorre depois do commit e, se falhar, fica com a recuperação
+// agendada. O ajuste não depende de reentrega de mensagens. Faturas
+// canceladas ou baixadas seguem os fluxos próprios.
 func (s *Service) replaceIfBalanceChanged(ctx context.Context, tx Tx, tenantID uuid.UUID, c *Charge, now time.Time) (bool, *replacement, error) {
 	inv, err := tx.Invoice(ctx, c.InvoiceID, true)
 	if err != nil {
@@ -752,7 +774,8 @@ func needsAuthoritativeState(c Charge, ev WebhookEvent) bool {
 }
 
 // applyProviderState aplica a situação informada pelo provedor sem
-// regredir estados e de forma idempotente.
+// regredir estados e de forma idempotente. A confirmação de pagamento vale
+// também para cobrança recusada ou cancelada localmente (ver MarkPaid).
 func (s *Service) applyProviderState(ctx context.Context, tx Tx, c *Charge, pc ProviderCharge, now time.Time, actor audit.Actor) error {
 	c.RecordProviderStatus(pc.RawStatus, pc.UpdatedAt)
 	if statusRank(pc.Status) < localRank(*c) && pc.Status != ProviderFailed && pc.Status != ProviderCanceled {
@@ -794,10 +817,10 @@ func (s *Service) confirmPayment(ctx context.Context, tx Tx, c *Charge, pc Provi
 		gross = c.Amount
 	}
 	fee := pc.FeeOrDerived()
-	// Cobrança cancelada apenas no Recorvia continua válida no provedor: a
-	// confirmação prevalece e o valor segue para a fatura (excedente vira
-	// crédito do cliente), nunca é descartado.
-	wasCanceled := c.Status == ChargeCanceled
+	// Cobrança recusada ou cancelada apenas no Recorvia continua válida no
+	// provedor: a confirmação prevalece e o valor segue para a fatura
+	// (excedente vira crédito do cliente), nunca é descartado.
+	previous, failureReason := c.Status, c.FailureReason
 	if err := c.MarkPaid(gross, fee, paidAt, now); err != nil {
 		return err
 	}
@@ -812,13 +835,25 @@ func (s *Service) confirmPayment(ctx context.Context, tx Tx, c *Charge, pc Provi
 	if err != nil || !inserted {
 		return err
 	}
-	if wasCanceled {
-		if err := tx.Audit(ctx, audit.New(c.TenantID, now, actor, "charge.paid_after_local_cancellation", "charge", c.ID.String(),
-			map[string]any{"invoice_id": inv.ID, "payment_id": pay.ID, "amount": gross.Amount(), "invoice_status": string(inv.Status)})); err != nil {
+	if action, ok := paidAfterClosureAudit[previous]; ok {
+		details := map[string]any{"invoice_id": inv.ID, "payment_id": pay.ID, "amount": gross.Amount(), "invoice_status": string(inv.Status),
+			"previous_status": string(previous)}
+		if failureReason != "" {
+			details["failure_reason"] = failureReason
+		}
+		if err := tx.Audit(ctx, audit.New(c.TenantID, now, actor, action, "charge", c.ID.String(), details)); err != nil {
 			return err
 		}
 	}
 	return s.applyToInvoice(ctx, tx, &inv, pay, true, actor, now)
+}
+
+// paidAfterClosureAudit identifica, na auditoria, a confirmação de pagamento
+// de cobrança que estava recusada ou cancelada localmente (transição
+// incomum, que merece verificação na conciliação).
+var paidAfterClosureAudit = map[ChargeStatus]string{
+	ChargeFailed:   "charge.paid_after_failure",
+	ChargeCanceled: "charge.paid_after_local_cancellation",
 }
 
 func (s *Service) applyToInvoice(ctx context.Context, tx Tx, inv *billing.Invoice, pay Payment, viaProvider bool, actor audit.Actor, now time.Time) error {
@@ -873,11 +908,10 @@ func (s *Service) applyToInvoice(ctx context.Context, tx Tx, inv *billing.Invoic
 			}
 		}
 	}
-	if excess.IsPositive() {
-		if err := s.creditOverpayment(ctx, tx, inv, pay, excess, viaProvider, actor, now); err != nil {
-			return err
-		}
-	}
+	// A situação da assinatura é atualizada antes do crédito do excedente:
+	// a assinatura é bloqueada antes do cliente, na mesma ordem do motor, das
+	// mudanças de assinatura, da correção de consumo e da ingestão, para que
+	// essas transações se serializem sem impasse.
 	event := outbox.EventInvoicePartiallyPaid
 	if inv.Status == billing.Paid {
 		event = outbox.EventInvoicePaid
@@ -885,6 +919,11 @@ func (s *Service) applyToInvoice(ctx context.Context, tx Tx, inv *billing.Invoic
 			if err := tx.RefreshSubscriptionStanding(ctx, *inv.SubscriptionID, actor, now); err != nil {
 				return err
 			}
+		}
+	}
+	if excess.IsPositive() {
+		if err := s.creditOverpayment(ctx, tx, inv, pay, excess, viaProvider, actor, now); err != nil {
+			return err
 		}
 	}
 	if err := tx.Emit(ctx, outbox.New(pay.TenantID, outbox.EventPaymentConfirmed, "payment", pay.ID,

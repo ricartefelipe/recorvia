@@ -28,6 +28,9 @@ stateDiagram-v2
 Cancelamento ao fim do período é uma marcação (`cancel_at_period_end`) desfeita com
 `resume-renewal`; a transição para `canceled` ocorre no motor, no início do período seguinte.
 Reativação antes do fim do trial volta a `trialing` e mantém a data original de fim do trial.
+Reativação que pula períodos inteiramente suspensos registra em `pending_usage_starts` os períodos
+com consumo anterior à suspensão ainda não fechado; o primeiro faturamento após a reativação os
+fecha e limpa a lista (ver `dinheiro-e-datas.md`).
 
 ## Mudança agendada e reajuste programado (`internal/subscriptions`)
 
@@ -87,6 +90,7 @@ stateDiagram-v2
   awaiting_payment --> paid
   awaiting_payment --> failed
   awaiting_payment --> canceled: fatura cancelada ou nota de crédito
+  failed --> paid: pagamento confirmado pelo provedor
   canceled --> paid: pagamento confirmado pelo provedor
   paid --> partially_refunded
   paid --> refunded
@@ -97,9 +101,14 @@ stateDiagram-v2
   disputed --> charged_back: disputa perdida
 ```
 
-O cancelamento de cobrança é apenas local: a cobrança continua válida no provedor. Por isso a
-confirmação de pagamento pelo provedor é a única transição que sai de `canceled`; o valor é aplicado
-à fatura e o excedente vira crédito do cliente.
+Dinheiro recebido nunca é descartado. O cancelamento de cobrança é apenas local (a cobrança continua
+válida no provedor), e a recusa (por exemplo, do cartão) não impede o pagamento posterior por outro
+meio no mesmo checkout. Por isso a confirmação de pagamento pelo provedor é a única transição que
+sai de `failed` e de `canceled`: a cobrança passa a `paid` e o valor segue a aplicação normal (quita
+o saldo da fatura; o excedente, ou o valor integral quando a fatura já está paga ou cancelada, vira
+crédito do cliente; a taxa do provedor é lançada no ledger). A transição incomum é auditada como
+`charge.paid_after_failure` ou `charge.paid_after_local_cancellation`, com a situação anterior e,
+na recusa, o motivo, que deixa de constar na cobrança paga.
 
 ## Operação externa (`payment_operations`)
 

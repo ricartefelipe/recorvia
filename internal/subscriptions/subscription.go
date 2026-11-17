@@ -6,7 +6,10 @@
 // início de cada período; consumo medido é cobrado no período seguinte
 // (pós-pago). O índice NextBillingIndex aponta o próximo período a faturar
 // e NextBillingAt o seu início; o motor de faturamento processa todos os
-// períodos vencidos, inclusive após indisponibilidade do agendador.
+// períodos vencidos, inclusive após indisponibilidade do agendador. Quando a
+// reativação pula os passos dos períodos inteiramente suspensos, o consumo
+// anterior à suspensão que esses passos fechariam fica em PendingUsageStarts
+// e é fechado pelo primeiro passo após a reativação.
 package subscriptions
 
 import (
@@ -81,6 +84,12 @@ type Subscription struct {
 	SuspendedAt       *time.Time
 	SuspensionReason  string
 	PaymentTermsDays  *int
+	// PendingUsageStarts são os inícios dos períodos com consumo anterior a
+	// uma suspensão cujo passo de fechamento foi pulado pela reativação
+	// (junto com os períodos inteiramente suspensos), em ordem cronológica.
+	// O próximo passo de faturamento fecha esses períodos no lugar do período
+	// anterior regular; ApplyStep limpa a lista.
+	PendingUsageStarts []time.Time
 	// PriceOverride substitui o componente fixo da versão de preço após um
 	// reajuste programado, em centavos: valor fixo (inteiro) ou preço por
 	// unidade (até money.MaxDecimalScale casas).
@@ -232,10 +241,76 @@ const (
 
 // BillingStep descreve o que o motor deve faturar.
 type BillingStep struct {
-	Kind        StepKind
-	Index       int
-	Period      calendar.Period
+	Kind   StepKind
+	Index  int
+	Period calendar.Period
+	// UsagePeriod é o período de consumo fechado pelo passo: o anterior ao
+	// período faturado ou, depois de uma reativação que pulou passos, o mais
+	// recente com consumo anterior à suspensão.
 	UsagePeriod *calendar.Period
+	// CarriedUsage são os demais períodos com consumo anterior a uma
+	// suspensão cujo fechamento a reativação pulou, em ordem cronológica e
+	// anteriores a UsagePeriod (vazio no caso comum, em que só o período em
+	// que a suspensão começou fica pendente).
+	CarriedUsage []calendar.Period
+}
+
+// UsagePeriods devolve todos os períodos de consumo fechados pelo passo, em
+// ordem cronológica.
+func (b BillingStep) UsagePeriods() []calendar.Period {
+	if b.UsagePeriod == nil {
+		return nil
+	}
+	return append(slices.Clone(b.CarriedUsage), *b.UsagePeriod)
+}
+
+// UsageSpan é o intervalo coberto pelos períodos de consumo do passo (nulo
+// sem consumo a fechar).
+func (b BillingStep) UsageSpan() *calendar.Period {
+	if b.UsagePeriod == nil {
+		return nil
+	}
+	span := *b.UsagePeriod
+	if len(b.CarriedUsage) > 0 {
+		span.Start = b.CarriedUsage[0].Start
+	}
+	return &span
+}
+
+// withUsage define os períodos de consumo do passo (em ordem cronológica).
+func (b *BillingStep) withUsage(periods []calendar.Period) {
+	if len(periods) == 0 {
+		return
+	}
+	last := periods[len(periods)-1]
+	b.UsagePeriod = &last
+	if len(periods) > 1 {
+		b.CarriedUsage = slices.Clone(periods[:len(periods)-1])
+	}
+}
+
+// pendingUsage devolve os períodos de PendingUsageStarts.
+func (s Subscription) pendingUsage(sched calendar.Schedule) []calendar.Period {
+	out := make([]calendar.Period, 0, len(s.PendingUsageStarts))
+	for _, start := range s.PendingUsageStarts {
+		out = append(out, sched.Period(max(sched.IndexOf(start), 0)))
+	}
+	return out
+}
+
+// UsageOpen informa se o consumo do período de cobrança de índice idx (com
+// início start) ainda será fechado por um passo de faturamento: períodos
+// pendentes de uma reativação, ou o período anterior ao próximo passo e os
+// seguintes. Com períodos pendentes, o próximo passo fecha somente eles, e o
+// período anterior regular (inteiramente suspenso) não é fechado.
+func (s Subscription) UsageOpen(idx int, start time.Time) bool {
+	if slices.ContainsFunc(s.PendingUsageStarts, start.Equal) {
+		return true
+	}
+	if len(s.PendingUsageStarts) > 0 {
+		return idx >= s.NextBillingIndex
+	}
+	return idx+1 >= s.NextBillingIndex
 }
 
 // NextStep calcula o próximo passo de faturamento.
@@ -244,16 +319,7 @@ func (s Subscription) NextStep(now time.Time) (BillingStep, bool, error) {
 		return BillingStep{}, false, nil
 	}
 	if s.Status == Canceled {
-		if s.EndedAt == nil {
-			return BillingStep{}, false, nil
-		}
-		usage := calendar.Period{Start: s.CurrentPeriod.Start, End: *s.EndedAt}
-		// Sem período faturado (avaliação) ou sem tempo decorrido, não há
-		// consumo a faturar; o passo final ainda fatura itens pendentes.
-		if s.NextBillingIndex == 0 || !usage.Start.Before(usage.End) {
-			return BillingStep{Kind: StepFinalUsage, Index: s.NextBillingIndex}, true, nil
-		}
-		return BillingStep{Kind: StepFinalUsage, Index: s.NextBillingIndex, Period: usage, UsagePeriod: &usage}, true, nil
+		return s.finalUsageStep()
 	}
 	sched, err := s.Schedule()
 	if err != nil {
@@ -261,12 +327,45 @@ func (s Subscription) NextStep(now time.Time) (BillingStep, bool, error) {
 	}
 	idx := s.NextBillingIndex
 	step := BillingStep{Kind: StepBill, Index: idx, Period: sched.Period(idx)}
-	if idx > 0 {
+	switch {
+	case len(s.PendingUsageStarts) > 0:
+		step.withUsage(s.pendingUsage(sched))
+	case idx > 0:
 		prev := sched.Period(idx - 1)
 		step.UsagePeriod = &prev
 	}
 	if s.CancelAtPeriodEnd {
 		step.Kind = StepEnd
+	}
+	return step, true, nil
+}
+
+// finalUsageStep é o passo de fechamento da assinatura cancelada de imediato:
+// o consumo do período interrompido e, se houver, o dos períodos pendentes de
+// uma reativação.
+func (s Subscription) finalUsageStep() (BillingStep, bool, error) {
+	if s.EndedAt == nil {
+		return BillingStep{}, false, nil
+	}
+	var periods []calendar.Period
+	if len(s.PendingUsageStarts) > 0 {
+		sched, err := s.Schedule()
+		if err != nil {
+			return BillingStep{}, false, err
+		}
+		periods = s.pendingUsage(sched)
+	}
+	// Sem período faturado (avaliação) ou sem tempo decorrido, não há
+	// consumo do período interrompido; o passo final ainda fatura os
+	// períodos pendentes e os itens pendentes.
+	usage := calendar.Period{Start: s.CurrentPeriod.Start, End: *s.EndedAt}
+	if s.NextBillingIndex > 0 && usage.Start.Before(usage.End) {
+		periods = append(periods, usage)
+	}
+	step := BillingStep{Kind: StepFinalUsage, Index: s.NextBillingIndex}
+	step.withUsage(periods)
+	if step.UsagePeriod != nil {
+		step.Period = *step.UsagePeriod
 	}
 	return step, true, nil
 }
@@ -288,14 +387,17 @@ func (s *Subscription) ApplyStep(step BillingStep, at time.Time) error {
 		s.NextBillingIndex = step.Index + 1
 		next := sched.Period(step.Index + 1).Start
 		s.NextBillingAt = &next
+		s.PendingUsageStarts = nil
 		s.record("renewed", nil, at, map[string]any{"period_start": step.Period.Start, "period_index": step.Index})
 	case StepEnd:
 		end := step.Period.Start
 		s.EndedAt = &end
 		s.NextBillingAt = nil
+		s.PendingUsageStarts = nil
 		return s.transition(Canceled, "ended_at_period_end", at, map[string]any{"ended_at": end})
 	case StepFinalUsage:
 		s.NextBillingAt = nil
+		s.PendingUsageStarts = nil
 		s.record("final_usage_billed", nil, at, nil)
 	}
 	return nil
@@ -310,11 +412,11 @@ const (
 )
 
 // Cancel cancela a assinatura. Imediato: encerra agora; se o plano tiver
-// consumo, o consumo do período interrompido é faturado no fechamento
-// final, e itens pendentes em aberto (hasPendingItems) também agendam o
-// fechamento, mesmo sem consumo. Ao fim do período: mantém o acesso até o
-// fim do período corrente; o passo de encerramento fatura o consumo final e
-// os itens pendentes.
+// consumo, o consumo do período interrompido e o dos períodos pendentes de
+// uma reativação são faturados no fechamento final, e itens pendentes em
+// aberto (hasPendingItems) também agendam o fechamento, mesmo sem consumo.
+// Ao fim do período: mantém o acesso até o fim do período corrente; o passo
+// de encerramento fatura o consumo final e os itens pendentes.
 func (s *Subscription) Cancel(mode CancelMode, reason string, hasUsage, hasPendingItems bool, at time.Time) error {
 	if len([]rune(reason)) > 500 {
 		return apperr.Invalid("invalid_reason", "O motivo deve ter no máximo 500 caracteres.")
@@ -326,10 +428,11 @@ func (s *Subscription) Cancel(mode CancelMode, reason string, hasUsage, hasPendi
 		}
 		s.CanceledAt, s.EndedAt, s.CancelReason = &at, &at, reason
 		s.CancelAtPeriodEnd = false
-		if (hasUsage && s.NextBillingIndex > 0 && at.After(s.CurrentPeriod.Start)) || hasPendingItems {
+		interrupted := s.NextBillingIndex > 0 && at.After(s.CurrentPeriod.Start)
+		if (hasUsage && (interrupted || len(s.PendingUsageStarts) > 0)) || hasPendingItems {
 			s.NextBillingAt = &at
 		} else {
-			s.NextBillingAt = nil
+			s.NextBillingAt, s.PendingUsageStarts = nil, nil
 		}
 		return nil
 	case CancelAtPeriodEnd:
@@ -378,7 +481,11 @@ func reasonCode(r string) string {
 // Reactivate retoma uma assinatura suspensa. Política: períodos inteiros
 // decorridos durante a suspensão não são faturados (o serviço não foi
 // prestado); o faturamento retoma no período que contém o instante da
-// reativação, se ainda não faturado.
+// reativação, se ainda não faturado. O consumo anterior à suspensão cujo
+// fechamento ficaria nos passos pulados (o do período em que a suspensão
+// começou e, se o faturamento estava atrasado, o dos períodos anteriores
+// ainda abertos) fica pendente e é faturado no primeiro passo após a
+// reativação.
 func (s *Subscription) Reactivate(at time.Time) error {
 	if s.Status != Suspended {
 		return apperr.Conflict("invalid_transition", "Somente assinaturas suspensas podem ser reativadas.")
@@ -394,6 +501,7 @@ func (s *Subscription) Reactivate(at time.Time) error {
 	skipped := 0
 	if idx > s.NextBillingIndex {
 		skipped = idx - s.NextBillingIndex
+		s.PendingUsageStarts = s.carriedUsage(sched, idx)
 		s.NextBillingIndex = idx
 	}
 	if s.TrialEndsAt != nil && at.Before(*s.TrialEndsAt) {
@@ -411,7 +519,42 @@ func (s *Subscription) Reactivate(at time.Time) error {
 	if s.TrialEndsAt != nil && at.Before(*s.TrialEndsAt) {
 		to = Trialing // a avaliação continua até a data original
 	}
-	return s.transition(to, "reactivated", at, map[string]any{"skipped_periods": skipped})
+	details := map[string]any{"skipped_periods": skipped}
+	if n := len(s.PendingUsageStarts); n > 0 {
+		details["pending_usage_periods"] = n
+	}
+	return s.transition(to, "reactivated", at, details)
+}
+
+// carriedUsage devolve os inícios dos períodos cujo consumo anterior à
+// suspensão ficaria sem fechamento quando a reativação pula os passos de
+// faturamento de NextBillingIndex até resume (exclusivo): o passo i fecha o
+// consumo do período i-1. Mantém os períodos pendentes de uma reativação
+// anterior ainda não faturada; nesse caso o período anterior ao próximo passo
+// não entra (a lista o substitui). Períodos sem instante faturável antes da
+// suspensão (inteiramente suspensos ou anteriores ao início) ficam de fora;
+// com avaliação, o primeiro período já começa no fim dela.
+func (s Subscription) carriedUsage(sched calendar.Schedule, resume int) []time.Time {
+	out := slices.Clone(s.PendingUsageStarts)
+	if s.SuspendedAt == nil {
+		return out
+	}
+	from := s.NextBillingIndex - 1
+	if len(out) > 0 {
+		from = s.NextBillingIndex
+	}
+	for p := max(from, 0); p < resume; p++ {
+		start := sched.Period(p).Start
+		billableFrom := start
+		if s.StartedAt.After(billableFrom) {
+			billableFrom = s.StartedAt
+		}
+		if !billableFrom.Before(*s.SuspendedAt) {
+			break // este período e os seguintes começam na suspensão ou depois
+		}
+		out = append(out, start)
+	}
+	return out
 }
 
 // MarkPastDue indica fatura vencida em aberto.
