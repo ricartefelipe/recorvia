@@ -33,8 +33,9 @@ Cada empresa contratante é um tenant. O isolamento usa defesa em profundidade:
 Funções `SECURITY DEFINER` (donas: `recorvia_owner`) expõem somente o necessário para descobrir
 trabalho sem abrir dados: `app_tenants_with_due_billing`, `app_tenants_with_pending_payment_operations`,
 `app_resolve_webhook_endpoint` (vínculo do webhook pelo hash do token), `app_find_invitation`,
-`app_user_memberships`, `app_outbox_claim` e afins, e `app_platform_tenant_catalog` (sem valores
-financeiros). O processamento ocorre depois, dentro da transação de cada tenant.
+`app_user_memberships`, `app_outbox_claim` e afins, `app_platform_tenant_catalog` (sem valores
+financeiros), `app_tenants_due_reconciliation` (tenants elegíveis à conciliação agendada) e as contagens
+agregadas para métricas (`app_payment_operation_stats`, `app_open_discrepancy_stats`, `app_refund_stats`). O processamento ocorre depois, dentro da transação de cada tenant.
 
 ## Workers, eventos, cache e arquivos
 
