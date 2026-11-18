@@ -23,6 +23,7 @@ tenant, RabbitMQ para eventos, Redis para sessões, Keycloak para identidade. De
 - [Máquinas de estado](docs/arquitetura/maquinas-de-estado.md)
 - [Modelo de dados](docs/arquitetura/modelo-de-dados.md)
 - [Matriz de permissões](docs/arquitetura/permissoes.md)
+- [Operação: observabilidade, runbooks, backup e retenção](docs/operacao/observabilidade.md)
 - [Decisões arquiteturais](docs/DECISOES.md) · [Requisitos](docs/REQUISITOS.md)
 - [Modelo comercial (hipóteses)](docs/negocio/modelo-comercial.md)
 - [Roteiro demonstrativo](docs/roteiro-demo.md)
@@ -63,6 +64,62 @@ make web-install web-verify  # interface: tipos, lint, testes de componente (Vit
 make web-e2e           # roteiros Playwright contra o ambiente em execução (make up)
 make lint vulncheck sqlc-check secrets-scan
 ```
+
+## Operação
+
+Guias em [`docs/operacao/`](docs/operacao): [observabilidade](docs/operacao/observabilidade.md),
+[runbooks](docs/operacao/runbooks/README.md), [backup e restauração](docs/operacao/backup-e-restauracao.md)
+e [retenção e anonimização](docs/operacao/retencao-e-anonimizacao.md).
+
+### Observabilidade
+
+```bash
+make up-obs          # ambiente completo + OpenTelemetry Collector, Jaeger, Prometheus e Grafana
+make obs-stack-check # confere alvos de coleta, regras, séries, dashboards e rastros da stack em execução
+make obs-check       # valida configurações, regras de alerta e dashboards (otelcol, jaeger, promtool)
+```
+
+| Serviço | Endereço |
+|---|---|
+| Grafana (pasta *Recorvia*; leitura anônima, administrador `admin` com `GRAFANA_ADMIN_PASSWORD`) | http://localhost:3000 |
+| Prometheus (alvos, regras e alertas) | http://localhost:9090 |
+| Jaeger (rastros da API e do worker) | http://localhost:16686 |
+
+Dashboards provisionados: *visão geral* (página inicial), *mensageria* (filas, retentativas, DLQs,
+consumidores e outbox) e *banco e processos* (pools de conexão, conexões do servidor e tarefas
+agendadas). Cada alerta do Prometheus aponta para a seção do runbook correspondente:
+[faturamento e cobrança](docs/operacao/runbooks/faturamento.md),
+[filas e DLQ](docs/operacao/runbooks/filas-e-dlq.md), [conciliação](docs/operacao/runbooks/conciliacao.md)
+e [isolamento de dados](docs/operacao/runbooks/isolamento-de-dados.md).
+
+Sondas: `/livez` indica que o processo responde, sem consultar dependências; `/readyz` exige
+PostgreSQL e Redis na API e PostgreSQL e RabbitMQ no worker (porta de métricas).
+
+Na CI, o job `observability-check` executa `make obs-check` e o job `observability-stack` executa
+`make up-obs` seguido de `make obs-stack-check`.
+
+### Backup e restauração
+
+```bash
+make backup                 # pg_dump no container: backups/recorvia-<instante>.{dump,manifest,sha256}
+make restore-check          # restaura o backup mais recente num banco novo e confere contagens, ledger e RLS
+make restore-check DUMP=backups/recorvia-20261118T120000Z.dump
+```
+
+O procedimento é exercitado pelo job `backup-restore` da CI (ambiente do compose com migrations,
+dados de demonstração e lançamento no ledger; `make backup`, `make restore-check` e recuperação num
+servidor PostgreSQL novo). O que é exercitado e as recomendações para produção estão em
+[`docs/operacao/backup-e-restauracao.md`](docs/operacao/backup-e-restauracao.md).
+
+### Análise de imagens
+
+```bash
+make images       # constrói api, worker, migrate, seed, paysim, web e keycloak (IMAGE_TAG=local)
+make image-scan   # Trivy 0.76.2: falha em HIGH/CRITICAL com correção disponível (.trivyignore.yaml)
+```
+
+Na CI, o job `image-scan` constrói e analisa cada imagem com a mesma versão do Trivy; nenhuma
+imagem é publicada e não há deploy.
 
 ## Configuração
 

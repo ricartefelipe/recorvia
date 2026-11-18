@@ -329,3 +329,146 @@ assinatura ainda aponta a versão anterior; validar pela versão anterior aceita
 fechamento não fatura e rejeitaria os que ele fatura.
 **Consequências:** a mudança é lida sem bloqueio dentro da transação da ingestão, que já mantém a
 assinatura em `FOR SHARE`.
+
+## ADR-052 Observabilidade local em perfil opcional, com configurações nas imagens
+**Status:** aceita.
+**Contexto:** a API e o worker já expunham métricas Prometheus e rastreamento OpenTelemetry
+opcional, mas não havia onde coletá-los, visualizá-los ou alertar. O ambiente local roda em Docker
+Desktop, em que bind mounts de diretórios fora das pastas compartilhadas aparecem vazios (ADR-020).
+**Decisão:** o perfil `observability` do compose (`make up-obs`) acrescenta OpenTelemetry Collector
+(distribuição contrib 0.165.0), Jaeger 2.23.0 (armazenamento em memória), Prometheus 3.16.0 e
+Grafana 13.3.1, todos com versão fixa. Cada um tem Dockerfile próprio em `deploy/observability/`
+que copia a configuração para a imagem e a valida no build (`otelcol-contrib validate`,
+`jaeger validate`, `promtool check config`); o Grafana recebe fontes de dados e dashboards
+provisionados (somente leitura na interface). A API e o worker exportam rastros apenas para o
+Collector (`OTEL_EXPORTER_OTLP_ENDPOINT` definido pelo `make up-obs`), que remove antes da
+exportação o token opaco do caminho dos webhooks recebidos, a consulta da URL e o endereço do
+cliente final e do par da conexão (conferido de ponta a ponta, Collector e Jaeger reais, por
+`TestCollectorRedactsSensitiveSpanAttributes`). As métricas não passam pelo Collector: o Prometheus coleta `/metrics` de cada
+processo e o plugin `rabbitmq_prometheus` (já habilitado na imagem do RabbitMQ). Somente as portas
+das interfaces (Grafana, Prometheus, Jaeger) são publicadas, em `127.0.0.1`.
+**Justificativa:** o Collector concentra a redação de atributos sensíveis e desacopla a aplicação
+do backend de rastreamento; configurações dentro da imagem funcionam com qualquer daemon Docker e
+tornam a validação reproduzível: `make obs-check` (job `observability-check` da CI: `otelcol
+validate`, `jaeger validate`, `promtool check config`, `check rules` e `test rules`, JSON dos
+dashboards) e `make up-obs` seguido de `make obs-stack-check` (job `observability-stack`: alvos de
+coleta, regras avaliadas, séries dos alertas, fonte de dados e dashboards do Grafana e rastros da
+API e do worker no Jaeger).
+**Consequências:** alterar uma configuração exige reconstruir a imagem (`make up-obs` usa
+`--build`). Rastros ficam só em memória no Jaeger; métricas ficam 7 dias no volume do Prometheus.
+Não há Alertmanager: os alertas aparecem no Prometheus e no Grafana, e o encaminhamento (e-mail,
+plantão) fica para o ambiente de produção.
+
+## ADR-053 Métricas e alertas operacionais de baixa cardinalidade
+**Status:** aceita.
+**Contexto:** os alertas pedidos (outbox, filas, retentativas e DLQ, falhas de cobrança,
+operações com resultado desconhecido, divergências de conciliação, conexões do banco e saturação
+do worker) precisam de séries existentes, sem rótulos de tenant, cliente ou fatura (RNF-08).
+**Decisão:**
+1. As filas são observadas pelo plugin do RabbitMQ no endpoint `/metrics/detailed` (famílias
+   `queue_coarse_metrics`, `queue_consumer_count` e `queue_metrics`): profundidade, consumidores e
+   `rabbitmq_detailed_queue_head_message_timestamp`. O atraso da fila é a diferença entre o
+   instante da avaliação e o carimbo da mensagem na cabeça, que o publicador já preenche com o
+   instante do evento. As filas são uma por consumidor (mais `.retry.N` e `.dlq`).
+2. Métricas acrescentadas: pool de conexões de cada processo (`recorvia_db_pool_*`, lidas do
+   `pgxpool.Stat` a cada coleta), conexões do servidor e limite para papéis comuns
+   (`recorvia_db_server_connections` e `recorvia_db_server_max_connections`, pela tarefa
+   `metrics.collect`, sem migration: com o papel da aplicação, as sessões de outros papéis
+   aparecem em `pg_stat_activity` com `backend_type` nulo e são contadas pelo banco e pelo papel)
+   e falhas de criação de cobrança por provedor e tipo
+   (`recorvia_charge_failures_total`, até então declarada sem uso), contadas por um decorador do
+   adaptador na composição (`gateways.Resolver.Observe`), sem tocar nos casos de uso.
+3. Contadores de consumidores, tarefas e falhas de cobrança são criados com zero na partida, para
+   que `increase()` detecte a primeira ocorrência; o último sucesso de uma tarefa não é
+   inicializado, para não mascarar o alerta de faturamento parado.
+4. O nome da tarefa agendada passa a usar o rótulo `task`: `job` é o rótulo do alvo de coleta no
+   Prometheus e seria renomeado para `exported_job`.
+5. Regras em `deploy/observability/prometheus/rules/recorvia.yml` com testes `promtool test rules`;
+   testes Go garantem que regras e dashboards só referenciam métricas declaradas, que nenhuma
+   métrica tem rótulo proibido e que a anotação `runbook` de cada alerta aponta para uma seção
+   existente. As séries do plugin do RabbitMQ usadas nos alertas são conferidas contra o broker
+   real (`TestPrometheusPluginExposesQueueSeriesUsedByAlerts`).
+**Consequências:** a contagem de dead letters abertas por tenant continua visível apenas pela API
+(`GET /api/v1/dead-letters`); um gauge global exigiria nova função `SECURITY DEFINER` (migration),
+fora do escopo. Os limites dos alertas são pontos de partida a calibrar com volume real.
+
+## ADR-054 Liveness e readiness com semânticas distintas na API e no worker
+**Status:** aceita (registra e testa o comportamento existente).
+**Decisão:** `/livez` responde 200 enquanto o processo atende, sem consultar dependências;
+`/readyz` responde 200 somente com as dependências críticas acessíveis e 503 caso contrário, com o
+estado de cada verificação no corpo. Na API (porta HTTP), a prontidão verifica PostgreSQL e Redis
+(ADR-021: o Keycloak fica de fora). No worker (porta de métricas), verifica PostgreSQL e conexão
+com o RabbitMQ; o tratamento passou para `app.WorkerHealthMux` e devolve o mesmo formato JSON da
+API. O healthcheck dos containers usa `/livez`. Testes HTTP cobrem as duas sondas nos dois
+processos (`TestLivenessAndReadinessHaveDistinctSemantics`,
+`TestWorkerHealthMuxSeparatesLivenessFromReadiness`).
+**Justificativa:** reiniciar um processo porque uma dependência caiu não a restaura e provoca
+reinícios em cascata; o worker e a API já reconectam sozinhos. A prontidão serve para retirar a
+instância do balanceamento ou adiar o tráfego.
+**Consequências:** em orquestradores, `/livez` deve ser a sonda de vida e `/readyz` a de
+prontidão. `recorvia_dependency_up` da API só muda quando `/readyz` é consultado.
+
+## ADR-055 Backup lógico com manifesto no mesmo snapshot e verificação por restauração
+**Status:** aceita.
+**Decisão:** `make backup` executa `pg_dump -Fc` dentro do container do PostgreSQL (mesma versão do
+servidor) como superusuário local, sem bind mounts: o arquivo sai pela saída padrão do
+`docker exec`. Uma sessão exporta um snapshot (`pg_export_snapshot`), o `pg_dump` usa esse
+snapshot e, na mesma transação, é gerado um manifesto: contagem exata de cada tabela, versão das
+migrations, tabelas com RLS, políticas, gatilhos, somas de débitos e créditos por moeda, hash do
+conteúdo das tabelas do ledger e o lançamento mais recente em detalhe. `make restore-check`
+restaura o arquivo num banco novo do mesmo servidor (criado como no bootstrap), compara o
+manifesto, confere o isolamento com o papel `recorvia_app` e remove o banco. O procedimento é
+exercitado na CI: pelo job `backup-restore` (ambiente do compose com migrations, dados de
+demonstração e o worker emitindo a fatura e o lançamento no ledger; `make backup` com o worker
+gravando na origem; `make restore-check`; rejeição de arquivo corrompido; recuperação num segundo
+servidor vazio com bootstrap, `pg_restore`, `migrate up`, manifesto idêntico ao da origem e
+`make restore-check`) e pelo teste de integração `TestBackupAndRestoreCheckScripts` (job
+`go-integration`, com escrita concorrente contínua durante o dump e manifesto adulterado). O que é
+exercitado e o que é recomendação estão separados em `docs/operacao/backup-e-restauracao.md`.
+**Justificativa:** o snapshot torna o manifesto comparável mesmo com escrita concorrente na origem;
+restaurar de fato é a única prova de que o backup serve. O formato custom permite restauração
+seletiva e `--single-transaction`.
+**Consequências:** papéis e privilégios de banco não fazem parte do `pg_dump`: num servidor novo,
+o bootstrap (`cmd/migrate bootstrap`) vem antes do `pg_restore`. O backup lógico não oferece
+recuperação para um instante arbitrário; arquivamento contínuo de WAL é recomendação para
+produção (`docs/operacao/backup-e-restauracao.md`). Os arquivos contêm dados pessoais e
+financeiros e credenciais cifradas cuja chave não está no banco.
+
+## ADR-056 Retenção limitada aos expurgos técnicos existentes
+**Status:** aceita.
+**Decisão:** a política de retenção (`docs/operacao/retencao-e-anonimizacao.md`) descreve o que o
+sistema faz hoje: expurgo diário dos eventos da outbox publicados há mais de 7 dias, expurgo
+horário das chaves de idempotência expiradas (24 h), expiração das sessões e dos fluxos de login
+no Redis e rastros apenas em memória. Ledger, auditoria, faturas, pagamentos e itens de fatura são
+imutáveis no banco e não são expurgados; anonimização de clientes não é automatizada. Nenhuma
+afirmação de conformidade legal é feita.
+**Justificativa:** apagar dados financeiros exigiria decisões jurídicas e contábeis que não cabem
+ao software; anonimizar sem rever os gatilhos de imutabilidade e a trilha de auditoria quebraria
+garantias do ledger.
+**Consequências:** pedidos de eliminação ou anonimização são tratados por procedimento manual
+documentado, com registro, até haver um caso de uso próprio (com migration e auditoria).
+
+## ADR-057 Análise de imagens na CI e ferramentas do frontend com suporte
+**Status:** aceita.
+**Decisão:** o job `image-scan` da CI constrói as sete imagens (api, worker, migrate, seed, paysim,
+web e keycloak) e as analisa com Trivy 0.76.2 (imagem referenciada também pelo digest), falhando
+em vulnerabilidades HIGH ou CRITICAL com correção disponível (`--ignore-unfixed`). Nada é
+publicado e não há deploy. Correções aplicadas: `go-jose` 4.1.9 (dependência indireta do cliente
+OIDC; as versões anteriores a 4.1.6 têm vulnerabilidades publicadas com correção) e
+`apk upgrade` na imagem final da interface web, que traz as correções já publicadas no branch
+estável do Alpine 3.24 sem trocar a versão fixada da imagem base. Exceções ficam em
+`.trivyignore.yaml`, cada uma com pacote e versão exatos, justificativa e data de expiração (hoje,
+apenas o Guava 33.6.0 embutido no Keycloak 26.8.2, CVE-2026-102554, corrigido no Guava 33.7.2 e
+ainda sem versão do Keycloak que o inclua; imagem usada só no ambiente local e nos testes E2E). No
+frontend, o ESLint 9.39.5 (fora do período de suporte) foi substituído pelo ESLint 10.15.0 com
+`@eslint/js` 10.0.1, `typescript-eslint` 8.73.0, `eslint-plugin-react-hooks` 7.1.1 e
+`globals` 17.14.0, em versões exatas (`save-exact`), todos com o ESLint 10 entre as versões
+suportadas (`peerDependencies`); diretivas de desativação sem efeito e configurações inline
+desnecessárias passam a ser erro.
+**Justificativa:** vulnerabilidades sem correção não têm ação possível no build e bloqueariam a
+CI sem benefício; as corrigíveis indicam imagem base ou dependência a atualizar. A expiração das
+exceções obriga a reavaliação.
+**Consequências:** uma nova vulnerabilidade corrigível numa imagem base falha a CI até a
+atualização da versão fixada. O `apk upgrade` torna a camada final dependente do dia do build
+(pacotes do mesmo branch estável). O ESLint 10 exige Node.js 22.13 ou superior (`engines`
+ajustado).
