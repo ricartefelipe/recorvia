@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"net/mail"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -228,6 +229,19 @@ func NewToken() (token string, hash []byte) {
 func HashToken(token string) []byte {
 	h := sha256.Sum256([]byte(token))
 	return h[:]
+}
+
+// AcceptURL monta o endereço de aceite de um convite a partir da URL pública
+// da interface (vazia: caminho relativo).
+func AcceptURL(publicURL, token string) string {
+	return strings.TrimRight(publicURL, "/") + "/convite?token=" + url.QueryEscape(token)
+}
+
+// InvitationTokenAAD vincula o token cifrado no evento member.invited ao
+// tenant e ao convite: o ciphertext não pode ser reaproveitado em outro
+// registro.
+func InvitationTokenAAD(tenantID, invitationID uuid.UUID) []byte {
+	return []byte(tenantID.String() + "/invitation/" + invitationID.String() + "/token")
 }
 
 // NormalizeEmail valida e normaliza um endereço de e-mail.

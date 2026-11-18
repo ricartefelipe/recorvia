@@ -71,6 +71,7 @@ type Config struct {
 	SMTPUsername string
 	SMTPPassword string
 	SMTPTLS      string
+	SMTPTimeout  time.Duration
 
 	PaySimURL        string
 	PaySimPublicURL  string
@@ -175,6 +176,7 @@ func Load(get Getenv) (*Config, error) {
 		SMTPUsername:        l.str("RECORVIA_SMTP_USERNAME", ""),
 		SMTPPassword:        l.str("RECORVIA_SMTP_PASSWORD", ""),
 		SMTPTLS:             l.str("RECORVIA_SMTP_TLS", "starttls"),
+		SMTPTimeout:         l.dur("RECORVIA_SMTP_TIMEOUT", 15*time.Second),
 		PaySimURL:           l.str("RECORVIA_PAYSIM_URL", ""),
 		PaySimPublicURL:     l.str("RECORVIA_PAYSIM_PUBLIC_URL", ""),
 		WebhookPublicURL:    l.str("RECORVIA_WEBHOOK_PUBLIC_URL", ""),
