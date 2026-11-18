@@ -4,9 +4,11 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 
+	"github.com/ricartefelipe/recorvia/internal/apicredentials"
 	"github.com/ricartefelipe/recorvia/internal/audit"
 	"github.com/ricartefelipe/recorvia/internal/identity"
 	"github.com/ricartefelipe/recorvia/internal/infra/logging"
@@ -14,20 +16,51 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
 )
 
-// Principal é a identidade autenticada da requisição.
+// Principal é a identidade autenticada da requisição: um usuário com sessão
+// do navegador ou uma credencial de API (Credential preenchida, sem usuário
+// nem sessão).
 type Principal struct {
 	User          identity.User
 	Session       identity.Session
+	Credential    *apicredentials.Principal
 	TenantID      uuid.UUID
 	Role          tenancy.Role
 	PlatformStaff bool
 }
 
-// Can informa se o papel concede a permissão.
-func (p Principal) Can(perm tenancy.Permission) bool { return p.Role.Can(perm) }
+// Can informa se o papel (ou os escopos da credencial) concede a permissão.
+func (p Principal) Can(perm tenancy.Permission) bool {
+	if p.Credential != nil {
+		return p.Credential.Can(perm)
+	}
+	return p.Role.Can(perm)
+}
 
 // Actor descreve o executor para a auditoria.
-func (p Principal) Actor() audit.Actor { return audit.User(p.User.ID, p.User.DisplayName) }
+func (p Principal) Actor() audit.Actor {
+	if p.Credential != nil {
+		return p.Credential.Actor()
+	}
+	return audit.User(p.User.ID, p.User.DisplayName)
+}
+
+// UserID devolve o usuário executor para colunas de autoria; nil quando a
+// requisição é feita por credencial de API (a autoria fica na auditoria).
+func (p Principal) UserID() *uuid.UUID {
+	if p.Credential != nil || p.User.ID == uuid.Nil {
+		return nil
+	}
+	id := p.User.ID
+	return &id
+}
+
+// ClientID identifica o cliente da API no escopo das chaves de idempotência.
+func (p Principal) ClientID() string {
+	if p.Credential != nil {
+		return p.Credential.ClientID()
+	}
+	return "user:" + p.User.ID.String()
+}
 
 // UserRef descreve o usuário para os casos de uso de tenancy.
 func (p Principal) UserRef() tenancy.UserRef {
@@ -72,11 +105,21 @@ func (a *API) clearSessionCookie(w http.ResponseWriter) {
 		SameSite: http.SameSiteLaxMode, MaxAge: -1})
 }
 
-// authenticate valida a sessão do cookie.
+// authenticate valida a credencial de API (Authorization: Bearer rcv_…) ou a
+// sessão do cookie. Um token do Recorvia tem precedência sobre o cookie. Um
+// Authorization em outro formato só é tratado como credencial quando não há
+// cookie de sessão: com cookie, ele é ignorado, porque o navegador repete por
+// conta própria credenciais de outra origem (por exemplo, HTTP Basic de um
+// proxy à frente da aplicação) em todas as requisições do painel.
 func (a *API) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := r.Cookie(a.cookieName())
-		if err != nil || c.Value == "" {
+		hasSession := err == nil && c.Value != ""
+		if auth := r.Header.Get("Authorization"); auth != "" && (!hasSession || recorviaBearer(auth)) {
+			a.authenticateCredential(w, r, auth, next)
+			return
+		}
+		if !hasSession {
 			a.writeError(w, r, apperr.Unauthenticated("session_required", "Entre para continuar."))
 			return
 		}
@@ -95,6 +138,59 @@ func (a *API) authenticate(next http.Handler) http.Handler {
 		}
 		ctx := logging.WithAttrs(r.Context(), slog.String("user_id", user.ID.String()))
 		next.ServeHTTP(w, r.WithContext(withPrincipal(ctx, Principal{User: user, Session: sess, PlatformStaff: staff})))
+	})
+}
+
+// bearerToken extrai o token do header Authorization (esquema Bearer, sem
+// diferenciar maiúsculas no nome do esquema).
+func bearerToken(header string) (string, bool) {
+	scheme, token, ok := strings.Cut(header, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return "", false
+	}
+	token = strings.TrimSpace(token)
+	return token, token != ""
+}
+
+// recorviaBearer informa se o header traz um token do Recorvia (esquema
+// Bearer e prefixo rcv_), mesmo que malformado.
+func recorviaBearer(header string) bool {
+	token, ok := bearerToken(header)
+	return ok && strings.HasPrefix(token, apicredentials.TokenPrefix)
+}
+
+// authenticateCredential autentica a requisição por credencial de API. O
+// tenant é o da credencial (um X-Recorvia-Tenant divergente gera 409 em
+// requireTenant); não há sessão, por isso a verificação CSRF não se aplica:
+// navegadores não enviam Authorization: Bearer por conta própria.
+func (a *API) authenticateCredential(w http.ResponseWriter, r *http.Request, header string, next http.Handler) {
+	token, ok := bearerToken(header)
+	if !ok || a.Credentials == nil {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="recorvia"`)
+		a.writeError(w, r, apperr.Unauthenticated("api_credential_invalid", "Credencial de API inválida, expirada ou revogada."))
+		return
+	}
+	cp, err := a.Credentials.Authenticate(r.Context(), token, "ip:"+clientIP(r))
+	if err != nil {
+		if apperr.IsKind(err, apperr.KindUnauthenticated) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="recorvia", error="invalid_token"`)
+		}
+		a.writeError(w, r, err)
+		return
+	}
+	ctx := logging.WithAttrs(r.Context(), slog.String("principal", cp.ClientID()))
+	next.ServeHTTP(w, r.WithContext(withPrincipal(ctx, Principal{Credential: &cp, TenantID: cp.TenantID})))
+}
+
+// requireUserSession restringe a rota a usuários com sessão do navegador
+// (operações de conta e de sessão não valem para credenciais de API).
+func (a *API) requireUserSession(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p, ok := principalFrom(r.Context()); ok && p.Credential != nil {
+			a.writeError(w, r, apperr.Forbidden("user_session_required", "Esta operação exige a sessão de um usuário; credenciais de API não são aceitas."))
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

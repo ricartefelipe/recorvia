@@ -65,6 +65,8 @@ func TestActorConstructors(t *testing.T) {
 	}{
 		{"usuário", audit.User(id, "Ana Souza"), audit.Actor{Type: audit.ActorUser, ID: id.String(), Label: "Ana Souza"}},
 		{"sistema", audit.System("scheduler"), audit.Actor{Type: audit.ActorSystem, ID: "scheduler", Label: "scheduler"}},
+		{"credencial de API", audit.APICredential(id, "ERP interno"), audit.Actor{Type: audit.ActorAPICredential, ID: id.String(), Label: "ERP interno"}},
+		{"portal do cliente", audit.CustomerPortal(id), audit.Actor{Type: audit.ActorCustomerPortal, ID: id.String(), Label: "Portal do cliente"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

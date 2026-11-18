@@ -165,3 +165,62 @@ func TestSMTPTimeout(t *testing.T) {
 		t.Fatalf("valor inválido deve falhar: %v", err)
 	}
 }
+
+func TestPortalAndCredentialDefaults(t *testing.T) {
+	c, err := Load(env(baseEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PortalLinkTTL != 72*time.Hour || c.PortalSessionTTL != 2*time.Hour || c.PortalSessionIdleTTL != 30*time.Minute {
+		t.Fatalf("validades padrão do portal: %v %v %v", c.PortalLinkTTL, c.PortalSessionTTL, c.PortalSessionIdleTTL)
+	}
+	if c.PortalCookieName != "recorvia_portal" || c.APICredentialRateLimitPerMinute != 600 {
+		t.Fatalf("cookie do portal %q, limite por credencial %d", c.PortalCookieName, c.APICredentialRateLimitPerMinute)
+	}
+	m := baseEnv()
+	m["RECORVIA_COOKIE_NAME"] = "__Host-recorvia_session"
+	m["RECORVIA_COOKIE_SECURE"] = "true"
+	c, err = Load(env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PortalCookieName != "__Host-recorvia_portal" {
+		t.Fatalf("cookie do portal deveria seguir o prefixo __Host-: %q", c.PortalCookieName)
+	}
+	if err := c.ValidateAPI(); err != nil {
+		t.Fatalf("configuração segura deveria valer: %v", err)
+	}
+}
+
+func TestPortalValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		set  map[string]string
+		frag string
+	}{
+		{"link curto", map[string]string{"RECORVIA_PORTAL_LINK_TTL": "5m"}, "PORTAL_LINK_TTL"},
+		{"link longo", map[string]string{"RECORVIA_PORTAL_LINK_TTL": "721h"}, "PORTAL_LINK_TTL"},
+		{"inatividade acima da duração", map[string]string{"RECORVIA_PORTAL_SESSION_TTL": "1h", "RECORVIA_PORTAL_SESSION_IDLE_TTL": "2h"}, "PORTAL_SESSION_IDLE_TTL"},
+		{"inatividade mínima", map[string]string{"RECORVIA_PORTAL_SESSION_IDLE_TTL": "30s"}, "maior que 1m"},
+		{"cookie igual ao da sessão", map[string]string{"RECORVIA_PORTAL_COOKIE_NAME": "recorvia_session"}, "diferente do cookie de sessão"},
+		{"__Host- sem Secure", map[string]string{"RECORVIA_PORTAL_COOKIE_NAME": "__Host-portal"}, "__Host-"},
+		{"produção sem __Host-", map[string]string{"RECORVIA_ENV": "production", "RECORVIA_PUBLIC_URL": "https://recorvia.example",
+			"RECORVIA_COOKIE_SECURE": "true", "RECORVIA_COOKIE_NAME": "__Host-recorvia_session", "RECORVIA_PORTAL_COOKIE_NAME": "recorvia_portal"},
+			"cookie do portal deve usar o prefixo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := baseEnv()
+			for k, v := range tc.set {
+				m[k] = v
+			}
+			c, err := Load(env(m))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.ValidateAPI(); err == nil || !strings.Contains(err.Error(), tc.frag) {
+				t.Fatalf("esperava erro com %q: %v", tc.frag, err)
+			}
+		})
+	}
+}

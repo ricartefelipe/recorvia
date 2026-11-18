@@ -509,7 +509,7 @@ func (s *Store) ResolveDeadLetter(ctx context.Context, tenantID, id uuid.UUID, s
 			}
 		}
 		now := s.clock.Now()
-		if err := b.q.ResolveDeadLetter(ctx, dbgen.ResolveDeadLetterParams{Status: status, ResolvedAt: &now, ResolvedBy: &by, ResolutionNote: &note,
+		if err := b.q.ResolveDeadLetter(ctx, dbgen.ResolveDeadLetterParams{Status: status, ResolvedAt: &now, ResolvedBy: uuidOrNil(by), ResolutionNote: &note,
 			TenantID: &tenantID, ID: id}); err != nil {
 			return err
 		}

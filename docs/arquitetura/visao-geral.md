@@ -62,6 +62,8 @@ C4Container
 | `kernel/*` | dinheiro, calendário, relógio, erros, IDs, CPF/CNPJ | — |
 | `tenancy` | organizações, membros, convites, papéis e permissões | `platformbilling` |
 | `identity` | OIDC, sessões, CSRF | — |
+| `apicredentials` | credenciais de API com escopos, rotação, revogação e autenticação Bearer | `tenancy`, `platformbilling` |
+| `portal` | links de uso único, sessão restrita, faturas e preferências de contato do portal do cliente | `customers`, `tenancy`, `billing` |
 | `platformbilling` | plano do tenant no Recorvia, limites, implantação assistida | — |
 | `customers` | clientes, contatos, endereço | `tenancy` (e-mail) |
 | `catalog` | produtos, métricas, planos, versões de preço | — |

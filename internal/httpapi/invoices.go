@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/csv"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -261,8 +262,8 @@ func (a *API) recordManualPayment(w http.ResponseWriter, r *http.Request) {
 		paidAt = in.PaidAt.UTC()
 	}
 	p := mustPrincipal(r)
-	uid := p.User.ID
-	pay, err := a.Payments.RecordManualPayment(r.Context(), p.TenantID, p.Actor(), &uid, payments.ManualPaymentInput{InvoiceID: id,
+	uid := p.UserID()
+	pay, err := a.Payments.RecordManualPayment(r.Context(), p.TenantID, p.Actor(), uid, payments.ManualPaymentInput{InvoiceID: id,
 		Amount: money.New(in.Amount, money.BRL), PaidAt: paidAt, Method: in.Method, Note: in.Note, RequestKey: idempotencyKeyFrom(r.Context())})
 	if err != nil {
 		a.writeError(w, r, err)
@@ -422,43 +423,50 @@ type docItem struct {
 	Amount, Discount int64
 }
 
-func (a *API) renderInvoiceDocument(w http.ResponseWriter, r *http.Request, tenantID, id uuid.UUID, orgName string, customerFilter *uuid.UUID) {
-	d, err := a.Billing.Get(r.Context(), tenantID, id)
-	if err != nil {
-		a.writeError(w, r, err)
-		return
+// invoiceDocumentData reúne o que o documento comercial exibe.
+type invoiceDocumentData struct {
+	Org         string
+	Invoice     billing.Invoice
+	Location    *time.Location
+	CheckoutURL string
+	// CustomerFacing indica o documento exibido ao próprio cliente (portal).
+	CustomerFacing bool
+}
+
+// documentStatusLabels traduz a situação da fatura para o documento.
+var documentStatusLabels = map[billing.Status]string{billing.Draft: "Rascunho", billing.Open: "Em aberto",
+	billing.PartiallyPaid: "Parcialmente paga", billing.Paid: "Paga", billing.Void: "Cancelada", billing.Uncollectible: "Incobrável"}
+
+// documentStatus devolve o rótulo da situação. Para o cliente, a baixa como
+// incobrável (registro interno da organização) aparece como encerrada.
+func documentStatus(s billing.Status, customerFacing bool) string {
+	if customerFacing && s == billing.Uncollectible {
+		return "Encerrada"
 	}
-	if customerFilter != nil && d.CustomerID != *customerFilter {
-		a.writeError(w, r, apperr.NotFound("invoice_not_found", "Fatura não encontrada."))
-		return
+	if l, ok := documentStatusLabels[s]; ok {
+		return l
 	}
-	if d.Status == billing.Draft {
-		a.writeError(w, r, apperr.NotFound("invoice_not_found", "Fatura não encontrada."))
-		return
-	}
-	charges, err := a.Store.InvoiceCharges(r.Context(), tenantID, id)
-	if err != nil {
-		a.writeError(w, r, err)
-		return
-	}
-	checkout := ""
-	for _, c := range charges {
-		if c.Status == payments.ChargeAwaitingPayment && c.CheckoutURL != "" {
-			checkout = c.CheckoutURL
-		}
-	}
-	items := make([]docItem, 0, len(d.Items))
-	for _, it := range d.Items {
+	return string(s)
+}
+
+// writeInvoiceDocument renderiza o documento comercial (HTML sem scripts,
+// com CSP restritiva). Quem chama garante que a fatura foi emitida e
+// pertence ao escopo da requisição.
+func (a *API) writeInvoiceDocument(w http.ResponseWriter, r *http.Request, d invoiceDocumentData) {
+	items := make([]docItem, 0, len(d.Invoice.Items))
+	for _, it := range d.Invoice.Items {
 		items = append(items, docItem{Description: it.Description, Qty: money.RatString(it.Quantity), Amount: it.Amount.Amount(), Discount: it.DiscountAmount.Amount()})
 	}
 	due := "-"
-	if d.DueAt != nil {
-		due = billing.DueDate(*d.DueAt, d.Location).String()
+	if d.Invoice.DueAt != nil {
+		dd := billing.DueDate(*d.Invoice.DueAt, d.Location)
+		due = fmt.Sprintf("%02d/%02d/%04d", dd.Day, int(dd.Month), dd.Year)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'")
-	if err := documentTmpl.Execute(w, map[string]any{"Number": d.Number, "Org": orgName, "Customer": d.CustomerSnapshot, "Invoice": d.Invoice,
-		"Loc": d.Location, "DueDate": due, "Status": d.Status, "Items": items, "CheckoutURL": checkout}); err != nil {
+	if err := documentTmpl.Execute(w, map[string]any{"Number": d.Invoice.Number, "Org": d.Org, "Customer": d.Invoice.CustomerSnapshot,
+		"Invoice": d.Invoice, "Loc": d.Location, "DueDate": due, "Status": documentStatus(d.Invoice.Status, d.CustomerFacing), "Items": items,
+		"CheckoutURL": d.CheckoutURL}); err != nil {
 		a.log.WarnContext(r.Context(), "documento não renderizado", slog.String("error", err.Error()))
 	}
 }
@@ -475,5 +483,25 @@ func (a *API) invoiceDocument(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.renderInvoiceDocument(w, r, p.TenantID, id, org.Name, nil)
+	d, err := a.Billing.Get(r.Context(), p.TenantID, id)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	if d.Status == billing.Draft {
+		a.writeError(w, r, apperr.NotFound("invoice_not_found", "Fatura não encontrada."))
+		return
+	}
+	charges, err := a.Store.InvoiceCharges(r.Context(), p.TenantID, id)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	checkout := ""
+	for _, c := range charges {
+		if c.Status == payments.ChargeAwaitingPayment && c.CheckoutURL != "" {
+			checkout = c.CheckoutURL
+		}
+	}
+	a.writeInvoiceDocument(w, r, invoiceDocumentData{Org: org.Name, Invoice: d.Invoice, Location: d.Location, CheckoutURL: checkout})
 }

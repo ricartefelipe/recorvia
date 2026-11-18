@@ -63,6 +63,13 @@ type Config struct {
 	CookieSecure   bool
 	CookieName     string
 
+	// Portal do cliente: validade do link de uso único, duração máxima e
+	// inatividade da sessão e nome do cookie próprio.
+	PortalLinkTTL        time.Duration
+	PortalSessionTTL     time.Duration
+	PortalSessionIdleTTL time.Duration
+	PortalCookieName     string
+
 	EncryptionKeys      map[string][]byte
 	EncryptionActiveKey string
 
@@ -80,6 +87,8 @@ type Config struct {
 	WebhookAllowedPrivate []netip.Prefix
 
 	RateLimitPerMinute int
+	// APICredentialRateLimitPerMinute limita requisições por credencial de API.
+	APICredentialRateLimitPerMinute int
 }
 
 // Getenv abstrai a leitura do ambiente para testes.
@@ -181,7 +190,16 @@ func Load(get Getenv) (*Config, error) {
 		PaySimPublicURL:     l.str("RECORVIA_PAYSIM_PUBLIC_URL", ""),
 		WebhookPublicURL:    l.str("RECORVIA_WEBHOOK_PUBLIC_URL", ""),
 		RateLimitPerMinute:  l.intv("RECORVIA_RATE_LIMIT_PER_MINUTE", 600),
+
+		PortalLinkTTL:        l.dur("RECORVIA_PORTAL_LINK_TTL", 72*time.Hour),
+		PortalSessionTTL:     l.dur("RECORVIA_PORTAL_SESSION_TTL", 2*time.Hour),
+		PortalSessionIdleTTL: l.dur("RECORVIA_PORTAL_SESSION_IDLE_TTL", 30*time.Minute),
+
+		APICredentialRateLimitPerMinute: l.intv("RECORVIA_API_CREDENTIAL_RATE_LIMIT_PER_MINUTE", 600),
 	}
+	// Sem configuração explícita, o cookie do portal segue o prefixo do
+	// cookie de sessão (__Host- quando seguro).
+	c.PortalCookieName = l.str("RECORVIA_PORTAL_COOKIE_NAME", defaultPortalCookie(c.CookieName))
 	switch c.Env {
 	case Development, Test, Production:
 	default:
@@ -219,6 +237,13 @@ func Load(get Getenv) (*Config, error) {
 		c.WorkerPrefetch = c.WorkerConcurrency
 	}
 	return c, errors.Join(l.errs...)
+}
+
+func defaultPortalCookie(sessionCookie string) string {
+	if strings.HasPrefix(sessionCookie, "__Host-") {
+		return "__Host-recorvia_portal"
+	}
+	return "recorvia_portal"
 }
 
 func parseKeys(l *loader, raw string) map[string][]byte {
@@ -298,7 +323,35 @@ func (c *Config) ValidateAPI() error {
 	if c.SessionIdleTTL > c.SessionTTL {
 		errs = append(errs, errors.New("RECORVIA_SESSION_IDLE_TTL não pode exceder RECORVIA_SESSION_TTL"))
 	}
-	return errors.Join(errs...)
+	return errors.Join(append(errs, c.validatePortal()...)...)
+}
+
+// Limites aceitos para a validade do link do portal.
+const (
+	minPortalLinkTTL = 15 * time.Minute
+	maxPortalLinkTTL = 30 * 24 * time.Hour
+)
+
+func (c *Config) validatePortal() []error {
+	var errs []error
+	if c.PortalLinkTTL < minPortalLinkTTL || c.PortalLinkTTL > maxPortalLinkTTL {
+		errs = append(errs, errors.New("RECORVIA_PORTAL_LINK_TTL deve ficar entre 15m e 720h"))
+	}
+	if c.PortalSessionIdleTTL > c.PortalSessionTTL {
+		errs = append(errs, errors.New("RECORVIA_PORTAL_SESSION_IDLE_TTL não pode exceder RECORVIA_PORTAL_SESSION_TTL"))
+	}
+	if c.PortalSessionIdleTTL <= time.Minute {
+		errs = append(errs, errors.New("RECORVIA_PORTAL_SESSION_IDLE_TTL deve ser maior que 1m"))
+	}
+	switch {
+	case c.PortalCookieName == "" || c.PortalCookieName == c.CookieName:
+		errs = append(errs, errors.New("RECORVIA_PORTAL_COOKIE_NAME deve ser diferente do cookie de sessão"))
+	case c.Env == Production && !strings.HasPrefix(c.PortalCookieName, "__Host-"):
+		errs = append(errs, errors.New("em produção o cookie do portal deve usar o prefixo __Host-"))
+	case strings.HasPrefix(c.PortalCookieName, "__Host-") && !c.CookieSecure:
+		errs = append(errs, errors.New("cookies __Host- exigem RECORVIA_COOKIE_SECURE=true"))
+	}
+	return errs
 }
 
 // ValidateWorker valida o que o worker utiliza.
