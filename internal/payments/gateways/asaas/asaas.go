@@ -7,7 +7,14 @@
 //     escolhe o meio na fatura hospedada invoiceUrl); o Recorvia não recebe
 //     dados de cartão.
 //   - Consulta: GET /payments/{id} e GET /payments?externalReference=.
-//   - Reembolso: POST /payments/{id}/refund.
+//   - Reembolso: POST /payments/{id}/refund (total ou parcial); a resposta é
+//     a cobrança com a lista refunds (sem identificador por reembolso, com
+//     situação PENDING, AWAITING_CRITICAL_ACTION_AUTHORIZATION,
+//     AWAITING_CUSTOMER_EXTERNAL_AUTHORIZATION, CANCELLED ou DONE).
+//   - Cancelamento: DELETE /payments/{id}, resposta {deleted, id}; dispara o
+//     evento PAYMENT_DELETED.
+//   - Listagem para conciliação: GET /payments com dateCreated[ge],
+//     dateCreated[le], offset e limit (máximo 100) e hasMore na resposta.
 //   - Webhook: POST /webhooks com authToken; o Asaas envia o token no header
 //     asaas-access-token. A documentação não descreve assinatura HMAC nem
 //     chave de idempotência; por isso a proteção contra duplicidade usa
@@ -97,10 +104,25 @@ type paymentDTO struct {
 	ClientPaymentDate string      `json:"clientPaymentDate"`
 	DateCreated       string      `json:"dateCreated"`
 	Deleted           bool        `json:"deleted"`
-	Refunds           []struct {
-		Status string      `json:"status"`
-		Value  json.Number `json:"value"`
-	} `json:"refunds"`
+	Refunds           []refundDTO `json:"refunds"`
+}
+
+type refundDTO struct {
+	Status      string      `json:"status"`
+	Value       json.Number `json:"value"`
+	DateCreated string      `json:"dateCreated"`
+	Description string      `json:"description"`
+}
+
+// RefundState converte a situação documentada de um estorno do Asaas.
+func RefundState(status string) payments.RefundState {
+	switch status {
+	case "DONE":
+		return payments.RefundStateDone
+	case "CANCELLED":
+		return payments.RefundStateFailed
+	}
+	return payments.RefundStatePending
 }
 
 // MapStatus converte a situação documentada do Asaas.
@@ -158,18 +180,25 @@ func (d paymentDTO) toProvider() (payments.ProviderCharge, error) {
 		pc.NetAmount = &net
 	}
 	for _, r := range d.Refunds {
-		if r.Status != "DONE" {
-			continue
-		}
 		v, err := decimalToMoney(r.Value)
 		if err != nil {
 			return payments.ProviderCharge{}, err
+		}
+		// O Asaas não informa identificador por estorno: a associação com os
+		// reembolsos locais é feita por valor (ver payments.planRefundSync).
+		pc.Refunds = append(pc.Refunds, payments.ProviderRefund{Status: r.Status, State: RefundState(r.Status), Amount: v})
+		if r.Status != "DONE" {
+			continue
 		}
 		if pc.RefundedAmount, err = pc.RefundedAmount.Add(v); err != nil {
 			return payments.ProviderCharge{}, err
 		}
 	}
-	if pc.RefundedAmount.IsPositive() && pc.Status != payments.ProviderRefunded {
+	// Estorno efetivado em cobrança recebida indica reembolso parcial. As
+	// demais situações (chargeback, estorno em andamento, reembolsada) são
+	// preservadas: decidem disputas e a conciliação, e o valor reembolsado
+	// continua em RefundedAmount e Refunds.
+	if pc.RefundedAmount.IsPositive() && (pc.Status == payments.ProviderReceived || pc.Status == payments.ProviderConfirmed) {
 		pc.Status = payments.ProviderPartiallyRefunded
 	}
 	for _, s := range []string{d.ConfirmedDate, d.PaymentDate, d.ClientPaymentDate} {
@@ -242,7 +271,11 @@ func (g *Gateway) FindByExternalReference(ctx context.Context, ref string) (*pay
 	return &pc, err
 }
 
-// Refund solicita reembolso (total ou parcial).
+// Refund solicita estorno (total ou parcial). A documentação não descreve
+// chave de idempotência nem identificador do estorno: a resposta é a
+// cobrança atualizada, devolvida em Charge para que o resultado seja
+// associado ao reembolso local pela lista refunds. Por isso o reembolso fica
+// pendente até a confirmação na própria resposta, por webhook ou consulta.
 func (g *Gateway) Refund(ctx context.Context, req payments.RefundRequest) (payments.ProviderRefund, error) {
 	var out paymentDTO
 	err := g.c.Do(ctx, http.MethodPost, "/payments/"+url.PathEscape(req.ProviderChargeID)+"/refund",
@@ -250,7 +283,27 @@ func (g *Gateway) Refund(ctx context.Context, req payments.RefundRequest) (payme
 	if err != nil {
 		return payments.ProviderRefund{}, err
 	}
-	return payments.ProviderRefund{ProviderRefundID: req.ProviderChargeID + ":" + req.ExternalReference, Status: out.Status, Amount: req.Amount}, nil
+	pc, err := out.toProvider()
+	if err != nil {
+		return payments.ProviderRefund{}, &payments.GatewayError{Kind: payments.ErrKindAmbiguous, Message: "resposta do estorno ilegível", Err: err}
+	}
+	return payments.ProviderRefund{Status: out.Status, State: payments.RefundStatePending, Amount: req.Amount, Charge: &pc}, nil
+}
+
+// CancelCharge exclui a cobrança ainda não recebida (DELETE /payments/{id}).
+// Resposta sem confirmação da exclusão é tratada como resultado ambíguo.
+func (g *Gateway) CancelCharge(ctx context.Context, id string) error {
+	var out struct {
+		Deleted bool   `json:"deleted"`
+		ID      string `json:"id"`
+	}
+	if err := g.c.Do(ctx, http.MethodDelete, "/payments/"+url.PathEscape(id), nil, &out); err != nil {
+		return err
+	}
+	if !out.Deleted {
+		return &payments.GatewayError{Kind: payments.ErrKindAmbiguous, StatusCode: http.StatusOK, Message: "exclusão não confirmada pelo provedor"}
+	}
+	return nil
 }
 
 // ListCharges lista cobranças criadas na janela (paginação offset/limit, máx. 100).

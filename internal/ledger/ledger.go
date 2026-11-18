@@ -231,10 +231,25 @@ func Overpayment(id, tenant, paymentID uuid.UUID, amount money.Money, viaProvide
 		"payment.overpayment:"+paymentID.String(), pair(debit, CustomerCredits, amount))
 }
 
-// RefundSucceeded: reembolso efetivado pelo provedor.
-func RefundSucceeded(id, tenant, refundID uuid.UUID, amount money.Money, at time.Time) (Transaction, bool, error) {
+// RefundSucceeded: reembolso efetivado pelo provedor. O valor sai dos
+// valores em liquidação; fromCredit é a parte que devolve crédito do cliente
+// gerado por pagamento excedente (reduz a obrigação com o cliente) e o
+// restante reduz a receita (conta de reembolsos).
+func RefundSucceeded(id, tenant, refundID uuid.UUID, amount, fromCredit money.Money, at time.Time) (Transaction, bool, error) {
+	if fromCredit == (money.Money{}) {
+		fromCredit = money.Zero(amount.Currency())
+	}
+	revenue, err := amount.Sub(fromCredit)
+	if err != nil {
+		return Transaction{}, false, err
+	}
+	if revenue.IsNegative() || fromCredit.IsNegative() {
+		return Transaction{}, false, fmt.Errorf("%w: parte do crédito maior que o reembolso", ErrInvalidEntry)
+	}
+	entries := pair(Refunds, ProviderClearing, revenue)
+	entries = append(entries, pair(CustomerCredits, ProviderClearing, fromCredit)...)
 	return build(id, tenant, "refund.succeeded", "Reembolso efetivado", at, "refund", refundID,
-		"refund.succeeded:"+refundID.String(), pair(Refunds, ProviderClearing, amount))
+		"refund.succeeded:"+refundID.String(), entries)
 }
 
 // ChargebackOpened: valor contestado retido pelo provedor.

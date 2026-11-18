@@ -23,6 +23,7 @@ func (s *Sim) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/charges", s.auth(s.postCharge))
 	mux.HandleFunc("GET /v1/charges", s.auth(s.listCharges))
 	mux.HandleFunc("GET /v1/charges/{id}", s.auth(s.getCharge))
+	mux.HandleFunc("DELETE /v1/charges/{id}", s.auth(s.deleteCharge))
 	mux.HandleFunc("POST /v1/charges/{id}/refunds", s.auth(s.postRefund))
 	// Checkout hospedado e controles de simulação (apenas ambiente local).
 	mux.HandleFunc("GET /checkout/{id}", s.checkoutPage)
@@ -135,12 +136,28 @@ func wait(ctx context.Context, d time.Duration) {
 }
 
 func (s *Sim) getCharge(w http.ResponseWriter, r *http.Request, key string) {
-	c, err := s.Charge(key, r.PathValue("id"))
+	c, err := s.View(key, r.PathValue("id"))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "not_found")
 		return
 	}
 	writeJSON(w, http.StatusOK, c)
+}
+
+func (s *Sim) deleteCharge(w http.ResponseWriter, r *http.Request, key string) {
+	c, err := s.Cancel(key, r.PathValue("id"))
+	switch {
+	case errors.Is(err, ErrNotFound):
+		writeErr(w, http.StatusNotFound, "not_found")
+	case errors.Is(err, ErrNotCancelable):
+		writeErr(w, http.StatusUnprocessableEntity, "charge_not_cancelable")
+	case errors.Is(err, ErrCancelUnavailable):
+		writeErr(w, http.StatusServiceUnavailable, "temporarily_unavailable")
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, "internal_error")
+	default:
+		writeJSON(w, http.StatusOK, c)
+	}
 }
 
 func (s *Sim) listCharges(w http.ResponseWriter, r *http.Request, key string) {
@@ -166,7 +183,7 @@ func (s *Sim) listCharges(w http.ResponseWriter, r *http.Request, key string) {
 	}
 	items, more := s.ListCharges(key, q.Get("external_reference"), from, to, max(offset, 0), limit)
 	if items == nil {
-		items = []Charge{}
+		items = []ChargeView{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": items, "has_more": more})
 }
@@ -178,8 +195,15 @@ func (s *Sim) postRefund(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 	ref, err := s.Refund(key, r.PathValue("id"), in)
-	if errors.Is(err, ErrNotFound) {
+	switch {
+	case errors.Is(err, ErrNotFound):
 		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	case errors.Is(err, ErrRefundUnavailable):
+		writeErr(w, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	case errors.Is(err, ErrRefundResponseLost):
+		writeErr(w, http.StatusBadGateway, "upstream_error")
 		return
 	}
 	if err != nil {
@@ -254,7 +278,7 @@ button.secondary{background:#fff;color:#cf222e;border-color:#cf222e}.muted{color
 <form method="post" action="/checkout/{{.ID}}/fail" style="margin-top:.5rem"><button type="submit" class="secondary">Recusar pagamento</button></form>{{end}}
 </div>{{end}}{{else}}<div class="card"><h1>Cobranças simuladas</h1><table><thead><tr><th>ID</th><th>Referência</th><th>Valor</th><th>Situação</th><th>Atualização</th></tr></thead><tbody>
 {{range .Charges}}<tr><td><a href="/checkout/{{.ID}}">{{.ID}}</a></td><td>{{.ExternalReference}}</td><td>{{brl .Amount}}</td><td>{{.Status}}</td><td>{{.UpdatedAt.Format "02/01/2006 15:04:05"}}</td></tr>{{else}}<tr><td colspan="5">Nenhuma cobrança.</td></tr>{{end}}
-</tbody></table><p class="muted">Controles: POST /sim/scenarios e POST /sim/charges/{id}/actions (pay, pay_silently, fail, refund, chargeback, diverge, replay).</p></div>{{end}}
+</tbody></table><p class="muted">Controles: POST /sim/scenarios e POST /sim/charges/{id}/actions (pay, pay_silently, fail, refund, chargeback, diverge, replay); DELETE /v1/charges/{id} cancela a cobrança pendente.</p></div>{{end}}
 </main></body></html>`))
 
 func (s *Sim) render(w http.ResponseWriter, data map[string]any) {

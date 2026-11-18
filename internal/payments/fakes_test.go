@@ -78,6 +78,7 @@ type payData struct {
 	posted            []ledger.Transaction
 	audits            []audit.Entry
 	events            []outbox.Event
+	receivables
 }
 
 func (d payData) clone() payData {
@@ -98,6 +99,7 @@ func (d payData) clone() payData {
 	c.posted = slices.Clone(d.posted)
 	c.audits = slices.Clone(d.audits)
 	c.events = slices.Clone(d.events)
+	c.receivables = d.receivables.clone()
 	return c
 }
 
@@ -123,7 +125,8 @@ type payStore struct {
 func newPayStore() *payStore {
 	return &payStore{
 		payData: payData{accounts: map[uuid.UUID]ProviderAccount{}, invoices: map[uuid.UUID]billing.Invoice{}, providerCustomers: map[string]string{},
-			charges: map[uuid.UUID]Charge{}, operations: map[uuid.UUID]Operation{}, webhooks: map[uuid.UUID]StoredWebhook{}, inbox: map[string]bool{}},
+			charges: map[uuid.UUID]Charge{}, operations: map[uuid.UUID]Operation{}, webhooks: map[uuid.UUID]StoredWebhook{}, inbox: map[string]bool{},
+			receivables: newReceivables()},
 		loc: saoPaulo, customers: map[uuid.UUID]CustomerData{}, endpoints: map[string]endpoint{}, errs: map[string]error{},
 		tenantDueErr: map[uuid.UUID]error{},
 	}
@@ -554,6 +557,22 @@ type fakeGateway struct {
 	getErr         error
 	configureCalls []configureCall
 	configureErr   error
+	getByID        map[string]gwResult
+	refundCalls    []RefundRequest
+	refundResults  []refundRes
+	onRefund       func(RefundRequest)
+	cancelCalls    []string
+	cancelErrs     []error
+	listCalls      []ListRequest
+	listPages      []ListResult
+	listErr        error
+	onList         func()
+	onGet          func()
+}
+
+type refundRes struct {
+	pr  ProviderRefund
+	err error
 }
 
 func (g *fakeGateway) EnsureCustomer(_ context.Context, c CustomerData) (string, error) {
@@ -588,6 +607,12 @@ func (g *fakeGateway) CreateCharge(ctx context.Context, req CreateChargeRequest)
 
 func (g *fakeGateway) GetCharge(_ context.Context, id string) (ProviderCharge, error) {
 	g.getCalls = append(g.getCalls, id)
+	if g.onGet != nil {
+		g.onGet()
+	}
+	if r, ok := g.getByID[id]; ok {
+		return r.pc, r.err
+	}
 	return g.getResult, g.getErr
 }
 
@@ -596,11 +621,42 @@ func (g *fakeGateway) FindByExternalReference(_ context.Context, ref string) (*P
 	return g.findResult, g.findErr
 }
 
-func (g *fakeGateway) Refund(context.Context, RefundRequest) (ProviderRefund, error) {
-	return ProviderRefund{}, nil
+func (g *fakeGateway) Refund(_ context.Context, req RefundRequest) (ProviderRefund, error) {
+	g.refundCalls = append(g.refundCalls, req)
+	if g.onRefund != nil {
+		g.onRefund(req)
+	}
+	if len(g.refundResults) > 0 {
+		r := g.refundResults[0]
+		g.refundResults = g.refundResults[1:]
+		return r.pr, r.err
+	}
+	return ProviderRefund{ProviderRefundID: fmt.Sprintf("rf_%d", len(g.refundCalls)), ExternalReference: req.ExternalReference,
+		Status: "succeeded", State: RefundStateDone, Amount: req.Amount}, nil
 }
 
-func (g *fakeGateway) ListCharges(context.Context, ListRequest) (ListResult, error) {
+func (g *fakeGateway) CancelCharge(_ context.Context, id string) error {
+	g.cancelCalls = append(g.cancelCalls, id)
+	if len(g.cancelErrs) > 0 {
+		err := g.cancelErrs[0]
+		g.cancelErrs = g.cancelErrs[1:]
+		return err
+	}
+	return nil
+}
+
+func (g *fakeGateway) ListCharges(_ context.Context, req ListRequest) (ListResult, error) {
+	g.listCalls = append(g.listCalls, req)
+	if g.onList != nil {
+		g.onList()
+	}
+	if g.listErr != nil {
+		return ListResult{}, g.listErr
+	}
+	page := req.Offset / max(req.Limit, 1)
+	if page < len(g.listPages) {
+		return g.listPages[page], nil
+	}
 	return ListResult{}, nil
 }
 

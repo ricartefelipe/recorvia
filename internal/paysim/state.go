@@ -6,12 +6,14 @@
 //
 // Cenários são enfileirados por comerciante e consumidos na próxima criação
 // de cobrança: decline, unavailable, timeout_after_success,
-// error_after_success, slow, duplicate_webhooks e out_of_order. Ações sobre
-// cobranças (pagar, falhar, reembolsar, chargeback, divergência, pagamento
-// sem webhook, reenvio de eventos) permitem reproduzir falhas de forma
-// controlada. Identificadores são sequenciais e o estado é persistido em
-// arquivo, de modo que a mesma sequência de comandos produz o mesmo
-// resultado.
+// error_after_success, slow, duplicate_webhooks e out_of_order. Cenários de
+// reembolso (refund_unavailable, refund_error_after_success) e de
+// cancelamento (cancel_unavailable) valem para o próximo pedido do tipo.
+// Ações sobre cobranças (pagar, falhar, reembolsar, chargeback, divergência,
+// pagamento sem webhook, reenvio de eventos) permitem reproduzir falhas de
+// forma controlada; DELETE /v1/charges/{id} cancela a cobrança pendente.
+// Identificadores são sequenciais e o estado é persistido em arquivo, de
+// modo que a mesma sequência de comandos produz o mesmo resultado.
 package paysim
 
 import (
@@ -98,6 +100,10 @@ type Merchant struct {
 	WebhookURL    string   `json:"webhook_url"`
 	WebhookSecret string   `json:"webhook_secret"`
 	Scenarios     []string `json:"scenarios"`
+	// RefundScenarios são consumidos pelos próximos pedidos de reembolso.
+	RefundScenarios []string `json:"refund_scenarios"`
+	// CancelScenarios são consumidos pelos próximos cancelamentos.
+	CancelScenarios []string `json:"cancel_scenarios"`
 }
 
 type snapshot struct {

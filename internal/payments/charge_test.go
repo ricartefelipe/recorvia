@@ -60,7 +60,7 @@ func TestChargeCanTransitionMatrix(t *testing.T) {
 		ChargeAwaitingPayment:   {ChargePaid, ChargeFailed, ChargeCanceled},
 		ChargePaid:              {ChargePartiallyRefunded, ChargeRefunded, ChargeDisputed},
 		ChargePartiallyRefunded: {ChargePartiallyRefunded, ChargeRefunded, ChargeDisputed},
-		ChargeDisputed:          {ChargePaid, ChargePartiallyRefunded, ChargeChargedBack},
+		ChargeDisputed:          {ChargePaid, ChargePartiallyRefunded, ChargeRefunded, ChargeChargedBack},
 		ChargeFailed:            {ChargePaid},
 		ChargeCanceled:          {ChargePaid},
 	}

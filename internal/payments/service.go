@@ -101,6 +101,10 @@ type Tx interface {
 	PostLedger(ctx context.Context, t ledger.Transaction) error
 	Audit(ctx context.Context, e audit.Entry) error
 	Emit(ctx context.Context, e outbox.Event) error
+
+	RefundTx
+	DisputeTx
+	ReconciliationTx
 }
 
 // Store abre transações e resolve o vínculo de webhooks com tenants.
@@ -108,6 +112,9 @@ type Store interface {
 	InTenant(ctx context.Context, tenantID uuid.UUID, fn func(Tx) error) error
 	ResolveWebhookEndpoint(ctx context.Context, provider string, tokenHash []byte) (tenantID, accountID uuid.UUID, err error)
 	TenantsWithPendingOperations(ctx context.Context, now time.Time) ([]uuid.UUID, error)
+	// TenantsDueReconciliation descobre tenants elegíveis à conciliação
+	// agendada sem execução no intervalo informado.
+	TenantsDueReconciliation(ctx context.Context, now time.Time, every time.Duration) ([]uuid.UUID, error)
 }
 
 // Config parametriza o serviço.
@@ -280,69 +287,129 @@ func (s *Service) ExecuteOperation(ctx context.Context, tenantID, opID uuid.UUID
 // executa a substituta e devolve o ID da cobrança vigente; caso contrário,
 // devolve uuid.Nil.
 func (s *Service) executeOperation(ctx context.Context, tenantID, opID uuid.UUID) (uuid.UUID, error) {
-	var (
-		op      Operation
-		charge  Charge
-		account ProviderAccount
-		cust    CustomerData
-		number  string
-	)
+	var w opWork
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		var err error
-		if op, err = tx.Operation(ctx, opID, true); err != nil {
-			return err
-		}
-		now := s.clock.Now()
-		if !op.Claimable(now) {
-			return errNothingToDo
-		}
-		if op.Kind != OpCreateCharge {
-			// Não reivindica operações que esta execução não sabe realizar.
-			return fmt.Errorf("payments: operação %s ainda não suportada pela execução genérica", op.Kind)
-		}
-		lease := now.Add(s.cfg.Lease)
-		op.Status, op.LeaseUntil, op.UpdatedAt = OpInFlight, &lease, now
-		op.Attempts++
-		if err := tx.UpdateOperation(ctx, op); err != nil {
-			return err
-		}
-		if charge, err = tx.Charge(ctx, op.ChargeID, false); err != nil {
-			return err
-		}
-		if account, err = tx.Account(ctx, charge.ProviderAccountID); err != nil {
-			return err
-		}
-		if cust, err = tx.CustomerData(ctx, charge.CustomerID, charge.Provider); err != nil {
-			return err
-		}
-		inv, err := tx.Invoice(ctx, charge.InvoiceID, false)
-		number = inv.Number
+		w, err = s.claimOperation(ctx, tx, opID)
 		return err
 	})
-	if errors.Is(err, errNothingToDo) {
-		return uuid.Nil, nil
-	}
-	if err != nil {
+	if err != nil || w.skip {
 		return uuid.Nil, err
 	}
-	gw, err := s.resolver.Gateway(account)
+	switch w.op.Kind {
+	case OpRefund:
+		return uuid.Nil, s.runRefund(ctx, tenantID, w)
+	case OpCancelCharge:
+		return uuid.Nil, s.runCancel(ctx, tenantID, w)
+	}
+	gw, err := s.resolver.Gateway(w.account)
 	if err != nil {
 		_, err := s.recordOutcome(ctx, tenantID, opID, outcomePermanent, nil, "", err)
 		return uuid.Nil, err
 	}
 	callCtx, cancel := context.WithTimeout(ctx, s.cfg.CallTimeout)
-	pc, providerCustomer, res, callErr := s.createAtProvider(callCtx, gw, op, charge, cust, number)
+	pc, providerCustomer, res, callErr := s.createAtProvider(callCtx, gw, w.op, w.charge, w.cust, w.number)
 	cancel()
 	next, err := s.recordOutcome(ctx, tenantID, opID, res, pc, providerCustomer, callErr)
 	if err != nil {
 		return uuid.Nil, err
 	}
-	if next == nil {
+	s.executeAll(ctx, tenantID, next.cancelOps)
+	if next.replacement == nil {
 		return uuid.Nil, nil
 	}
 	// A cobrança criada divergia do saldo atual da fatura e foi substituída
 	// na mesma transação; a nova segue o fluxo normal e passa a ser a vigente.
-	return s.executeBestEffort(ctx, tenantID, next.chargeID, next.opID), nil
+	return s.executeBestEffort(ctx, tenantID, next.replacement.chargeID, next.replacement.opID), nil
+}
+
+// opWork reúne o que a execução de uma operação reivindicada precisa.
+type opWork struct {
+	skip    bool
+	op      Operation
+	charge  Charge
+	account ProviderAccount
+	cust    CustomerData
+	number  string
+	refund  Refund
+	refunds []Refund
+	// dispatched indica os reembolsos da cobrança já enviados ao provedor.
+	dispatched map[uuid.UUID]bool
+}
+
+// refundSerializationDelay adia o reembolso enquanto outro reembolso da
+// mesma cobrança aguarda resultado no provedor.
+const refundSerializationDelay = 30 * time.Second
+
+// claimOperation reivindica a operação com lease e carrega os dados da
+// chamada. Operações já resolvidas por outro caminho (por exemplo, reembolso
+// confirmado por webhook) são concluídas aqui sem chamada ao provedor.
+func (s *Service) claimOperation(ctx context.Context, tx Tx, opID uuid.UUID) (opWork, error) {
+	op, err := tx.Operation(ctx, opID, true)
+	if err != nil {
+		return opWork{}, err
+	}
+	now := s.clock.Now()
+	if !op.Claimable(now) {
+		return opWork{skip: true}, nil
+	}
+	switch op.Kind {
+	case OpCreateCharge, OpRefund, OpCancelCharge:
+	default:
+		// Não reivindica operações que esta execução não sabe realizar.
+		return opWork{}, fmt.Errorf("payments: operação %s não suportada", op.Kind)
+	}
+	w := opWork{op: op}
+	if w.charge, err = tx.Charge(ctx, op.ChargeID, false); err != nil {
+		return opWork{}, err
+	}
+	if w.account, err = tx.Account(ctx, w.charge.ProviderAccountID); err != nil {
+		return opWork{}, err
+	}
+	switch op.Kind {
+	case OpCreateCharge:
+		if w.cust, err = tx.CustomerData(ctx, w.charge.CustomerID, w.charge.Provider); err != nil {
+			return opWork{}, err
+		}
+		inv, err := tx.Invoice(ctx, w.charge.InvoiceID, false)
+		if err != nil {
+			return opWork{}, err
+		}
+		w.number = inv.Number
+	case OpRefund:
+		done, err := s.prepareRefundWork(ctx, tx, &w, now)
+		if err != nil || done {
+			return opWork{skip: true}, err
+		}
+	case OpCancelCharge:
+		if w.charge.ProviderChargeID == "" {
+			// Nada a cancelar no provedor.
+			op.Status, op.CompletedAt, op.UpdatedAt, op.LastError = OpSucceeded, &now, now, ""
+			return opWork{skip: true}, tx.UpdateOperation(ctx, op)
+		}
+	}
+	lease := now.Add(s.cfg.Lease)
+	op.Status, op.LeaseUntil, op.UpdatedAt = OpInFlight, &lease, now
+	op.Attempts++
+	if err := tx.UpdateOperation(ctx, op); err != nil {
+		return opWork{}, err
+	}
+	w.op = op
+	if w.dispatched != nil && w.refund.ID != uuid.Nil {
+		w.dispatched[w.refund.ID] = true
+	}
+	return w, nil
+}
+
+// executeAll executa operações após o commit, em melhor esforço: falhas
+// ficam com a recuperação agendada.
+func (s *Service) executeAll(ctx context.Context, tenantID uuid.UUID, opIDs []uuid.UUID) {
+	for _, id := range opIDs {
+		if _, err := s.executeOperation(ctx, tenantID, id); err != nil && s.cfg.Log != nil {
+			s.cfg.Log.WarnContext(ctx, "operação externa adiada para a recuperação", slog.String("operation_id", id.String()),
+				slog.String("error", err.Error()))
+		}
+	}
 }
 
 func classify(err error) outcome {
@@ -393,14 +460,21 @@ type replacement struct {
 	chargeID, opID uuid.UUID
 }
 
+// followUp reúne o que executar depois do commit do resultado da criação: a
+// cobrança substituta e os cancelamentos no provedor.
+type followUp struct {
+	replacement *replacement
+	cancelOps   []uuid.UUID
+}
+
 // recordOutcome registra o resultado da chamada ao provedor. Quando a
 // cobrança recém-criada já não corresponde ao saldo da fatura, devolve a
 // cobrança substituta gravada na mesma transação, para execução após o
-// commit.
-func (s *Service) recordOutcome(ctx context.Context, tenantID, opID uuid.UUID, res outcome, pc *ProviderCharge, providerCustomer string, callErr error) (*replacement, error) {
-	var next *replacement
+// commit, e o cancelamento da cobrança substituída no provedor.
+func (s *Service) recordOutcome(ctx context.Context, tenantID, opID uuid.UUID, res outcome, pc *ProviderCharge, providerCustomer string, callErr error) (followUp, error) {
+	var next followUp
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
-		next = nil
+		next = followUp{}
 		op, err := tx.Operation(ctx, opID, true)
 		if err != nil {
 			return err
@@ -427,7 +501,7 @@ func (s *Service) recordOutcome(ctx context.Context, tenantID, opID uuid.UUID, r
 			op.ProviderResponse = map[string]any{"provider_charge_id": pc.ProviderChargeID, "status": pc.RawStatus}
 			replaced := false
 			if charge.Status == ChargeAwaitingPayment && !pc.Status.IsPaid() {
-				if replaced, next, err = s.replaceIfBalanceChanged(ctx, tx, tenantID, &charge, now); err != nil {
+				if replaced, next.replacement, err = s.replaceIfBalanceChanged(ctx, tx, tenantID, &charge, now); err != nil {
 					return err
 				}
 			}
@@ -443,6 +517,17 @@ func (s *Service) recordOutcome(ctx context.Context, tenantID, opID uuid.UUID, r
 			if pc.Status.IsPaid() {
 				if err := s.applyProviderState(ctx, tx, &charge, *pc, now, providerActor); err != nil {
 					return err
+				}
+			}
+			// Cobrança cancelada localmente (substituída ou com a fatura
+			// cancelada durante a criação) é cancelada também no provedor.
+			if charge.Status == ChargeCanceled {
+				id, ok, err := s.scheduleProviderCancel(ctx, tx, charge, now)
+				if err != nil {
+					return err
+				}
+				if ok {
+					next.cancelOps = append(next.cancelOps, id)
 				}
 			}
 			// O vínculo do cliente no provedor é gravado por último: a
@@ -480,7 +565,7 @@ func (s *Service) recordOutcome(ctx context.Context, tenantID, opID uuid.UUID, r
 			map[string]any{"charge_id": op.ChargeID, "attempts": op.Attempts, "kind": op.Kind}))
 	})
 	if err != nil {
-		return nil, err
+		return followUp{}, err
 	}
 	return next, nil
 }
@@ -681,6 +766,7 @@ func (s *Service) ProcessWebhook(ctx context.Context, tenantID, webhookID, messa
 		return err
 	}
 	var snapshot *ProviderCharge
+	authoritative := false
 	if found && needsAuthoritativeState(charge, ev) {
 		gw, err := s.resolver.Gateway(account)
 		if err != nil {
@@ -692,9 +778,16 @@ func (s *Service) ProcessWebhook(ctx context.Context, tenantID, webhookID, messa
 		if err != nil {
 			return fmt.Errorf("payments: consulta ao provedor: %w", err)
 		}
-		snapshot = &pc
+		snapshot, authoritative = &pc, true
 	} else if found {
 		snapshot = ev.Charge
+		if snapshot != nil && snapshot.UpdatedAt == nil && ev.OccurredAt != nil {
+			// Sem instante no retrato, vale o instante do evento: permite
+			// descartar retratos anteriores ao último registrado.
+			cp := *snapshot
+			cp.UpdatedAt = ev.OccurredAt
+			snapshot = &cp
+		}
 	}
 	return s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		first, err := tx.MarkInbox(ctx, ConsumerWebhooks, messageID)
@@ -713,7 +806,7 @@ func (s *Service) ProcessWebhook(ctx context.Context, tenantID, webhookID, messa
 		if snapshot == nil {
 			return tx.UpdateWebhookStatus(ctx, webhookID, "ignored", "evento sem efeito financeiro", now)
 		}
-		if err := s.applyProviderState(ctx, tx, &c, *snapshot, now, providerActor); err != nil {
+		if err := s.applyProviderStateFrom(ctx, tx, &c, *snapshot, now, providerActor, authoritative); err != nil {
 			if apperr.IsKind(err, apperr.KindConflict) {
 				return tx.UpdateWebhookStatus(ctx, webhookID, "ignored", err.Error(), now)
 			}
@@ -775,34 +868,55 @@ func needsAuthoritativeState(c Charge, ev WebhookEvent) bool {
 
 // applyProviderState aplica a situação informada pelo provedor sem
 // regredir estados e de forma idempotente. A confirmação de pagamento vale
-// também para cobrança recusada ou cancelada localmente (ver MarkPaid).
+// também para cobrança recusada ou cancelada localmente (ver MarkPaid). Em
+// cobrança paga, sincroniza reembolsos (dados cumulativos, aplicáveis em
+// qualquer ordem) e disputas (somente com retrato não anterior ao último
+// registrado).
 func (s *Service) applyProviderState(ctx context.Context, tx Tx, c *Charge, pc ProviderCharge, now time.Time, actor audit.Actor) error {
+	return s.applyProviderStateFrom(ctx, tx, c, pc, now, actor, false)
+}
+
+// applyProviderStateFrom implementa applyProviderState; authoritative indica
+// retrato obtido por consulta ao provedor (não por evento).
+func (s *Service) applyProviderStateFrom(ctx context.Context, tx Tx, c *Charge, pc ProviderCharge, now time.Time, actor audit.Actor, authoritative bool) error {
+	prevAt := c.ProviderStatusAt
 	c.RecordProviderStatus(pc.RawStatus, pc.UpdatedAt)
-	if statusRank(pc.Status) < localRank(*c) && pc.Status != ProviderFailed && pc.Status != ProviderCanceled {
-		return tx.UpdateCharge(ctx, c) // evento antigo: apenas registra a situação recebida
-	}
-	switch {
-	case pc.Status.IsPaid() && !IsSettledStatus(c.Status):
-		if err := s.confirmPayment(ctx, tx, c, pc, now, actor); err != nil {
-			return err
-		}
-	case (pc.Status == ProviderFailed || pc.Status == ProviderCanceled) && !IsSettledStatus(c.Status):
-		if c.Status == ChargeFailed || c.Status == ChargeCanceled {
-			return nil
-		}
-		if pc.Status == ProviderFailed {
-			if err := c.MarkFailed("recusada pelo provedor", now); err != nil {
+	older := statusRank(pc.Status) < localRank(*c) && pc.Status != ProviderFailed && pc.Status != ProviderCanceled
+	if !older {
+		switch {
+		case pc.Status.IsPaid() && !IsSettledStatus(c.Status):
+			if err := s.confirmPayment(ctx, tx, c, pc, now, actor); err != nil {
 				return err
 			}
-		} else if err := c.MarkCanceled(now); err != nil {
+		case (pc.Status == ProviderFailed || pc.Status == ProviderCanceled) && !IsSettledStatus(c.Status):
+			if c.Status == ChargeFailed || c.Status == ChargeCanceled {
+				return nil
+			}
+			if pc.Status == ProviderFailed {
+				if err := c.MarkFailed("recusada pelo provedor", now); err != nil {
+					return err
+				}
+			} else if err := c.MarkCanceled(now); err != nil {
+				return err
+			}
+			if err := tx.Emit(ctx, outbox.New(c.TenantID, outbox.EventChargeFailed, "charge", c.ID,
+				map[string]any{"charge_id": c.ID, "invoice_id": c.InvoiceID, "provider_status": pc.RawStatus}, now)); err != nil {
+				return err
+			}
+		case (pc.Status == ProviderFailed || pc.Status == ProviderCanceled) && IsSettledStatus(c.Status):
+			return apperr.Conflict("provider_state_conflict", "Provedor informou cancelamento de cobrança já paga; verificar na conciliação.")
+		}
+	}
+	if IsSettledStatus(c.Status) {
+		if err := s.syncRefunds(ctx, tx, c, pc, now, actor); err != nil {
 			return err
 		}
-		if err := tx.Emit(ctx, outbox.New(c.TenantID, outbox.EventChargeFailed, "charge", c.ID,
-			map[string]any{"charge_id": c.ID, "invoice_id": c.InvoiceID, "provider_status": pc.RawStatus}, now)); err != nil {
-			return err
+		stale := pc.UpdatedAt != nil && prevAt != nil && pc.UpdatedAt.Before(*prevAt)
+		if !stale {
+			if err := s.syncDispute(ctx, tx, c, pc, now, actor, authoritative); err != nil {
+				return err
+			}
 		}
-	case (pc.Status == ProviderFailed || pc.Status == ProviderCanceled) && IsSettledStatus(c.Status):
-		return apperr.Conflict("provider_state_conflict", "Provedor informou cancelamento de cobrança já paga; verificar na conciliação.")
 	}
 	return tx.UpdateCharge(ctx, c)
 }
@@ -1043,9 +1157,13 @@ func (s *Service) RecordManualPayment(ctx context.Context, tenantID uuid.UUID, a
 }
 
 // CancelOpenCharges cancela localmente cobranças em aberto de uma fatura
-// cancelada (consumidor de invoice.voided).
+// cancelada (consumidor de invoice.voided) e as cancela no provedor depois
+// do commit. Cobranças ainda em criação são canceladas no provedor quando a
+// criação termina (recordOutcome).
 func (s *Service) CancelOpenCharges(ctx context.Context, tenantID, invoiceID, messageID uuid.UUID) error {
-	return s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+	var cancelOps []uuid.UUID
+	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		cancelOps = nil
 		first, err := tx.MarkInbox(ctx, "payments.invoice_voided", messageID)
 		if err != nil || !first {
 			return err
@@ -1062,9 +1180,21 @@ func (s *Service) CancelOpenCharges(ctx context.Context, tenantID, invoiceID, me
 			if err := tx.UpdateCharge(ctx, &charges[i]); err != nil {
 				return err
 			}
+			id, ok, err := s.scheduleProviderCancel(ctx, tx, charges[i], now)
+			if err != nil {
+				return err
+			}
+			if ok {
+				cancelOps = append(cancelOps, id)
+			}
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	s.executeAll(ctx, tenantID, cancelOps)
+	return nil
 }
 
 // ConsumerInvoiceCredited identifica o consumidor que ajusta cobranças após
@@ -1082,7 +1212,9 @@ const ConsumerInvoiceCredited = "payments.invoice_credited"
 // a cobrança já criada. Um pagamento que ainda chegue pela cobrança antiga é
 // aplicado normalmente e o excedente vira crédito do cliente.
 func (s *Service) HandleInvoiceCredited(ctx context.Context, tenantID, invoiceID, messageID uuid.UUID) error {
+	var cancelOps []uuid.UUID
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		cancelOps = nil
 		// Bloqueia as cobranças antes da fatura, na mesma ordem do registro
 		// do resultado da criação e da confirmação de pagamento, para que as
 		// transações concorrentes se serializem sem impasse.
@@ -1110,12 +1242,20 @@ func (s *Service) HandleInvoiceCredited(ctx context.Context, tenantID, invoiceID
 				map[string]any{"invoice_id": invoiceID, "charge_amount": c.Amount.Amount(), "amount_due": inv.AmountDue.Amount()})); err != nil {
 				return err
 			}
+			id, ok, err := s.scheduleProviderCancel(ctx, tx, *c, now)
+			if err != nil {
+				return err
+			}
+			if ok {
+				cancelOps = append(cancelOps, id)
+			}
 		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
+	s.executeAll(ctx, tenantID, cancelOps)
 	if _, err := s.RequestCharge(ctx, tenantID, invoiceID, systemActor); err != nil {
 		return err
 	}

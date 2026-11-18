@@ -33,20 +33,44 @@ func New(baseURL, apiKey string, httpc *http.Client) *Gateway {
 }
 
 type chargeDTO struct {
-	ID                string     `json:"id"`
-	CustomerID        string     `json:"customer_id"`
-	ExternalReference string     `json:"external_reference"`
-	Amount            int64      `json:"amount"`
-	Currency          string     `json:"currency"`
-	Status            string     `json:"status"`
-	PaidAmount        int64      `json:"paid_amount"`
-	Fee               int64      `json:"fee"`
-	NetAmount         int64      `json:"net_amount"`
-	RefundedAmount    int64      `json:"refunded_amount"`
-	ChargebackStatus  string     `json:"chargeback_status"`
-	CheckoutURL       string     `json:"checkout_url"`
-	PaidAt            *time.Time `json:"paid_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
+	ID                string      `json:"id"`
+	CustomerID        string      `json:"customer_id"`
+	ExternalReference string      `json:"external_reference"`
+	Amount            int64       `json:"amount"`
+	Currency          string      `json:"currency"`
+	Status            string      `json:"status"`
+	PaidAmount        int64       `json:"paid_amount"`
+	Fee               int64       `json:"fee"`
+	NetAmount         int64       `json:"net_amount"`
+	RefundedAmount    int64       `json:"refunded_amount"`
+	ChargebackStatus  string      `json:"chargeback_status"`
+	CheckoutURL       string      `json:"checkout_url"`
+	PaidAt            *time.Time  `json:"paid_at"`
+	UpdatedAt         time.Time   `json:"updated_at"`
+	Refunds           []refundDTO `json:"refunds"`
+}
+
+type refundDTO struct {
+	ID                string `json:"id"`
+	Amount            int64  `json:"amount"`
+	Status            string `json:"status"`
+	ExternalReference string `json:"external_reference"`
+}
+
+// refundState converte a situação do reembolso no simulador.
+func refundState(status string) payments.RefundState {
+	switch status {
+	case "succeeded":
+		return payments.RefundStateDone
+	case "failed", "canceled":
+		return payments.RefundStateFailed
+	}
+	return payments.RefundStatePending
+}
+
+func (r refundDTO) toProvider() payments.ProviderRefund {
+	return payments.ProviderRefund{ProviderRefundID: r.ID, ExternalReference: r.ExternalReference, Status: r.Status, State: refundState(r.Status),
+		Amount: money.New(r.Amount, money.BRL)}
 }
 
 // MapStatus converte a situação do simulador.
@@ -83,6 +107,9 @@ func (d chargeDTO) toProvider() payments.ProviderCharge {
 	pc := payments.ProviderCharge{ProviderChargeID: d.ID, ExternalReference: d.ExternalReference, ProviderCustomerID: d.CustomerID,
 		Status: MapStatus(d.Status, d.ChargebackStatus), RawStatus: d.Status, Amount: money.New(gross, money.BRL),
 		RefundedAmount: money.New(d.RefundedAmount, money.BRL), CheckoutURL: d.CheckoutURL, PaidAt: d.PaidAt}
+	for _, r := range d.Refunds {
+		pc.Refunds = append(pc.Refunds, r.toProvider())
+	}
 	if d.PaidAmount > 0 {
 		fee, net := money.New(d.Fee, money.BRL), money.New(d.NetAmount, money.BRL)
 		pc.Fee, pc.NetAmount = &fee, &net
@@ -140,17 +167,18 @@ func (g *Gateway) FindByExternalReference(ctx context.Context, ref string) (*pay
 
 // Refund solicita reembolso (o simulador deduplica pela referência externa).
 func (g *Gateway) Refund(ctx context.Context, req payments.RefundRequest) (payments.ProviderRefund, error) {
-	var out struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-		Amount int64  `json:"amount"`
-	}
+	var out refundDTO
 	err := g.c.Do(ctx, http.MethodPost, "/v1/charges/"+url.PathEscape(req.ProviderChargeID)+"/refunds", map[string]any{
 		"amount": req.Amount.Amount(), "description": req.Description, "external_reference": req.ExternalReference}, &out)
 	if err != nil {
 		return payments.ProviderRefund{}, err
 	}
-	return payments.ProviderRefund{ProviderRefundID: out.ID, Status: out.Status, Amount: money.New(out.Amount, money.BRL)}, nil
+	return out.toProvider(), nil
+}
+
+// CancelCharge cancela a cobrança ainda não paga (DELETE /v1/charges/{id}).
+func (g *Gateway) CancelCharge(ctx context.Context, id string) error {
+	return g.c.Do(ctx, http.MethodDelete, "/v1/charges/"+url.PathEscape(id), nil, nil)
 }
 
 // ListCharges lista cobranças atualizadas na janela.
