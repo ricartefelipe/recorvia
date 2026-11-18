@@ -38,8 +38,10 @@ Funções `SECURITY DEFINER` (donas: `recorvia_owner`) expõem somente o necess�
 trabalho sem abrir dados: `app_tenants_with_due_billing`, `app_tenants_with_pending_payment_operations`,
 `app_resolve_webhook_endpoint` (vínculo do webhook pelo hash do token), `app_find_invitation`,
 `app_find_api_credential` (credencial pelo identificador público do token), `app_find_portal_link`
-(link do portal pelo hash do token), `app_user_memberships`, `app_outbox_claim` e afins, e
-`app_platform_tenant_catalog` (sem valores financeiros). O processamento ocorre depois, dentro da
+(link do portal pelo hash do token), `app_user_memberships`, `app_outbox_claim` e afins,
+`app_platform_tenant_catalog` (sem valores financeiros), `app_tenants_for_collections`,
+`app_tenants_with_due_notifications` e `app_tenants_with_due_webhook_deliveries` (estas três
+paginadas pelo ID do tenant, com rodízio entre execuções). O processamento ocorre depois, dentro da
 transação de cada tenant.
 
 ## Workers, eventos, cache e arquivos
@@ -57,6 +59,8 @@ transação de cada tenant.
   auditadas.
 - Webhooks recebidos são vinculados ao tenant pelo token opaco do endpoint (somente o hash fica no
   banco) e autenticados conforme o provedor.
+- Conteúdo das notificações e segredos dos webhooks enviados ficam cifrados com o keyring, com AAD
+  que inclui o tenant e o registro (o ciphertext não pode ser copiado para outro tenant).
 
 ## Testes
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/google/uuid"
@@ -492,9 +491,9 @@ func nullable(s string) any {
 
 // acceptURL monta o link de aceite de convite.
 func (a *API) acceptURL(token string) string {
-	base := "/"
+	base := ""
 	if a.Config != nil && a.Config.PublicURL != nil {
-		base = strings.TrimRight(a.Config.PublicURL.String(), "/") + "/"
+		base = a.Config.PublicURL.String()
 	}
-	return base + "convite?token=" + url.QueryEscape(token)
+	return tenancy.AcceptURL(base, token)
 }

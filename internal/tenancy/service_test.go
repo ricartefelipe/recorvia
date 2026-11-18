@@ -3,6 +3,7 @@ package tenancy
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -935,5 +936,61 @@ func TestRemoveMemberStoreErrors(t *testing.T) {
 				t.Fatal("remoção deveria ser desfeita")
 			}
 		})
+	}
+}
+
+// xorSealer cifra de forma reversível para o teste e registra o AAD.
+type xorSealer struct {
+	aad []byte
+	err error
+}
+
+func (s *xorSealer) Encrypt(plaintext, aad []byte) ([]byte, string, error) {
+	if s.err != nil {
+		return nil, "", s.err
+	}
+	s.aad = aad
+	out := make([]byte, len(plaintext))
+	for i, b := range plaintext {
+		out[i] = b ^ 0x5a
+	}
+	return out, "k1", nil
+}
+
+// Com o cifrador, o evento leva o token cifrado (nunca em claro) e vinculado
+// ao tenant e ao convite, para o e-mail de convite.
+func TestInviteSealsTokenForInvitationEmail(t *testing.T) {
+	e := newEnv(t)
+	sealer := &xorSealer{}
+	e.svc.WithTokenSealer(sealer)
+	inv, token := e.invite(t, "nova.pessoa@acme.com", RoleFinance)
+	ev := e.d().events[0]
+	p, ok := ev.Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload inesperado: %T", ev.Payload)
+	}
+	ct, _ := base64.StdEncoding.DecodeString(p["token_ciphertext"].(string))
+	plain := make([]byte, len(ct))
+	for i, b := range ct {
+		plain[i] = b ^ 0x5a
+	}
+	if string(plain) != token || p["token_key_id"] != "k1" || strings.Contains(fmt.Sprint(p), token) {
+		t.Fatalf("token cifrado inesperado: %v", p)
+	}
+	if !bytes.Equal(sealer.aad, InvitationTokenAAD(e.tenantID, inv.ID)) {
+		t.Fatalf("AAD deve vincular tenant e convite: %s", sealer.aad)
+	}
+	sealer.err = errors.New("chave indisponível")
+	if _, _, err := e.svc.Invite(context.Background(), e.tenantID, e.access(e.owner), e.owner, "outra@acme.com", RoleAuditor); err == nil {
+		t.Fatal("falha ao cifrar deve impedir o convite")
+	}
+}
+
+func TestAcceptURL(t *testing.T) {
+	if got := AcceptURL("https://app.test/", "a+b/c"); got != "https://app.test/convite?token=a%2Bb%2Fc" {
+		t.Fatal(got)
+	}
+	if got := AcceptURL("", "x"); got != "/convite?token=x" {
+		t.Fatal(got)
 	}
 }

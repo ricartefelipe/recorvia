@@ -393,7 +393,7 @@ export function WebhookDeliveriesPage() {
                         <Table.Td>{d.delivered_at ? <DateTime value={d.delivered_at} /> : '—'}</Table.Td>
                         {canWrite && (
                           <Table.Td>
-                            {(d.status === 'exhausted' || d.status === 'retrying') && (
+                            {(d.status === 'exhausted' || d.status === 'retrying' || d.status === 'succeeded') && (
                               <Button
                                 size="xs"
                                 variant="light"

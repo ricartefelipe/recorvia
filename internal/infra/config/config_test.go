@@ -150,6 +150,22 @@ func TestWorkerAndMigrationsValidation(t *testing.T) {
 	}
 }
 
+func TestSMTPTimeout(t *testing.T) {
+	c, err := Load(env(baseEnv()))
+	if err != nil || c.SMTPTimeout != 15*time.Second {
+		t.Fatalf("tempo limite padrão do SMTP: %v %v", c.SMTPTimeout, err)
+	}
+	m := baseEnv()
+	m["RECORVIA_SMTP_TIMEOUT"] = "5s"
+	if c, err := Load(env(m)); err != nil || c.SMTPTimeout != 5*time.Second {
+		t.Fatalf("tempo limite configurado: %v %v", c.SMTPTimeout, err)
+	}
+	m["RECORVIA_SMTP_TIMEOUT"] = "zero"
+	if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), "RECORVIA_SMTP_TIMEOUT") {
+		t.Fatalf("valor inválido deve falhar: %v", err)
+	}
+}
+
 func TestPortalAndCredentialDefaults(t *testing.T) {
 	c, err := Load(env(baseEnv()))
 	if err != nil {
