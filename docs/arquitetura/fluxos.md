@@ -167,6 +167,129 @@ cliente nessa ordem.
    `FOR UPDATE`) impede que transações que precisam de várias assinaturas as bloqueiem em ordens
    opostas.
 
+## Régua de cobrança e notificações
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant S as Agendador (worker)
+  participant C as Régua (collections)
+  participant DB as PostgreSQL
+  participant N as Envio (notifications)
+  participant M as SMTP
+  S->>C: collections.run (lease)
+  C->>DB: app_tenants_for_collections (somente IDs, em páginas; rodízio entre execuções)
+  loop por fatura em aberto (páginas)
+    C->>DB: tx: fatura FOR SHARE; passo mais recente alcançado; INSERT notificação (ON CONFLICT DO NOTHING)
+  end
+  loop por fatura vencida avulsa ou de assinatura fora de active e past_due
+    C->>DB: tx: fatura FOR SHARE; inadimplência + invoice.overdue (uma vez)
+  end
+  loop por assinatura com fatura vencida (ou em past_due sem fatura vencida)
+    C->>DB: tx: faturas vencidas FOR SHARE → assinatura FOR UPDATE
+    C->>DB: inadimplência + invoice.overdue (uma vez); past_due ou volta a active; suspensão após N dias + aviso; reativação
+  end
+  S->>N: notifications.dispatch (lease)
+  N->>DB: tx curta: notificações vencidas FOR UPDATE SKIP LOCKED; regras (resolução, contatos, janela, limite) → sending
+  N->>M: envio fora de transação (tempo limite, TLS conforme configuração)
+  N->>DB: tx (contexto desvinculado do job): sent | scheduled com backoff | failed (somente quem detém a tentativa)
+```
+
+O consumidor `collections.invoice_resolved` (eventos `invoice.paid`, `invoice.voided`,
+`invoice.uncollectible` e `invoice.credited`) cancela os lembretes agendados da fatura resolvida,
+registra a resolução da inadimplência e reavalia a assinatura (volta de `past_due` a `active` e
+reativação pela política). Os
+consumidores `notifications.invoice_issued`, `notifications.payment_confirmed` e
+`notifications.member_invited` agendam os avisos de fatura emitida, pagamento recebido e convite de
+membro (o token do convite chega cifrado no evento; ver ADR-044).
+
+Configuração pela API (permissões `collections.read` e `collections.write`):
+
+- `GET/POST /api/v1/collection-policies` e `PATCH /api/v1/collection-policies/{id}` (`If-Match`):
+  passos relativos ao vencimento, janela de envio no fuso do tenant, limite diário por cliente,
+  suspensão após N dias e reativação no pagamento. A primeira política é a padrão; marcar outra
+  como padrão substitui a anterior. Na alteração, campos opcionais omitidos (`is_default`,
+  `suspend_after_days`, `reactivate_on_payment`) mantêm o valor atual e `suspend_after_days: null`
+  remove a suspensão.
+- `GET /api/v1/notification-templates` e `PUT /api/v1/notification-templates/{key}`: assunto e
+  corpo em texto simples com as variáveis da lista de cada template (`variables` traz os nomes;
+  no texto, a marcação é `{{nome}}`).
+- `GET /api/v1/notifications`: histórico paginado (filtros por situação e fatura) com
+  destinatários, tentativas, último erro e instante de envio.
+
+Criação e alteração de políticas e templates são auditadas. O worker publica as métricas
+`recorvia_collection_actions_total{action}` (lembretes agendados, faturas vencidas, suspensões e
+reativações) e `recorvia_notifications_dispatched_total{outcome}` (`sent`, `retried`, `failed`,
+`deferred`, `skipped`, `lost_lease`), sem rótulos de tenant, cliente ou fatura.
+
+## Webhooks enviados
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant MQ as RabbitMQ
+  participant F as Fan-out (webhooks.fanout)
+  participant DB as PostgreSQL
+  participant D as Entregas (webhooks.deliver)
+  participant T as Sistema do tenant
+  MQ->>F: evento de domínio assinável
+  F->>DB: tx: endpoints ativos que assinam o tipo; inbox; evento; uma entrega por endpoint
+  D->>DB: tx curta: entregas vencidas FOR UPDATE SKIP LOCKED → delivering (lease); segredos válidos
+  D->>D: assina id.timestamp.corpo com cada segredo válido (rotação)
+  D->>T: POST (DNS validado, IP conferido na conexão, sem redirecionamento, limites)
+  D->>DB: tx (contexto desvinculado do job): tentativa no histórico; succeeded | retrying (backoff com jitter) | exhausted
+  D->>DB: orçamento esgotado ou endpoint sem resposta: entregas não tentadas voltam à fila
+```
+
+Configuração pela API (permissões `webhooks.read` e `webhooks.write`; todas as alterações são
+auditadas, sem o valor dos segredos):
+
+- `GET /api/v1/webhook-event-types`: eventos que podem ser assinados (eventos internos, como
+  webhooks recebidos e convites, ficam de fora).
+- `POST /api/v1/webhook-endpoints`: cria o endpoint e devolve o segredo (`whsec_...`) uma única vez;
+  a listagem mostra apenas identificador e validade de cada segredo. A URL é validada no formato
+  (http ou https conforme o ambiente, sem credenciais nem fragmento) e no destino (SSRF, abaixo).
+- `PATCH /api/v1/webhook-endpoints/{id}` (`If-Match`): URL, descrição, eventos e situação; troca
+  de URL ou reativação revalida o destino. `DELETE` desativa o endpoint, retira-o da listagem e
+  encerra as entregas pendentes.
+- `POST /api/v1/webhook-endpoints/{id}/rotate-secret`: novo segredo (exibido uma vez); os anteriores
+  continuam válidos por `previous_secret_valid_hours` (padrão 24 h, 0 a 168).
+- `GET /api/v1/webhook-endpoints/{id}/deliveries` e `POST /api/v1/webhook-deliveries/{id}/retry`:
+  histórico paginado e reenvio manual (uma tentativa adicional imediata; recusado enquanto a
+  entrega está pendente ou em andamento e para endpoint desativado).
+
+Verificação pelo destinatário: recalcular `HMAC-SHA256(segredo, webhook-id + "." +
+webhook-timestamp + "." + corpo)` (a chave é o base64 após o prefixo `whsec_`), aceitar se qualquer
+assinatura `v1,` do cabeçalho `webhook-signature` conferir (comparação em tempo constante),
+recusar `webhook-timestamp` fora de uma tolerância curta (por exemplo, 5 minutos) e deduplicar
+pelo `webhook-id`, que é o mesmo em retentativas e reenvios. `webhooks.Verify` implementa a mesma
+verificação. O worker publica `recorvia_webhook_deliveries_total{outcome}` (`succeeded`,
+`retrying`, `exhausted`, `lost_lease`, `deferred`).
+
+### Proteção contra SSRF
+
+```mermaid
+flowchart TD
+  A[URL do endpoint] --> B{formato válido?<br/>http/https, sem credenciais,<br/>sem fragmento, porta válida}
+  B -- não --> X[422 invalid_webhook_endpoint]
+  B -- sim --> C[resolve o DNS do host]
+  C --> D{algum endereço interno,<br/>reservado ou de metadados?}
+  D -- sim --> Y[422 webhook_destination_not_allowed]
+  D -- não --> E[endpoint gravado]
+  E --> F[entrega: resolve de novo e conecta no IP validado]
+  F --> G{Dialer.Control: endereço<br/>efetivo permitido?}
+  G -- não --> Z[entrega exhausted<br/>falha permanente]
+  G -- sim --> H[POST sem proxy, sem seguir redirecionamentos,<br/>com tempo limite e corpo da resposta limitado]
+```
+
+São recusados loopback, redes privadas, link-local, CGNAT, multicast, faixas reservadas e de
+documentação, IPv4 embutido em NAT64 e qualquer resolução que inclua um desses endereços.
+Endereços de metadados de nuvem (`169.254.169.254`, `fd00:ec2::254` e equivalentes) nunca são
+aceitos. Exceções vêm somente de `RECORVIA_WEBHOOK_ALLOWED_PRIVATE_CIDRS`, proibida em produção,
+onde também se exige https. A checagem na conexão fecha a janela entre a validação e a requisição
+(DNS rebinding); um redirecionamento (3xx) é registrado como falha da tentativa, sem seguir o
+destino informado.
+
 ## Conciliação
 
 A conciliação compara cobranças locais com o provedor na janela de datas e registra divergências
