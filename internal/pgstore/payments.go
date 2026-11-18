@@ -188,7 +188,7 @@ func chargeFromRow(r dbgen.Charge) (payments.Charge, error) {
 	return payments.Charge{ID: r.ID, TenantID: r.TenantID, InvoiceID: r.InvoiceID, CustomerID: r.CustomerID, ProviderAccountID: r.ProviderAccountID,
 		Provider: r.Provider, Attempt: int(r.Attempt), ProviderChargeID: deref(r.ProviderChargeID), Status: payments.ChargeStatus(r.Status),
 		Amount: m(r.Amount), AmountPaid: m(r.AmountPaid), Fee: m(r.FeeAmount), AmountRefunded: m(r.AmountRefunded),
-		AmountChargedBack: m(r.AmountChargedBack), CheckoutURL: deref(r.CheckoutUrl), DueDate: dateFromPg(r.DueDate), PaidAt: r.PaidAt,
+		AmountRefundPending: m(r.AmountRefundPending), AmountChargedBack: m(r.AmountChargedBack), CheckoutURL: deref(r.CheckoutUrl), DueDate: dateFromPg(r.DueDate), PaidAt: r.PaidAt,
 		FailureReason: deref(r.FailureReason), ProviderStatus: deref(r.ProviderStatus), ProviderStatusAt: r.ProviderStatusAt,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: int(r.Version)}, nil
 }
@@ -209,8 +209,8 @@ func (tx paymentsTx) InsertCharge(ctx context.Context, c payments.Charge) error 
 	err := tx.q.InsertCharge(ctx, dbgen.InsertChargeParams{ID: c.ID, TenantID: tx.tenantID, InvoiceID: c.InvoiceID, CustomerID: c.CustomerID,
 		ProviderAccountID: c.ProviderAccountID, Provider: c.Provider, Attempt: int32(c.Attempt), ProviderChargeID: strPtr(c.ProviderChargeID),
 		Status: string(c.Status), Amount: c.Amount.Amount(), Currency: c.Amount.Currency().Code(), AmountPaid: c.AmountPaid.Amount(),
-		FeeAmount: c.Fee.Amount(), AmountRefunded: c.AmountRefunded.Amount(), AmountChargedBack: c.AmountChargedBack.Amount(),
-		CheckoutUrl: strPtr(c.CheckoutURL), DueDate: dateToPg(c.DueDate), PaidAt: c.PaidAt, FailureReason: strPtr(c.FailureReason),
+		FeeAmount: c.Fee.Amount(), AmountRefunded: c.AmountRefunded.Amount(), AmountRefundPending: c.AmountRefundPending.Amount(),
+		AmountChargedBack: c.AmountChargedBack.Amount(), CheckoutUrl: strPtr(c.CheckoutURL), DueDate: dateToPg(c.DueDate), PaidAt: c.PaidAt, FailureReason: strPtr(c.FailureReason),
 		ProviderStatus: strPtr(c.ProviderStatus), ProviderStatusAt: c.ProviderStatusAt, CreatedAt: c.CreatedAt})
 	if postgres.IsUniqueViolation(err, "charges_invoice_attempt_key") {
 		return apperr.Conflict("charge_attempt_exists", "Outra tentativa de cobrança foi criada ao mesmo tempo.")
@@ -250,11 +250,14 @@ func (tx paymentsTx) ChargeByProviderID(ctx context.Context, provider, providerC
 func (tx paymentsTx) UpdateCharge(ctx context.Context, c *payments.Charge) error {
 	n, err := tx.q.UpdateCharge(ctx, dbgen.UpdateChargeParams{TenantID: tx.tenantID, ID: c.ID, ProviderChargeID: strPtr(c.ProviderChargeID),
 		Status: string(c.Status), AmountPaid: c.AmountPaid.Amount(), FeeAmount: c.Fee.Amount(), AmountRefunded: c.AmountRefunded.Amount(),
-		AmountChargedBack: c.AmountChargedBack.Amount(), CheckoutUrl: strPtr(c.CheckoutURL), PaidAt: c.PaidAt, FailureReason: strPtr(c.FailureReason),
+		AmountRefundPending: c.AmountRefundPending.Amount(), AmountChargedBack: c.AmountChargedBack.Amount(), CheckoutUrl: strPtr(c.CheckoutURL), PaidAt: c.PaidAt, FailureReason: strPtr(c.FailureReason),
 		ProviderStatus: strPtr(c.ProviderStatus), ProviderStatusAt: c.ProviderStatusAt, Version: int32(c.Version)})
 	if err != nil {
 		if postgres.IsUniqueViolation(err, "charges_provider_charge_key") {
 			return apperr.Conflict("provider_charge_linked", "A cobrança do provedor já está vinculada a outra cobrança.")
+		}
+		if postgres.IsNamedCheckViolation(err, "charges_refund_reservation_limit") || postgres.IsNamedCheckViolation(err, "charges_refund_limit") {
+			return apperr.Conflict("refund_exceeds_balance", "O reembolso excede o saldo elegível da cobrança.").Wrap(err)
 		}
 		return err
 	}
