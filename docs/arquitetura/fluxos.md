@@ -174,3 +174,79 @@ abertas por tipo: cobrança sem correspondência, valor ou taxa divergente, paga
 reembolso/chargeback pendente e operação com resultado desconhecido. A resolução exige permissão
 `reconciliation.resolve`, justificativa e gera histórico e, quando necessário, lançamento de ajuste
 no ledger. O estado atual desta funcionalidade está em `docs/STATUS.md`.
+
+## Autenticação por credencial de API
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant I as Integração
+  participant A as API
+  participant R as Redis
+  participant DB as PostgreSQL
+  I->>A: Authorization: Bearer rcv_<identificador>_<segredo>
+  A->>R: falhas recentes da origem (bloqueio após o limite)
+  A->>A: valida o formato do token (sem consulta)
+  A->>DB: app_find_api_credential(identificador) → tenant, credencial
+  A->>DB: tx do tenant: credencial + organização + associação do emissor + plano
+  A->>A: SHA-256 do segredo comparado em tempo constante (vigente e anterior)
+  A->>DB: last_used_at (no máximo 1 escrita por minuto)
+  A->>A: escopos efetivos = escopos ∩ permissões atuais do emissor
+  A->>A: X-Recorvia-Tenant (se enviado) = tenant da credencial; permissão da rota pelos escopos
+  A->>R: limite de taxa por credencial
+  A-->>I: resposta (auditoria com ator api_credential)
+```
+
+Sem CSRF (o navegador não envia `Authorization: Bearer` por conta própria). O token do Recorvia tem
+precedência sobre o cookie de sessão; outro `Authorization` (por exemplo, HTTP Basic de um proxy,
+que o navegador repete) é ignorado quando há cookie e a requisição segue pela sessão, com CSRF. Token
+malformado, desconhecido, revogado, expirado ou com segredo errado responde 401 com
+`WWW-Authenticate: Bearer` e conta como tentativa inválida da origem. Organização inativa, plano sem
+`api_access` ou emissor que deixou a organização respondem 403. A rotação mantém o identificador e
+aceita o segredo anterior por 24 horas; a revogação vale na requisição seguinte.
+
+## Portal do cliente
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as Usuário do tenant
+  participant C as Cliente
+  participant A as API
+  participant DB as PostgreSQL
+  participant R as Redis
+  U->>A: POST /api/v1/customers/{id}/portal-links
+  A->>DB: tx: cliente FOR NO KEY UPDATE; revoga links anteriores; grava hash do novo token; auditoria
+  A-->>U: URL /portal/access?token=… e expires_at (token exibido uma vez)
+  C->>A: GET /portal/access?token=…
+  A->>R: falhas recentes da origem
+  A->>DB: app_find_portal_link(sha256(token)) → tenant, link
+  A->>DB: tx: link FOR UPDATE (pendente e dentro da validade); cliente e organização ativos; used_at; auditoria (customer_portal)
+  A->>R: grava a sessão do portal (antes do commit; descartada se o commit falhar)
+  A-->>C: 302 /portal + cookie recorvia_portal (HttpOnly, SameSite=Strict, Secure conforme ambiente)
+  C->>A: /api/portal/v1/* com o cookie (X-CSRF-Token nos métodos que alteram estado)
+  A->>R: sessão (expiração absoluta e por inatividade)
+  A->>DB: tx do tenant da sessão: link não revogado, cliente e organização ativos
+  C->>A: GET /api/portal/v1/invoices, /invoices/{id}, /invoices/{id}/document
+  A->>DB: tx do tenant da sessão: faturas emitidas do cliente da sessão (tenant_id e customer_id), itens e link de pagamento em aberto
+  A-->>C: faturas do cliente (outro cliente, outro tenant ou rascunho: 404)
+  C->>A: PUT /api/portal/v1/contact-preferences (X-CSRF-Token)
+  A->>DB: tx: cliente bloqueado; contatos do próprio cliente; grava só o que mudou; auditoria (customer_portal)
+  C->>A: POST /api/portal/v1/logout (X-CSRF-Token)
+  A->>DB: auditoria do encerramento
+  A->>R: remove a sessão
+  A-->>C: 204 + cookie expirado
+```
+
+Um novo link para o mesmo cliente revoga o anterior e encerra a sessão aberta com ele; arquivar o
+cliente ou suspender a organização também encerra o acesso. O portal não aceita a sessão do painel
+nem credenciais de API.
+
+O cliente vê as 100 faturas emitidas mais recentes, sem histórico, cobranças ou identificadores
+internos; os itens aparecem pelo valor líquido do desconto. O botão de pagamento usa o link do
+pagamento hospedado da cobrança mais recente aguardando pagamento e só aparece para fatura em
+aberto com saldo. O documento comercial é o mesmo HTML do painel, exibido em `iframe` isolado; a
+baixa como incobrável aparece ao cliente como "Encerrada". Nas
+preferências, o cliente escolhe quais contatos recebem e-mails de cobrança; contatos de outro
+cliente respondem 404 e nada da requisição é aplicado. Rascunhos e faturas de outros clientes nunca
+são consultados: as consultas do portal filtram tenant e cliente.

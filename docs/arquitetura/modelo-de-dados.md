@@ -37,15 +37,19 @@ erDiagram
   ledger_accounts ||--o{ ledger_entries : movimenta
   tenants ||--o{ outbox_events : publica
   tenants ||--o{ audit_log : audita
+  tenants ||--o{ api_credentials : emite
+  users ||--o{ api_credentials : responde
+  customers ||--o{ customer_portal_links : acessa
+  api_credentials |o--o{ customer_portal_links : gera
 ```
 
 ## Tabelas por módulo
 
 | Módulo | Tabelas |
 |---|---|
-| Organizações e identidade | `tenants`, `users`, `memberships`, `invitations`, `platform_staff` |
+| Organizações e identidade | `tenants`, `users`, `memberships`, `invitations`, `platform_staff`, `api_credentials` |
 | Plataforma | `platform_plans`, `platform_addons`, `tenant_platform_subscriptions`, `platform_addon_orders`, `platform_statements` |
-| Clientes | `customers`, `customer_contacts`, `customer_billing_addresses`, `customer_provider_refs`, `customer_credit_entries` |
+| Clientes | `customers`, `customer_contacts`, `customer_billing_addresses`, `customer_provider_refs`, `customer_credit_entries`, `customer_portal_links` |
 | Catálogo | `products`, `billable_metrics`, `plans`, `plan_price_versions`, `coupons` |
 | Assinaturas | `subscriptions`, `subscription_history`, `subscription_discounts`, `pending_invoice_items`, `subscription_scheduled_changes`, `subscription_price_adjustments`, `subscription_prorations` |
 | Consumo | `usage_events`, `usage_aggregates` |
@@ -75,3 +79,19 @@ erDiagram
 | Prorrata registrada imutável, dentro do período de cobrança | `app_reject_mutation`, `subscription_prorations_period` |
 | Valores na escala do preço unitário comportam `money.MaxAmount` | colunas `numeric(28,10)` (`unit_amount`, reajustes, bases de prorrata) |
 | Total da fatura coerente | `total = subtotal - desconto`; `saldo = total - crédito - pago - creditado - baixado` |
+| Credencial guarda só o hash do segredo; identificador único global | `api_credentials_key_id_key`, `secret_hash` de 32 bytes |
+| Escopos, nome, autoria e validade da credencial imutáveis; revogada não muda | gatilho `app_api_credentials_guard` |
+| Segredo anterior só existe com janela de validade e após rotação | `api_credentials_previous_secret` |
+| Um link do portal não revogado por cliente; uso único dentro da validade | `customer_portal_links_active_key`, `customer_portal_links_use_window`, gatilho `app_portal_links_guard` |
+| Link do portal com exatamente um autor (membro ou credencial do mesmo tenant) | `customer_portal_links_creator`, FKs compostas |
+
+## Dados do portal do cliente
+
+O portal não tem tabelas próprias de conteúdo: lê e altera dados do tenant sempre no escopo do
+cliente da sessão (consultas em `db/queries/portal.sql`).
+
+| Operação | Tabelas | Filtro |
+|---|---|---|
+| Sessão e resumo | `customer_portal_links`, `customers`, `customer_contacts`, `tenants` | tenant da sessão e cliente do link |
+| Faturas e documento | `invoices`, `invoice_items`, `charges` (`checkout_url` da tentativa mais recente aguardando pagamento) | `tenant_id`, `customer_id` e `status <> 'draft'` (índice `invoices_customer_idx`) |
+| Preferências de contato | `customer_contacts.receives_billing_email`, `audit_log` | `tenant_id`, `customer_id` e contato do próprio cliente |
