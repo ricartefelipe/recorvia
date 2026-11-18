@@ -35,6 +35,7 @@ import (
 // Env reúne serviços reais ligados ao banco do teste.
 type Env struct {
 	DB            *postgres.DB
+	Keyring       *secrets.Keyring
 	Clock         *clock.Manual
 	Store         *pgstore.Store
 	Tenancy       *tenancy.Service
@@ -57,7 +58,7 @@ func New(t testing.TB, maxConns int32, now time.Time) *Env {
 	c := clock.NewManual(now)
 	store := pgstore.New(db, kr, c, nil)
 	engine := billing.NewEngine(store.Billing(), c)
-	return &Env{DB: db, Clock: c, Store: store,
+	return &Env{DB: db, Keyring: kr, Clock: c, Store: store,
 		Tenancy: tenancy.NewService(store.Tenancy(), c), Platform: platformbilling.NewService(store.Platform(), c),
 		Customers: customers.NewService(store.Customers(), c), Catalog: catalog.NewService(store.Catalog(), c),
 		Subscriptions: subscriptions.NewService(store.Subscriptions(), c), Engine: engine,
