@@ -96,7 +96,7 @@ func (a *API) idempotency(info RouteInfo, next http.Handler) http.Handler {
 		h.Write([]byte(r.Method + "\n" + r.URL.Path + "\n"))
 		h.Write(body)
 		fingerprint := h.Sum(nil)
-		k := pgstore.IdempotencyKey{TenantID: p.TenantID, ClientID: "user:" + p.User.ID.String(), Operation: operation, Key: key}
+		k := pgstore.IdempotencyKey{TenantID: p.TenantID, ClientID: p.ClientID(), Operation: operation, Key: key}
 
 		rec, won, err := a.Store.IdempotencyBegin(r.Context(), k, fingerprint, idempotencyLease, idempotencyTTL)
 		if err != nil {

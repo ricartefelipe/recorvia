@@ -17,14 +17,17 @@ import (
 	"github.com/google/uuid"
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 
+	"github.com/ricartefelipe/recorvia/internal/apicredentials"
 	"github.com/ricartefelipe/recorvia/internal/httpapi"
 	"github.com/ricartefelipe/recorvia/internal/identity"
 	"github.com/ricartefelipe/recorvia/internal/infra/config"
 	"github.com/ricartefelipe/recorvia/internal/infra/redisstore"
 	"github.com/ricartefelipe/recorvia/internal/infra/secrets"
 	"github.com/ricartefelipe/recorvia/internal/kernel/ids"
+	"github.com/ricartefelipe/recorvia/internal/metering"
 	"github.com/ricartefelipe/recorvia/internal/payments"
 	"github.com/ricartefelipe/recorvia/internal/payments/gateways"
+	"github.com/ricartefelipe/recorvia/internal/portal"
 	"github.com/ricartefelipe/recorvia/internal/reporting"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
 	"github.com/ricartefelipe/recorvia/internal/testsupport/fixture"
@@ -42,7 +45,14 @@ type apiEnv struct {
 	srv      *httptest.Server
 }
 
-func newAPI(t *testing.T) *apiEnv {
+// apiSetup permite ajustar configuração e políticas antes de montar a API.
+type apiSetup struct {
+	cfg              *config.Config
+	portalPolicy     portal.Policy
+	credentialPolicy apicredentials.Policy
+}
+
+func newAPI(t *testing.T, opts ...func(*apiSetup)) *apiEnv {
 	t.Helper()
 	ctx := context.Background()
 	ctr, err := tcredis.Run(ctx, "redis:8.8.4-alpine")
@@ -65,12 +75,21 @@ func newAPI(t *testing.T) *apiEnv {
 	}
 	sessions := redisstore.New(rdb, kr, "web")
 	idsvc := identity.NewService(stubIDP{}, sessions, env.Store.Users(), env.Clock, identity.DefaultPolicy())
-	cfg := &config.Config{Env: config.Test, CookieName: "recorvia_session", CookieSecure: false, RateLimitPerMinute: 10000}
+	setup := &apiSetup{cfg: &config.Config{Env: config.Test, CookieName: "recorvia_session", PortalCookieName: "recorvia_portal",
+		CookieSecure: false, RateLimitPerMinute: 10000, APICredentialRateLimitPerMinute: 10000},
+		portalPolicy: portal.DefaultPolicy(), credentialPolicy: apicredentials.DefaultPolicy()}
+	for _, o := range opts {
+		o(setup)
+	}
 	pay := env.Payments(gateways.NewResolver(time.Second), payments.Config{WebhookBaseURL: "http://api.test/webhooks/providers"})
-	_, router := httpapi.NewRouter(httpapi.Deps{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: cfg, Clock: env.Clock,
+	portalSvc := portal.NewService(env.Store.Portal(), redisstore.NewPortalSessions(redisstore.New(rdb, kr, "portal")), sessions, env.Clock,
+		setup.portalPolicy)
+	credentials := apicredentials.NewService(env.Store.APICredentials(), sessions, env.Clock, setup.credentialPolicy)
+	_, router := httpapi.NewRouter(httpapi.Deps{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: setup.cfg, Clock: env.Clock,
 		Store: env.Store, Sessions: sessions, Identity: idsvc, Tenancy: env.Tenancy, Platform: env.Platform, Customers: env.Customers,
 		Catalog: env.Catalog, Subscriptions: env.Subscriptions, Billing: env.Billing, Payments: pay,
-		Reporting: reporting.NewService(env.Store.Reporting(), env.Clock)})
+		Metering: metering.NewService(env.Store.Metering(), env.Clock), Reporting: reporting.NewService(env.Store.Reporting(), env.Clock),
+		Portal: portalSvc, Credentials: credentials})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
 	return &apiEnv{t: t, env: env, sessions: sessions, srv: srv}
