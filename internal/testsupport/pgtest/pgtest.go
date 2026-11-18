@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/ricartefelipe/recorvia/internal/infra/migrate"
@@ -35,6 +36,12 @@ type Env struct {
 	SuperURL string
 	OwnerURL string
 	AppURL   string
+	// ContainerID e DockerHost identificam o container e o daemon que o
+	// executa (usados pelos testes que rodam ferramentas do PostgreSQL dentro
+	// dele com o docker CLI, como pg_dump e pg_restore). O daemon pode diferir
+	// do contexto atual do docker CLI.
+	ContainerID string
+	DockerHost  string
 }
 
 var (
@@ -82,7 +89,17 @@ func Start(t testing.TB) Env {
 			initErr = err
 			return
 		}
-		shared = Env{SuperURL: superURL, OwnerURL: ownerURL, AppURL: appURL}
+		cli, err := testcontainers.NewDockerClientWithOpts(ctx)
+		if err != nil {
+			initErr = fmt.Errorf("pgtest: cliente docker: %w", err)
+			return
+		}
+		dockerHost := cli.DaemonHost()
+		if err := cli.Close(); err != nil {
+			initErr = err
+			return
+		}
+		shared = Env{SuperURL: superURL, OwnerURL: ownerURL, AppURL: appURL, ContainerID: ctr.GetContainerID(), DockerHost: dockerHost}
 		if _, err := migrate.Up(ctx, shared.OwnerURL); err != nil {
 			initErr = err
 		}

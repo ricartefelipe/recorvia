@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ricartefelipe/recorvia/api"
 	"github.com/ricartefelipe/recorvia/internal/billing"
@@ -188,6 +190,9 @@ func (a *API) requestID(next http.Handler) http.Handler {
 			id = newRequestID()
 		}
 		w.Header().Set("X-Request-ID", id)
+		// O mesmo identificador no span HTTP permite ir do log ou do corpo de
+		// erro ao rastro correspondente.
+		trace.SpanFromContext(r.Context()).SetAttributes(attribute.String("recorvia.request_id", id))
 		ctx := logging.WithAttrs(r.Context(), slog.String("request_id", id))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -242,6 +247,10 @@ func (a *API) observe(next http.Handler) http.Handler {
 			rec.status = http.StatusOK
 		}
 		d := time.Since(start)
+		// Nome do span pelo padrão de rota (nunca pela URL concreta).
+		span := trace.SpanFromContext(r.Context())
+		span.SetName(r.Method + " " + route)
+		span.SetAttributes(attribute.String("http.route", route))
 		if a.Metrics != nil {
 			a.Metrics.HTTPRequests.WithLabelValues(route, r.Method, strconv.Itoa(rec.status/100)+"xx").Inc()
 			a.Metrics.HTTPDuration.WithLabelValues(route, r.Method).Observe(d.Seconds())

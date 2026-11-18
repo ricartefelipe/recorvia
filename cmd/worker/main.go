@@ -62,22 +62,15 @@ func run(log *slog.Logger) error {
 	}
 	defer core.Close()
 	metrics := telemetry.NewMetrics("worker")
+	metrics.RegisterDBPool(app.DBPoolStats(core.DB))
+	core.Resolver.Observe(metrics)
+	metrics.InitChargeFailures(core.Resolver.Providers())
 	conn := rabbit.NewConn(cfg.AMQPURL, log)
 	w := &app.Worker{Core: core, Metrics: metrics, Conn: conn}
 
-	mux := http.NewServeMux()
-	mux.Handle("GET /metrics", promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}))
-	mux.HandleFunc("GET /livez", func(rw http.ResponseWriter, _ *http.Request) { rw.WriteHeader(http.StatusOK) })
-	// Pronto quando banco e broker estão acessíveis.
-	mux.HandleFunc("GET /readyz", func(rw http.ResponseWriter, r *http.Request) {
-		pctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-		if core.DB.Ping(pctx) != nil || !conn.Connected() {
-			rw.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		rw.WriteHeader(http.StatusOK)
-	})
+	// Liveness só do processo; readiness com banco e broker (app.WorkerHealthMux).
+	mux := app.WorkerHealthMux(promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}),
+		app.WorkerProbes{Database: core.DB.Ping, Broker: conn.Connected})
 	srv := &http.Server{Addr: cfg.MetricsAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()

@@ -81,6 +81,9 @@ func run(log *slog.Logger) error {
 	policy.Absolute, policy.Idle = cfg.SessionTTL, cfg.SessionIdleTTL
 	ids := identity.NewService(idp, sessions, core.Store.Users(), core.Clock, policy)
 	metrics := telemetry.NewMetrics("api")
+	metrics.RegisterDBPool(app.DBPoolStats(core.DB))
+	core.Resolver.Observe(metrics)
+	metrics.InitChargeFailures(core.Resolver.Providers())
 
 	_, router := httpapi.NewRouter(httpapi.Deps{
 		Log: log, Config: cfg, Clock: core.Clock, Metrics: metrics, Store: core.Store, Sessions: sessions, Identity: ids,
