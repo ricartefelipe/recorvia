@@ -221,6 +221,7 @@ export const templateKeyLabels: Labels = {
   reminder_after_due: 'Lembrete após o vencimento',
   payment_confirmed: 'Pagamento confirmado',
   subscription_suspended: 'Assinatura suspensa',
+  member_invitation: 'Convite de membro',
 };
 
 export const notificationStatusLabels: Labels = {
