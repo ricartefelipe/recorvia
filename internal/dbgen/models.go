@@ -65,6 +65,36 @@ type Charge struct {
 	Version           int32
 }
 
+type CollectionPolicy struct {
+	ID                  uuid.UUID
+	TenantID            uuid.UUID
+	Name                string
+	IsDefault           bool
+	ReminderOffsetsDays []int32
+	SendWindowStartHour int32
+	SendWindowEndHour   int32
+	MaxMessagesPerDay   int32
+	SuspendAfterDays    *int32
+	ReactivateOnPayment bool
+	CreatedBy           *uuid.UUID
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	Version             int32
+}
+
+type CollectionSuspension struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	SubscriptionID uuid.UUID
+	PolicyID       uuid.UUID
+	InvoiceID      uuid.UUID
+	DaysOverdue    int32
+	Status         string
+	SuspendedAt    time.Time
+	EndedAt        *time.Time
+	EndReason      *string
+}
+
 type Coupon struct {
 	ID               uuid.UUID
 	TenantID         uuid.UUID
@@ -295,6 +325,57 @@ type Membership struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	Version   int32
+}
+
+type Notification struct {
+	ID                uuid.UUID
+	TenantID          uuid.UUID
+	BusinessKey       string
+	TemplateKey       string
+	Channel           string
+	Recipients        []string
+	Subject           string
+	ContentCiphertext []byte
+	ContentKeyID      *string
+	CustomerID        *uuid.UUID
+	InvoiceID         *uuid.UUID
+	SubscriptionID    *uuid.UUID
+	InvitationID      *uuid.UUID
+	PolicyID          *uuid.UUID
+	StepOffsetDays    *int32
+	Status            string
+	StatusReason      *string
+	SendAfter         time.Time
+	Attempts          int32
+	MaxAttempts       int32
+	LeaseUntil        *time.Time
+	LastError         *string
+	MessageID         *string
+	SentAt            *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type NotificationEvent struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	NotificationID uuid.UUID
+	Status         string
+	Reason         string
+	Attempt        int32
+	Detail         *string
+	OccurredAt     time.Time
+}
+
+type NotificationTemplate struct {
+	TenantID    uuid.UUID
+	TemplateKey string
+	Subject     string
+	Body        string
+	UpdatedBy   *uuid.UUID
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	Version     int32
 }
 
 type OutboxEvent struct {
@@ -667,4 +748,67 @@ type User struct {
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	LastLoginAt *time.Time
+}
+
+type WebhookDelivery struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	EndpointID     uuid.UUID
+	EventID        uuid.UUID
+	EventType      string
+	Status         string
+	Attempts       int32
+	MaxAttempts    int32
+	NextAttemptAt  *time.Time
+	LeaseUntil     *time.Time
+	LastStatusCode *int32
+	LastError      *string
+	DeliveredAt    *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type WebhookDeliveryAttempt struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	DeliveryID     uuid.UUID
+	Attempt        int32
+	StartedAt      time.Time
+	DurationMs     int32
+	StatusCode     *int32
+	Error          *string
+	SignatureCount int32
+}
+
+type WebhookEndpoint struct {
+	ID          uuid.UUID
+	TenantID    uuid.UUID
+	Url         string
+	Description string
+	EventTypes  []string
+	Status      string
+	DeletedAt   *time.Time
+	CreatedBy   *uuid.UUID
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	Version     int32
+}
+
+type WebhookEndpointSecret struct {
+	ID               uuid.UUID
+	TenantID         uuid.UUID
+	EndpointID       uuid.UUID
+	SecretCiphertext []byte
+	SecretKeyID      string
+	CreatedAt        time.Time
+	ExpiresAt        *time.Time
+}
+
+type WebhookEvent struct {
+	ID         uuid.UUID
+	TenantID   uuid.UUID
+	EventType  string
+	Payload    []byte
+	OccurredAt time.Time
+	CreatedAt  time.Time
 }
