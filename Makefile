@@ -14,7 +14,7 @@ GOLANGCI_LINT_VERSION := v2.15.0
 GOVULNCHECK_VERSION   := v1.9.0
 SQLC_VERSION          := v1.31.1
 GITLEAKS_VERSION      := v8.30.1
-TRIVY_IMAGE           := aquasec/trivy:0.76.2
+TRIVY_IMAGE           := aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
 
 COMPOSE := docker compose
 COVERAGE_THRESHOLD ?= 90
@@ -126,8 +126,8 @@ up: env ## Sobe o ambiente local completo e carrega os dados de demonstração
 	$(COMPOSE) --profile seed run --rm --build seed
 
 .PHONY: up-obs
-up-obs: env ## Sobe o ambiente com a stack de observabilidade
-	$(COMPOSE) --profile observability up -d --build --wait
+up-obs: env ## Sobe o ambiente com OpenTelemetry Collector, Jaeger, Prometheus e Grafana
+	OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 $(COMPOSE) --profile observability up -d --build --wait
 	$(COMPOSE) --profile seed run --rm --build seed
 
 .PHONY: down
@@ -142,8 +142,37 @@ reset: ## Derruba o ambiente e remove volumes
 logs: ## Acompanha logs da API e do worker
 	$(COMPOSE) logs -f api worker
 
-.PHONY: image-scan
-image-scan: ## Analisa as imagens locais com Trivy
-	@for img in recorvia-api:local recorvia-worker:local recorvia-paysim:local recorvia-web:local; do \
-	  docker run --rm -v /var/run/docker.sock:/var/run/docker.sock $(TRIVY_IMAGE) image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed $$img; \
+## ---------- Operação ----------
+.PHONY: obs-check
+obs-check: ## Valida as configurações de observabilidade (otelcol, jaeger, promtool, dashboards)
+	bash deploy/observability/validate.sh
+
+.PHONY: obs-stack-check
+obs-stack-check: ## Confere a stack em execução (make up-obs): alvos, regras, séries, dashboards e rastros
+	bash deploy/observability/stack-check.sh
+
+.PHONY: backup
+backup: ## Backup lógico do PostgreSQL do ambiente (pg_dump no container) em backups/
+	bash deploy/backup/backup.sh
+
+.PHONY: restore-check
+restore-check: ## Restaura o último backup (ou DUMP=arquivo) num banco novo e confere o manifesto
+	bash deploy/backup/restore-check.sh $(DUMP)
+
+## ---------- Imagens ----------
+GO_IMAGES := api worker migrate seed paysim
+IMAGES    := $(addprefix recorvia-,$(GO_IMAGES)) recorvia-web recorvia-keycloak
+# Etiqueta das imagens construídas e analisadas (as do compose usam "local").
+IMAGE_TAG ?= local
+
+.PHONY: images
+images: ## Constrói as imagens da aplicação (api, worker, migrate, seed, paysim, web, keycloak)
+	@for cmd in $(GO_IMAGES); do \
+	  docker build -f deploy/docker/go.Dockerfile --build-arg CMD=$$cmd -t recorvia-$$cmd:$(IMAGE_TAG) . ; \
 	done
+	docker build -t recorvia-web:$(IMAGE_TAG) web
+	docker build -t recorvia-keycloak:$(IMAGE_TAG) deploy/keycloak
+
+.PHONY: image-scan
+image-scan: ## Analisa as imagens com Trivy (falha em HIGH/CRITICAL com correção disponível)
+	TRIVY_IMAGE=$(TRIVY_IMAGE) bash deploy/security/image-scan.sh $(addsuffix :$(IMAGE_TAG),$(IMAGES))

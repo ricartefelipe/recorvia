@@ -1,0 +1,13 @@
+# Dashboards do Recorvia carregados da imagem (ADR-020). Alterações feitas na
+# interface não são salvas: edite os arquivos JSON em
+# deploy/observability/grafana/dashboards e reconstrua a imagem.
+apiVersion: 1
+providers:
+  - name: recorvia
+    folder: Recorvia
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 0
+    options:
+      path: /etc/grafana/dashboards/recorvia
