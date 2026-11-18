@@ -154,7 +154,11 @@ export const paymentOperationStatusLabels: Labels = {
   unknown: 'Resultado desconhecido',
 };
 
-export const paymentOperationKindLabels: Labels = { create_charge: 'Criação de cobrança', refund: 'Reembolso' };
+export const paymentOperationKindLabels: Labels = {
+  create_charge: 'Criação de cobrança',
+  refund: 'Reembolso',
+  cancel_charge: 'Cancelamento no provedor',
+};
 
 export const creditKindLabels: Labels = {
   grant: 'Concessão',
@@ -207,6 +211,7 @@ export const resolutionLabels: Labels = {
   keep_local: 'Manter o valor local',
   adjust_ledger: 'Ajustar o ledger com lançamento compensatório',
   dismiss: 'Descartar a divergência',
+  auto_resolved: 'Resolvida automaticamente (não constatada em nova execução)',
 };
 
 export const reconciliationRunStatusLabels: Labels = {

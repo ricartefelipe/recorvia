@@ -2633,7 +2633,7 @@ export interface components {
             /** Format: uuid */
             refund_id?: string | null;
             /** @enum {string} */
-            kind: "create_charge" | "refund";
+            kind: "create_charge" | "refund" | "cancel_charge";
             /** @enum {string} */
             status: "pending" | "in_flight" | "succeeded" | "failed" | "unknown";
             external_reference: string;
