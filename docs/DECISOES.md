@@ -329,3 +329,121 @@ assinatura ainda aponta a versão anterior; validar pela versão anterior aceita
 fechamento não fatura e rejeitaria os que ele fatura.
 **Consequências:** a mudança é lida sem bloqueio dentro da transação da ingestão, que já mantém a
 assinatura em `FOR SHARE`.
+
+## ADR-046 Credenciais de API: formato do token, hash e comparação em tempo constante
+**Status:** aceita.
+**Contexto:** integrações precisam de credenciais próprias (RF-14), sem depender da sessão do
+navegador, e o banco não pode guardar nada que permita reconstruir um token válido.
+**Decisão:** o token tem o formato `rcv_<identificador>_<segredo>`: identificador público de 80 bits
+e segredo de 256 bits gerados com `crypto/rand`, ambos em base32 minúsculo sem preenchimento (16 e
+52 caracteres, 73 no total). Somente o SHA-256 do segredo é persistido (`api_credentials`); um hash
+rápido basta porque o segredo é aleatório e não há espaço de busca a explorar. O token é exibido uma
+única vez, na criação ou na rotação. A autenticação localiza a credencial pelo identificador
+(`app_find_api_credential`, `SECURITY DEFINER`, que devolve apenas credencial e tenant) e compara o
+hash dentro da transação do tenant com `subtle.ConstantTimeCompare`, sempre contra o segredo vigente
+e contra o anterior (ou um valor neutro de mesmo tamanho), para que o tempo de resposta não indique
+qual hash coincidiu. O formato é validado antes de qualquer consulta, sem normalização. O último uso
+(`last_used_at`) é registrado com resolução de 1 minuto para não gerar uma escrita por requisição.
+**Consequências:** a listagem mostra apenas o prefixo (`rcv_<identificador>`); um segredo perdido
+exige rotação. O prefixo fixo facilita a detecção de vazamentos por varredura de segredos. Cada
+organização tem no máximo 50 credenciais ativas (`api_credential_limit`, 409); a criação bloqueia a
+linha da organização com `FOR NO KEY UPDATE` antes de contar as ativas, o que serializa criações
+simultâneas sem conflitar com inserções que apenas referenciam a organização. Como credenciais nunca
+são excluídas, a listagem (sem cursor no contrato) traz sempre todas as ativas primeiro e completa
+o limite de 200 itens com as revogadas e expiradas mais recentes.
+
+## ADR-047 Escopos das credenciais limitados a quem as emite
+**Status:** aceita.
+**Decisão:** os escopos são permissões existentes de `internal/tenancy/permissions.go`, validadas,
+sem repetição e em ordem estável. Na criação, cada escopo precisa ser concedido ao papel de quem
+cria (`scope_exceeds_permissions`, 403). `members.manage`, `platform_billing.manage` e
+`api_credentials.manage` não são delegáveis: exigem uma pessoa identificada, e uma credencial não pode
+emitir nem administrar outras credenciais. Em cada requisição, os escopos efetivos são a interseção
+dos escopos gravados com as permissões atuais do papel de quem emitiu o segredo vigente (quem
+rotacionou por último ou, sem rotação, quem criou); se essa pessoa deixar a organização, a credencial
+para de autenticar (`api_credential_issuer_inactive`, 403) até ser rotacionada por um membro ativo,
+que passa a ser o responsável. A criação e a rotação exigem o recurso `api_access` do plano da
+plataforma, também verificado a cada requisição (troca para um plano sem o recurso suspende o uso);
+a revogação e a listagem não dependem do plano. Escopos, nome, autoria e validade são imutáveis no
+banco (gatilho `app_api_credentials_guard`).
+**Consequências:** rebaixar um membro reduz imediatamente as credenciais que ele emitiu, sem regravá-las.
+Rotas de conta e de sessão (`Authenticated`) e a gestão de credenciais não aceitam credenciais.
+
+## ADR-048 Rotação com janela de 24 horas e revogação imediata
+**Status:** aceita.
+**Decisão:** a rotação troca o segredo da mesma credencial (identificador, nome, escopos e validade
+mantidos) e guarda o hash anterior com validade de 24 horas (`previous_secret_expires_at`, nunca além
+da validade da credencial), prazo informado no contrato da API. Uma nova rotação dentro da janela
+descarta imediatamente o segredo de antes da primeira: no máximo dois segredos valem ao mesmo tempo. A
+revogação invalida os dois na hora e é idempotente; credencial revogada não pode ser alterada nem
+reativada (gatilho). Rotação de credencial revogada ou expirada é recusada (409). Rotações concorrentes
+são serializadas pelo bloqueio da linha e pela versão.
+**Justificativa:** manter o identificador preserva o cliente de idempotência e o histórico de uso; a
+janela permite trocar o segredo na integração sem indisponibilidade.
+
+## ADR-049 Autenticação Bearer na mesma pilha da sessão do navegador
+**Status:** aceita.
+**Decisão:** o middleware de autenticação aceita `Authorization: Bearer rcv_…`, que tem precedência
+sobre o cookie, e, sem esse header, mantém a sessão por cookie. Um `Authorization` em outro formato
+(por exemplo, HTTP Basic de um proxy à frente da aplicação, que o navegador repete em todas as
+requisições) é ignorado quando há cookie de sessão; sem cookie, é tratado como credencial inválida
+(401 `api_credential_invalid`). Com Bearer, o principal é do tipo `api_credential`: o tenant é o da
+credencial (um `X-Recorvia-Tenant` divergente gera 409 `tenant_mismatch`), a permissão da rota é
+verificada pelos escopos efetivos, não há verificação CSRF (navegadores não enviam `Bearer` por
+conta própria e o CORS só libera origens configuradas), a auditoria registra o ator
+`api_credential`, o cliente de idempotência é `api_credential:<id>` e o limite de taxa é por
+credencial (`RECORVIA_API_CREDENTIAL_RATE_LIMIT_PER_MINUTE`, padrão 600). Colunas de autoria que
+referenciam `users` ficam nulas nas ações feitas por credencial; a autoria completa fica na auditoria.
+Respostas 401 incluem `WWW-Authenticate: Bearer`.
+**Consequências:** as rotas existentes passam a servir integrações sem duplicação; nenhuma rota de
+tenant precisa saber o tipo do principal além da autoria.
+
+## ADR-050 Portal do cliente: link de uso único e sessão restrita
+**Status:** aceita.
+**Decisão:** o link (`customer_portal_links`) guarda apenas o SHA-256 de um token de 256 bits e vale
+por 72 horas por padrão (`RECORVIA_PORTAL_LINK_TTL`, de 15 minutos a 30 dias). Cada cliente tem no
+máximo um link não revogado (índice único parcial): gerar um novo link revoga o anterior, pendente ou
+já trocado, o que também encerra a sessão aberta com ele; é a forma de revogação disponível no
+contrato. A geração bloqueia o cliente com `FOR NO KEY UPDATE`, serializando gerações concorrentes sem
+conflitar com inserções que apenas referenciam o cliente. `GET /portal/access` localiza o link pelo
+hash (`app_find_portal_link`), bloqueia a linha, exige link pendente, cliente e organização ativos,
+marca o uso, audita com o ator `customer_portal` e grava a sessão no Redis antes do commit; se o
+commit falhar, a sessão é descartada, e se o Redis falhar o link continua utilizável. A sessão tem
+namespace e cookie próprios (`recorvia_portal`; `__Host-` em produção), `HttpOnly`, `Secure`
+conforme a configuração, `SameSite=Strict`, token CSRF próprio, duração máxima de 2 horas
+(`RECORVIA_PORTAL_SESSION_TTL`) e encerramento após 30 minutos sem uso
+(`RECORVIA_PORTAL_SESSION_IDLE_TTL`). Toda requisição do portal revalida a sessão contra o link de
+origem (não revogado), o cliente e a organização (ativos), na transação do tenant gravado na sessão.
+**Escopo dos dados:** tenant e cliente vêm sempre da sessão, nunca da requisição. As consultas do
+portal (`db/queries/portal.sql`) filtram `tenant_id` e `customer_id` e excluem rascunhos; o caso de
+uso confere de novo cliente, tenant e situação antes de responder, e fatura de outro cliente, de
+outro tenant ou em rascunho responde 404 `invoice_not_found`. A listagem traz as 100 faturas emitidas
+mais recentes, sem paginação (o contrato não prevê cursor), com itens pelo valor líquido do desconto
+(a soma é o total) e sem histórico, cobranças ou identificadores internos. O link de pagamento
+hospedado é o da tentativa mais recente aguardando pagamento, exibido apenas para fatura em aberto
+com saldo e apenas com esquema `http(s)` absoluto. O documento comercial é o mesmo HTML do painel
+(sem scripts, CSP restritiva); para o cliente, a baixa como incobrável, registro interno da
+organização, aparece como "Encerrada", no documento e na interface. As preferências de contato alteram somente
+`receives_billing_email` de contatos do próprio cliente (contato alheio responde 404 e nada da
+requisição é aplicado), com o cliente bloqueado durante a alteração; somente mudanças efetivas são
+gravadas e auditadas (`customer.contact_preferences_updated`, ator `customer_portal`, sem e-mails nos
+detalhes).
+**Consequências:** o portal nunca aceita a sessão do painel nem credenciais de API, e vice-versa.
+Arquivar o cliente, suspender a organização ou gerar novo link encerra o acesso na requisição
+seguinte. Uma sessão órfã (commit perdido depois da gravação no Redis) não é alcançável: o
+identificador nunca chegou ao navegador. Um link inválido em `GET /portal/access` responde 401 com
+`application/problem+json`, como define o contrato; uma página amigável para esse caso exigiria
+alterar o contrato.
+
+## ADR-051 Limitação de tentativas de autenticação por origem
+**Status:** aceita.
+**Decisão:** tentativas inválidas de troca de link do portal e de autenticação por credencial
+(token malformado, desconhecido, expirado, revogado, já usado ou com segredo errado) incrementam um
+contador por origem (IP) no Redis, em janela fixa iniciada na primeira falha; a chave guarda apenas o
+hash da origem. Com 10 falhas em 15 minutos no portal ou 30 falhas em 10 minutos nas credenciais, a
+origem recebe 429 mesmo com um token válido até a janela terminar. A rota `/portal/access` tem também
+limite de 30 requisições por minuto por IP. Falhas de infraestrutura não contam como tentativas
+inválidas, e a indisponibilidade do contador libera a verificação (os limites são proteção
+auxiliar; o token continua sendo verificado).
+**Consequências:** varreduras de identificadores e de links custam pouco ao banco; uma integração
+com token revogado é bloqueada temporariamente pela própria origem, sem afetar outras origens.

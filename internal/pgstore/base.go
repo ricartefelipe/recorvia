@@ -258,6 +258,15 @@ func strPtr(s string) *string {
 
 func ptrTime(t time.Time) *time.Time { return &t }
 
+// uuidOrNil grava a autoria ausente (uuid.Nil, ação executada por credencial
+// de API) como NULL; a autoria completa fica na auditoria.
+func uuidOrNil(id uuid.UUID) *uuid.UUID {
+	if id == uuid.Nil {
+		return nil
+	}
+	return &id
+}
+
 func deref(s *string) string {
 	if s == nil {
 		return ""

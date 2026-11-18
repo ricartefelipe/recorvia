@@ -11,6 +11,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type ApiCredential struct {
+	ID                      uuid.UUID
+	TenantID                uuid.UUID
+	Name                    string
+	KeyID                   string
+	SecretHash              []byte
+	PreviousSecretHash      []byte
+	PreviousSecretExpiresAt *time.Time
+	Scopes                  []string
+	CreatedBy               uuid.UUID
+	CreatedAt               time.Time
+	ExpiresAt               *time.Time
+	RotatedBy               *uuid.UUID
+	RotatedAt               *time.Time
+	LastUsedAt              *time.Time
+	RevokedBy               *uuid.UUID
+	RevokedAt               *time.Time
+	Version                 int32
+}
+
 type AuditLog struct {
 	ID           uuid.UUID
 	TenantID     uuid.UUID
@@ -158,6 +178,20 @@ type CustomerCreditEntry struct {
 	CreatedBy  *uuid.UUID
 	RequestKey *string
 	CreatedAt  time.Time
+}
+
+type CustomerPortalLink struct {
+	ID                    uuid.UUID
+	TenantID              uuid.UUID
+	CustomerID            uuid.UUID
+	TokenHash             []byte
+	CreatedByUserID       *uuid.UUID
+	CreatedByCredentialID *uuid.UUID
+	CreatedAt             time.Time
+	ExpiresAt             time.Time
+	UsedAt                *time.Time
+	RevokedAt             *time.Time
+	RevokeReason          *string
 }
 
 type DeadLetter struct {

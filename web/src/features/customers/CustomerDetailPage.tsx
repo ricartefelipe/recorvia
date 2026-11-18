@@ -49,6 +49,9 @@ function PortalLinkAction({ customer }: { customer: CustomerDetails }) {
               Envie este link para {customer.name}. Ele é de uso único e expira em {formatDateTime(link.expires_at, timeZone)}.
               Ao abri-lo, o cliente acessa suas faturas e preferências de contato.
             </Text>
+            <Text size="sm" c="dimmed">
+              O link é exibido somente agora. Gerar um novo link invalida o anterior e encerra a sessão do portal aberta com ele.
+            </Text>
             <CopyField label="Link do portal" value={link.url} />
             <Group justify="flex-end">
               <Button onClick={() => setLink(null)}>Fechar</Button>

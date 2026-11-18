@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"github.com/ricartefelipe/recorvia/internal/apicredentials"
 	"github.com/ricartefelipe/recorvia/internal/app"
 	"github.com/ricartefelipe/recorvia/internal/httpapi"
 	"github.com/ricartefelipe/recorvia/internal/identity"
@@ -23,6 +24,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/infra/logging"
 	"github.com/ricartefelipe/recorvia/internal/infra/redisstore"
 	"github.com/ricartefelipe/recorvia/internal/infra/telemetry"
+	"github.com/ricartefelipe/recorvia/internal/portal"
 )
 
 var version = "dev"
@@ -80,13 +82,22 @@ func run(log *slog.Logger) error {
 	policy := identity.DefaultPolicy()
 	policy.Absolute, policy.Idle = cfg.SessionTTL, cfg.SessionIdleTTL
 	ids := identity.NewService(idp, sessions, core.Store.Users(), core.Clock, policy)
+	portalPolicy := portal.DefaultPolicy()
+	portalPolicy.LinkTTL, portalPolicy.SessionTTL, portalPolicy.SessionIdle = cfg.PortalLinkTTL, cfg.PortalSessionTTL, cfg.PortalSessionIdleTTL
+	if err := portalPolicy.Validate(); err != nil {
+		return err
+	}
+	portalSessions := redisstore.NewPortalSessions(redisstore.New(rdb, core.Keyring, "portal"))
+	portalSvc := portal.NewService(core.Store.Portal(), portalSessions, sessions, core.Clock, portalPolicy)
+	credentials := apicredentials.NewService(core.Store.APICredentials(), sessions, core.Clock, apicredentials.DefaultPolicy())
 	metrics := telemetry.NewMetrics("api")
 
 	_, router := httpapi.NewRouter(httpapi.Deps{
 		Log: log, Config: cfg, Clock: core.Clock, Metrics: metrics, Store: core.Store, Sessions: sessions, Identity: ids,
 		Tenancy: core.Tenancy, Platform: core.Platform, Customers: core.Customers, Catalog: core.Catalog, Subscriptions: core.Subscriptions,
 		Billing: core.Billing, Changes: core.Changes, CreditNotes: core.CreditNotes, Coupons: core.Coupons, Terms: core.Terms,
-		Metering: core.Metering, Payments: core.Payments, Reporting: core.Reporting, Providers: core.Resolver.Providers(),
+		Metering: core.Metering, Payments: core.Payments, Reporting: core.Reporting, Portal: portalSvc, Credentials: credentials,
+		Providers: core.Resolver.Providers(),
 		Ready: func(ctx context.Context) map[string]error {
 			return map[string]error{"postgres": core.DB.Ping(ctx), "redis": sessions.Ping(ctx)}
 		},

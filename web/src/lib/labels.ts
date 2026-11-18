@@ -95,6 +95,12 @@ export const invoiceStatusLabels: Labels = {
   uncollectible: 'Incobrável',
 };
 
+/**
+ * Situações exibidas ao cliente no portal: a baixa como incobrável é um
+ * registro interno da organização; para o cliente, a fatura está encerrada.
+ */
+export const portalInvoiceStatusLabels: Labels = { ...invoiceStatusLabels, uncollectible: 'Encerrada' };
+
 export const invoiceKindLabels: Labels = {
   subscription_cycle: 'Ciclo da assinatura',
   final_usage: 'Consumo final',
@@ -269,6 +275,7 @@ export const actorTypeLabels: Labels = {
   api_credential: 'Credencial de API',
   provider: 'Provedor',
   customer: 'Cliente',
+  customer_portal: 'Portal do cliente',
 };
 
 /** Cor do Badge por situação. */
