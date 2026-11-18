@@ -1,0 +1,12 @@
+# Exceções da análise de imagens com Trivy (ADR-057). Cada entrada precisa de
+# justificativa, escopo restrito (pacote e versão) e data de expiração: depois
+# dela, o achado volta a falhar a CI e deve ser reavaliado.
+vulnerabilities:
+  - id: CVE-2026-102554
+    purls:
+      - "pkg:maven/com.google.guava/guava@33.6.0-jre"
+    statement: >-
+      Guava 33.6.0 embutido na distribuição do Keycloak 26.8.2, a versão mais recente publicada
+      (imagem de 2026-11-12); a correção (33.7.2) depende de nova versão do Keycloak. A imagem
+      recorvia-keycloak é usada somente no ambiente local e nos testes E2E da CI.
+    expired_at: 2026-12-31
