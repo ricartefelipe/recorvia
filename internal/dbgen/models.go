@@ -39,30 +39,31 @@ type BillableMetric struct {
 }
 
 type Charge struct {
-	ID                uuid.UUID
-	TenantID          uuid.UUID
-	InvoiceID         uuid.UUID
-	CustomerID        uuid.UUID
-	ProviderAccountID uuid.UUID
-	Provider          string
-	Attempt           int32
-	ProviderChargeID  *string
-	Status            string
-	Amount            int64
-	Currency          string
-	AmountPaid        int64
-	FeeAmount         int64
-	AmountRefunded    int64
-	AmountChargedBack int64
-	CheckoutUrl       *string
-	DueDate           pgtype.Date
-	PaidAt            *time.Time
-	FailureReason     *string
-	ProviderStatus    *string
-	ProviderStatusAt  *time.Time
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	Version           int32
+	ID                  uuid.UUID
+	TenantID            uuid.UUID
+	InvoiceID           uuid.UUID
+	CustomerID          uuid.UUID
+	ProviderAccountID   uuid.UUID
+	Provider            string
+	Attempt             int32
+	ProviderChargeID    *string
+	Status              string
+	Amount              int64
+	Currency            string
+	AmountPaid          int64
+	FeeAmount           int64
+	AmountRefunded      int64
+	AmountChargedBack   int64
+	CheckoutUrl         *string
+	DueDate             pgtype.Date
+	PaidAt              *time.Time
+	FailureReason       *string
+	ProviderStatus      *string
+	ProviderStatusAt    *time.Time
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	Version             int32
+	AmountRefundPending int64
 }
 
 type Coupon struct {
@@ -175,6 +176,34 @@ type DeadLetter struct {
 	ResolvedAt     *time.Time
 	ResolvedBy     *uuid.UUID
 	ResolutionNote *string
+}
+
+type Dispute struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	ChargeID       uuid.UUID
+	Provider       string
+	Status         string
+	Amount         int64
+	Currency       string
+	ProviderStatus *string
+	OpenedAt       time.Time
+	ClosedAt       *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	Version        int32
+}
+
+type DisputeEvent struct {
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	DisputeID      uuid.UUID
+	FromStatus     *string
+	ToStatus       string
+	ProviderStatus *string
+	OccurredAt     time.Time
+	RecordedAt     time.Time
+	Details        []byte
 }
 
 type IdempotencyKey struct {
@@ -497,6 +526,78 @@ type ProviderWebhookEvent struct {
 	Status            string
 	ProcessedAt       *time.Time
 	Error             *string
+}
+
+type ReconciliationDiscrepancy struct {
+	ID                  uuid.UUID
+	TenantID            uuid.UUID
+	RunID               uuid.UUID
+	LastRunID           uuid.UUID
+	Kind                string
+	Status              string
+	DedupeKey           string
+	Provider            string
+	ChargeID            *uuid.UUID
+	RefundID            *uuid.UUID
+	DisputeID           *uuid.UUID
+	OperationID         *uuid.UUID
+	ProviderChargeID    *string
+	LocalAmount         *int64
+	ProviderAmount      *int64
+	LocalValue          []byte
+	ProviderValue       []byte
+	Occurrences         int32
+	FirstDetectedAt     time.Time
+	LastDetectedAt      time.Time
+	Resolution          *string
+	Justification       *string
+	ResolvedBy          *uuid.UUID
+	ResolvedAt          *time.Time
+	LedgerTransactionID *uuid.UUID
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	Version             int32
+}
+
+type ReconciliationRun struct {
+	ID                uuid.UUID
+	TenantID          uuid.UUID
+	ProviderAccountID uuid.UUID
+	Provider          string
+	TriggerType       string
+	Status            string
+	WindowStart       time.Time
+	WindowEnd         time.Time
+	CheckedCount      int32
+	DiscrepancyCount  int32
+	Error             *string
+	RequestedBy       *uuid.UUID
+	RequestKey        *string
+	LeaseUntil        *time.Time
+	StartedAt         time.Time
+	FinishedAt        *time.Time
+	UpdatedAt         time.Time
+}
+
+type Refund struct {
+	ID               uuid.UUID
+	TenantID         uuid.UUID
+	ChargeID         uuid.UUID
+	Provider         string
+	Origin           string
+	Status           string
+	Amount           int64
+	CreditAmount     int64
+	Currency         string
+	Reason           string
+	ProviderRefundID *string
+	FailureReason    *string
+	RequestedBy      *uuid.UUID
+	RequestKey       *string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	CompletedAt      *time.Time
+	Version          int32
 }
 
 type ScheduledJob struct {
