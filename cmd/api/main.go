@@ -86,7 +86,8 @@ func run(log *slog.Logger) error {
 		Log: log, Config: cfg, Clock: core.Clock, Metrics: metrics, Store: core.Store, Sessions: sessions, Identity: ids,
 		Tenancy: core.Tenancy, Platform: core.Platform, Customers: core.Customers, Catalog: core.Catalog, Subscriptions: core.Subscriptions,
 		Billing: core.Billing, Changes: core.Changes, CreditNotes: core.CreditNotes, Coupons: core.Coupons, Terms: core.Terms,
-		Metering: core.Metering, Payments: core.Payments, Reporting: core.Reporting, Providers: core.Resolver.Providers(),
+		Metering: core.Metering, Payments: core.Payments, Reporting: core.Reporting, Notifications: core.Notifications,
+		Collections: core.Collections, Webhooks: core.Webhooks, Providers: core.Resolver.Providers(),
 		Ready: func(ctx context.Context) map[string]error {
 			return map[string]error{"postgres": core.DB.Ping(ctx), "redis": sessions.Ping(ctx)}
 		},

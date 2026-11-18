@@ -26,13 +26,7 @@ var pendingOperations = map[string]bool{
 	"GET /api/v1/reconciliation/runs": true, "POST /api/v1/reconciliation/runs": true,
 	"GET /api/v1/reconciliation/discrepancies": true, "GET /api/v1/reconciliation/discrepancies/{id}": true,
 	"POST /api/v1/reconciliation/discrepancies/{id}/resolve": true,
-	"GET /api/v1/collection-policies":                        true, "POST /api/v1/collection-policies": true, "PATCH /api/v1/collection-policies/{id}": true,
-	"GET /api/v1/notification-templates": true, "PUT /api/v1/notification-templates/{key}": true, "GET /api/v1/notifications": true,
-	"GET /api/v1/webhook-event-types": true, "GET /api/v1/webhook-endpoints": true, "POST /api/v1/webhook-endpoints": true,
-	"PATCH /api/v1/webhook-endpoints/{id}": true, "DELETE /api/v1/webhook-endpoints/{id}": true,
-	"POST /api/v1/webhook-endpoints/{id}/rotate-secret": true, "GET /api/v1/webhook-endpoints/{id}/deliveries": true,
-	"POST /api/v1/webhook-deliveries/{id}/retry": true,
-	"GET /api/v1/api-credentials":                true, "POST /api/v1/api-credentials": true, "POST /api/v1/api-credentials/{id}/rotate": true,
+	"GET /api/v1/api-credentials":                            true, "POST /api/v1/api-credentials": true, "POST /api/v1/api-credentials/{id}/rotate": true,
 	"DELETE /api/v1/api-credentials/{id}": true,
 }
 

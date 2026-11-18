@@ -25,6 +25,7 @@ import (
 	"github.com/ricartefelipe/recorvia/api"
 	"github.com/ricartefelipe/recorvia/internal/billing"
 	"github.com/ricartefelipe/recorvia/internal/catalog"
+	"github.com/ricartefelipe/recorvia/internal/collections"
 	"github.com/ricartefelipe/recorvia/internal/customers"
 	"github.com/ricartefelipe/recorvia/internal/identity"
 	"github.com/ricartefelipe/recorvia/internal/infra/config"
@@ -34,12 +35,14 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
 	"github.com/ricartefelipe/recorvia/internal/metering"
+	"github.com/ricartefelipe/recorvia/internal/notifications"
 	"github.com/ricartefelipe/recorvia/internal/payments"
 	"github.com/ricartefelipe/recorvia/internal/pgstore"
 	"github.com/ricartefelipe/recorvia/internal/platformbilling"
 	"github.com/ricartefelipe/recorvia/internal/reporting"
 	"github.com/ricartefelipe/recorvia/internal/subscriptions"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
+	"github.com/ricartefelipe/recorvia/internal/webhooks"
 )
 
 // Deps são as dependências da API, injetadas pelo executável.
@@ -64,6 +67,9 @@ type Deps struct {
 	Metering      *metering.Service
 	Payments      *payments.Service
 	Reporting     *reporting.Service
+	Notifications *notifications.Service
+	Collections   *collections.Service
+	Webhooks      *webhooks.Service
 	Providers     []string
 	// Ready verifica dependências críticas (readiness).
 	Ready func(ctx context.Context) map[string]error

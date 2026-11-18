@@ -107,6 +107,22 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	t(get, "/api/v1/payment-providers", tenancy.PermIntegrationsRead, a.listProviders)
 	t(put, "/api/v1/payment-providers/{provider}", tenancy.PermIntegrationsWrite, a.configureProvider)
 
+	t(get, "/api/v1/collection-policies", tenancy.PermCollectionsRead, a.listCollectionPolicies)
+	t(post, "/api/v1/collection-policies", tenancy.PermCollectionsWrite, a.createCollectionPolicy)
+	t(patch, "/api/v1/collection-policies/{id}", tenancy.PermCollectionsWrite, a.updateCollectionPolicy)
+	t(get, "/api/v1/notification-templates", tenancy.PermCollectionsRead, a.listNotificationTemplates)
+	t(put, "/api/v1/notification-templates/{key}", tenancy.PermCollectionsWrite, a.updateNotificationTemplate)
+	t(get, "/api/v1/notifications", tenancy.PermCollectionsRead, a.listNotifications)
+
+	t(get, "/api/v1/webhook-event-types", tenancy.PermWebhooksRead, a.listWebhookEventTypes)
+	t(get, "/api/v1/webhook-endpoints", tenancy.PermWebhooksRead, a.listWebhookEndpoints)
+	t(post, "/api/v1/webhook-endpoints", tenancy.PermWebhooksWrite, a.createWebhookEndpoint)
+	t(patch, "/api/v1/webhook-endpoints/{id}", tenancy.PermWebhooksWrite, a.updateWebhookEndpoint)
+	t(del, "/api/v1/webhook-endpoints/{id}", tenancy.PermWebhooksWrite, a.deleteWebhookEndpoint)
+	t(post, "/api/v1/webhook-endpoints/{id}/rotate-secret", tenancy.PermWebhooksWrite, a.rotateWebhookSecret)
+	t(get, "/api/v1/webhook-endpoints/{id}/deliveries", tenancy.PermWebhooksRead, a.listWebhookDeliveries)
+	t(post, "/api/v1/webhook-deliveries/{id}/retry", tenancy.PermWebhooksWrite, a.retryWebhookDelivery)
+
 	t(get, "/api/v1/ledger/accounts", tenancy.PermLedgerRead, a.ledgerAccounts)
 	t(get, "/api/v1/ledger/transactions", tenancy.PermLedgerRead, a.ledgerTransactions)
 	t(get, "/api/v1/audit-events", tenancy.PermAuditRead, a.listAuditEvents)
