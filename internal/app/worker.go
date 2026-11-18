@@ -210,6 +210,13 @@ func (w *Worker) Jobs() []scheduler.Job {
 			_, err := c.Payments.RecoverOperations(ctx)
 			return err
 		}},
+		// Conciliação agendada dos tenants com o recurso
+		// reconciliation_automation (no máximo uma por tenant a cada
+		// payments.ScheduledReconciliationEvery).
+		{Name: "payments.reconcile", Interval: time.Hour, Timeout: 50 * time.Minute, Run: func(ctx context.Context) error {
+			_, err := c.Payments.RunScheduledReconciliations(ctx)
+			return err
+		}},
 		{Name: "platform.close_statements", Interval: time.Hour, Timeout: 10 * time.Minute, Run: func(ctx context.Context) error {
 			_, err := c.Platform.CloseDueStatements(ctx)
 			return err
@@ -239,6 +246,23 @@ func (w *Worker) collectMetrics(ctx context.Context) error {
 	}
 	for _, s := range []string{"pending", "in_flight", "unknown"} {
 		w.Metrics.PaymentOperations.WithLabelValues(s).Set(float64(ops[s]))
+	}
+	open, err := w.Core.Store.OpenDiscrepancyStats(ctx)
+	if err != nil {
+		return err
+	}
+	for _, k := range payments.DiscrepancyKinds {
+		w.Metrics.Discrepancies.WithLabelValues(string(k)).Set(float64(open[string(k)]))
+	}
+	refunds, err := w.Core.Store.RefundStats(ctx)
+	if err != nil {
+		return err
+	}
+	for _, s := range []payments.RefundStatus{payments.RefundSucceeded, payments.RefundFailed} {
+		w.Metrics.Refunds.Set(string(s), float64(refunds[string(s)]))
+	}
+	for _, s := range []payments.RefundStatus{payments.RefundRequested, payments.RefundUnknown} {
+		w.Metrics.RefundsInProgress.WithLabelValues(string(s)).Set(float64(refunds[string(s)]))
 	}
 	up := 0.0
 	if w.Conn.Connected() {

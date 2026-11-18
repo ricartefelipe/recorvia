@@ -2329,7 +2329,7 @@ components:
         id: { type: string, format: uuid }
         charge_id: { type: string, format: uuid }
         refund_id: { type: string, format: uuid, nullable: true }
-        kind: { type: string, enum: [create_charge, refund] }
+        kind: { type: string, enum: [create_charge, refund, cancel_charge] }
         status: { type: string, enum: [pending, in_flight, succeeded, failed, unknown] }
         external_reference: { type: string }
         attempts: { type: integer }
