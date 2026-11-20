@@ -113,7 +113,7 @@ func (q *Queries) ExhaustedOperationCounts(ctx context.Context, arg ExhaustedOpe
 }
 
 const getCharge = `-- name: GetCharge :one
-SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version FROM charges WHERE tenant_id = $1 AND id = $2
+SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version, amount_refund_pending FROM charges WHERE tenant_id = $1 AND id = $2
 `
 
 type GetChargeParams struct {
@@ -149,12 +149,13 @@ func (q *Queries) GetCharge(ctx context.Context, arg GetChargeParams) (Charge, e
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Version,
+		&i.AmountRefundPending,
 	)
 	return i, err
 }
 
 const getChargeByProviderID = `-- name: GetChargeByProviderID :one
-SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version FROM charges WHERE tenant_id = $1 AND provider = $2 AND provider_charge_id = $3
+SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version, amount_refund_pending FROM charges WHERE tenant_id = $1 AND provider = $2 AND provider_charge_id = $3
 `
 
 type GetChargeByProviderIDParams struct {
@@ -191,12 +192,13 @@ func (q *Queries) GetChargeByProviderID(ctx context.Context, arg GetChargeByProv
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Version,
+		&i.AmountRefundPending,
 	)
 	return i, err
 }
 
 const getChargeByProviderIDForUpdate = `-- name: GetChargeByProviderIDForUpdate :one
-SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version FROM charges WHERE tenant_id = $1 AND provider = $2 AND provider_charge_id = $3 FOR UPDATE
+SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version, amount_refund_pending FROM charges WHERE tenant_id = $1 AND provider = $2 AND provider_charge_id = $3 FOR UPDATE
 `
 
 type GetChargeByProviderIDForUpdateParams struct {
@@ -233,12 +235,13 @@ func (q *Queries) GetChargeByProviderIDForUpdate(ctx context.Context, arg GetCha
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Version,
+		&i.AmountRefundPending,
 	)
 	return i, err
 }
 
 const getChargeForUpdate = `-- name: GetChargeForUpdate :one
-SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version FROM charges WHERE tenant_id = $1 AND id = $2 FOR UPDATE
+SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version, amount_refund_pending FROM charges WHERE tenant_id = $1 AND id = $2 FOR UPDATE
 `
 
 type GetChargeForUpdateParams struct {
@@ -274,6 +277,7 @@ func (q *Queries) GetChargeForUpdate(ctx context.Context, arg GetChargeForUpdate
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Version,
+		&i.AmountRefundPending,
 	)
 	return i, err
 }
@@ -499,36 +503,37 @@ func (q *Queries) GetWebhookEvent(ctx context.Context, arg GetWebhookEventParams
 
 const insertCharge = `-- name: InsertCharge :exec
 INSERT INTO charges (id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency,
-                     amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason,
-                     provider_status, provider_status_at, created_at, updated_at, version)
+                     amount_paid, fee_amount, amount_refunded, amount_refund_pending, amount_charged_back, checkout_url, due_date, paid_at,
+                     failure_reason, provider_status, provider_status_at, created_at, updated_at, version)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
         $11, $12, $13, $14, $15, $16, $17, $18,
-        $19, $20, $21, $22, $22, 1)
+        $19, $20, $21, $22, $23, $23, 1)
 `
 
 type InsertChargeParams struct {
-	ID                uuid.UUID
-	TenantID          uuid.UUID
-	InvoiceID         uuid.UUID
-	CustomerID        uuid.UUID
-	ProviderAccountID uuid.UUID
-	Provider          string
-	Attempt           int32
-	ProviderChargeID  *string
-	Status            string
-	Amount            int64
-	Currency          string
-	AmountPaid        int64
-	FeeAmount         int64
-	AmountRefunded    int64
-	AmountChargedBack int64
-	CheckoutUrl       *string
-	DueDate           pgtype.Date
-	PaidAt            *time.Time
-	FailureReason     *string
-	ProviderStatus    *string
-	ProviderStatusAt  *time.Time
-	CreatedAt         time.Time
+	ID                  uuid.UUID
+	TenantID            uuid.UUID
+	InvoiceID           uuid.UUID
+	CustomerID          uuid.UUID
+	ProviderAccountID   uuid.UUID
+	Provider            string
+	Attempt             int32
+	ProviderChargeID    *string
+	Status              string
+	Amount              int64
+	Currency            string
+	AmountPaid          int64
+	FeeAmount           int64
+	AmountRefunded      int64
+	AmountRefundPending int64
+	AmountChargedBack   int64
+	CheckoutUrl         *string
+	DueDate             pgtype.Date
+	PaidAt              *time.Time
+	FailureReason       *string
+	ProviderStatus      *string
+	ProviderStatusAt    *time.Time
+	CreatedAt           time.Time
 }
 
 func (q *Queries) InsertCharge(ctx context.Context, arg InsertChargeParams) error {
@@ -547,6 +552,7 @@ func (q *Queries) InsertCharge(ctx context.Context, arg InsertChargeParams) erro
 		arg.AmountPaid,
 		arg.FeeAmount,
 		arg.AmountRefunded,
+		arg.AmountRefundPending,
 		arg.AmountChargedBack,
 		arg.CheckoutUrl,
 		arg.DueDate,
@@ -683,7 +689,7 @@ func (q *Queries) InsertWebhookEvent(ctx context.Context, arg InsertWebhookEvent
 }
 
 const latestCharge = `-- name: LatestCharge :one
-SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version FROM charges WHERE tenant_id = $1 AND invoice_id = $2 ORDER BY attempt DESC LIMIT 1
+SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version, amount_refund_pending FROM charges WHERE tenant_id = $1 AND invoice_id = $2 ORDER BY attempt DESC LIMIT 1
 `
 
 type LatestChargeParams struct {
@@ -719,12 +725,13 @@ func (q *Queries) LatestCharge(ctx context.Context, arg LatestChargeParams) (Cha
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Version,
+		&i.AmountRefundPending,
 	)
 	return i, err
 }
 
 const listCharges = `-- name: ListCharges :many
-SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version FROM charges
+SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version, amount_refund_pending FROM charges
  WHERE tenant_id = $1
    AND ($2::text IS NULL OR status = $2)
    AND ($3::uuid IS NULL OR invoice_id = $3)
@@ -783,6 +790,7 @@ func (q *Queries) ListCharges(ctx context.Context, arg ListChargesParams) ([]Cha
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.Version,
+			&i.AmountRefundPending,
 		); err != nil {
 			return nil, err
 		}
@@ -940,7 +948,7 @@ func (q *Queries) ListProviderAccounts(ctx context.Context, tenantID uuid.UUID) 
 }
 
 const openChargesForInvoice = `-- name: OpenChargesForInvoice :many
-SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version FROM charges WHERE tenant_id = $1 AND invoice_id = $2 AND status IN ('pending', 'awaiting_payment') FOR UPDATE
+SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version, amount_refund_pending FROM charges WHERE tenant_id = $1 AND invoice_id = $2 AND status IN ('pending', 'awaiting_payment') FOR UPDATE
 `
 
 type OpenChargesForInvoiceParams struct {
@@ -982,6 +990,7 @@ func (q *Queries) OpenChargesForInvoice(ctx context.Context, arg OpenChargesForI
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.Version,
+			&i.AmountRefundPending,
 		); err != nil {
 			return nil, err
 		}
@@ -1070,27 +1079,29 @@ func (q *Queries) TenantsWithPendingOperations(ctx context.Context, now time.Tim
 const updateCharge = `-- name: UpdateCharge :execrows
 UPDATE charges
    SET provider_charge_id = $1, status = $2, amount_paid = $3, fee_amount = $4,
-       amount_refunded = $5, amount_charged_back = $6, checkout_url = $7,
-       paid_at = $8, failure_reason = $9, provider_status = $10,
-       provider_status_at = $11, version = version + 1
- WHERE tenant_id = $12 AND id = $13 AND version = $14
+       amount_refunded = $5, amount_refund_pending = $6, amount_charged_back = $7,
+       checkout_url = $8,
+       paid_at = $9, failure_reason = $10, provider_status = $11,
+       provider_status_at = $12, version = version + 1
+ WHERE tenant_id = $13 AND id = $14 AND version = $15
 `
 
 type UpdateChargeParams struct {
-	ProviderChargeID  *string
-	Status            string
-	AmountPaid        int64
-	FeeAmount         int64
-	AmountRefunded    int64
-	AmountChargedBack int64
-	CheckoutUrl       *string
-	PaidAt            *time.Time
-	FailureReason     *string
-	ProviderStatus    *string
-	ProviderStatusAt  *time.Time
-	TenantID          uuid.UUID
-	ID                uuid.UUID
-	Version           int32
+	ProviderChargeID    *string
+	Status              string
+	AmountPaid          int64
+	FeeAmount           int64
+	AmountRefunded      int64
+	AmountRefundPending int64
+	AmountChargedBack   int64
+	CheckoutUrl         *string
+	PaidAt              *time.Time
+	FailureReason       *string
+	ProviderStatus      *string
+	ProviderStatusAt    *time.Time
+	TenantID            uuid.UUID
+	ID                  uuid.UUID
+	Version             int32
 }
 
 func (q *Queries) UpdateCharge(ctx context.Context, arg UpdateChargeParams) (int64, error) {
@@ -1100,6 +1111,7 @@ func (q *Queries) UpdateCharge(ctx context.Context, arg UpdateChargeParams) (int
 		arg.AmountPaid,
 		arg.FeeAmount,
 		arg.AmountRefunded,
+		arg.AmountRefundPending,
 		arg.AmountChargedBack,
 		arg.CheckoutUrl,
 		arg.PaidAt,

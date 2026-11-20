@@ -474,10 +474,10 @@ func TestExecuteOperationEdgeCases(t *testing.T) {
 		f := newPayFixture(t)
 		inv := f.addInvoice(t, 10000)
 		c := f.requestCharge(t, inv.ID)
-		op := Operation{ID: uuid.New(), TenantID: f.tenantID, ChargeID: c.ID, Kind: OpRefund, Status: OpPending, NextAttemptAt: payNow}
+		op := Operation{ID: uuid.New(), TenantID: f.tenantID, ChargeID: c.ID, Kind: "settlement", Status: OpPending, NextAttemptAt: payNow}
 		f.store.operations[op.ID] = op
 		err := f.svc.ExecuteOperation(context.Background(), f.tenantID, op.ID)
-		if err == nil || !strings.Contains(err.Error(), "ainda não suportada") {
+		if err == nil || !strings.Contains(err.Error(), "não suportada") {
 			t.Fatalf("esperava erro de operação não suportada: %v", err)
 		}
 	})

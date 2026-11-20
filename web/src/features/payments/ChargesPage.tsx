@@ -11,7 +11,7 @@ import { useCursorPagination, useUrlFilters } from '../../lib/hooks';
 import { stableStringify } from '../../lib/idempotency';
 import { chargeStatusLabels, labelOf, optionsOf, providerLabels } from '../../lib/labels';
 import { Can, useTenant } from '../../session/SessionContext';
-import { paymentsApi, refundableAmount } from './api';
+import { canRequestRefund, paymentsApi, refundableAmount } from './api';
 import { ChargesTable, CheckoutLink } from './ChargesTable';
 import { RefundModal } from './RefundModal';
 
@@ -92,7 +92,7 @@ export function ChargeDetailPage() {
               description={labelOf(providerLabels, c.provider)}
               actions={
                 <Can permission="payments.refund">
-                  {refundableAmount(c) > 0 && (
+                  {canRequestRefund(c) && (
                     <Button color="red" variant="light" leftSection={<IconReceiptRefund size={16} />} onClick={() => setRefunding(true)}>
                       Reembolsar
                     </Button>

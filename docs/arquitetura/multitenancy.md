@@ -41,8 +41,10 @@ trabalho sem abrir dados: `app_tenants_with_due_billing`, `app_tenants_with_pend
 (link do portal pelo hash do token), `app_user_memberships`, `app_outbox_claim` e afins,
 `app_platform_tenant_catalog` (sem valores financeiros), `app_tenants_for_collections`,
 `app_tenants_with_due_notifications` e `app_tenants_with_due_webhook_deliveries` (estas três
-paginadas pelo ID do tenant, com rodízio entre execuções). O processamento ocorre depois, dentro da
-transação de cada tenant.
+paginadas pelo ID do tenant, com rodízio entre execuções), `app_tenants_due_reconciliation` (tenants
+elegíveis à conciliação agendada) e as contagens agregadas para métricas
+(`app_payment_operation_stats`, `app_open_discrepancy_stats`, `app_refund_stats`). O processamento
+ocorre depois, dentro da transação de cada tenant.
 
 ## Workers, eventos, cache e arquivos
 

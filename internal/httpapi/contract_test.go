@@ -18,12 +18,7 @@ import (
 // versão. A lista só pode diminuir: o teste falha se uma operação
 // implementada continuar aqui ou se o contrato tiver operação sem handler
 // e fora desta lista.
-var pendingOperations = map[string]bool{
-	"POST /api/v1/charges/{id}/refunds": true, "GET /api/v1/refunds": true, "GET /api/v1/disputes": true,
-	"GET /api/v1/reconciliation/runs": true, "POST /api/v1/reconciliation/runs": true,
-	"GET /api/v1/reconciliation/discrepancies": true, "GET /api/v1/reconciliation/discrepancies/{id}": true,
-	"POST /api/v1/reconciliation/discrepancies/{id}/resolve": true,
-}
+var pendingOperations = map[string]bool{}
 
 // Rotas utilitárias fora do contrato de negócio.
 var unlistedRoutes = map[string]bool{"GET /api/openapi.yaml": true}

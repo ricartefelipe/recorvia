@@ -21,6 +21,15 @@ import (
 // Cenários de criação de cobrança.
 var Scenarios = []string{"decline", "unavailable", "timeout_after_success", "error_after_success", "slow", "duplicate_webhooks", "out_of_order"}
 
+// RefundScenarios são cenários aplicados ao próximo pedido de reembolso:
+// refund_unavailable recusa sem processar (503); refund_error_after_success
+// efetiva o reembolso e responde com erro (502), como resposta perdida.
+var RefundScenarios = []string{"refund_unavailable", "refund_error_after_success"}
+
+// CancelScenarios são cenários aplicados ao próximo cancelamento:
+// cancel_unavailable recusa sem processar (503), como provedor indisponível.
+var CancelScenarios = []string{"cancel_unavailable"}
+
 // Sim é o simulador.
 type Sim struct {
 	st        *State
@@ -62,16 +71,87 @@ func (s *Sim) ConfigureWebhook(key, url, secret string) error {
 	return s.st.persist()
 }
 
-// EnqueueScenario agenda um cenário para a próxima criação de cobrança.
+// EnqueueScenario agenda um cenário para a próxima criação de cobrança ou,
+// para cenários de reembolso e de cancelamento, para o próximo pedido desse
+// tipo.
 func (s *Sim) EnqueueScenario(key, scenario string) error {
-	if !slices.Contains(Scenarios, scenario) {
+	refund, cancel := slices.Contains(RefundScenarios, scenario), slices.Contains(CancelScenarios, scenario)
+	if !slices.Contains(Scenarios, scenario) && !refund && !cancel {
 		return fmt.Errorf("cenário desconhecido: %s", scenario)
 	}
 	s.st.mu.Lock()
 	defer s.st.mu.Unlock()
 	m := s.st.merchant(key)
-	m.Scenarios = append(m.Scenarios, scenario)
+	switch {
+	case refund:
+		m.RefundScenarios = append(m.RefundScenarios, scenario)
+	case cancel:
+		m.CancelScenarios = append(m.CancelScenarios, scenario)
+	default:
+		m.Scenarios = append(m.Scenarios, scenario)
+	}
 	return s.st.persist()
+}
+
+// ErrCancelUnavailable reproduz o cenário cancel_unavailable.
+var ErrCancelUnavailable = errors.New("cancelamento temporariamente indisponível")
+
+// ErrNotCancelable indica cobrança já paga, reembolsada ou contestada.
+var ErrNotCancelable = errors.New("cobrança não pode ser cancelada")
+
+// Cancel cancela a cobrança pendente ou recusada (idempotente para cobrança
+// já cancelada) e notifica o comerciante.
+func (s *Sim) Cancel(key, id string) (ChargeView, error) {
+	s.st.mu.Lock()
+	defer s.st.mu.Unlock()
+	c, ok := s.st.s.Charges[id]
+	if !ok || c.MerchantKey != key {
+		return ChargeView{}, ErrNotFound
+	}
+	if m := s.st.merchant(key); len(m.CancelScenarios) > 0 {
+		m.CancelScenarios = m.CancelScenarios[1:]
+		return ChargeView{}, errors.Join(ErrCancelUnavailable, s.st.persist())
+	}
+	switch c.Status {
+	case "canceled":
+		return s.viewLocked(c), nil
+	case "pending", "failed":
+	default:
+		return s.viewLocked(c), ErrNotCancelable
+	}
+	c.Status, c.UpdatedAt = "canceled", s.now()
+	s.emit(c, "charge.canceled")
+	return s.viewLocked(c), s.st.persist()
+}
+
+// ChargeView é a cobrança com os reembolsos, como exposta na API e nos
+// webhooks.
+type ChargeView struct {
+	Charge
+	Refunds []Refund `json:"refunds"`
+}
+
+// viewLocked monta a visão da cobrança. Deve ser chamado com o mutex.
+func (s *Sim) viewLocked(c *Charge) ChargeView {
+	v := ChargeView{Charge: *c, Refunds: []Refund{}}
+	for _, r := range s.st.s.Refunds {
+		if r.ChargeID == c.ID {
+			v.Refunds = append(v.Refunds, *r)
+		}
+	}
+	slices.SortFunc(v.Refunds, func(a, b Refund) int { return strings.Compare(a.ID, b.ID) })
+	return v
+}
+
+// View retorna a visão de uma cobrança do comerciante.
+func (s *Sim) View(key, id string) (ChargeView, error) {
+	s.st.mu.Lock()
+	defer s.st.mu.Unlock()
+	c, ok := s.st.s.Charges[id]
+	if !ok || (key != "" && c.MerchantKey != key) {
+		return ChargeView{}, ErrNotFound
+	}
+	return s.viewLocked(c), nil
 }
 
 // CreateCustomer registra um pagador (idempotente por referência externa).
@@ -142,9 +222,9 @@ func (s *Sim) Charge(key, id string) (Charge, error) {
 }
 
 // ListCharges filtra por referência externa ou janela de atualização.
-func (s *Sim) ListCharges(key, externalRef string, from, to time.Time, offset, limit int) ([]Charge, bool) {
+func (s *Sim) ListCharges(key, externalRef string, from, to time.Time, offset, limit int) ([]ChargeView, bool) {
 	all := s.st.ChargesSorted()
-	var out []Charge
+	var out []ChargeView
 	for _, c := range all {
 		if c.MerchantKey != key {
 			continue
@@ -158,7 +238,11 @@ func (s *Sim) ListCharges(key, externalRef string, from, to time.Time, offset, l
 		if !to.IsZero() && !c.UpdatedAt.Before(to) {
 			continue
 		}
-		out = append(out, c)
+		v, err := s.View(key, c.ID)
+		if err != nil {
+			continue
+		}
+		out = append(out, v)
 	}
 	if offset >= len(out) {
 		return nil, false
@@ -169,7 +253,7 @@ func (s *Sim) ListCharges(key, externalRef string, from, to time.Time, offset, l
 
 // emit cria o evento e agenda a entrega. Deve ser chamado com o mutex.
 func (s *Sim) emit(c *Charge, eventType string) {
-	data, err := json.Marshal(map[string]any{"charge": c})
+	data, err := json.Marshal(map[string]any{"charge": s.viewLocked(c)})
 	if err != nil {
 		s.log.Error("serialização do evento falhou", slog.String("error", err.Error()))
 		return
@@ -322,6 +406,13 @@ type RefundInput struct {
 	ExternalReference string `json:"external_reference"`
 }
 
+// ErrRefundUnavailable e ErrRefundResponseLost reproduzem os cenários de
+// reembolso: recusa sem processar e efetivação com resposta perdida.
+var (
+	ErrRefundUnavailable  = errors.New("reembolso temporariamente indisponível")
+	ErrRefundResponseLost = errors.New("reembolso efetivado com resposta perdida")
+)
+
 // Refund reembolsa (idempotente por referência externa do reembolso).
 func (s *Sim) Refund(key, chargeID string, in RefundInput) (Refund, error) {
 	s.st.mu.Lock()
@@ -337,8 +428,19 @@ func (s *Sim) Refund(key, chargeID string, in RefundInput) (Refund, error) {
 			}
 		}
 	}
+	m := s.st.merchant(key)
+	scenario := ""
+	if len(m.RefundScenarios) > 0 {
+		scenario, m.RefundScenarios = m.RefundScenarios[0], m.RefundScenarios[1:]
+	}
+	if scenario == "refund_unavailable" {
+		return Refund{}, errors.Join(ErrRefundUnavailable, s.st.persist())
+	}
 	if err := s.refundLocked(c, in.Amount, in.ExternalReference); err != nil {
-		return Refund{}, err
+		return Refund{}, errors.Join(err, s.st.persist())
+	}
+	if scenario == "refund_error_after_success" {
+		return Refund{}, errors.Join(ErrRefundResponseLost, s.st.persist())
 	}
 	var last *Refund
 	for _, r := range s.st.s.Refunds {

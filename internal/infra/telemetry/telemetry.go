@@ -11,6 +11,8 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -51,6 +53,8 @@ type Metrics struct {
 	// atualizada pela tarefa payments.recover_operations.
 	PaymentOperationsExhausted *prometheus.GaugeVec
 	Discrepancies              *prometheus.GaugeVec
+	Refunds                    *TotalsCounter
+	RefundsInProgress          *prometheus.GaugeVec
 	WebhooksReceived           *prometheus.CounterVec
 	InvoicesIssued             prometheus.Counter
 	DependencyUp               *prometheus.GaugeVec
@@ -109,6 +113,9 @@ func NewMetrics(service string) *Metrics {
 			[]string{"status"}),
 		Discrepancies: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_reconciliation_open_discrepancies", Help: "Divergências de conciliação abertas por tipo.", ConstLabels: cl},
 			[]string{"kind"}),
+		Refunds: NewTotalsCounter("recorvia_refunds_total", "Reembolsos concluídos por resultado (succeeded, failed), totais mantidos no banco.", "outcome", cl),
+		RefundsInProgress: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_refunds_in_progress", Help: "Reembolsos sem conclusão por situação (requested, unknown).", ConstLabels: cl},
+			[]string{"status"}),
 		WebhooksReceived: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "recorvia_provider_webhooks_total", Help: "Webhooks de provedores por resultado.", ConstLabels: cl},
 			[]string{"provider", "outcome"}),
 		InvoicesIssued: prometheus.NewCounter(prometheus.CounterOpts{Name: "recorvia_invoices_issued_total", Help: "Faturas emitidas pelo motor.", ConstLabels: cl}),
@@ -128,8 +135,8 @@ func NewMetrics(service string) *Metrics {
 	}
 	reg.MustRegister(m.HTTPRequests, m.HTTPDuration, m.ConsumerProcessed, m.ConsumerDuration, m.ConsumerInFlight, m.ConsumerConcurrency,
 		m.OutboxPublished, m.OutboxPublishFailed, m.OutboxPending, m.OutboxOldestSeconds, m.JobRuns, m.JobDuration, m.JobLastSuccess,
-		m.JobInterval, m.ChargeFailures, m.PaymentOperations, m.PaymentOperationsExhausted, m.Discrepancies, m.WebhooksReceived, m.InvoicesIssued, m.DependencyUp,
-		m.DBServerConnections, m.DBServerMaxConns,
+		m.JobInterval, m.ChargeFailures, m.PaymentOperations, m.PaymentOperationsExhausted, m.Discrepancies, m.Refunds, m.RefundsInProgress,
+		m.WebhooksReceived, m.InvoicesIssued, m.DependencyUp, m.DBServerConnections, m.DBServerMaxConns,
 		m.NotificationsDispatched, m.WebhookDeliveries, m.CollectionActions)
 	return m
 }
@@ -261,6 +268,51 @@ func (c *dbPoolCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.empty, prometheus.CounterValue, float64(s.EmptyAcquires))
 	ch <- prometheus.MustNewConstMetric(c.canceled, prometheus.CounterValue, float64(s.CanceledAcquires))
 	ch <- prometheus.MustNewConstMetric(c.wait, prometheus.CounterValue, s.EmptyAcquireWait.Seconds())
+}
+
+// TotalsCounter expõe como contador Prometheus totais monotônicos mantidos
+// fora do processo (por exemplo, contagens no banco lidas pelo job
+// metrics.collect). O valor nunca diminui: leituras menores que a anterior
+// são ignoradas. Sem leitura, não expõe séries.
+type TotalsCounter struct {
+	desc   *prometheus.Desc
+	mu     sync.Mutex
+	values map[string]float64
+}
+
+// NewTotalsCounter cria o coletor com um rótulo de baixa cardinalidade.
+func NewTotalsCounter(name, help, label string, constLabels prometheus.Labels) *TotalsCounter {
+	return &TotalsCounter{desc: prometheus.NewDesc(name, help, []string{label}, constLabels), values: map[string]float64{}}
+}
+
+// Set registra o total lido para o valor do rótulo.
+func (c *TotalsCounter) Set(labelValue string, total float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if cur, ok := c.values[labelValue]; !ok || total > cur {
+		c.values[labelValue] = total
+	}
+}
+
+// Describe implementa prometheus.Collector.
+func (c *TotalsCounter) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+
+// Collect implementa prometheus.Collector.
+func (c *TotalsCounter) Collect(ch chan<- prometheus.Metric) {
+	c.mu.Lock()
+	labels := make([]string, 0, len(c.values))
+	for l := range c.values {
+		labels = append(labels, l)
+	}
+	sort.Strings(labels)
+	values := make([]float64, len(labels))
+	for i, l := range labels {
+		values[i] = c.values[l]
+	}
+	c.mu.Unlock()
+	for i, l := range labels {
+		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.CounterValue, values[i], l)
+	}
 }
 
 // Processed implementa rabbit.Observer.

@@ -81,8 +81,9 @@ func (h *payHarness) assertOldChargePaymentApplied(t *testing.T, invoiceID uuid.
 	}
 }
 
-// Após a nota de crédito, a cobrança aguardando pagamento é cancelada só no
-// Recorvia e continua válida no provedor. O pagamento por ela é aplicado ao
+// Após a nota de crédito, a cobrança aguardando pagamento é cancelada no
+// Recorvia; com o cancelamento no provedor ainda pendente (provedor
+// indisponível), ela continua válida lá. O pagamento por ela é aplicado ao
 // saldo e o excedente vira crédito do cliente.
 func TestProviderPaymentOfChargeCanceledAfterCreditNote(t *testing.T) {
 	ctx := context.Background()
@@ -91,6 +92,9 @@ func TestProviderPaymentOfChargeCanceledAfterCreditNote(t *testing.T) {
 	old, err := h.pay.RequestCharge(ctx, h.tn.ID, inv.ID, h.tn.Actor)
 	if err != nil || old == nil || old.Status != payments.ChargeAwaitingPayment {
 		t.Fatalf("cobrança: %+v %v", old, err)
+	}
+	if err := h.sim.EnqueueScenario(h.apiKey, "cancel_unavailable"); err != nil {
+		t.Fatal(err)
 	}
 	h.issueCreditNote(t, inv.ID, 3000)
 	if err := h.pay.HandleInvoiceCredited(ctx, h.tn.ID, inv.ID, uuid.New()); err != nil {
@@ -125,6 +129,10 @@ func TestCreditNoteWhileChargeIsBeingCreatedIsAdjustedOnCompletion(t *testing.T)
 	if err := h.pay.HandleInvoiceCredited(ctx, h.tn.ID, inv.ID, msg); err != nil {
 		t.Fatalf("nota de crédito com cobrança em criação não devolve erro: %v", err)
 	}
+	// O cancelamento da cobrança substituída no provedor falha uma vez.
+	if err := h.sim.EnqueueScenario(h.apiKey, "cancel_unavailable"); err != nil {
+		t.Fatal(err)
+	}
 	if n := countRows(t, h.env, h.tn.ID, `SELECT count(*) FROM inbox_messages WHERE tenant_id = $1 AND consumer = $2 AND message_id = $3`,
 		h.tn.ID, payments.ConsumerInvoiceCredited, msg); n != 1 {
 		t.Fatalf("mensagem registrada no inbox: %d", n)
@@ -157,8 +165,13 @@ func TestCreditNoteWhileChargeIsBeingCreatedIsAdjustedOnCompletion(t *testing.T)
 		AND resource_id = $2 AND details->>'replacement_charge_id' = $3`, h.tn.ID, old.ID.String(), repl.ID.String()); n != 1 {
 		t.Fatalf("auditoria do ajuste: %d", n)
 	}
-	if n := countRows(t, h.env, h.tn.ID, `SELECT count(*) FROM payment_operations WHERE tenant_id = $1 AND status <> 'succeeded'`, h.tn.ID); n != 0 {
+	if n := countRows(t, h.env, h.tn.ID, `SELECT count(*) FROM payment_operations WHERE tenant_id = $1 AND status <> 'succeeded'
+		AND kind = 'create_charge'`, h.tn.ID); n != 0 {
 		t.Fatalf("operações pendentes: %d", n)
+	}
+	if n := countRows(t, h.env, h.tn.ID, `SELECT count(*) FROM payment_operations WHERE tenant_id = $1 AND charge_id = $2
+		AND kind = 'cancel_charge' AND status = 'pending'`, h.tn.ID, old.ID); n != 1 {
+		t.Fatalf("cancelamento no provedor aguardando nova tentativa: %d", n)
 	}
 
 	// O cliente ainda paga a cobrança antiga, válida no provedor.

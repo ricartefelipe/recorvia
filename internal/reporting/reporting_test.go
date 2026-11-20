@@ -173,7 +173,7 @@ func TestComputeExposesDefinitions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"mrr", "arr", "billed", "received", "open", "overdue", "delinquency", "churn", "refunds"} {
+	for _, k := range []string{"mrr", "arr", "billed", "received", "open", "overdue", "delinquency", "churn", "refunds", "chargebacks"} {
 		if d.Definitions[k] == "" {
 			t.Errorf("definição %q ausente", k)
 		}

@@ -450,7 +450,7 @@ func (q *Queries) InsertSubscriptionProration(ctx context.Context, arg InsertSub
 }
 
 const listInvoiceCharges = `-- name: ListInvoiceCharges :many
-SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version FROM charges WHERE tenant_id = $1 AND invoice_id = $2 ORDER BY attempt
+SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version, amount_refund_pending FROM charges WHERE tenant_id = $1 AND invoice_id = $2 ORDER BY attempt
 `
 
 type ListInvoiceChargesParams struct {
@@ -492,6 +492,7 @@ func (q *Queries) ListInvoiceCharges(ctx context.Context, arg ListInvoiceCharges
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.Version,
+			&i.AmountRefundPending,
 		); err != nil {
 			return nil, err
 		}

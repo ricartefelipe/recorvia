@@ -10,8 +10,9 @@ import { confirmAction } from '../../components/ui';
 import { useApiMutation } from '../../lib/hooks';
 import { useIdempotencyKey } from '../../lib/idempotency';
 import { centsToInput, formatMoney } from '../../lib/money';
+import { notifyError, notifySuccess } from '../../lib/notify';
 import { moneyField, reasonField } from '../../lib/validation';
-import { paymentsApi, refundableAmount } from './api';
+import { canRequestRefund, paymentsApi, refundableAmount } from './api';
 
 export function refundSchema(max: number, currency: string) {
   return z.object({
@@ -25,6 +26,7 @@ type Output = z.output<ReturnType<typeof refundSchema>>;
 /** Reembolso com valor limitado ao reembolsável e confirmação explícita. */
 export function RefundModal({ charge, opened, onClose }: { charge: Charge; opened: boolean; onClose: () => void }) {
   const max = refundableAmount(charge);
+  const allowed = canRequestRefund(charge);
   const idempotency = useIdempotencyKey();
   const schema = useMemo(() => refundSchema(max, charge.currency), [max, charge.currency]);
   const form = useForm<FormValues, unknown, Output>({
@@ -34,16 +36,24 @@ export function RefundModal({ charge, opened, onClose }: { charge: Charge; opene
   const mutation = useApiMutation<Output, Refund, FormValues>({
     mutationFn: (input) => paymentsApi.refund(charge.id, input, idempotency.keyFor({ charge: charge.id, ...input })),
     invalidate: ['charges', 'refunds', 'invoices', 'payment-operations', 'dashboard', 'ledger'],
-    successMessage: (r) =>
-      r.status === 'succeeded'
-        ? 'Reembolso concluído.'
-        : r.status === 'unknown'
-          ? 'Reembolso enviado; o provedor não confirmou o resultado. Acompanhe em Operações de pagamento.'
-          : 'Reembolso solicitado ao provedor.',
     form,
-    onSuccess: () => {
-      idempotency.reset();
+    // Recusa da API (por exemplo, saldo insuficiente) encerra a intenção: o
+    // próximo envio usa outra chave e não repete a recusa registrada.
+    idempotency,
+    onSuccess: (r) => {
       onClose();
+      // A API registra o pedido (201) também quando o provedor o recusa.
+      if (r.status === 'failed') {
+        notifyError('O provedor recusou o reembolso; o valor reservado voltou a ficar disponível.');
+        return;
+      }
+      notifySuccess(
+        r.status === 'succeeded'
+          ? 'Reembolso concluído.'
+          : r.status === 'unknown'
+            ? 'Reembolso enviado; o provedor não confirmou o resultado. Acompanhe em Operações de pagamento.'
+            : 'Reembolso solicitado ao provedor; a confirmação chega pelo provedor.',
+      );
     },
   });
   const submit = form.handleSubmit(async (input) => {
@@ -63,9 +73,11 @@ export function RefundModal({ charge, opened, onClose }: { charge: Charge; opene
             Pago: {formatMoney(charge.amount_paid, charge.currency)} · Já reembolsado: {formatMoney(charge.amount_refunded, charge.currency)} ·
             Reembolsável: <strong>{formatMoney(max, charge.currency)}</strong>
           </Text>
-          {max <= 0 ? (
+          {!allowed ? (
             <Alert color="orange" icon={<IconAlertTriangle />}>
-              Não há valor reembolsável nesta cobrança.
+              {max <= 0
+                ? 'Não há valor reembolsável nesta cobrança.'
+                : 'A cobrança não aceita reembolso nesta situação (por exemplo, durante uma disputa).'}
             </Alert>
           ) : (
             <>
@@ -77,7 +89,7 @@ export function RefundModal({ charge, opened, onClose }: { charge: Charge; opene
             <Button variant="default" onClick={onClose}>
               Cancelar
             </Button>
-            <Button type="submit" color="red" loading={mutation.isPending} disabled={max <= 0}>
+            <Button type="submit" color="red" loading={mutation.isPending} disabled={!allowed}>
               Continuar
             </Button>
           </Group>

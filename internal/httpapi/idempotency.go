@@ -138,10 +138,13 @@ func (a *API) idempotency(info RouteInfo, next http.Handler) http.Handler {
 		if bw.status == 0 {
 			bw.status = http.StatusOK
 		}
-		// Falhas transitórias ou de autorização liberam a chave para nova
-		// tentativa; resultados definitivos ficam registrados.
+		// Falhas transitórias (5xx, 429 e respostas com Retry-After, como o
+		// conflito com outra conciliação em andamento) ou de autorização
+		// liberam a chave para nova tentativa; resultados definitivos ficam
+		// registrados.
 		persistCtx := context.WithoutCancel(r.Context())
-		if bw.status >= 500 || bw.status == http.StatusUnauthorized || bw.status == http.StatusForbidden || bw.status == http.StatusTooManyRequests {
+		if bw.status >= 500 || bw.status == http.StatusUnauthorized || bw.status == http.StatusForbidden || bw.status == http.StatusTooManyRequests ||
+			bw.header.Get("Retry-After") != "" {
 			if err := a.Store.IdempotencyRelease(persistCtx, k); err != nil {
 				a.log.WarnContext(r.Context(), "liberação de chave de idempotência falhou", slog.String("error", err.Error()))
 			}

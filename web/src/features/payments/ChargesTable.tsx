@@ -6,7 +6,7 @@ import type { Charge } from '../../api/types';
 import { CivilDate, Money, StatusBadge } from '../../components/format';
 import { chargeStatusLabels, labelOf, providerLabels } from '../../lib/labels';
 import { usePermission } from '../../session/SessionContext';
-import { refundableAmount } from './api';
+import { canRequestRefund } from './api';
 import { RefundModal } from './RefundModal';
 
 export function CheckoutLink({ url }: { url: string | null | undefined }) {
@@ -81,7 +81,7 @@ export function ChargesTable({ charges, showInvoice = false }: { charges: Charge
                 </Table.Td>
                 <Table.Td>{c.status === 'awaiting_payment' || c.status === 'pending' ? <CheckoutLink url={c.checkout_url} /> : '—'}</Table.Td>
                 <Table.Td>
-                  {canRefund && refundableAmount(c) > 0 && (
+                  {canRefund && canRequestRefund(c) && (
                     <Button size="xs" variant="light" color="red" leftSection={<IconReceiptRefund size={14} />} onClick={() => setRefunding(c)}>
                       Reembolsar
                     </Button>

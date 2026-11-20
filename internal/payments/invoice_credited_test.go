@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ricartefelipe/recorvia/internal/audit"
 	"github.com/ricartefelipe/recorvia/internal/billing"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/ledger"
@@ -295,8 +296,13 @@ func TestChargeCompletionAfterFullCreditCancelsWithoutReplacement(t *testing.T) 
 	if len(charges) != 1 || charges[0].Status != ChargeCanceled || charges[0].ProviderChargeID == "" {
 		t.Fatalf("fatura quitada pela nota: cobrança cancelada sem substituta: %+v", charges)
 	}
-	if a := f.store.audits; a[len(a)-2].Action != "charge.canceled_after_balance_change" || a[len(a)-2].Details["replacement_charge_id"] != nil {
+	idx := slices.IndexFunc(f.store.audits, func(e audit.Entry) bool { return e.Action == "charge.canceled_after_balance_change" })
+	if idx < 0 || f.store.audits[idx].Details["replacement_charge_id"] != nil {
 		t.Fatalf("auditoria: %v", f.auditActions())
+	}
+	// A cobrança substituída é cancelada também no provedor.
+	if !slices.Equal(f.gw.cancelCalls, []string{charges[0].ProviderChargeID}) || !slices.Contains(f.auditActions(), "charge.provider_canceled") {
+		t.Fatalf("cancelamento no provedor: %v %v", f.gw.cancelCalls, f.auditActions())
 	}
 }
 

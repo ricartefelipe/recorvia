@@ -132,7 +132,8 @@ Credenciais de provedores ficam cifradas (AES-256-GCM) com chave fornecida por
 ## Limitações conhecidas
 
 - O adaptador do Asaas segue a documentação oficial, mas ainda não foi exercitado no sandbox
-  (requer credenciais e URL pública de webhook).
+  (requer credenciais e URL pública de webhook); o passo a passo da validação está em
+  `docs/integracoes/asaas.md`.
 - Funcionalidades em desenvolvimento estão listadas em `docs/STATUS.md`.
 - O ledger é operacional: não substitui contabilidade fiscal. Faturas são documentos comerciais,
   não documentos fiscais.

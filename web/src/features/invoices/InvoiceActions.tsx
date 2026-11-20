@@ -48,10 +48,8 @@ function ManualPaymentForm({ invoice, onClose }: { invoice: InvoiceDetails; onCl
     invalidate: [...INVALIDATE],
     successMessage: 'Pagamento registrado.',
     form,
-    onSuccess: () => {
-      idempotency.reset();
-      onClose();
-    },
+    idempotency,
+    onSuccess: () => onClose(),
   });
   const submit = form.handleSubmit(async (v) => {
     const input: ManualPaymentInput = { amount: v.amount, method: v.method };
@@ -124,10 +122,8 @@ function CreditNoteForm({ invoice, onClose }: { invoice: InvoiceDetails; onClose
     invalidate: [...INVALIDATE],
     successMessage: 'Nota de crédito emitida.',
     form,
-    onSuccess: () => {
-      idempotency.reset();
-      onClose();
-    },
+    idempotency,
+    onSuccess: () => onClose(),
   });
   const submit = form.handleSubmit(async (input) => {
     const ok = await confirmAction({
@@ -165,7 +161,7 @@ function ReasonForm({ invoice, kind, onClose }: { invoice: InvoiceDetails; kind:
     invalidate: [...INVALIDATE],
     successMessage: kind === 'void' ? 'Fatura cancelada.' : 'Fatura baixada como incobrável.',
     form,
-    onSuccess: onClose,
+    onSuccess: () => onClose(),
   });
   const submit = form.handleSubmit(async ({ reason }) => {
     const ok = await confirmAction({
@@ -249,7 +245,7 @@ export function InvoiceActions({ invoice }: { invoice: InvoiceDetails }) {
     mutationFn: () => invoicesApi.retryCharge(invoice.id, idempotency.keyFor({ invoice: invoice.id, version: invoice.version })),
     invalidate: ['invoices', 'charges', 'payment-operations'],
     successMessage: 'Nova cobrança solicitada ao provedor.',
-    onSuccess: () => idempotency.reset(),
+    idempotency,
   });
 
   const items = [

@@ -19,6 +19,7 @@ import {
 } from '@mantine/core';
 import { IconInfoCircle, IconPlayerPlay, IconScale } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
 import { Controller, useForm, useWatch } from 'react-hook-form';
 import { Link, useParams } from 'react-router';
 import { z } from 'zod';
@@ -31,6 +32,7 @@ import { confirmAction, KeyValue, PageHeader } from '../../components/ui';
 import { useApiMutation, useUrlFilters } from '../../lib/hooks';
 import { useIdempotencyKey } from '../../lib/idempotency';
 import {
+  actorTypeLabels,
   discrepancyKindLabels,
   discrepancyStatusLabels,
   labelOf,
@@ -40,6 +42,7 @@ import {
   resolutionLabels,
 } from '../../lib/labels';
 import { formatMoney } from '../../lib/money';
+import { notifyError, notifySuccess } from '../../lib/notify';
 import { Can, usePermission, useSession, useTenant } from '../../session/SessionContext';
 
 const enc = encodeURIComponent;
@@ -56,21 +59,47 @@ const reconciliationApi = {
 };
 
 const RESOLUTION_HELP: Record<Resolution, string> = {
-  accept_provider: 'O registro local é corrigido para refletir o provedor, com lançamento compensatório.',
+  accept_provider:
+    'Adota o provedor: aplica o pagamento não refletido, sincroniza reembolso ou chargeback, aceita a taxa ou o valor pago com lançamento de ajuste no ledger, reconsulta a operação desconhecida ou cancela a cobrança inexistente no provedor.',
   keep_local: 'O registro local está correto; a diferença é do provedor e fica documentada.',
-  adjust_ledger: 'Registra um lançamento compensatório no ledger para zerar a diferença.',
+  adjust_ledger: 'Lança no ledger o ajuste pela diferença de taxa ou de valor pago, sem alterar a cobrança.',
   dismiss: 'A divergência não procede (por exemplo, já resolvida por outro meio).',
 };
 
-function RunsTab() {
+/**
+ * Resoluções aceitas pela API para cada tipo de divergência (ADR-038). O valor
+ * divergente de cobrança ainda não paga (`local_value.basis = 'charge'`) só
+ * admite manter o registro local ou descartar: o ajuste e a adoção do
+ * provedor valem apenas para o valor pago.
+ */
+export function resolutionsFor(kind: DiscrepancyKind, localValue?: Record<string, unknown>): Resolution[] {
+  const all = Object.keys(RESOLUTION_HELP) as Resolution[];
+  const unpaidAmount = kind === 'amount_mismatch' && localValue?.basis !== undefined && localValue.basis !== 'paid';
+  return all.filter((r) => {
+    if (r === 'adjust_ledger') return (kind === 'amount_mismatch' || kind === 'fee_mismatch') && !unpaidAmount;
+    if (r === 'accept_provider') return kind !== 'missing_local' && !unpaidAmount;
+    return true;
+  });
+}
+
+export function RunsTab() {
   const { keys } = useTenant();
   const idempotency = useIdempotencyKey();
   const query = useQuery({ queryKey: keys('reconciliation', 'runs'), queryFn: ({ signal }) => reconciliationApi.runs(signal) });
   const run = useApiMutation<void, ReconciliationRun>({
     mutationFn: () => reconciliationApi.run(idempotency.keyFor({ operation: 'reconciliation-run' })),
     invalidate: ['reconciliation', 'dashboard'],
-    successMessage: (r) => `Conciliação concluída: ${r.checked_count} cobrança(s) verificada(s), ${r.discrepancy_count} divergência(s).`,
-    onSuccess: () => idempotency.reset(),
+    // Recusa da API (por exemplo, outra execução em andamento) encerra a
+    // intenção: o próximo clique usa outra chave e não repete a recusa.
+    idempotency,
+    onSuccess: (r) => {
+      // A falha do provedor encerra a execução como "failed", com a causa.
+      if (r.status === 'failed') {
+        notifyError(`A conciliação não foi concluída: ${r.error || 'falha ao consultar o provedor'}.`);
+        return;
+      }
+      notifySuccess(`Conciliação concluída: ${r.checked_count} cobrança(s) verificada(s), ${r.discrepancy_count} divergência(s).`);
+    },
   });
   const onRun = async () => {
     const ok = await confirmAction({
@@ -359,7 +388,7 @@ export function ResolveDiscrepancyForm({ discrepancy }: { discrepancy: Discrepan
             render={({ field, fieldState }) => (
               <Radio.Group label="Resolução" required value={field.value} onChange={field.onChange} error={fieldState.error?.message}>
                 <Stack gap="xs" mt="xs">
-                  {(Object.keys(RESOLUTION_HELP) as Resolution[]).map((r) => (
+                  {resolutionsFor(discrepancy.kind, discrepancy.local_value).map((r) => (
                     <Radio key={r} value={r} label={resolutionLabels[r]} description={RESOLUTION_HELP[r]} />
                   ))}
                 </Stack>
@@ -385,6 +414,23 @@ export function ResolveDiscrepancyForm({ discrepancy }: { discrepancy: Discrepan
       </form>
     </Paper>
   );
+}
+
+/**
+ * Responsável pela resolução da divergência. A resolução automática é da
+ * conciliação; a manual tem o ator no evento de resolução do histórico: o
+ * usuário da sessão (também em `resolved_by`) ou a credencial de API, que
+ * deixa `resolved_by` nulo.
+ */
+export function discrepancyResolver(d: Discrepancy): ReactNode {
+  if (d.resolution === 'auto_resolved') return 'conciliação automática';
+  const event = d.history?.find((e) => e.action === 'reconciliation.discrepancy_resolved');
+  if (event?.actor_type === 'user') return event.actor_label || <ShortId id={event.actor_id ?? d.resolved_by} />;
+  if (event) {
+    const type = labelOf(actorTypeLabels, event.actor_type);
+    return event.actor_label ? `${type} “${event.actor_label}”` : type;
+  }
+  return d.resolved_by ? <ShortId id={d.resolved_by} /> : 'não identificado no histórico';
 }
 
 export function DiscrepancyDetailPage() {
@@ -436,7 +482,8 @@ export function DiscrepancyDetailPage() {
                   <Text size="sm">Resolução: {labelOf(resolutionLabels, d.resolution)}</Text>
                   <Text size="sm">Justificativa: {d.justification ?? '—'}</Text>
                   <Text size="sm">
-                    Responsável: <ShortId id={d.resolved_by} /> em <DateTime value={d.resolved_at} />
+                    Responsável: {discrepancyResolver(d)} em{' '}
+                    <DateTime value={d.resolved_at} />
                   </Text>
                 </Stack>
               </Alert>

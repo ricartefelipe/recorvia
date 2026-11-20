@@ -46,12 +46,13 @@ func (q *Queries) DashboardBilled(ctx context.Context, arg DashboardBilledParams
 }
 
 const dashboardContraRevenue = `-- name: DashboardContraRevenue :one
-SELECT COALESCE(sum(e.amount) FILTER (WHERE a.code = 'refunds' AND e.direction = 'debit'), 0)::bigint AS refunds,
-       COALESCE(sum(e.amount) FILTER (WHERE a.code = 'chargebacks' AND e.direction = 'debit'), 0)::bigint AS chargebacks
+SELECT COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END) FILTER (WHERE a.code = 'refunds'), 0)::bigint AS refunds,
+       COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END) FILTER (WHERE a.code = 'chargebacks'), 0)::bigint AS chargebacks
   FROM ledger_entries e
   JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
   JOIN ledger_transactions t ON t.tenant_id = e.tenant_id AND t.id = e.transaction_id
- WHERE e.tenant_id = $1 AND t.occurred_at >= $2 AND t.occurred_at < $3
+ WHERE e.tenant_id = $1 AND a.code IN ('refunds', 'chargebacks')
+   AND t.occurred_at >= $2 AND t.occurred_at < $3
 `
 
 type DashboardContraRevenueParams struct {
@@ -65,6 +66,11 @@ type DashboardContraRevenueRow struct {
 	Chargebacks int64
 }
 
+// Movimento líquido (débitos menos créditos) das contas de reembolsos e de
+// chargebacks no período. Os créditos em chargebacks são a retenção liberada
+// na disputa perdida (dispute.hold_released) e o estorno da disputa ganha:
+// somar só os débitos contaria duas vezes o valor reembolsado ao pagador e o
+// valor de disputa ganha.
 func (q *Queries) DashboardContraRevenue(ctx context.Context, arg DashboardContraRevenueParams) (DashboardContraRevenueRow, error) {
 	row := q.db.QueryRow(ctx, dashboardContraRevenue, arg.TenantID, arg.FromTs, arg.ToTs)
 	var i DashboardContraRevenueRow

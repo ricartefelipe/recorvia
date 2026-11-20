@@ -24,10 +24,8 @@ function BillingRunButton() {
   const mutation = useApiMutation<void, BillingRunResult>({
     mutationFn: () => invoicesApi.runBilling(idempotency.keyFor({ operation: 'billing-run' })),
     invalidate: ['invoices', 'subscriptions', 'charges', 'dashboard', 'ledger'],
-    onSuccess: (r) => {
-      idempotency.reset();
-      setResult(r);
-    },
+    idempotency,
+    onSuccess: (r) => setResult(r),
   });
   const run = async () => {
     const ok = await confirmAction({

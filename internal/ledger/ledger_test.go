@@ -205,11 +205,23 @@ func constructorCases() []constructorCase {
 			return Overpayment(txID, tenantID, refID, brl(500), false, instant)
 		}, "payment.overpayment", "payment.overpayment:", "payment", map[AccountCode]int64{Cash: 500, CustomerCredits: -500}},
 		{"reembolso efetivado", func() (Transaction, bool, error) {
-			return RefundSucceeded(txID, tenantID, refID, brl(1500), instant)
+			return RefundSucceeded(txID, tenantID, refID, brl(1500), brl(0), instant)
+		}, "refund.succeeded", "refund.succeeded:", "refund", map[AccountCode]int64{Refunds: 1500, ProviderClearing: -1500}},
+		{"reembolso com parte do crédito do cliente", func() (Transaction, bool, error) {
+			return RefundSucceeded(txID, tenantID, refID, brl(1500), brl(400), instant)
+		}, "refund.succeeded", "refund.succeeded:", "refund", map[AccountCode]int64{Refunds: 1100, CustomerCredits: 400, ProviderClearing: -1500}},
+		{"reembolso integral de crédito do cliente", func() (Transaction, bool, error) {
+			return RefundSucceeded(txID, tenantID, refID, brl(1500), money.Money{}, instant)
 		}, "refund.succeeded", "refund.succeeded:", "refund", map[AccountCode]int64{Refunds: 1500, ProviderClearing: -1500}},
 		{"chargeback aberto", func() (Transaction, bool, error) {
 			return ChargebackOpened(txID, tenantID, refID, brl(800), instant)
 		}, "dispute.opened", "dispute.opened:", "dispute", map[AccountCode]int64{Chargebacks: 800, ProviderClearing: -800}},
+		{"retenção de chargeback liberada", func() (Transaction, bool, error) {
+			return ChargebackHoldReleased(txID, tenantID, refID, brl(300), instant)
+		}, "dispute.hold_released", "dispute.hold_released:", "dispute", map[AccountCode]int64{ProviderClearing: 300, Chargebacks: -300}},
+		{"chargeback de reembolso recusado", func() (Transaction, bool, error) {
+			return ChargebackHoldRestored(txID, tenantID, refID, brl(300), instant)
+		}, "dispute.hold_restored", "dispute.hold_restored:", "refund", map[AccountCode]int64{Chargebacks: 300, ProviderClearing: -300}},
 		{"baixa como incobrável", func() (Transaction, bool, error) {
 			return InvoiceWrittenOff(txID, tenantID, refID, brl(6000), instant)
 		}, "invoice.uncollectible", "invoice.uncollectible:", "invoice", map[AccountCode]int64{BadDebt: 6000, AccountsReceivable: -6000}},
@@ -288,8 +300,12 @@ func TestConstructorsWithZeroAmountsProduceNothing(t *testing.T) {
 		},
 		"pagamento manual":  func() (Transaction, bool, error) { return ManualPaymentReceived(txID, tenantID, refID, z, instant) },
 		"excedente":         func() (Transaction, bool, error) { return Overpayment(txID, tenantID, refID, z, true, instant) },
-		"reembolso":         func() (Transaction, bool, error) { return RefundSucceeded(txID, tenantID, refID, z, instant) },
+		"reembolso":         func() (Transaction, bool, error) { return RefundSucceeded(txID, tenantID, refID, z, z, instant) },
 		"chargeback":        func() (Transaction, bool, error) { return ChargebackOpened(txID, tenantID, refID, z, instant) },
+		"retenção liberada": func() (Transaction, bool, error) { return ChargebackHoldReleased(txID, tenantID, refID, z, instant) },
+		"retenção restaurada": func() (Transaction, bool, error) {
+			return ChargebackHoldRestored(txID, tenantID, refID, z, instant)
+		},
 		"baixa":             func() (Transaction, bool, error) { return InvoiceWrittenOff(txID, tenantID, refID, z, instant) },
 		"nota de crédito":   func() (Transaction, bool, error) { return CreditNoteIssued(txID, tenantID, refID, z, instant) },
 		"crédito concedido": func() (Transaction, bool, error) { return CustomerCreditGranted(txID, tenantID, refID, z, instant) },
@@ -333,6 +349,20 @@ func TestConstructorsRejectInvalidAmounts(t *testing.T) {
 		_, ok, err := ManualPaymentReceived(txID, uuid.Nil, refID, brl(100), instant)
 		if ok || !errors.Is(err, ErrInvalidEntry) {
 			t.Fatalf("esperava ErrInvalidEntry, obtive ok=%v err=%v", ok, err)
+		}
+	})
+	t.Run("parte do crédito maior que o reembolso", func(t *testing.T) {
+		_, ok, err := RefundSucceeded(txID, tenantID, refID, brl(100), brl(101), instant)
+		if ok || !errors.Is(err, ErrInvalidEntry) {
+			t.Fatalf("esperava ErrInvalidEntry, obtive ok=%v err=%v", ok, err)
+		}
+		_, ok, err = RefundSucceeded(txID, tenantID, refID, brl(100), brl(-1), instant)
+		if ok || !errors.Is(err, ErrInvalidEntry) {
+			t.Fatalf("parte negativa: ok=%v err=%v", ok, err)
+		}
+		_, ok, err = RefundSucceeded(txID, tenantID, refID, brl(100), money.New(1, money.Currency{}), instant)
+		if ok || !errors.Is(err, money.ErrCurrencyMismatch) {
+			t.Fatalf("moedas diferentes: ok=%v err=%v", ok, err)
 		}
 	})
 	t.Run("ajuste negativo sem valor absoluto representável", func(t *testing.T) {
@@ -428,9 +458,17 @@ func FuzzLedgerBalanced(f *testing.F) {
 			"ManualPaymentReceived": func() (Transaction, bool, error) {
 				return ManualPaymentReceived(txID, tenantID, refID, brl(a), instant)
 			},
-			"Overpayment":       func() (Transaction, bool, error) { return Overpayment(txID, tenantID, refID, brl(a), flag, instant) },
-			"RefundSucceeded":   func() (Transaction, bool, error) { return RefundSucceeded(txID, tenantID, refID, brl(a), instant) },
-			"ChargebackOpened":  func() (Transaction, bool, error) { return ChargebackOpened(txID, tenantID, refID, brl(a), instant) },
+			"Overpayment": func() (Transaction, bool, error) { return Overpayment(txID, tenantID, refID, brl(a), flag, instant) },
+			"RefundSucceeded": func() (Transaction, bool, error) {
+				return RefundSucceeded(txID, tenantID, refID, brl(a), brl(a/3), instant)
+			},
+			"ChargebackOpened": func() (Transaction, bool, error) { return ChargebackOpened(txID, tenantID, refID, brl(a), instant) },
+			"ChargebackHoldReleased": func() (Transaction, bool, error) {
+				return ChargebackHoldReleased(txID, tenantID, refID, brl(a), instant)
+			},
+			"ChargebackHoldRestored": func() (Transaction, bool, error) {
+				return ChargebackHoldRestored(txID, tenantID, refID, brl(a), instant)
+			},
 			"InvoiceWrittenOff": func() (Transaction, bool, error) { return InvoiceWrittenOff(txID, tenantID, refID, brl(a), instant) },
 			"CreditNoteIssued":  func() (Transaction, bool, error) { return CreditNoteIssued(txID, tenantID, refID, brl(a), instant) },
 			"CustomerCreditGranted": func() (Transaction, bool, error) {

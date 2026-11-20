@@ -33,6 +33,13 @@ type payHarness struct {
 
 func newPayHarness(t *testing.T, callTimeout time.Duration) *payHarness {
 	t.Helper()
+	return newPayHarnessWith(t, callTimeout, nil)
+}
+
+// newPayHarnessWith monta o cenário com o gateway do simulador envolvido por
+// wrap (nil usa o gateway do simulador sem alteração).
+func newPayHarnessWith(t *testing.T, callTimeout time.Duration, wrap func(payments.Gateway) payments.Gateway) *payHarness {
+	t.Helper()
 	env := fixture.New(t, 8, now)
 	tn := env.NewTenant(t, "pay")
 	st, err := paysim.Load("")
@@ -63,7 +70,11 @@ func newPayHarness(t *testing.T, callTimeout time.Duration) *payHarness {
 	t.Cleanup(recv.Close)
 	resolver := gateways.NewResolver(callTimeout, gateways.Factory{Provider: "simulator", Verifier: simulator.Verifier{},
 		Gateway: func(a payments.ProviderAccount, hc *http.Client) (payments.Gateway, error) {
-			return simulator.New(simSrv.URL, a.APIKey, hc), nil
+			var gw payments.Gateway = simulator.New(simSrv.URL, a.APIKey, hc)
+			if wrap != nil {
+				gw = wrap(gw)
+			}
+			return gw, nil
 		}})
 	h.pay = env.Payments(resolver, payments.Config{WebhookBaseURL: recv.URL + "/webhooks/providers", CallTimeout: callTimeout, Lease: 10 * time.Second})
 	if _, err := h.pay.ConfigureAccount(context.Background(), tn.ID, tn.Actor, payments.AccountInput{Provider: "simulator", Environment: "local",
