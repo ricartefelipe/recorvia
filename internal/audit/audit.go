@@ -48,6 +48,18 @@ func User(id uuid.UUID, label string) Actor {
 	return Actor{Type: ActorUser, ID: id.String(), Label: label}
 }
 
+// APICredential cria um ator credencial de API, identificado pelo ID da
+// credencial e pelo nome dado pela organização.
+func APICredential(id uuid.UUID, label string) Actor {
+	return Actor{Type: ActorAPICredential, ID: id.String(), Label: label}
+}
+
+// CustomerPortal cria um ator cliente no portal, identificado pelo ID do
+// cliente. O rótulo é fixo para não gravar dados pessoais na trilha.
+func CustomerPortal(customerID uuid.UUID) Actor {
+	return Actor{Type: ActorCustomerPortal, ID: customerID.String(), Label: "Portal do cliente"}
+}
+
 // Entry é uma entrada da trilha.
 type Entry struct {
 	ID           uuid.UUID

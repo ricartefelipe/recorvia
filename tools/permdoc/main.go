@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/ricartefelipe/recorvia/internal/apicredentials"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
 )
 
@@ -52,6 +53,18 @@ func render() []byte {
 	b.WriteString("- O plano da plataforma (`platform_billing.manage`) é exclusivo do proprietário.\n")
 	b.WriteString("- A equipe da plataforma (`platform_staff`) vê apenas o catálogo de organizações, sem dados\n")
 	b.WriteString("  financeiros; acesso a dados de um tenant exige convite do próprio tenant e fica auditado.\n")
+	b.WriteString("- Credenciais de API recebem como escopos somente permissões de quem as emite; os escopos\n")
+	b.WriteString("  efetivos acompanham o papel atual dessa pessoa.\n")
+	b.WriteString("  Não são delegáveis:")
+	for i, p := range apicredentials.NonDelegable() {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, " `%s`", p)
+	}
+	b.WriteString(".\n")
+	b.WriteString("- Rotas de conta e de sessão aceitam apenas a sessão de um usuário; o portal do cliente tem\n")
+	b.WriteString("  sessão própria, restrita ao cliente e à organização do link.\n")
 	return b.Bytes()
 }
 

@@ -23,8 +23,10 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/ricartefelipe/recorvia/api"
+	"github.com/ricartefelipe/recorvia/internal/apicredentials"
 	"github.com/ricartefelipe/recorvia/internal/billing"
 	"github.com/ricartefelipe/recorvia/internal/catalog"
+	"github.com/ricartefelipe/recorvia/internal/collections"
 	"github.com/ricartefelipe/recorvia/internal/customers"
 	"github.com/ricartefelipe/recorvia/internal/identity"
 	"github.com/ricartefelipe/recorvia/internal/infra/config"
@@ -34,12 +36,15 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
 	"github.com/ricartefelipe/recorvia/internal/metering"
+	"github.com/ricartefelipe/recorvia/internal/notifications"
 	"github.com/ricartefelipe/recorvia/internal/payments"
 	"github.com/ricartefelipe/recorvia/internal/pgstore"
 	"github.com/ricartefelipe/recorvia/internal/platformbilling"
+	"github.com/ricartefelipe/recorvia/internal/portal"
 	"github.com/ricartefelipe/recorvia/internal/reporting"
 	"github.com/ricartefelipe/recorvia/internal/subscriptions"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
+	"github.com/ricartefelipe/recorvia/internal/webhooks"
 )
 
 // Deps são as dependências da API, injetadas pelo executável.
@@ -64,6 +69,11 @@ type Deps struct {
 	Metering      *metering.Service
 	Payments      *payments.Service
 	Reporting     *reporting.Service
+	Notifications *notifications.Service
+	Collections   *collections.Service
+	Webhooks      *webhooks.Service
+	Portal        *portal.Service
+	Credentials   *apicredentials.Service
 	Providers     []string
 	// Ready verifica dependências críticas (readiness).
 	Ready func(ctx context.Context) map[string]error
@@ -121,6 +131,8 @@ func (a *API) handle(r chi.Router, method, pattern string, access Access, perm t
 	switch access {
 	case TenantScoped:
 		handler = a.requireTenant(perm, handler)
+	case Authenticated:
+		handler = a.requireUserSession(handler)
 	case PlatformStaff:
 		handler = a.requireStaff(handler)
 	}
@@ -158,6 +170,7 @@ func NewRouter(d Deps) (*API, http.Handler) {
 			a.registerAuthenticated(r)
 			a.registerTenantRoutes(r)
 		})
+		a.registerPortal(r)
 	})
 	return a, r
 }
@@ -332,10 +345,16 @@ func clientIP(r *http.Request) string {
 // rateLimitIP limita requisições por IP (por minuto). Falha do Redis libera
 // a requisição: limites são proteção auxiliar, não regra financeira.
 func (a *API) rateLimitIP(perMinute int) func(http.Handler) http.Handler {
+	return a.rateLimitIPScoped("ip", perMinute)
+}
+
+// rateLimitIPScoped limita requisições por IP com contador próprio do escopo
+// (o limite de uma rota não consome o de outra).
+func (a *API) rateLimitIPScoped(scope string, perMinute int) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if a.Sessions != nil {
-				ok, _, err := a.Sessions.Allow(r.Context(), "ip:"+clientIP(r), perMinute, time.Minute)
+				ok, _, err := a.Sessions.Allow(r.Context(), scope+":"+clientIP(r), perMinute, time.Minute)
 				if err != nil {
 					a.log.WarnContext(r.Context(), "limite de taxa indisponível", slog.String("error", err.Error()))
 				} else if !ok {
@@ -356,7 +375,10 @@ func (a *API) rateLimitPrincipal(next http.Handler) http.Handler {
 		}
 		key := "anon:" + clientIP(r)
 		if p, ok := principalFrom(r.Context()); ok {
-			key = "user:" + p.User.ID.String()
+			key = p.ClientID()
+			if p.Credential != nil && a.Config != nil && a.Config.APICredentialRateLimitPerMinute > 0 {
+				limit = a.Config.APICredentialRateLimitPerMinute
+			}
 		}
 		if a.Sessions != nil {
 			ok, _, err := a.Sessions.Allow(r.Context(), key, limit, time.Minute)

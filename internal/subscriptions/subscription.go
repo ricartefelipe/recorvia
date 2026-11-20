@@ -133,6 +133,21 @@ func (s *Subscription) RecordEvent(event string, at time.Time, details map[strin
 	s.record(event, nil, at, details)
 }
 
+// AnnotateLastEvent acrescenta detalhes à última entrada de histórico ainda
+// não gravada (por exemplo, a origem automática de uma suspensão).
+func (s *Subscription) AnnotateLastEvent(details map[string]any) {
+	if len(s.pending) == 0 {
+		return
+	}
+	last := &s.pending[len(s.pending)-1]
+	if last.Details == nil {
+		last.Details = map[string]any{}
+	}
+	for k, v := range details {
+		last.Details[k] = v
+	}
+}
+
 func (s *Subscription) transition(to Status, event string, at time.Time, details map[string]any) error {
 	if !CanTransition(s.Status, to) {
 		return apperr.Conflict("invalid_transition",

@@ -2,6 +2,7 @@ package tenancy
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 	"time"
 
@@ -60,14 +61,28 @@ type UserRef struct {
 
 func (u UserRef) actor() audit.Actor { return audit.User(u.ID, u.DisplayName) }
 
+// TokenSealer cifra o token do convite incluído no evento member.invited,
+// para que o worker envie o e-mail sem que o token fique em claro no banco.
+type TokenSealer interface {
+	Encrypt(plaintext, aad []byte) ([]byte, string, error)
+}
+
 // Service implementa os casos de uso de organizações e membros.
 type Service struct {
-	store Store
-	clock clock.Clock
+	store  Store
+	clock  clock.Clock
+	sealer TokenSealer
 }
 
 // NewService cria o serviço.
 func NewService(store Store, c clock.Clock) *Service { return &Service{store: store, clock: c} }
+
+// WithTokenSealer habilita o envio do token cifrado no evento do convite
+// (usado pelo e-mail de convite). Sem ele, o evento não carrega o token.
+func (s *Service) WithTokenSealer(ts TokenSealer) *Service {
+	s.sealer = ts
+	return s
+}
 
 // Onboard cria a organização, torna o usuário proprietário e inicia o plano
 // padrão da plataforma em avaliação.
@@ -256,8 +271,15 @@ func (s *Service) Invite(ctx context.Context, tenantID uuid.UUID, inviter Access
 		if err := tx.InsertInvitation(ctx, inv); err != nil {
 			return err
 		}
-		if err := tx.Emit(ctx, outbox.New(tenantID, outbox.EventMemberInvited, "invitation", inv.ID,
-			map[string]any{"invitation_id": inv.ID, "role": role, "expires_at": inv.ExpiresAt}, now)); err != nil {
+		payload := map[string]any{"invitation_id": inv.ID, "role": role, "expires_at": inv.ExpiresAt}
+		if s.sealer != nil {
+			ct, keyID, err := s.sealer.Encrypt([]byte(token), InvitationTokenAAD(tenantID, inv.ID))
+			if err != nil {
+				return err
+			}
+			payload["token_ciphertext"], payload["token_key_id"] = base64.StdEncoding.EncodeToString(ct), keyID
+		}
+		if err := tx.Emit(ctx, outbox.New(tenantID, outbox.EventMemberInvited, "invitation", inv.ID, payload, now)); err != nil {
 			return err
 		}
 		return tx.Audit(ctx, audit.New(tenantID, now, inviterRef.actor(), "member.invited", "invitation", inv.ID.String(),

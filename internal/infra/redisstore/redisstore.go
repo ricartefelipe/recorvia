@@ -19,6 +19,7 @@ import (
 
 	"github.com/ricartefelipe/recorvia/internal/identity"
 	"github.com/ricartefelipe/recorvia/internal/infra/secrets"
+	"github.com/ricartefelipe/recorvia/internal/portal"
 )
 
 const prefix = "recorvia:"
@@ -217,5 +218,66 @@ func (s *Store) Allow(ctx context.Context, bucket string, limit int, window time
 	return true, 0, nil
 }
 
+func failureKey(key string) string { return prefix + "failures:" + hashID(key) }
+
+// Failures lê o número de falhas registradas para a chave na janela
+// corrente (zero quando não há registro).
+func (s *Store) Failures(ctx context.Context, key string) (int, error) {
+	n, err := s.rdb.Get(ctx, failureKey(key)).Int()
+	if errors.Is(err, redis.Nil) {
+		return 0, nil
+	}
+	return n, err
+}
+
+// RecordFailure registra uma falha. A janela é fixa e começa na primeira
+// falha: o contador expira window depois dela, independentemente das
+// falhas seguintes. A chave guarda apenas o hash da origem.
+func (s *Store) RecordFailure(ctx context.Context, key string, window time.Duration) error {
+	k := failureKey(key)
+	pipe := s.rdb.TxPipeline()
+	pipe.Incr(ctx, k)
+	pipe.ExpireNX(ctx, k, window)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
 // Ping verifica o Redis (readiness).
 func (s *Store) Ping(ctx context.Context) error { return s.rdb.Ping(ctx).Err() }
+
+// PortalSessions implementa portal.SessionStore com o mesmo mecanismo das
+// sessões do painel (conteúdo cifrado, chave pelo hash do identificador),
+// em namespace próprio.
+type PortalSessions struct{ s *Store }
+
+// NewPortalSessions cria o armazenamento de sessões do portal. O Store
+// informado deve usar um namespace exclusivo do portal.
+func NewPortalSessions(s *Store) *PortalSessions { return &PortalSessions{s: s} }
+
+const portalSessionKind = "portal_session"
+
+// Save grava a sessão com expiração.
+func (p *PortalSessions) Save(ctx context.Context, sess portal.Session, ttl time.Duration) error {
+	if ttl <= 0 {
+		return portal.ErrSessionNotFound
+	}
+	return p.s.PutJSON(ctx, portalSessionKind, sess.ID, sess, ttl)
+}
+
+// Get lê a sessão; ausente, expirada ou ilegível equivale a inexistente.
+func (p *PortalSessions) Get(ctx context.Context, id string) (portal.Session, error) {
+	var sess portal.Session
+	ok, err := p.s.GetJSON(ctx, portalSessionKind, id, &sess)
+	if err != nil {
+		return portal.Session{}, err
+	}
+	if !ok || sess.ID != id {
+		return portal.Session{}, portal.ErrSessionNotFound
+	}
+	return sess, nil
+}
+
+// Delete remove a sessão.
+func (p *PortalSessions) Delete(ctx context.Context, id string) error {
+	return p.s.DeleteKey(ctx, portalSessionKind, id)
+}

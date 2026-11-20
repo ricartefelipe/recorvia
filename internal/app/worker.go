@@ -9,16 +9,20 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	amqp "github.com/rabbitmq/amqp091-go"
 
+	"github.com/ricartefelipe/recorvia/internal/collections"
 	"github.com/ricartefelipe/recorvia/internal/infra/logging"
 	"github.com/ricartefelipe/recorvia/internal/infra/rabbit"
 	"github.com/ricartefelipe/recorvia/internal/infra/telemetry"
 	"github.com/ricartefelipe/recorvia/internal/kernel/ids"
+	"github.com/ricartefelipe/recorvia/internal/notifications"
 	"github.com/ricartefelipe/recorvia/internal/outbox"
 	"github.com/ricartefelipe/recorvia/internal/payments"
 	"github.com/ricartefelipe/recorvia/internal/pgstore"
 	"github.com/ricartefelipe/recorvia/internal/scheduler"
+	"github.com/ricartefelipe/recorvia/internal/webhooks"
 )
 
 // relayStore adapta o pgstore à porta do relay.
@@ -80,6 +84,12 @@ var consumerSpecs = []rabbit.ConsumerSpec{
 	{Name: payments.ConsumerWebhooks, EventTypes: []string{outbox.EventProviderWebhook}},
 	{Name: "payments.invoice_voided", EventTypes: []string{outbox.EventInvoiceVoided}},
 	{Name: payments.ConsumerInvoiceCredited, EventTypes: []string{outbox.EventInvoiceCredited}},
+	{Name: notifications.ConsumerInvoiceIssued, EventTypes: []string{outbox.EventInvoiceIssued}},
+	{Name: notifications.ConsumerPaymentConfirmed, EventTypes: []string{outbox.EventPaymentConfirmed}},
+	{Name: notifications.ConsumerMemberInvited, EventTypes: []string{outbox.EventMemberInvited}},
+	{Name: collections.ConsumerInvoiceResolved, EventTypes: []string{outbox.EventInvoicePaid, outbox.EventInvoiceVoided,
+		outbox.EventInvoiceUncollectible, outbox.EventInvoiceCredited}},
+	{Name: webhooks.ConsumerFanout, EventTypes: webhooks.EventTypes()},
 }
 
 // Worker é o processo de eventos, agendamentos e integrações.
@@ -112,9 +122,60 @@ func payloadID(m rabbit.Message, field string) (uuid.UUID, error) {
 	return id, nil
 }
 
+// idHandler extrai tenant, mensagem e um identificador do payload.
+func idHandler(field string, fn func(ctx context.Context, tenantID, id, messageID uuid.UUID) error) rabbit.Handler {
+	return func(ctx context.Context, m rabbit.Message) error {
+		tenantID, msgID, err := parseMessage(m)
+		if err != nil {
+			return err
+		}
+		id, err := payloadID(m, field)
+		if err != nil {
+			return err
+		}
+		return fn(ctx, tenantID, id, msgID)
+	}
+}
+
+func (w *Worker) memberInvited(ctx context.Context, m rabbit.Message) error {
+	tenantID, msgID, err := parseMessage(m)
+	if err != nil {
+		return err
+	}
+	var p struct {
+		InvitationID    uuid.UUID `json:"invitation_id"`
+		TokenCiphertext string    `json:"token_ciphertext"`
+		TokenKeyID      string    `json:"token_key_id"`
+	}
+	if err := json.Unmarshal(m.Body, &p); err != nil || p.InvitationID == uuid.Nil {
+		return rabbit.Permanent(fmt.Errorf("payload de convite inválido"))
+	}
+	return w.Core.Notifications.HandleMemberInvited(ctx, tenantID, msgID, notifications.MemberInvited{InvitationID: p.InvitationID,
+		TokenCiphertext: p.TokenCiphertext, TokenKeyID: p.TokenKeyID})
+}
+
+func (w *Worker) webhookFanout(ctx context.Context, m rabbit.Message) error {
+	tenantID, msgID, err := parseMessage(m)
+	if err != nil {
+		return err
+	}
+	return w.Core.Webhooks.HandleEvent(ctx, tenantID, msgID, m.Type, m.OccurredAt, m.Body)
+}
+
 func (w *Worker) handlers() map[string]rabbit.Handler {
-	pay := w.Core.Payments
+	pay, notif := w.Core.Payments, w.Core.Notifications
 	return map[string]rabbit.Handler{
+		notifications.ConsumerInvoiceIssued: idHandler("invoice_id", func(ctx context.Context, t, id, msg uuid.UUID) error {
+			return notif.HandleInvoiceIssued(ctx, t, id, msg)
+		}),
+		notifications.ConsumerPaymentConfirmed: idHandler("payment_id", func(ctx context.Context, t, id, msg uuid.UUID) error {
+			return notif.HandlePaymentConfirmed(ctx, t, id, msg)
+		}),
+		notifications.ConsumerMemberInvited: w.memberInvited,
+		collections.ConsumerInvoiceResolved: idHandler("invoice_id", func(ctx context.Context, t, id, msg uuid.UUID) error {
+			return w.Core.Collections.HandleInvoiceResolved(ctx, t, id, msg)
+		}),
+		webhooks.ConsumerFanout: w.webhookFanout,
 		payments.ConsumerInvoiceIssued: func(ctx context.Context, m rabbit.Message) error {
 			tenantID, msgID, err := parseMessage(m)
 			if err != nil {
@@ -210,6 +271,21 @@ func (w *Worker) Jobs() []scheduler.Job {
 			_, err := c.Payments.RecoverOperations(ctx)
 			return err
 		}},
+		{Name: JobCollections, Interval: 5 * time.Minute, Timeout: 10 * time.Minute, Run: func(ctx context.Context) error {
+			res, err := c.Collections.Run(ctx)
+			recordCollections(w.Metrics, res)
+			return err
+		}},
+		{Name: JobNotifications, Interval: 15 * time.Second, Timeout: 3 * time.Minute, Run: func(ctx context.Context) error {
+			res, err := c.Notifications.Dispatch(ctx)
+			recordDispatch(w.Metrics, res)
+			return err
+		}},
+		{Name: JobWebhooks, Interval: 10 * time.Second, Timeout: 3 * time.Minute, Run: func(ctx context.Context) error {
+			res, err := c.Webhooks.Deliver(ctx)
+			recordDeliveries(w.Metrics, res)
+			return err
+		}},
 		// Conciliação agendada dos tenants com o recurso
 		// reconciliation_automation (no máximo uma por tenant a cada
 		// payments.ScheduledReconciliationEvery).
@@ -231,6 +307,48 @@ func (w *Worker) Jobs() []scheduler.Job {
 			return err
 		}},
 	}
+}
+
+// Tarefas da régua de cobrança, do envio de notificações e das entregas de
+// webhooks.
+const (
+	JobCollections   = "collections.run"
+	JobNotifications = "notifications.dispatch"
+	JobWebhooks      = "webhooks.deliver"
+)
+
+func addCount(v *prometheus.CounterVec, label string, n int) {
+	if n > 0 {
+		v.WithLabelValues(label).Add(float64(n))
+	}
+}
+
+// recordCollections registra as ações de uma execução da régua (resultados
+// parciais também são contados quando algum tenant falha).
+func recordCollections(m *telemetry.Metrics, r collections.RunResult) {
+	addCount(m.CollectionActions, "reminder_scheduled", r.Reminders)
+	addCount(m.CollectionActions, "invoice_overdue", r.Overdue)
+	addCount(m.CollectionActions, "subscription_suspended", r.Suspended)
+	addCount(m.CollectionActions, "subscription_reactivated", r.Reactivated)
+}
+
+// recordDispatch registra os resultados de uma execução do envio.
+func recordDispatch(m *telemetry.Metrics, r notifications.DispatchResult) {
+	addCount(m.NotificationsDispatched, "sent", r.Sent)
+	addCount(m.NotificationsDispatched, "retried", r.Retried)
+	addCount(m.NotificationsDispatched, "failed", r.Failed)
+	addCount(m.NotificationsDispatched, "deferred", r.Deferred)
+	addCount(m.NotificationsDispatched, "skipped", r.Skipped)
+	addCount(m.NotificationsDispatched, "lost_lease", r.LostLease)
+}
+
+// recordDeliveries registra os resultados de uma execução das entregas.
+func recordDeliveries(m *telemetry.Metrics, r webhooks.DeliverResult) {
+	addCount(m.WebhookDeliveries, "succeeded", r.Succeeded)
+	addCount(m.WebhookDeliveries, "retrying", r.Retrying)
+	addCount(m.WebhookDeliveries, "exhausted", r.Exhausted)
+	addCount(m.WebhookDeliveries, "lost_lease", r.LostLease)
+	addCount(m.WebhookDeliveries, "deferred", r.Deferred)
 }
 
 func (w *Worker) collectMetrics(ctx context.Context) error {

@@ -927,3 +927,16 @@ func FuzzBillingStepsCoverEachPeriodOnce(f *testing.F) {
 		}
 	})
 }
+
+func TestAnnotateLastEvent(t *testing.T) {
+	var s Subscription
+	s.AnnotateLastEvent(map[string]any{"x": 1}) // sem eventos pendentes: nada a fazer
+	s.Status = Active
+	s.RecordEvent("primeiro", time.Now(), nil)
+	s.pending = append(s.pending, HistoryEvent{Event: "segundo", To: Active})
+	s.AnnotateLastEvent(map[string]any{"origin": "collection_policy"})
+	ev := s.PopEvents()
+	if len(ev) != 2 || ev[0].Details["origin"] != nil || ev[1].Details["origin"] != "collection_policy" {
+		t.Fatalf("somente a última entrada recebe os detalhes: %+v", ev)
+	}
+}

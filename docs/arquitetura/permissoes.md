@@ -62,3 +62,8 @@ Regras adicionais aplicadas nos casos de uso:
 - O plano da plataforma (`platform_billing.manage`) é exclusivo do proprietário.
 - A equipe da plataforma (`platform_staff`) vê apenas o catálogo de organizações, sem dados
   financeiros; acesso a dados de um tenant exige convite do próprio tenant e fica auditado.
+- Credenciais de API recebem como escopos somente permissões de quem as emite; os escopos
+  efetivos acompanham o papel atual dessa pessoa.
+  Não são delegáveis: `members.manage`, `platform_billing.manage`, `api_credentials.manage`.
+- Rotas de conta e de sessão aceitam apenas a sessão de um usuário; o portal do cliente tem
+  sessão própria, restrita ao cliente e à organização do link.

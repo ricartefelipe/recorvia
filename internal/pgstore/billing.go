@@ -273,7 +273,7 @@ func (tx billingTx) ConsumeCustomerCredit(ctx context.Context, customerID, invoi
 }
 
 func (tx billingTx) GrantCustomerCredit(ctx context.Context, customerID uuid.UUID, amount money.Money, reason string, by uuid.UUID, requestKey string) (uuid.UUID, bool, error) {
-	return tx.addCreditKeyed(ctx, customerID, amount.Amount(), "grant", nil, reason, &by, requestKey)
+	return tx.addCreditKeyed(ctx, customerID, amount.Amount(), "grant", nil, reason, uuidOrNil(by), requestKey)
 }
 
 func (tx billingTx) ReturnCustomerCredit(ctx context.Context, customerID, invoiceID uuid.UUID, amount int64, _ time.Time) error {
@@ -410,27 +410,35 @@ func (b base) invoice(ctx context.Context, id uuid.UUID, forUpdate bool) (billin
 		return billing.Invoice{}, err
 	}
 	for _, it := range items {
-		qty, err := ratFromNumeric(it.Quantity)
+		item, err := invoiceItemFromRow(it, inv.Currency)
 		if err != nil {
 			return billing.Invoice{}, err
-		}
-		unit, err := ratFromNumeric(it.UnitAmount)
-		if err != nil {
-			return billing.Invoice{}, err
-		}
-		snap, err := jsonMap(it.PriceSnapshot)
-		if err != nil {
-			return billing.Invoice{}, err
-		}
-		item := billing.Item{ID: it.ID, Position: int(it.Position), Kind: billing.ItemKind(it.Kind), Description: it.Description, Quantity: qty,
-			UnitAmount: unit, Amount: money.New(it.Amount, inv.Currency), DiscountAmount: money.New(it.DiscountAmount, inv.Currency),
-			PlanID: it.PlanID, PriceVersionID: it.PriceVersionID, PriceSnapshot: snap, UsageAggregateID: it.UsageAggregateID}
-		if it.PeriodStart != nil && it.PeriodEnd != nil {
-			item.Period = &calendar.Period{Start: *it.PeriodStart, End: *it.PeriodEnd}
 		}
 		inv.Items = append(inv.Items, item)
 	}
 	return inv, nil
+}
+
+func invoiceItemFromRow(it dbgen.InvoiceItem, cur money.Currency) (billing.Item, error) {
+	qty, err := ratFromNumeric(it.Quantity)
+	if err != nil {
+		return billing.Item{}, err
+	}
+	unit, err := ratFromNumeric(it.UnitAmount)
+	if err != nil {
+		return billing.Item{}, err
+	}
+	snap, err := jsonMap(it.PriceSnapshot)
+	if err != nil {
+		return billing.Item{}, err
+	}
+	item := billing.Item{ID: it.ID, Position: int(it.Position), Kind: billing.ItemKind(it.Kind), Description: it.Description, Quantity: qty,
+		UnitAmount: unit, Amount: money.New(it.Amount, cur), DiscountAmount: money.New(it.DiscountAmount, cur),
+		PlanID: it.PlanID, PriceVersionID: it.PriceVersionID, PriceSnapshot: snap, UsageAggregateID: it.UsageAggregateID}
+	if it.PeriodStart != nil && it.PeriodEnd != nil {
+		item.Period = &calendar.Period{Start: *it.PeriodStart, End: *it.PeriodEnd}
+	}
+	return item, nil
 }
 
 func (tx billingTx) Invoice(ctx context.Context, id uuid.UUID, forUpdate bool) (billing.Invoice, error) {

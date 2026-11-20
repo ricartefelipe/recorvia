@@ -11,10 +11,31 @@ import { EmptyState, QueryContent } from '../../components/states';
 import { confirmAction, SecretRevealModal } from '../../components/ui';
 import { useApiMutation } from '../../lib/hooks';
 import { optionalInt, requiredText } from '../../lib/validation';
-import { PERMISSIONS, permissionLabel } from '../../session/permissions';
-import { Can, usePermission, useTenant } from '../../session/SessionContext';
-import { useRoles } from '../members/MembersPage';
+import { PERMISSIONS, permissionLabel, type Permission } from '../../session/permissions';
+import { usePermission, useTenant } from '../../session/SessionContext';
 import { integrationsApi } from './api';
+
+/**
+ * Permissões que nunca viram escopo de credencial: exigem uma pessoa
+ * identificada (a API recusa esses escopos com 422).
+ */
+export const NON_DELEGABLE_SCOPES: readonly string[] = [
+  'members.manage',
+  'platform_billing.manage',
+  'api_credentials.manage',
+] satisfies Permission[];
+
+/**
+ * Escopos que o membro atual pode conceder: as permissões do próprio papel,
+ * exceto as não delegáveis, na ordem do catálogo. A API recusa escopos além
+ * das permissões de quem emite (403 scope_exceeds_permissions).
+ */
+export function grantableScopes(granted: readonly string[]): string[] {
+  const own = new Set(granted.filter((p) => !NON_DELEGABLE_SCOPES.includes(p)));
+  const known = PERMISSIONS.filter((p) => own.has(p));
+  const extra = [...own].filter((p) => !(PERMISSIONS as readonly string[]).includes(p));
+  return [...known, ...extra];
+}
 
 const credentialSchema = z.object({
   name: requiredText(3, 100, 'O nome'),
@@ -24,16 +45,15 @@ const credentialSchema = z.object({
 type CredentialForm = z.input<typeof credentialSchema>;
 type CredentialInput = z.output<typeof credentialSchema>;
 
-function credentialState(c: ApiCredential): { label: string; color: string } {
-  if (c.revoked_at) return { label: 'Revogada', color: 'gray' };
-  if (c.expires_at && new Date(c.expires_at).getTime() < Date.now()) return { label: 'Expirada', color: 'orange' };
-  return { label: 'Ativa', color: 'green' };
+function credentialState(c: ApiCredential): { label: string; color: string; active: boolean } {
+  if (c.revoked_at) return { label: 'Revogada', color: 'gray', active: false };
+  if (c.expires_at && new Date(c.expires_at).getTime() <= Date.now()) return { label: 'Expirada', color: 'orange', active: false };
+  return { label: 'Ativa', color: 'green', active: true };
 }
 
 function CreateCredentialModal({ opened, onClose, onCreated }: { opened: boolean; onClose: () => void; onCreated: (c: ApiCredentialWithSecret) => void }) {
-  const roles = useRoles();
-  const available = new Set((roles.data?.data ?? []).flatMap((r) => r.permissions));
-  const scopes = [...PERMISSIONS.filter((p) => available.has(p)), ...[...available].filter((p) => !(PERMISSIONS as readonly string[]).includes(p))];
+  const { tenant } = useTenant();
+  const scopes = grantableScopes(tenant.permissions);
   const form = useForm<CredentialForm, unknown, CredentialInput>({
     resolver: zodResolver(credentialSchema),
     defaultValues: { name: '', scopes: [], expires_in_days: 365 },
@@ -60,14 +80,14 @@ function CreateCredentialModal({ opened, onClose, onCreated }: { opened: boolean
             render={({ field, fieldState }) => (
               <MultiSelect
                 label="Escopos"
-                description="Conceda apenas o necessário para a integração."
+                description="Conceda apenas o necessário para a integração. Somente permissões do seu papel podem ser delegadas; a gestão de membros, do plano e de credenciais exige uma pessoa."
                 required
                 searchable
                 data={scopes.map((p) => ({ value: p, label: `${permissionLabel(p)} (${p})` }))}
                 value={field.value}
                 onChange={field.onChange}
                 error={fieldState.error?.message}
-                placeholder={roles.isPending ? 'Carregando…' : 'Selecione'}
+                placeholder="Selecione"
               />
             )}
           />
@@ -101,16 +121,66 @@ function CreateCredentialModal({ opened, onClose, onCreated }: { opened: boolean
   );
 }
 
+function CredentialActions({ credential, onRotate, onRevoke }: { credential: ApiCredential; onRotate: () => void; onRevoke: () => void }) {
+  if (credential.revoked_at) return null;
+  const { active } = credentialState(credential);
+  return (
+    <Group gap={4} wrap="nowrap">
+      {active && (
+        <Tooltip label="Rotacionar segredo">
+          <ActionIcon
+            variant="subtle"
+            aria-label={`Rotacionar credencial ${credential.name}`}
+            onClick={async () => {
+              const ok = await confirmAction({
+                title: 'Rotacionar segredo',
+                message: `Um novo segredo de ${credential.name} será gerado e exibido uma única vez. O prefixo e os escopos são mantidos, e o segredo atual continua válido por 24 horas para a troca sem indisponibilidade.`,
+                confirmLabel: 'Rotacionar',
+              });
+              if (ok) onRotate();
+            }}
+          >
+            <IconRotate size={16} />
+          </ActionIcon>
+        </Tooltip>
+      )}
+      <Tooltip label="Revogar credencial">
+        <ActionIcon
+          variant="subtle"
+          color="red"
+          aria-label={`Revogar credencial ${credential.name}`}
+          onClick={async () => {
+            const ok = await confirmAction({
+              title: 'Revogar credencial',
+              message: `Revogar ${credential.name}? Integrações que a usam deixam de funcionar imediatamente, inclusive com o segredo anterior a uma rotação.`,
+              confirmLabel: 'Revogar',
+              danger: true,
+            });
+            if (ok) onRevoke();
+          }}
+        >
+          <IconTrash size={16} />
+        </ActionIcon>
+      </Tooltip>
+    </Group>
+  );
+}
+
 export function CredentialsTab() {
   const { keys } = useTenant();
   const canManage = usePermission('api_credentials.manage');
   const [creating, setCreating] = useState(false);
   const [secret, setSecret] = useState<{ title: string; value: string } | null>(null);
-  const query = useQuery({ queryKey: keys('api-credentials', 'list'), queryFn: ({ signal }) => integrationsApi.credentials(signal) });
+  // A listagem exige api_credentials.manage: sem ela, a aba nem consulta a API.
+  const query = useQuery({
+    queryKey: keys('api-credentials', 'list'),
+    queryFn: ({ signal }) => integrationsApi.credentials(signal),
+    enabled: canManage,
+  });
   const rotate = useApiMutation<ApiCredential, ApiCredentialWithSecret>({
     mutationFn: (c) => integrationsApi.rotateCredential(c.id),
     invalidate: ['api-credentials'],
-    successMessage: 'Credencial rotacionada. A anterior vale por mais 24 horas.',
+    successMessage: 'Segredo rotacionado. O segredo anterior continua válido por 24 horas.',
     onSuccess: (r) => setSecret({ title: `Novo segredo de ${r.credential.name}`, value: r.secret }),
   });
   const revoke = useApiMutation<ApiCredential, unknown>({
@@ -118,18 +188,25 @@ export function CredentialsTab() {
     invalidate: ['api-credentials'],
     successMessage: 'Credencial revogada.',
   });
+  if (!canManage) {
+    return (
+      <EmptyState
+        title="Acesso restrito"
+        description="A gestão de credenciais de API exige a permissão Gerenciar credenciais de API."
+        icon={<IconKey size={26} />}
+      />
+    );
+  }
   return (
     <Stack>
       <Group justify="space-between">
         <Text size="sm" c="dimmed" maw={640}>
-          Integrações autenticam com <Code>Authorization: Bearer rcv_…</Code>. Cada credencial pertence a esta organização e
-          tem escopos próprios.
+          Integrações autenticam com <Code>Authorization: Bearer rcv_…</Code>, sem cookie nem token CSRF. Cada credencial
+          pertence a esta organização e tem escopos próprios.
         </Text>
-        <Can permission="api_credentials.manage">
-          <Button leftSection={<IconPlus size={16} />} onClick={() => setCreating(true)}>
-            Nova credencial
-          </Button>
-        </Can>
+        <Button leftSection={<IconPlus size={16} />} onClick={() => setCreating(true)}>
+          Nova credencial
+        </Button>
       </Group>
       <QueryContent query={query}>
         {({ data }) =>
@@ -147,7 +224,7 @@ export function CredentialsTab() {
                     <Table.Th>Criada em</Table.Th>
                     <Table.Th>Expira em</Table.Th>
                     <Table.Th>Último uso</Table.Th>
-                    {canManage && <Table.Th aria-label="Ações" />}
+                    <Table.Th aria-label="Ações" />
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
@@ -176,48 +253,9 @@ export function CredentialsTab() {
                         </Table.Td>
                         <Table.Td>{c.expires_at ? <DateTime value={c.expires_at} /> : 'Sem expiração'}</Table.Td>
                         <Table.Td>{c.last_used_at ? <DateTime value={c.last_used_at} /> : 'Nunca usada'}</Table.Td>
-                        {canManage && (
-                          <Table.Td>
-                            {!c.revoked_at && (
-                              <Group gap={4} wrap="nowrap">
-                                <Tooltip label="Rotacionar segredo">
-                                  <ActionIcon
-                                    variant="subtle"
-                                    aria-label={`Rotacionar credencial ${c.name}`}
-                                    onClick={async () => {
-                                      const ok = await confirmAction({
-                                        title: 'Rotacionar credencial',
-                                        message: 'Uma nova credencial será criada e exibida uma única vez. A atual continua válida por 24 horas para a troca sem indisponibilidade.',
-                                        confirmLabel: 'Rotacionar',
-                                      });
-                                      if (ok) rotate.mutate(c);
-                                    }}
-                                  >
-                                    <IconRotate size={16} />
-                                  </ActionIcon>
-                                </Tooltip>
-                                <Tooltip label="Revogar credencial">
-                                  <ActionIcon
-                                    variant="subtle"
-                                    color="red"
-                                    aria-label={`Revogar credencial ${c.name}`}
-                                    onClick={async () => {
-                                      const ok = await confirmAction({
-                                        title: 'Revogar credencial',
-                                        message: `Revogar ${c.name}? Integrações que a usam deixam de funcionar imediatamente.`,
-                                        confirmLabel: 'Revogar',
-                                        danger: true,
-                                      });
-                                      if (ok) revoke.mutate(c);
-                                    }}
-                                  >
-                                    <IconTrash size={16} />
-                                  </ActionIcon>
-                                </Tooltip>
-                              </Group>
-                            )}
-                          </Table.Td>
-                        )}
+                        <Table.Td>
+                          <CredentialActions credential={c} onRotate={() => rotate.mutate(c)} onRevoke={() => revoke.mutate(c)} />
+                        </Table.Td>
                       </Table.Tr>
                     );
                   })}

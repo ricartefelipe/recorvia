@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { portalApi } from '../../api/client';
+import { isApiError } from '../../api/http';
 import { PORTAL_SESSION_KEY, portalKey } from '../../api/queryKeys';
 import type { DataList, PortalInvoice, PortalSession } from '../../api/types';
 import { DocumentViewer } from '../../components/DocumentViewer';
@@ -12,7 +13,7 @@ import { EmptyState, LoadingState, QueryContent } from '../../components/states'
 import { KeyValue } from '../../components/ui';
 import { formatInstantDate } from '../../lib/dates';
 import { handleMutationError } from '../../lib/errors';
-import { invoiceStatusLabels } from '../../lib/labels';
+import { portalInvoiceStatusLabels } from '../../lib/labels';
 import { notifySuccess } from '../../lib/notify';
 import { portalTimeZone, usePortalSession } from './PortalLayout';
 
@@ -42,7 +43,7 @@ function PayButton({ invoice, size = 'sm' }: { invoice: PortalInvoice; size?: 'x
 function StatusBadges({ invoice }: { invoice: PortalInvoice }) {
   return (
     <Group gap={4} wrap="nowrap">
-      <StatusBadge status={invoice.status} labels={invoiceStatusLabels} />
+      <StatusBadge status={invoice.status} labels={portalInvoiceStatusLabels} />
       {invoice.overdue && (
         <Badge color="red" variant="filled" size="sm">
           Vencida
@@ -135,73 +136,85 @@ export function PortalInvoicePage() {
         </Anchor>
         <Text>{query.data?.number ?? 'Fatura'}</Text>
       </Breadcrumbs>
-      <QueryContent query={query} loading={<LoadingState variant="detail" />}>
-        {(invoice) => (
-          <>
-            <Group justify="space-between" align="flex-start">
-              <Group gap="sm">
-                <Title order={1} size="h2">
-                  Fatura {invoice.number}
-                </Title>
-                <StatusBadges invoice={invoice} />
+      {isApiError(query.error, 404) ? (
+        <EmptyState
+          title="Fatura não encontrada"
+          description="A fatura não existe ou não está disponível para você."
+          action={
+            <Button component={Link} to="/portal" variant="light">
+              Voltar às faturas
+            </Button>
+          }
+        />
+      ) : (
+        <QueryContent query={query} loading={<LoadingState variant="detail" />}>
+          {(invoice) => (
+            <>
+              <Group justify="space-between" align="flex-start">
+                <Group gap="sm">
+                  <Title order={1} size="h2">
+                    Fatura {invoice.number}
+                  </Title>
+                  <StatusBadges invoice={invoice} />
+                </Group>
+                <Group gap="xs">
+                  <Button variant="default" leftSection={<IconFileText size={16} />} onClick={() => void openDocument()}>
+                    Ver documento
+                  </Button>
+                  <PayButton invoice={invoice} size="sm" />
+                </Group>
               </Group>
-              <Group gap="xs">
-                <Button variant="default" leftSection={<IconFileText size={16} />} onClick={() => void openDocument()}>
-                  Ver documento
-                </Button>
-                <PayButton invoice={invoice} size="sm" />
-              </Group>
-            </Group>
-            {payable(invoice) && (
-              <Alert icon={<IconInfoCircle />} variant="light">
-                O pagamento é feito no ambiente seguro do provedor de pagamentos. Seus dados de cartão não passam por esta
-                página.
-              </Alert>
-            )}
-            <Paper withBorder p="md" radius="md">
-              <SimpleGrid cols={{ base: 2, md: 4 }}>
-                <KeyValue label="Emissão">{formatInstantDate(invoice.issued_at, portalTimeZone)}</KeyValue>
-                <KeyValue label="Vencimento">
-                  <CivilDate value={invoice.due_date} />
-                </KeyValue>
-                <KeyValue label="Total">
-                  <Money value={invoice.total} currency={invoice.currency} />
-                </KeyValue>
-                <KeyValue label="A pagar">
-                  <Money value={invoice.amount_due} currency={invoice.currency} strong />
-                </KeyValue>
-              </SimpleGrid>
-            </Paper>
-            <Table aria-label="Itens da fatura">
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Descrição</Table.Th>
-                  <Table.Th ta="right">Valor</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {invoice.items.map((item, index) => (
-                  <Table.Tr key={`${index}-${item.description}`}>
-                    <Table.Td>{item.description}</Table.Td>
-                    <Table.Td ta="right">
-                      <Money value={item.amount} currency={invoice.currency} />
-                    </Table.Td>
+              {payable(invoice) && (
+                <Alert icon={<IconInfoCircle />} variant="light">
+                  O pagamento é feito no ambiente seguro do provedor de pagamentos. Seus dados de cartão não passam por esta
+                  página.
+                </Alert>
+              )}
+              <Paper withBorder p="md" radius="md">
+                <SimpleGrid cols={{ base: 2, md: 4 }}>
+                  <KeyValue label="Emissão">{formatInstantDate(invoice.issued_at, portalTimeZone)}</KeyValue>
+                  <KeyValue label="Vencimento">
+                    <CivilDate value={invoice.due_date} />
+                  </KeyValue>
+                  <KeyValue label="Total">
+                    <Money value={invoice.total} currency={invoice.currency} />
+                  </KeyValue>
+                  <KeyValue label="A pagar">
+                    <Money value={invoice.amount_due} currency={invoice.currency} strong />
+                  </KeyValue>
+                </SimpleGrid>
+              </Paper>
+              <Table aria-label="Itens da fatura">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Descrição</Table.Th>
+                    <Table.Th ta="right">Valor</Table.Th>
                   </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
-            <DocumentViewer
-              opened={doc.opened}
-              onClose={() => setDoc((d) => ({ ...d, opened: false }))}
-              title={`Fatura ${invoice.number}`}
-              html={doc.html}
-              loading={doc.loading}
-              error={doc.error}
-              filename={`fatura-${invoice.number}.html`}
-            />
-          </>
-        )}
-      </QueryContent>
+                </Table.Thead>
+                <Table.Tbody>
+                  {invoice.items.map((item, index) => (
+                    <Table.Tr key={`${index}-${item.description}`}>
+                      <Table.Td>{item.description}</Table.Td>
+                      <Table.Td ta="right">
+                        <Money value={item.amount} currency={invoice.currency} />
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+              <DocumentViewer
+                opened={doc.opened}
+                onClose={() => setDoc((d) => ({ ...d, opened: false }))}
+                title={`Fatura ${invoice.number}`}
+                html={doc.html}
+                loading={doc.loading}
+                error={doc.error}
+                filename={`fatura-${invoice.number}.html`}
+              />
+            </>
+          )}
+        </QueryContent>
+      )}
     </Stack>
   );
 }

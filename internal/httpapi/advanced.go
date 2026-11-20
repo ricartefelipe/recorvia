@@ -139,8 +139,8 @@ func (a *API) archiveCoupon(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) changeSubscription(w http.ResponseWriter, r *http.Request, in billing.ChangeInput) {
 	a.subscriptionAction(w, r, func(p Principal, id uuid.UUID, v int) (subscriptions.Subscription, error) {
-		uid := p.User.ID
-		res, err := a.Changes.Change(r.Context(), p.TenantID, p.Actor(), &uid, id, in, v)
+		uid := p.UserID()
+		res, err := a.Changes.Change(r.Context(), p.TenantID, p.Actor(), uid, id, in, v)
 		return res.Subscription, err
 	})
 }
@@ -257,8 +257,8 @@ func (a *API) schedulePriceAdjustment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	uid := p.User.ID
-	adj, err := a.Terms.ScheduleAdjustment(r.Context(), p.TenantID, p.Actor(), &uid, id, subscriptions.AdjustmentInput{EffectiveDate: date,
+	uid := p.UserID()
+	adj, err := a.Terms.ScheduleAdjustment(r.Context(), p.TenantID, p.Actor(), uid, id, subscriptions.AdjustmentInput{EffectiveDate: date,
 		Kind: subscriptions.AdjustmentKind(in.Kind), PercentBP: in.PercentBP, NewAmount: in.NewAmount, IndexName: in.IndexName, Reason: in.Reason})
 	if err != nil {
 		a.writeError(w, r, err)
@@ -316,8 +316,8 @@ func (a *API) applySubscriptionCoupon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	uid := p.User.ID
-	d, err := a.Terms.ApplyCoupon(r.Context(), p.TenantID, p.Actor(), &uid, id, in.CouponCode)
+	uid := p.UserID()
+	d, err := a.Terms.ApplyCoupon(r.Context(), p.TenantID, p.Actor(), uid, id, in.CouponCode)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -524,8 +524,8 @@ func (a *API) createCreditNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	uid := p.User.ID
-	if _, err := a.CreditNotes.Issue(r.Context(), p.TenantID, p.Actor(), &uid, id, money.New(in.Amount, money.BRL), in.Reason,
+	uid := p.UserID()
+	if _, err := a.CreditNotes.Issue(r.Context(), p.TenantID, p.Actor(), uid, id, money.New(in.Amount, money.BRL), in.Reason,
 		idempotencyKeyFrom(r.Context())); err != nil {
 		a.writeError(w, r, err)
 		return

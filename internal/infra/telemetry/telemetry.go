@@ -47,6 +47,16 @@ type Metrics struct {
 	WebhooksReceived    *prometheus.CounterVec
 	InvoicesIssued      prometheus.Counter
 	DependencyUp        *prometheus.GaugeVec
+	// NotificationsDispatched conta os resultados do envio de notificações
+	// (sent, retried, failed, deferred, skipped, lost_lease).
+	NotificationsDispatched *prometheus.CounterVec
+	// WebhookDeliveries conta os resultados das entregas de webhooks
+	// (succeeded, retrying, exhausted, lost_lease).
+	WebhookDeliveries *prometheus.CounterVec
+	// CollectionActions conta as ações da régua de cobrança
+	// (reminder_scheduled, invoice_overdue, subscription_suspended,
+	// subscription_reactivated).
+	CollectionActions *prometheus.CounterVec
 }
 
 // NewMetrics registra os coletores.
@@ -91,10 +101,20 @@ func NewMetrics(service string) *Metrics {
 		InvoicesIssued: prometheus.NewCounter(prometheus.CounterOpts{Name: "recorvia_invoices_issued_total", Help: "Faturas emitidas pelo motor.", ConstLabels: cl}),
 		DependencyUp: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_dependency_up", Help: "Disponibilidade de dependências (1 = disponível).", ConstLabels: cl},
 			[]string{"dependency"}),
+		NotificationsDispatched: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "recorvia_notifications_dispatched_total",
+			Help: "Resultados do envio de notificações por e-mail (sent, retried, failed, deferred, skipped, lost_lease).", ConstLabels: cl},
+			[]string{"outcome"}),
+		WebhookDeliveries: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "recorvia_webhook_deliveries_total",
+			Help: "Resultados das tentativas de entrega de webhooks enviados (succeeded, retrying, exhausted, lost_lease).", ConstLabels: cl},
+			[]string{"outcome"}),
+		CollectionActions: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "recorvia_collection_actions_total",
+			Help: "Ações da régua de cobrança (reminder_scheduled, invoice_overdue, subscription_suspended, subscription_reactivated).", ConstLabels: cl},
+			[]string{"action"}),
 	}
 	reg.MustRegister(m.HTTPRequests, m.HTTPDuration, m.ConsumerProcessed, m.ConsumerDuration, m.ConsumerInFlight, m.ConsumerConcurrency,
 		m.OutboxPublished, m.OutboxPublishFailed, m.OutboxPending, m.OutboxOldestSeconds, m.JobRuns, m.JobDuration, m.JobLastSuccess,
-		m.ChargeFailures, m.PaymentOperations, m.Discrepancies, m.Refunds, m.RefundsInProgress, m.WebhooksReceived, m.InvoicesIssued, m.DependencyUp)
+		m.ChargeFailures, m.PaymentOperations, m.Discrepancies, m.Refunds, m.RefundsInProgress, m.WebhooksReceived, m.InvoicesIssued, m.DependencyUp,
+		m.NotificationsDispatched, m.WebhookDeliveries, m.CollectionActions)
 	return m
 }
 

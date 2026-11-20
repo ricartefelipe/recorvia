@@ -14,7 +14,7 @@ stateDiagram-v2
   trialing --> suspended
   trialing --> canceled
   active --> past_due: fatura vencida
-  past_due --> active: faturas regularizadas
+  past_due --> active: faturas regularizadas (pagas, creditadas, canceladas ou baixadas)
   active --> suspended: manual ou política de inadimplência
   past_due --> suspended
   suspended --> active: reativação
@@ -195,3 +195,91 @@ Tipos: `create_charge` (criação da cobrança, consulta pela referência extern
 (reembolso, consulta da cobrança e dos reembolsos antes de repetir; no máximo um reembolso em execução ou
 desconhecido por cobrança) e `cancel_charge` (cancelamento no provedor, consulta da cobrança antes de
 repetir; um por cobrança).
+
+## Notificação (`internal/notifications`)
+
+```mermaid
+stateDiagram-v2
+  [*] --> scheduled: agendamento (identidade de negócio única)
+  [*] --> suppressed: sem destinatário ou convite indisponível
+  scheduled --> sending: reivindicada (lease)
+  scheduled --> scheduled: adiada (janela de envio ou limite diário)
+  scheduled --> canceled: fatura resolvida, passo substituído, convite ou suspensão encerrados
+  scheduled --> suppressed: contatos sem e-mail de cobrança no envio
+  sending --> sent: aceita pelo SMTP
+  sending --> scheduled: falha transitória (backoff)
+  sending --> failed: erro permanente (5xx) ou tentativas esgotadas
+  scheduled --> failed: conteúdo cifrado ilegível (content_unavailable)
+  sending --> sending: lease expirado (outra instância assume)
+  sent --> [*]
+  failed --> [*]
+  canceled --> [*]
+  suppressed --> [*]
+```
+
+O motivo fica em `status_reason` e cada mudança gera uma entrada em `notification_events`.
+
+## Suspensão pela política (`internal/collections`)
+
+```mermaid
+stateDiagram-v2
+  [*] --> active: fatura vencida há N dias (assinatura suspensa)
+  active --> reactivated: faturas vencidas regularizadas e reativação no pagamento
+  active --> released: reativação manual (inclusive seguida de nova suspensão manual) ou cancelamento
+  reactivated --> [*]
+  released --> [*]
+```
+
+## Entrega de webhook (`internal/webhooks`)
+
+```mermaid
+stateDiagram-v2
+  [*] --> pending: evento assinado pelo endpoint
+  pending --> delivering: reivindicada (lease)
+  retrying --> delivering: backoff vencido
+  delivering --> succeeded: resposta 2xx
+  delivering --> retrying: falha (rede, 3xx, 4xx, 5xx)
+  delivering --> exhausted: tentativas esgotadas ou destino bloqueado
+  delivering --> delivering: lease expirado (outra instância assume)
+  delivering --> pending: devolvida sem tentativa (orçamento, cancelamento ou endpoint sem resposta)
+  delivering --> retrying: devolvida sem tentativa, após tentativas anteriores
+  pending --> exhausted: endpoint desativado ou recurso fora do plano
+  retrying --> exhausted: endpoint desativado ou recurso fora do plano
+  succeeded --> pending: reenvio manual
+  exhausted --> pending: reenvio manual
+  retrying --> pending: reenvio manual (antecipa a tentativa)
+```
+
+O reenvio manual (`POST /api/v1/webhook-deliveries/{id}/retry`) é recusado com `409` enquanto a
+entrega está `pending` ou `delivering`, quando o endpoint está desativado ou removido e quando a
+entrega já soma 100 tentativas (`delivery_attempts_limit`); para entregas concluídas, concede uma
+tentativa além das já feitas.
+
+## Endpoint de webhook (`internal/webhooks`)
+
+```mermaid
+stateDiagram-v2
+  [*] --> active: criação (destino validado, primeiro segredo)
+  active --> disabled: alteração (status disabled; permitida sem o recurso no plano)
+  disabled --> active: alteração (destino revalidado; exige o recurso no plano)
+  active --> removido: DELETE
+  disabled --> removido: DELETE
+  removido --> [*]
+```
+
+A remoção grava `deleted_at` e `status = disabled`: o endpoint sai da listagem, as operações sobre
+ele respondem `404` e as entregas pendentes terminam como `exhausted` na próxima execução do job.
+A rotação de segredo não muda a situação nem a versão do endpoint.
+
+## Inadimplência da fatura (`internal/collections`)
+
+```mermaid
+stateDiagram-v2
+  [*] --> aberta: fatura em aberto vencida, avulsa ou de qualquer assinatura (invoice.overdue, uma vez)
+  aberta --> resolvida: paga, creditada, cancelada ou baixada
+  resolvida --> [*]
+```
+
+O registro em `invoice_delinquencies` é único por fatura; a resolução (`paid`, `credited`, `void`,
+`uncollectible`) é gravada pelo consumidor da fatura resolvida e conferida a cada execução da
+régua.

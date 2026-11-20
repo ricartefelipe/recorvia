@@ -33,13 +33,15 @@ C4Container
   System_Boundary(r, "Recorvia") {
     Container(web, "Interface web", "React, TypeScript, Vite, nginx", "SPA servida na mesma origem; proxy de /api, /auth e /webhooks")
     Container(api, "API", "Go, net/http, Chi", "Sessão no servidor, CSRF, autorização, idempotência, webhooks recebidos")
-    Container(worker, "Worker", "Go", "Relay da outbox, consumidores, agendador, cobranças, recuperação")
+    Container(worker, "Worker", "Go", "Relay da outbox, consumidores, agendador, cobranças, régua, e-mails, webhooks enviados")
     ContainerDb(pg, "PostgreSQL 18", "RLS por tenant", "Dados de negócio, outbox, inbox, ledger, auditoria")
     ContainerDb(redis, "Redis 8", "", "Sessões cifradas, fluxos de login, limites de taxa")
     ContainerQueue(mq, "RabbitMQ 4", "", "Eventos de domínio, retentativas escalonadas, DLQ")
   }
   System_Ext(kc, "Keycloak")
   System_Ext(psp, "Provedor de pagamento")
+  System_Ext(smtp, "SMTP", "Mailpit no ambiente local")
+  System_Ext(hooks, "Sistemas do tenant", "Webhooks enviados")
   Rel(user, web, "HTTPS")
   Rel(web, api, "HTTP (mesma origem)")
   Rel(api, pg, "pgx, papel recorvia_app")
@@ -48,6 +50,8 @@ C4Container
   Rel(worker, pg, "pgx, papel recorvia_app")
   Rel(worker, mq, "Publisher confirms, ack manual")
   Rel(worker, psp, "API do provedor")
+  Rel(worker, smtp, "E-mails (TLS conforme configuração)")
+  Rel(worker, hooks, "POST assinado (HMAC), cliente protegido contra SSRF")
   Rel(psp, api, "Webhooks")
 ```
 
@@ -58,6 +62,8 @@ C4Container
 | `kernel/*` | dinheiro, calendário, relógio, erros, IDs, CPF/CNPJ | — |
 | `tenancy` | organizações, membros, convites, papéis e permissões | `platformbilling` |
 | `identity` | OIDC, sessões, CSRF | — |
+| `apicredentials` | credenciais de API com escopos, rotação, revogação e autenticação Bearer | `tenancy`, `platformbilling` |
+| `portal` | links de uso único, sessão restrita, faturas e preferências de contato do portal do cliente | `customers`, `tenancy`, `billing` |
 | `platformbilling` | plano do tenant no Recorvia, limites, implantação assistida | — |
 | `customers` | clientes, contatos, endereço | `tenancy` (e-mail) |
 | `catalog` | produtos, métricas, planos, versões de preço | — |
@@ -66,10 +72,14 @@ C4Container
 | `payments` | cobranças, operações externas, webhooks, recebimentos | `billing`, `ledger` |
 | `ledger` | partidas dobradas | — |
 | `reporting` | indicadores do dashboard | — |
+| `notifications` | templates, notificações por e-mail com identidade de negócio, envio com lease | `billing`, `tenancy`, `platformbilling` |
+| `collections` | políticas de cobrança, régua, inadimplência, suspensão e reativação | `notifications`, `subscriptions`, `platformbilling` |
+| `webhooks` | webhooks enviados: endpoints, segredos, entregas e retentativas | `platformbilling` |
 | `audit`, `outbox` | trilha imutável e eventos | — |
 
 Adaptadores: `pgstore` (PostgreSQL via sqlc), `httpapi` (HTTP), `payments/gateways/*`
-(provedores), `infra/*` (RabbitMQ, Redis, SMTP, telemetria). A composição fica em `internal/app`.
+(provedores), `infra/*` (RabbitMQ, Redis, SMTP em `infra/mailer`, cliente HTTP protegido contra SSRF
+em `infra/safehttp`, telemetria). A composição fica em `internal/app`.
 
 ### Comunicação entre módulos
 
@@ -101,7 +111,7 @@ há microsserviços nesta versão.
 | Executável | Função |
 |---|---|
 | `cmd/api` | HTTP: autenticação, sessões, endpoints, recepção de webhooks |
-| `cmd/worker` | relay da outbox, consumidores, agendador, recuperação de operações |
+| `cmd/worker` | relay da outbox, consumidores, agendador, recuperação de operações, régua de cobrança, envio de e-mails e entrega de webhooks |
 | `cmd/migrate` | bootstrap de papéis (superusuário) e migrations (dono) |
 | `cmd/seed` | dados de demonstração idempotentes |
 | `cmd/paysim` | provedor de pagamento simulado |
