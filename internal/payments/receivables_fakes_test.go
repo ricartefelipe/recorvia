@@ -32,11 +32,18 @@ type receivables struct {
 	// refundClaimLocks registra as cobranças com reivindicação de reembolso
 	// serializada.
 	refundClaimLocks []uuid.UUID
+	// creditSteps registra, em ordem, o bloqueio do crédito do cliente
+	// ("lock") e as leituras do saldo ("balance").
+	creditSteps []string
+	// checkedAt guarda a última verificação de cada cobrança pela conciliação.
+	checkedAt      map[uuid.UUID]time.Time
+	rotationScopes []RotationScope
 }
 
 func newReceivables() receivables {
 	return receivables{refunds: map[uuid.UUID]Refund{}, disputes: map[uuid.UUID]Dispute{}, runs: map[uuid.UUID]ReconciliationRun{},
-		discrepancies: map[uuid.UUID]Discrepancy{}, overpaid: map[uuid.UUID]money.Money{}, creditBalance: map[uuid.UUID]money.Money{}}
+		discrepancies: map[uuid.UUID]Discrepancy{}, overpaid: map[uuid.UUID]money.Money{}, creditBalance: map[uuid.UUID]money.Money{},
+		checkedAt: map[uuid.UUID]time.Time{}}
 }
 
 func (r receivables) clone() receivables {
@@ -54,6 +61,9 @@ func (r receivables) clone() receivables {
 	c.overpaid = maps.Clone(r.overpaid)
 	c.creditBalance = maps.Clone(r.creditBalance)
 	c.refundClaimLocks = slices.Clone(r.refundClaimLocks)
+	c.creditSteps = slices.Clone(r.creditSteps)
+	c.checkedAt = maps.Clone(r.checkedAt)
+	c.rotationScopes = slices.Clone(r.rotationScopes)
 	return c
 }
 
@@ -171,10 +181,19 @@ func (s *payStore) RefundCreditBase(_ context.Context, chargeID uuid.UUID) (mone
 	return over, used, nil
 }
 
+func (s *payStore) LockCustomerCredits(_ context.Context, _ uuid.UUID) error {
+	if err := s.fail("LockCustomerCredits"); err != nil {
+		return err
+	}
+	s.creditSteps = append(s.creditSteps, "lock")
+	return nil
+}
+
 func (s *payStore) CustomerCreditBalance(_ context.Context, customerID uuid.UUID) (money.Money, error) {
 	if err := s.fail("CustomerCreditBalance"); err != nil {
 		return money.Money{}, err
 	}
+	s.creditSteps = append(s.creditSteps, "balance")
 	b, ok := s.creditBalance[customerID]
 	if !ok {
 		b = brl(0)
@@ -299,18 +318,74 @@ func (s *payStore) ChargesForReconciliation(_ context.Context, sc Reconciliation
 		return nil, err
 	}
 	in := func(t time.Time) bool { return !t.Before(sc.WindowStart) && t.Before(sc.WindowEnd) }
-	var out []Charge
+	// Como na consulta real: as presentes na listagem do provedor primeiro,
+	// depois as da janela, em ordem de criação, até o limite.
+	var listed, window []Charge
 	for _, id := range s.chargeOrder {
 		c := s.charges[id]
 		if c.ProviderAccountID != sc.AccountID {
 			continue
 		}
-		if in(c.CreatedAt) || in(c.UpdatedAt) || (c.ProviderChargeID != "" && slices.Contains(sc.ProviderChargeIDs, c.ProviderChargeID)) ||
-			slices.Contains(sc.ReferenceIDs, c.ID) {
+		switch {
+		case (c.ProviderChargeID != "" && slices.Contains(sc.ProviderChargeIDs, c.ProviderChargeID)) || slices.Contains(sc.ReferenceIDs, c.ID):
+			listed = append(listed, c)
+		case in(c.CreatedAt) || in(c.UpdatedAt):
+			window = append(window, c)
+		}
+	}
+	out := append(listed, window...)
+	if sc.Limit > 0 && len(out) > sc.Limit {
+		out = out[:sc.Limit]
+	}
+	return out, nil
+}
+
+func (s *payStore) ChargesForRotation(_ context.Context, sc RotationScope) ([]Charge, error) {
+	if err := s.fail("ChargesForRotation"); err != nil {
+		return nil, err
+	}
+	s.rotationScopes = append(s.rotationScopes, sc)
+	in := func(t time.Time) bool { return !t.Before(sc.WindowStart) && t.Before(sc.WindowEnd) }
+	var out []Charge
+	for _, id := range s.chargeOrder {
+		c := s.charges[id]
+		switch c.Status {
+		case ChargeAwaitingPayment, ChargePaid, ChargePartiallyRefunded, ChargeDisputed:
+		default:
+			continue
+		}
+		if c.ProviderAccountID == sc.AccountID && c.ProviderChargeID != "" && !c.CreatedAt.Before(sc.Since) && !in(c.CreatedAt) && !in(c.UpdatedAt) {
 			out = append(out, c)
 		}
 	}
+	// Nunca verificadas primeiro, depois as verificadas há mais tempo.
+	slices.SortStableFunc(out, func(a, b Charge) int {
+		ta, oka := s.checkedAt[a.ID]
+		tb, okb := s.checkedAt[b.ID]
+		switch {
+		case !oka && !okb:
+			return 0
+		case !oka:
+			return -1
+		case !okb:
+			return 1
+		}
+		return ta.Compare(tb)
+	})
+	if sc.Limit > 0 && len(out) > sc.Limit {
+		out = out[:sc.Limit]
+	}
 	return out, nil
+}
+
+func (s *payStore) MarkChargesReconciled(_ context.Context, ids []uuid.UUID, at time.Time) error {
+	if err := s.fail("MarkChargesReconciled"); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		s.checkedAt[id] = at
+	}
+	return nil
 }
 
 func (s *payStore) RefundsForCharges(_ context.Context, ids []uuid.UUID) ([]Refund, error) {

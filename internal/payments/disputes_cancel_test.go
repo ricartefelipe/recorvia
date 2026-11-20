@@ -3,7 +3,9 @@ package payments
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -196,6 +198,204 @@ func TestDisputeEdgeCases(t *testing.T) {
 		f.store.errs["LatestDispute"] = errors.New("x")
 		if _, err := f.svc.LatestDispute(context.Background(), f.tenantID, uuid.New()); err == nil {
 			t.Fatal("esperava erro")
+		}
+	})
+}
+
+// sendSnapshot processa o webhook com o retrato informado (também usado na
+// consulta ao provedor) e devolve a situação registrada do webhook.
+func (f *payFixture) sendSnapshot(t *testing.T, id string, snap ProviderCharge) StoredWebhook {
+	t.Helper()
+	f.gw.getResult = snap
+	wid := f.storeWebhook(t, chargebackWebhook(id, snap))
+	f.process(t, wid)
+	return f.store.webhooks[wid]
+}
+
+// Reembolsos e disputa na mesma cobrança: o chargeback da disputa perdida
+// não estorna de novo o valor reembolsado (confirmado ou reservado), e o
+// ledger registra em chargebacks somente o valor estornado, de modo que
+// chargebacks e reembolsos nunca somam mais que o pago (ADR-036).
+func TestDisputeLostWithRefundsKeepsLedgerConsistent(t *testing.T) {
+	at := func(h int) time.Time { return payNow.Add(time.Duration(h) * time.Hour) }
+	exact := func(r Refund, state RefundState) ProviderRefund {
+		return ProviderRefund{ExternalReference: r.ID.String(), State: state, Amount: brl(3000)}
+	}
+	panel := ProviderRefund{ProviderRefundID: "rf_painel", State: RefundStateDone, Amount: brl(3000)}
+	cases := []struct {
+		name string
+		// pending pede, antes do chargeback, um reembolso de 30,00 que o
+		// provedor aceita sem confirmação imediata.
+		pending      bool
+		snapshots    func(pid string, r Refund) []ProviderCharge
+		chargedBack  int64
+		refunded     int64
+		refundStatus RefundStatus
+		released     int64
+		restored     int64
+	}{
+		{name: "reembolso pendente confirmado durante a disputa", pending: true,
+			snapshots: func(pid string, r Refund) []ProviderCharge {
+				return []ProviderCharge{withRefunds(chargebackSnapshot(pid, ProviderChargebackRequested, at(1))),
+					withRefunds(chargebackSnapshot(pid, ProviderChargebackRequested, at(2)), exact(r, RefundStateDone)),
+					withRefunds(chargebackSnapshot(pid, ProviderChargebackLost, at(3)), exact(r, RefundStateDone))}
+			}, chargedBack: 7000, refunded: 3000, refundStatus: RefundSucceeded, released: 3000},
+		{name: "reembolso pendente confirmado depois da disputa perdida", pending: true,
+			snapshots: func(pid string, r Refund) []ProviderCharge {
+				return []ProviderCharge{withRefunds(chargebackSnapshot(pid, ProviderChargebackRequested, at(1))),
+					withRefunds(chargebackSnapshot(pid, ProviderChargebackLost, at(2))),
+					withRefunds(chargebackSnapshot(pid, ProviderChargebackLost, at(3)), exact(r, RefundStateDone))}
+			}, chargedBack: 7000, refunded: 3000, refundStatus: RefundSucceeded, released: 3000},
+		{name: "reembolso pendente recusado durante a disputa", pending: true,
+			snapshots: func(pid string, r Refund) []ProviderCharge {
+				return []ProviderCharge{withRefunds(chargebackSnapshot(pid, ProviderChargebackRequested, at(1))),
+					withRefunds(chargebackSnapshot(pid, ProviderChargebackRequested, at(2)), exact(r, RefundStateFailed)),
+					withRefunds(chargebackSnapshot(pid, ProviderChargebackLost, at(3)), exact(r, RefundStateFailed))}
+			}, chargedBack: 10000, refundStatus: RefundFailed},
+		{name: "reembolso pendente recusado depois da disputa perdida", pending: true,
+			snapshots: func(pid string, r Refund) []ProviderCharge {
+				return []ProviderCharge{withRefunds(chargebackSnapshot(pid, ProviderChargebackRequested, at(1))),
+					withRefunds(chargebackSnapshot(pid, ProviderChargebackLost, at(2))),
+					withRefunds(chargebackSnapshot(pid, ProviderChargebackLost, at(3)), exact(r, RefundStateFailed))}
+			}, chargedBack: 10000, refundStatus: RefundFailed, released: 3000, restored: 3000},
+		{name: "reembolso feito no provedor durante a disputa",
+			snapshots: func(pid string, _ Refund) []ProviderCharge {
+				return []ProviderCharge{withRefunds(chargebackSnapshot(pid, ProviderChargebackRequested, at(1))),
+					withRefunds(chargebackSnapshot(pid, ProviderChargebackRequested, at(2)), panel),
+					withRefunds(chargebackSnapshot(pid, ProviderChargebackLost, at(3)), panel)}
+			}, chargedBack: 7000, refunded: 3000, released: 3000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, _, c := paidFixture(t)
+			var r Refund
+			if tc.pending {
+				f.gw.refundResults = []refundRes{{pr: ProviderRefund{Status: "PENDING", State: RefundStatePending, Amount: brl(3000)}}}
+				if r = f.refund(t, c.ID, 3000, ""); r.Status != RefundRequested {
+					t.Fatalf("reembolso aguarda o provedor: %s", r.Status)
+				}
+			}
+			for i, snap := range tc.snapshots(c.ProviderChargeID, r) {
+				if w := f.sendSnapshot(t, fmt.Sprintf("evt_%d", i), snap); w.Status != "processed" {
+					t.Fatalf("webhook %d: %s (%s)", i, w.Status, w.Error)
+				}
+			}
+			got := f.store.charges[c.ID]
+			if got.Status != ChargeChargedBack || got.AmountChargedBack.Amount() != tc.chargedBack || got.AmountRefunded.Amount() != tc.refunded ||
+				!got.AmountRefundPending.IsZero() {
+				t.Fatalf("cobrança: %s estornado=%v reembolsado=%v reservado=%v", got.Status, got.AmountChargedBack, got.AmountRefunded,
+					got.AmountRefundPending)
+			}
+			if tc.pending && f.store.refunds[r.ID].Status != tc.refundStatus {
+				t.Fatalf("reembolso: %s", f.store.refunds[r.ID].Status)
+			}
+			net := ledgerNet(f.store.posted)
+			if net[ledger.Chargebacks] != tc.chargedBack || net[ledger.Refunds] != tc.refunded ||
+				net[ledger.ProviderClearing] != -(tc.chargedBack+tc.refunded) {
+				t.Fatalf("ledger: %v", net)
+			}
+			released := postedByKind(f.store.posted, "dispute.hold_released")
+			if tc.released == 0 && len(released) != 0 || tc.released > 0 &&
+				(len(released) != 1 || ledgerNet(released)[ledger.ProviderClearing] != tc.released) {
+				t.Fatalf("retenção liberada: %+v", released)
+			}
+			if restored := postedByKind(f.store.posted, "dispute.hold_restored"); ledgerNet(restored)[ledger.Chargebacks] != tc.restored ||
+				(tc.restored > 0) != slices.Contains(f.auditActions(), "dispute.chargeback_increased") {
+				t.Fatalf("chargeback do reembolso recusado: %+v", restored)
+			}
+			d := f.latestDispute(t, c.ID)
+			h := f.store.invoiceHistory[slices.IndexFunc(f.store.invoiceHistory, func(w invoiceHistoryWrite) bool {
+				return w.changes[0].Reason == "chargeback"
+			})]
+			if d.Amount.Amount() != 10000 || h.changes[0].Details["amount"] != tc.chargedBack-tc.restored ||
+				h.changes[0].Details["disputed_amount"] != int64(10000) {
+				t.Fatalf("disputa e histórico: %v %+v", d.Amount, h.changes[0].Details)
+			}
+		})
+	}
+}
+
+func withRefunds(snap ProviderCharge, refunds ...ProviderRefund) ProviderCharge {
+	snap.Refunds = refunds
+	return snap
+}
+
+// Reembolso pedido com a cobrança paga e ainda não enviado (aguardando outro
+// reembolso da cobrança) não é enviado ao provedor depois do chargeback: o
+// pagador receberia o valor duas vezes. O pedido é encerrado como recusado e
+// a reserva é liberada; reembolso com envio anterior só é consultado.
+func TestRefundNotSentAfterChargeback(t *testing.T) {
+	t.Run("pedido aguardando outro reembolso", func(t *testing.T) {
+		f, _, c := paidFixture(t)
+		f.gw.refundResults = []refundRes{{pr: ProviderRefund{Status: "PENDING", State: RefundStatePending, Amount: brl(2000)}}}
+		first := f.refund(t, c.ID, 2000, "")
+		second := f.refund(t, c.ID, 3000, "")
+		if first.Status != RefundRequested || second.Status != RefundRequested || len(f.gw.refundCalls) != 1 {
+			t.Fatalf("segundo pedido aguarda o primeiro: %s %s %d", first.Status, second.Status, len(f.gw.refundCalls))
+		}
+		if w := f.sendSnapshot(t, "evt_cb", chargebackSnapshot(c.ProviderChargeID, ProviderChargebackRequested, payNow.Add(time.Hour))); w.Status != "processed" {
+			t.Fatalf("chargeback: %s", w.Status)
+		}
+		f.clock.Advance(time.Hour)
+		if _, err := f.svc.RecoverOperations(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		got := f.store.refunds[second.ID]
+		if len(f.gw.refundCalls) != 1 || got.Status != RefundFailed || !strings.Contains(got.FailureReason, "disputa") {
+			t.Fatalf("pedido não enviado: chamadas=%d %s %q", len(f.gw.refundCalls), got.Status, got.FailureReason)
+		}
+		if op := f.refundOperation(t, second.ID); op.Status != OpFailed {
+			t.Fatalf("operação: %s", op.Status)
+		}
+		if ch := f.store.charges[c.ID]; ch.Status != ChargeDisputed || ch.AmountRefundPending.Amount() != 2000 {
+			t.Fatalf("reserva do pedido recusado liberada: %s %v", ch.Status, ch.AmountRefundPending)
+		}
+		if !slices.Contains(f.store.eventTypes(), outbox.EventRefundFailed) {
+			t.Fatalf("eventos: %v", f.store.eventTypes())
+		}
+	})
+	t.Run("pedido aguardando com a disputa já perdida", func(t *testing.T) {
+		f, _, c := paidFixture(t)
+		f.gw.refundResults = []refundRes{{pr: ProviderRefund{Status: "PENDING", State: RefundStatePending, Amount: brl(2000)}}}
+		first := f.refund(t, c.ID, 2000, "")
+		second := f.refund(t, c.ID, 3000, "")
+		f.sendSnapshot(t, "evt_cb", chargebackSnapshot(c.ProviderChargeID, ProviderChargebackRequested, payNow.Add(time.Hour)))
+		f.sendSnapshot(t, "evt_lost", chargebackSnapshot(c.ProviderChargeID, ProviderChargebackLost, payNow.Add(2*time.Hour)))
+		if ch := f.store.charges[c.ID]; ch.AmountChargedBack.Amount() != 5000 || ch.AmountRefundPending.Amount() != 5000 {
+			t.Fatalf("perda com reservas: estornado=%v reservado=%v", ch.AmountChargedBack, ch.AmountRefundPending)
+		}
+		f.clock.Advance(time.Hour)
+		if _, err := f.svc.RecoverOperations(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.store.refunds[second.ID]; got.Status != RefundFailed || len(f.gw.refundCalls) != 1 {
+			t.Fatalf("pedido não enviado: %s chamadas=%d", got.Status, len(f.gw.refundCalls))
+		}
+		f.sendSnapshot(t, "evt_done", withRefunds(chargebackSnapshot(c.ProviderChargeID, ProviderChargebackLost, payNow.Add(3*time.Hour)),
+			ProviderRefund{ExternalReference: first.ID.String(), State: RefundStateDone, Amount: brl(2000)}))
+		ch := f.store.charges[c.ID]
+		if ch.AmountChargedBack.Amount() != 8000 || ch.AmountRefunded.Amount() != 2000 || !ch.AmountRefundPending.IsZero() {
+			t.Fatalf("cobrança: estornado=%v reembolsado=%v reservado=%v", ch.AmountChargedBack, ch.AmountRefunded, ch.AmountRefundPending)
+		}
+		if net := ledgerNet(f.store.posted); net[ledger.Chargebacks] != 8000 || net[ledger.Refunds] != 2000 || net[ledger.ProviderClearing] != -10000 {
+			t.Fatalf("ledger: %v", net)
+		}
+	})
+	t.Run("pedido com resultado desconhecido só é consultado", func(t *testing.T) {
+		f, _, c := paidFixture(t)
+		f.gw.refundResults = []refundRes{{err: errAmbiguous}}
+		r := f.refund(t, c.ID, 3000, "")
+		if r.Status != RefundUnknown {
+			t.Fatalf("resultado desconhecido: %s", r.Status)
+		}
+		f.sendSnapshot(t, "evt_cb", chargebackSnapshot(c.ProviderChargeID, ProviderChargebackRequested, payNow.Add(time.Hour)))
+		f.clock.Advance(time.Hour)
+		if err := f.svc.ExecuteOperation(context.Background(), f.tenantID, f.refundOperation(t, r.ID).ID); err != nil {
+			t.Fatal(err)
+		}
+		if len(f.gw.refundCalls) != 1 || len(f.gw.getCalls) == 0 || f.store.refunds[r.ID].Status != RefundFailed ||
+			!f.store.charges[c.ID].AmountRefundPending.IsZero() {
+			t.Fatalf("sem novo envio: chamadas=%d consultas=%d %s", len(f.gw.refundCalls), len(f.gw.getCalls), f.store.refunds[r.ID].Status)
 		}
 	})
 }

@@ -84,7 +84,11 @@ var Definitions = map[string]string{
 	"overdue":     "Recebíveis vencidos: parcela dos recebíveis em aberto com vencimento já ultrapassado.",
 	"delinquency": "Inadimplência: saldo vencido das faturas com vencimento nos últimos 90 dias ÷ total dessas faturas.",
 	"churn":       "Churn de contratos: assinaturas encerradas no mês ÷ assinaturas ativas (fora de trial) no início do mês.",
-	"refunds":     "Reembolsos e chargebacks: valores lançados no ledger no mês.",
+	"refunds":     "Reembolsos: valor líquido lançado no ledger no mês na conta de reembolsos (reembolsos efetivados, pela data da confirmação).",
+	"chargebacks": "Chargebacks: valor líquido lançado no ledger no mês na conta de chargebacks (débitos menos créditos). A abertura da disputa " +
+		"retém o valor contestado; a disputa ganha estorna a retenção e a perdida libera a parte reembolsada ou reservada a reembolso, " +
+		"o que reduz o valor do mês em que ocorrem (negativo quando a disputa aberta em mês anterior é ganha). No acumulado " +
+		"dos meses, somado aos reembolsos, nunca passa do valor pago.",
 }
 
 func ratio(num, den int64) int64 {

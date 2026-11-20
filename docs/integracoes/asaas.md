@@ -17,7 +17,7 @@ sandbox. Decisões relacionadas: ADR-008, ADR-013 e ADR-034 a ADR-038 em `docs/D
 | Webhook | `POST /webhooks` com `url`, `email`, `authToken`, `apiVersion=3`, `sendType=SEQUENTIALLY` e a lista de eventos assinados; autenticação por `asaas-access-token` em tempo constante; leitura de `id`, `event`, `dateCreated` e `payment` | aceitação do cadastro (regras do `authToken`, e-mail), entrega efetiva, reenvio, ordem e unicidade do `id` do evento |
 | Reembolso | `POST /payments/{id}/refund` com `value` e `description`; resposta como cobrança com a lista `refunds` (`PENDING`, `AWAITING_*`, `CANCELLED`, `DONE`); classificação de erros 400/404/429/5xx | quais meios aceitam reembolso parcial, prazo até `DONE`, eventos `PAYMENT_REFUND_IN_PROGRESS`, `PAYMENT_PARTIALLY_REFUNDED` e `PAYMENT_REFUNDED`, valor de `value` após o reembolso |
 | Cancelamento | `DELETE /payments/{id}` com resposta `{deleted, id}`; `deleted` diferente de `true` é ambíguo; 404 equivale a cancelada; 400 é recusa | erro devolvido para cobrança já recebida; evento `PAYMENT_DELETED` |
-| Conciliação | `GET /payments` com `dateCreated[ge]`, `dateCreated[le]`, `offset`, `limit` (até 100) e `hasMore`; taxa derivada de `value - netValue` | fuso das datas de criação nos filtros, `netValue` antes e depois da liquidação |
+| Conciliação | `GET /payments` com `dateCreated[ge]`, `dateCreated[le]`, `offset`, `limit` (até 100) e `hasMore`; taxa derivada de `value - netValue`; cobranças fora da janela consultadas por rodízio com `GET /payments/{id}` | fuso das datas de criação nos filtros, `netValue` antes e depois da liquidação |
 | Chargeback | mapeamento de `CHARGEBACK_REQUESTED`, `CHARGEBACK_DISPUTE` e `AWAITING_CHARGEBACK_REVERSAL` e dos eventos correspondentes | o sandbox pode não oferecer simulação de chargeback; a decisão perdida não é descrita pela documentação (ADR-036) |
 
 Os fluxos de reembolso, disputa, cancelamento e conciliação foram validados de ponta a ponta com o
@@ -152,6 +152,14 @@ Registre, para cada cenário, a data, a versão do Recorvia (commit), os identif
 4. A verificar: o filtro `dateCreated` usa datas sem horário; cobranças criadas perto da meia-noite
    podem ficar fora da listagem e são consultadas individualmente (`GET /payments/{id}`). Registre
    se o sandbox interpreta as datas no fuso de Brasília.
+5. Limitação da listagem: a API filtra `GET /payments` pela data de criação, sem filtro por data de
+   atualização. Uma cobrança criada antes da janela que recebe chargeback, estorno no painel ou
+   pagamento tardio com o webhook perdido não aparece na listagem nem é atualizada localmente. Para
+   cobrir esse caso, cada execução consulta individualmente até 100 cobranças fora da janela, criadas
+   nos últimos 180 dias e ainda sujeitas a mudança (aguardando pagamento, pagas, parcialmente
+   reembolsadas ou em disputa), em rodízio pelas verificadas há mais tempo (ADR-038). Com muitas
+   cobranças nessa situação, a detecção pode levar várias execuções; para verificar uma cobrança
+   específica antes disso, consulte-a no painel do provedor.
 
 ### 7. Chargeback
 

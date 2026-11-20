@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,13 +31,43 @@ const (
 	ScheduledReconciliationEvery = 24 * time.Hour
 	// reconciliationLease limita a duração de uma execução; depois dele,
 	// outra execução pode encerrá-la como interrompida.
-	reconciliationLease   = 15 * time.Minute
-	providerPageSize      = 100
-	maxProviderPages      = 20
-	maxIndividualLookups  = 100
-	maxLocalCharges       = 5000
-	maxUnknownOperations  = 500
+	reconciliationLease = 15 * time.Minute
+	// ManualReconciliationBudget é o prazo padrão da coleta (chamadas ao
+	// provedor) da execução manual, que responde na mesma requisição: fica
+	// abaixo do limite de escrita da resposta da API (60 s).
+	ManualReconciliationBudget = 40 * time.Second
+	// scheduledCollectionBudget é o prazo da coleta da execução agendada,
+	// com folga para a comparação e o registro dentro do lease.
+	scheduledCollectionBudget = reconciliationLease - 2*time.Minute
+	providerPageSize          = 100
+	maxProviderPages          = 20
+	maxIndividualLookups      = 100
+	// maxLocalCharges limita as cobranças locais da janela. As presentes na
+	// listagem do provedor (no máximo duas por cobrança listada, pelo ID do
+	// provedor e pela referência) são carregadas primeiro e sempre cabem no
+	// limite, que só corta cobranças da janela ausentes da listagem.
+	maxLocalCharges      = 5000
+	maxUnknownOperations = 500
+	// rotationLookups limita, por execução, as consultas individuais do
+	// rodízio de cobranças fora da janela.
+	rotationLookups = 100
+	// rotationMaxFailures é o número de falhas seguidas de consulta que
+	// indicam provedor indisponível (sem resposta, limite de taxa, erro 5xx)
+	// e interrompem o rodízio.
+	rotationMaxFailures = 3
+	// rotationSpan é a idade máxima das cobranças do rodízio, próxima do
+	// prazo de contestação de pagamentos com cartão.
+	rotationSpan          = 180 * 24 * time.Hour
 	maxReconciliationSpan = 93 * 24 * time.Hour
+)
+
+// Motivos de execução parcial.
+const (
+	partialProviderPages = "limite de páginas da listagem do provedor"
+	partialLookups       = "limite de consultas individuais ao provedor"
+	partialBudget        = "prazo da coleta esgotado"
+	partialLocalCharges  = "limite de cobranças locais da janela"
+	partialUnknownOps    = "limite de operações com resultado desconhecido"
 )
 
 var reconciliationActor = audit.System("reconciliation")
@@ -174,17 +206,23 @@ func (s *Service) startRun(ctx context.Context, tenantID uuid.UUID, actor audit.
 	return run, account, existing, nil
 }
 
-// FinishReconciliation coleta, compara e encerra a execução iniciada. A
-// coleta dura no máximo o lease da execução; falha do provedor ou da leitura
-// encerra a execução como failed (sem erro devolvido).
+// FinishReconciliation coleta, compara e encerra a execução iniciada. As
+// chamadas ao provedor têm prazo próprio: na execução manual, o
+// Config.ManualReconciliationBudget, sem depender do prazo nem do
+// cancelamento da requisição que a iniciou; na agendada, uma fração do lease.
+// Esgotado o prazo, a execução é concluída com o que foi coletado e com aviso
+// de execução parcial. Falha do provedor ou da leitura encerra a execução
+// como failed (sem erro devolvido).
 func (s *Service) FinishReconciliation(ctx context.Context, tenantID uuid.UUID, st StartedRun) (ReconciliationRun, error) {
 	if st.Existing {
 		return st.Run, nil
 	}
 	run := st.Run
-	callCtx, cancel := context.WithTimeout(ctx, reconciliationLease)
-	result, err := s.collectAndCompare(callCtx, tenantID, st.account, run)
-	cancel()
+	budget := scheduledCollectionBudget
+	if run.Trigger != TriggerScheduled {
+		ctx, budget = context.WithoutCancel(ctx), s.cfg.ManualReconciliationBudget
+	}
+	result, err := s.collectAndCompare(ctx, budget, tenantID, st.account, run)
 	if err != nil {
 		return s.failRun(context.WithoutCancel(ctx), tenantID, run, err)
 	}
@@ -197,23 +235,41 @@ func (s *Service) FinishReconciliation(ctx context.Context, tenantID uuid.UUID, 
 	return done, err
 }
 
-// collectAndCompare busca os dois lados e compara.
-func (s *Service) collectAndCompare(ctx context.Context, tenantID uuid.UUID, account ProviderAccount, run ReconciliationRun) (runResult, error) {
+// collectAndCompare busca os dois lados e compara. As chamadas ao provedor
+// respeitam o prazo da coleta (budget); esgotado o prazo, a coleta para e a
+// comparação usa o que foi obtido, com a execução marcada como parcial.
+// Cobranças locais não comparadas (fora da listagem e sem consulta
+// individual) não geram divergência nem têm divergências resolvidas.
+func (s *Service) collectAndCompare(ctx context.Context, budget time.Duration, tenantID uuid.UUID, account ProviderAccount,
+	run ReconciliationRun) (runResult, error) {
 	gw, err := s.resolver.Gateway(account)
 	if err != nil {
 		return runResult{}, &providerStageError{stage: "configuração do provedor", err: err}
 	}
+	collect, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	// expired informa se o prazo da coleta acabou sem o cancelamento de quem
+	// chamou: a falha da chamada em andamento é do prazo, não do provedor.
+	expired := func() bool { return collect.Err() != nil && ctx.Err() == nil }
 	var res runResult
 	var provider []ProviderCharge
 	for page := 0; ; page++ {
 		if page == maxProviderPages {
-			res.truncated = true
+			res.markPartial(partialProviderPages)
 			break
 		}
-		callCtx, cancel := context.WithTimeout(ctx, s.cfg.CallTimeout)
+		if expired() {
+			res.markPartial(partialBudget)
+			break
+		}
+		callCtx, cancel := context.WithTimeout(collect, s.cfg.CallTimeout)
 		lr, err := gw.ListCharges(callCtx, ListRequest{UpdatedFrom: run.WindowStart, UpdatedTo: run.WindowEnd, Offset: page * providerPageSize,
 			Limit: providerPageSize})
 		cancel()
+		if err != nil && expired() {
+			res.markPartial(partialBudget)
+			break
+		}
 		if err != nil {
 			return runResult{}, &providerStageError{stage: "listagem do provedor", err: err}
 		}
@@ -232,19 +288,137 @@ func (s *Service) collectAndCompare(ctx context.Context, tenantID uuid.UUID, acc
 			refs = append(refs, ref)
 		}
 	}
-	var local []LocalCharge
-	var unknown []Operation
+	local, rotation, unknown, err := s.loadLocalSide(ctx, tenantID, account, run, pids, refs, &res)
+	if err != nil {
+		return runResult{}, err
+	}
+	missing := map[string]bool{}
+	// lookup consulta a cobrança no provedor. Devolve false, sem erro, quando
+	// o prazo da coleta acabou antes ou durante a chamada.
+	lookup := func(pid string) (bool, error) {
+		if expired() {
+			return false, nil
+		}
+		callCtx, cancel := context.WithTimeout(collect, s.cfg.CallTimeout)
+		pc, err := gw.GetCharge(callCtx, pid)
+		cancel()
+		switch {
+		case GatewayErrorKind(err) == ErrKindNotFound:
+			missing[pid] = true
+		case err != nil && expired():
+			return false, nil
+		case err != nil:
+			return false, &providerStageError{stage: "consulta da cobrança " + pid + " no provedor", err: err}
+		default:
+			listed[pid] = true
+			provider = append(provider, pc)
+		}
+		return true, nil
+	}
+	lookups := 0
+	for _, l := range local {
+		pid := l.Charge.ProviderChargeID
+		if pid == "" || listed[pid] || missing[pid] {
+			continue
+		}
+		if lookups == maxIndividualLookups {
+			res.markPartial(partialLookups)
+			break
+		}
+		lookups++
+		ok, err := lookup(pid)
+		if err != nil {
+			return runResult{}, err
+		}
+		if !ok {
+			res.markPartial(partialBudget)
+			break
+		}
+	}
+	s.rotate(ctx, run, rotation, listed, missing, lookup, &res)
+	res.compare = Compare(CompareInput{ProviderCharges: provider, Local: append(local, rotation...), MissingAtProvider: missing, UnknownOps: unknown,
+		Now: s.clock.Now()})
+	return res, nil
+}
+
+// rotate consulta as cobranças do rodízio (fora da janela e que ainda podem
+// mudar no provedor, por exemplo com chargeback ou reembolso tardio e o
+// webhook perdido) em melhor esforço: não marca a execução como parcial nem
+// a faz falhar, e a janela já verificada é concluída normalmente. A consulta
+// que falha é pulada (a cobrança não é comparada nem registrada como
+// verificada e volta na próxima execução). Interrompem o rodízio o prazo da
+// coleta esgotado, o cancelamento de quem chamou e rotationMaxFailures falhas
+// seguidas que indicam provedor indisponível (recusa definitiva, própria da
+// cobrança consultada, não conta); o que não foi consultado fica para as
+// próximas execuções.
+func (s *Service) rotate(ctx context.Context, run ReconciliationRun, rotation []LocalCharge, listed, missing map[string]bool,
+	lookup func(string) (bool, error), res *runResult) {
+	unavailable := 0
+	for _, l := range rotation {
+		pid := l.Charge.ProviderChargeID
+		if listed[pid] || missing[pid] {
+			continue
+		}
+		ok, err := lookup(pid)
+		switch {
+		case ctx.Err() != nil, err == nil && !ok:
+			return
+		case err == nil:
+			unavailable = 0
+			continue
+		}
+		res.rotationFailures++
+		if s.cfg.Log != nil {
+			s.cfg.Log.WarnContext(ctx, "consulta do rodízio da conciliação falhou", slog.String("run_id", run.ID.String()),
+				slog.String("charge_id", l.Charge.ID.String()), slog.String("error", err.Error()))
+		}
+		if GatewayErrorKind(err) == ErrKindPermanent {
+			continue
+		}
+		if unavailable++; unavailable == rotationMaxFailures {
+			return
+		}
+	}
+}
+
+// loadLocalSide lê, numa transação, as cobranças locais da janela e as
+// presentes na listagem do provedor, as cobranças do rodízio (fora da janela,
+// sem repetir as já lidas) com seus reembolsos e as operações com resultado
+// desconhecido. Limites atingidos marcam a execução como parcial.
+func (s *Service) loadLocalSide(ctx context.Context, tenantID uuid.UUID, account ProviderAccount, run ReconciliationRun, pids []string,
+	refs []uuid.UUID, res *runResult) (local, rotation []LocalCharge, unknown []Operation, err error) {
+	var localCut, unknownCut bool
 	err = s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		local, rotation, unknown, localCut, unknownCut = nil, nil, nil, false, false
+		now := s.clock.Now()
 		charges, err := tx.ChargesForReconciliation(ctx, ReconciliationScope{AccountID: account.ID, WindowStart: run.WindowStart,
-			WindowEnd: run.WindowEnd, ProviderChargeIDs: pids, ReferenceIDs: refs, Limit: maxLocalCharges})
+			WindowEnd: run.WindowEnd, ProviderChargeIDs: pids, ReferenceIDs: refs, Limit: maxLocalCharges + 1})
 		if err != nil {
 			return err
 		}
-		chargeIDs := make([]uuid.UUID, 0, len(charges))
-		for _, c := range charges {
-			chargeIDs = append(chargeIDs, c.ID)
+		if len(charges) > maxLocalCharges {
+			charges, localCut = charges[:maxLocalCharges], true
 		}
-		refunds, err := tx.RefundsForCharges(ctx, chargeIDs)
+		extra, err := tx.ChargesForRotation(ctx, RotationScope{AccountID: account.ID, Since: now.Add(-rotationSpan), WindowStart: run.WindowStart,
+			WindowEnd: run.WindowEnd, Limit: rotationLookups})
+		if err != nil {
+			return err
+		}
+		seen := make(map[uuid.UUID]bool, len(charges))
+		ids := make([]uuid.UUID, 0, len(charges)+len(extra))
+		for _, c := range charges {
+			seen[c.ID] = true
+			ids = append(ids, c.ID)
+		}
+		var rotated []Charge
+		for _, c := range extra {
+			if !seen[c.ID] {
+				seen[c.ID] = true
+				rotated = append(rotated, c)
+				ids = append(ids, c.ID)
+			}
+		}
+		refunds, err := tx.RefundsForCharges(ctx, ids)
 		if err != nil {
 			return err
 		}
@@ -256,44 +430,43 @@ func (s *Service) collectAndCompare(ctx context.Context, tenantID uuid.UUID, acc
 		for _, c := range charges {
 			local = append(local, LocalCharge{Charge: c, Refunds: byCharge[c.ID]})
 		}
-		unknown, err = tx.UnknownOperations(ctx, s.clock.Now(), maxUnknownOperations)
-		return err
+		for _, c := range rotated {
+			rotation = append(rotation, LocalCharge{Charge: c, Refunds: byCharge[c.ID]})
+		}
+		if unknown, err = tx.UnknownOperations(ctx, now, maxUnknownOperations+1); err != nil {
+			return err
+		}
+		if len(unknown) > maxUnknownOperations {
+			unknown, unknownCut = unknown[:maxUnknownOperations], true
+		}
+		return nil
 	})
-	if err != nil {
-		return runResult{}, err
+	if localCut {
+		res.markPartial(partialLocalCharges)
 	}
-	missing := map[string]bool{}
-	lookups := 0
-	for _, l := range local {
-		pid := l.Charge.ProviderChargeID
-		if pid == "" || listed[pid] {
-			continue
-		}
-		if lookups == maxIndividualLookups {
-			res.truncated = true
-			break
-		}
-		lookups++
-		callCtx, cancel := context.WithTimeout(ctx, s.cfg.CallTimeout)
-		pc, err := gw.GetCharge(callCtx, pid)
-		cancel()
-		switch {
-		case GatewayErrorKind(err) == ErrKindNotFound:
-			missing[pid] = true
-		case err != nil:
-			return runResult{}, &providerStageError{stage: "consulta da cobrança " + pid + " no provedor", err: err}
-		default:
-			listed[pid] = true
-			provider = append(provider, pc)
-		}
+	if unknownCut {
+		res.unknownTruncated = true
+		res.markPartial(partialUnknownOps)
 	}
-	res.compare = Compare(CompareInput{ProviderCharges: provider, Local: local, MissingAtProvider: missing, UnknownOps: unknown, Now: s.clock.Now()})
-	return res, nil
+	return local, rotation, unknown, err
 }
 
 type runResult struct {
-	compare   CompareResult
-	truncated bool
+	compare CompareResult
+	// partial reúne os motivos de execução parcial (limites atingidos).
+	partial []string
+	// unknownTruncated indica que a leitura das operações com resultado
+	// desconhecido atingiu o limite.
+	unknownTruncated bool
+	// rotationFailures conta as consultas do rodízio que falharam (não
+	// tornam a execução parcial).
+	rotationFailures int
+}
+
+func (r *runResult) markPartial(reason string) {
+	if !slices.Contains(r.partial, reason) {
+		r.partial = append(r.partial, reason)
+	}
 }
 
 // providerStageError identifica a etapa da conciliação em que a chamada ao
@@ -394,6 +567,17 @@ func (s *Service) completeRun(ctx context.Context, tenantID uuid.UUID, run Recon
 			if found[d.DedupeKey] || (d.Kind != DiscrepancyUnknownOperation && !checkedSubject(*d, res.compare)) {
 				continue
 			}
+			if d.Kind == DiscrepancyUnknownOperation && res.unknownTruncated {
+				// A operação pode ter ficado fora da leitura limitada: só é
+				// resolvida se a situação atual não for mais desconhecida.
+				pending, err := operationStillUnknown(ctx, tx, *d, now)
+				if err != nil {
+					return err
+				}
+				if pending {
+					continue
+				}
+			}
 			d.Status, d.Resolution, d.ResolvedAt, d.LastRunID = DiscrepancyResolved, ResolutionAutoResolved, &now, cur.ID
 			d.Justification = "Divergência não constatada na execução de conciliação " + cur.ID.String() + "."
 			if err := tx.UpdateDiscrepancy(ctx, d); err != nil {
@@ -404,18 +588,42 @@ func (s *Service) completeRun(ctx context.Context, tenantID uuid.UUID, run Recon
 				return err
 			}
 		}
+		if len(res.compare.CheckedCharges) > 0 {
+			if err := tx.MarkChargesReconciled(ctx, res.compare.CheckedCharges, now); err != nil {
+				return err
+			}
+		}
 		cur.Status, cur.CheckedCount, cur.DiscrepancyCount, cur.FinishedAt, cur.LeaseUntil = RunCompleted, res.compare.Checked(), count, &now, nil
-		if res.truncated {
-			cur.Error = "Execução parcial: limite de consultas ao provedor atingido; nem todas as cobranças da janela foram verificadas."
+		if len(res.partial) > 0 {
+			cur.Error = "Execução parcial (" + strings.Join(res.partial, "; ") +
+				"): nem todas as cobranças e operações do escopo da execução foram verificadas."
 		}
 		if err := tx.FinishReconciliationRun(ctx, cur); err != nil {
 			return err
 		}
 		run = cur
 		return tx.Audit(ctx, audit.New(tenantID, now, reconciliationActor, "reconciliation.run_completed", "reconciliation_run", cur.ID.String(),
-			map[string]any{"checked": cur.CheckedCount, "discrepancies": cur.DiscrepancyCount, "partial": res.truncated}))
+			map[string]any{"checked": cur.CheckedCount, "discrepancies": cur.DiscrepancyCount, "partial": len(res.partial) > 0,
+				"partial_reasons": res.partial, "rotation_failures": res.rotationFailures}))
 	})
 	return run, err
+}
+
+// operationStillUnknown informa se a operação da divergência continua com
+// resultado desconhecido (situação unknown ou em execução com o lease
+// expirado).
+func operationStillUnknown(ctx context.Context, tx Tx, d Discrepancy, now time.Time) (bool, error) {
+	if d.OperationID == nil {
+		return false, nil
+	}
+	op, err := tx.Operation(ctx, *d.OperationID, false)
+	if apperr.IsKind(err, apperr.KindNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return op.Status == OpUnknown || op.Stalled(now), nil
 }
 
 // checkedSubject informa se o objeto da divergência foi verificado na execução.

@@ -5,6 +5,7 @@ import { useSearchParams } from 'react-router';
 import type { QueryDomain } from '../api/queryKeys';
 import { useTenant } from '../session/SessionContext';
 import { handleMutationError, type FormErrorTarget } from './errors';
+import { discardsIdempotencyKey, type IdempotencyKeeper } from './idempotency';
 import { notifySuccess } from './notify';
 
 /**
@@ -56,9 +57,19 @@ export interface ApiMutationOptions<TVars, TData, TForm extends FieldValues> {
   onError?: (error: unknown) => void;
   form?: FormErrorTarget<TForm>;
   fieldMap?: Record<string, string>;
+  /**
+   * Chave de idempotência do envio (ADR-022): descartada depois do sucesso e
+   * da recusa 4xx da API, porque o próximo envio é outra intenção; mantida
+   * depois de erro de rede, 5xx ou pedido com a mesma chave ainda em
+   * processamento, para que a repetição não duplique o efeito.
+   */
+  idempotency?: IdempotencyKeeper;
 }
 
-/** Mutation com notificação de sucesso, invalidação por domínio e tratamento de erros. */
+/**
+ * Mutation com notificação de sucesso, invalidação por domínio, tratamento de
+ * erros e, quando informada, a regra de descarte da chave de idempotência.
+ */
 export function useApiMutation<TVars = void, TData = unknown, TForm extends FieldValues = FieldValues>(
   options: ApiMutationOptions<TVars, TData, TForm>,
 ) {
@@ -70,6 +81,7 @@ export function useApiMutation<TVars = void, TData = unknown, TForm extends Fiel
   return useMutation<TData, unknown, TVars>({
     mutationFn: options.mutationFn,
     onSuccess: async (data, vars) => {
+      options.idempotency?.reset();
       if (options.successMessage) {
         notifySuccess(
           typeof options.successMessage === 'function' ? options.successMessage(data, vars) : options.successMessage,
@@ -79,6 +91,7 @@ export function useApiMutation<TVars = void, TData = unknown, TForm extends Fiel
       await invalidateAll();
     },
     onError: (error) => {
+      if (discardsIdempotencyKey(error)) options.idempotency?.reset();
       handleMutationError(error, {
         form: options.form,
         fieldMap: options.fieldMap,

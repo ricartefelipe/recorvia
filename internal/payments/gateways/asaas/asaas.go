@@ -307,6 +307,8 @@ func (g *Gateway) CancelCharge(ctx context.Context, id string) error {
 }
 
 // ListCharges lista cobranças criadas na janela (paginação offset/limit, máx. 100).
+// A API não filtra por data de atualização: cobranças antigas que mudaram sem
+// webhook são cobertas pelo rodízio da conciliação (ADR-038).
 func (g *Gateway) ListCharges(ctx context.Context, req payments.ListRequest) (payments.ListResult, error) {
 	q := url.Values{}
 	if !req.UpdatedFrom.IsZero() {

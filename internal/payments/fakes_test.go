@@ -696,7 +696,10 @@ func (v *fakeVerifier) Parse(body []byte) (WebhookEvent, error) {
 }
 
 type fakeResolver struct {
-	gw          *fakeGateway
+	gw *fakeGateway
+	// override, quando definido, substitui gw (gateways com comportamento
+	// próprio construídos sobre o falso).
+	override    Gateway
 	gwErr       error
 	verifier    *fakeVerifier
 	verifierErr error
@@ -708,6 +711,9 @@ func (r *fakeResolver) Gateway(a ProviderAccount) (Gateway, error) {
 	r.accounts = append(r.accounts, a)
 	if r.gwErr != nil {
 		return nil, r.gwErr
+	}
+	if r.override != nil {
+		return r.override, nil
 	}
 	return r.gw, nil
 }

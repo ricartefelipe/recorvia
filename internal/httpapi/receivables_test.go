@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ricartefelipe/recorvia/api"
+	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
 	"github.com/ricartefelipe/recorvia/internal/kernel/money"
 	"github.com/ricartefelipe/recorvia/internal/payments"
@@ -142,6 +143,29 @@ func TestReceivablesHandlersRejectInvalidInput(t *testing.T) {
 			}
 			if ct := rec.Header().Get("Content-Type"); ct != "application/problem+json" {
 				t.Fatalf("content-type %q", ct)
+			}
+		})
+	}
+}
+
+// Conflitos transitórios informam Retry-After (e por isso não ficam
+// registrados na Idempotency-Key); os demais conflitos não.
+func TestTransientConflictsCarryRetryAfter(t *testing.T) {
+	a, _ := NewRouter(Deps{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Clock: clock.System{}})
+	cases := []struct {
+		code, retry string
+	}{
+		{"reconciliation_running", "60"},
+		{"refund_outcome_unknown", "60"},
+		{"provider_not_configured", ""},
+		{"refund_exceeds_balance", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.code, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			a.writeError(rec, httptest.NewRequest(http.MethodPost, "/", nil), apperr.Conflict(tc.code, "Conflito."))
+			if rec.Code != http.StatusConflict || rec.Header().Get("Retry-After") != tc.retry {
+				t.Fatalf("status %d Retry-After %q", rec.Code, rec.Header().Get("Retry-After"))
 			}
 		})
 	}

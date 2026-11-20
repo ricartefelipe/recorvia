@@ -2742,7 +2742,10 @@ export interface components {
             };
             resolution?: string | null;
             justification?: string | null;
-            /** Format: uuid */
+            /**
+             * Format: uuid
+             * @description Usuário da sessão que resolveu a divergência. Nulo na resolução automática (auto_resolved) e na resolução por credencial de API; o responsável fica sempre no histórico (ator do evento reconciliation.discrepancy_resolved).
+             */
             resolved_by?: string | null;
             /** Format: date-time */
             resolved_at?: string | null;
@@ -2942,9 +2945,15 @@ export interface components {
             active_subscriptions: number;
             new_subscriptions: number;
             canceled_subscriptions: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Movimento líquido da conta de reembolsos no mês
+             */
             refunds: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Movimento líquido da conta de chargebacks no mês (débitos menos créditos). A retenção liberada e a disputa ganha reduzem o mês em que ocorrem; negativo quando a disputa aberta em mês anterior é ganha.
+             */
             chargebacks: number;
             open_discrepancies?: number;
             unknown_operations?: number;
@@ -3020,7 +3029,7 @@ export interface components {
         CSRF: string;
         /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
         IfMatch: string;
-        /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. */
+        /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
         IdempotencyKey: string;
         ID: string;
         Limit: number;
@@ -4002,7 +4011,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. */
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5183,7 +5192,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. */
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5221,7 +5230,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. */
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5256,7 +5265,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. */
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5286,7 +5295,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. */
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path?: never;
@@ -5367,7 +5376,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. */
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5683,7 +5692,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. */
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path?: never;

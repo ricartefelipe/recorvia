@@ -5,6 +5,7 @@ package pgstore_test
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/payments"
 	"github.com/ricartefelipe/recorvia/internal/paysim"
 	"github.com/ricartefelipe/recorvia/internal/pgstore"
+	"github.com/ricartefelipe/recorvia/internal/reporting"
 )
 
 // paidCharge emite a fatura, cria a cobrança no simulador e confirma o
@@ -67,6 +69,16 @@ func (h *payHarness) accountNet(t *testing.T, code string) int64 {
 	return h.sum(t, `SELECT COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END), 0)::bigint
 	                   FROM ledger_entries e JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
 	                  WHERE e.tenant_id = $1 AND a.code = '`+code+`'`)
+}
+
+// dashboard calcula o painel financeiro do mês (AAAA-MM) no fuso do tenant.
+func (h *payHarness) dashboard(t *testing.T, month string) reporting.Dashboard {
+	t.Helper()
+	d, err := reporting.NewService(h.env.Store.Reporting(), h.env.Clock).Dashboard(context.Background(), h.tn.ID, month)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
 }
 
 func refundInput(c payments.Charge, amount int64, key string) payments.RefundInput {
@@ -268,6 +280,10 @@ func TestChargebackLifecycleWithSimulator(t *testing.T) {
 	if net := h.accountNet(t, "chargebacks"); net != 6000 {
 		t.Fatalf("chargebacks no ledger = %d", net)
 	}
+	// O painel do mês mostra o valor líquido: a disputa ganha não conta.
+	if d := h.dashboard(t, "2026-03"); d.Chargebacks != 6000 || d.Refunds != 0 {
+		t.Fatalf("painel: chargebacks=%d reembolsos=%d", d.Chargebacks, d.Refunds)
+	}
 	disputes, err := h.env.Store.ListDisputes(ctx, h.tn.ID, nil, 10)
 	if err != nil || len(disputes) != 2 {
 		t.Fatalf("disputas: %d %v", len(disputes), err)
@@ -292,6 +308,287 @@ func TestChargebackLifecycleWithSimulator(t *testing.T) {
 	if err == nil {
 		t.Fatal("histórico de disputa deve ser imutável")
 	}
+}
+
+// pendingRefunds é o estado compartilhado de pendingRefundGateway (o
+// resolvedor cria um gateway a cada uso).
+type pendingRefunds struct {
+	mu      sync.Mutex
+	calls   int
+	settled map[string][]payments.ProviderRefund
+}
+
+func (p *pendingRefunds) settle(providerChargeID string, r payments.ProviderRefund) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.settled[providerChargeID] = append(p.settled[providerChargeID], r)
+}
+
+// pendingRefundGateway aceita o pedido de reembolso sem confirmação imediata
+// (como o Asaas) e sem levá-lo ao simulador; os reembolsos liquidados com
+// settle aparecem nas consultas da cobrança.
+type pendingRefundGateway struct {
+	payments.Gateway
+	st *pendingRefunds
+}
+
+func (g pendingRefundGateway) Refund(_ context.Context, req payments.RefundRequest) (payments.ProviderRefund, error) {
+	g.st.mu.Lock()
+	defer g.st.mu.Unlock()
+	g.st.calls++
+	return payments.ProviderRefund{Status: "PENDING", State: payments.RefundStatePending, Amount: req.Amount}, nil
+}
+
+func (g pendingRefundGateway) GetCharge(ctx context.Context, id string) (payments.ProviderCharge, error) {
+	pc, err := g.Gateway.GetCharge(ctx, id)
+	g.st.mu.Lock()
+	defer g.st.mu.Unlock()
+	if err == nil {
+		pc.Refunds = append(pc.Refunds, g.st.settled[id]...)
+	}
+	return pc, err
+}
+
+// Reembolso pendente no provedor quando chega o chargeback: a disputa perdida
+// estorna somente o saldo não reservado e libera, no ledger, a parte da
+// retenção correspondente; a confirmação posterior do reembolso cabe no saldo
+// e a recusa posterior passa o valor ao chargeback. Chargebacks e reembolsos
+// somam exatamente o pago, no ledger e no painel do mês, e o banco recusa
+// qualquer soma de reembolsado, reservado e estornado acima do pago.
+func TestDisputeLostWithPendingRefundKeepsLedgerConsistent(t *testing.T) {
+	cases := []struct {
+		name                  string
+		state                 payments.RefundState
+		refunded, chargedBack int64
+		restored              int64
+	}{
+		{name: "reembolso confirmado depois da perda", state: payments.RefundStateDone, refunded: 3000, chargedBack: 7000},
+		{name: "reembolso recusado depois da perda", state: payments.RefundStateFailed, chargedBack: 10000, restored: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := &pendingRefunds{settled: map[string][]payments.ProviderRefund{}}
+			h := newPayHarnessWith(t, 2*time.Second, func(gw payments.Gateway) payments.Gateway { return pendingRefundGateway{Gateway: gw, st: st} })
+			_, c := h.paidCharge(t, 10000)
+			r, err := h.pay.RequestRefund(ctx, h.tn.ID, h.tn.Actor, &h.tn.Owner.ID, refundInput(c, 3000, "pendente-1"))
+			if err != nil || r.Status != payments.RefundRequested {
+				t.Fatalf("reembolso pendente: %+v %v", r, err)
+			}
+			for _, stage := range []string{"requested", "lost"} {
+				if _, err := h.sim.Apply(c.ProviderChargeID, paysim.Action{Name: "chargeback", Stage: stage}); err != nil {
+					t.Fatal(err)
+				}
+				h.deliver(t)
+			}
+			got := h.charge(t, c.InvoiceID)
+			if got.Status != payments.ChargeChargedBack || got.AmountChargedBack.Amount() != 7000 || got.AmountRefundPending.Amount() != 3000 {
+				t.Fatalf("disputa perdida: %s estornado=%v reservado=%v", got.Status, got.AmountChargedBack, got.AmountRefundPending)
+			}
+			if net := h.accountNet(t, "chargebacks"); net != 7000 {
+				t.Fatalf("chargebacks no ledger = %d", net)
+			}
+			if n := h.sum(t, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND kind = 'dispute.hold_released'`); n != 1 {
+				t.Fatalf("liberação da retenção = %d", n)
+			}
+			// O provedor conclui o reembolso; a conciliação aponta o reembolso
+			// pendente e a adoção do provedor aplica o resultado.
+			st.settle(c.ProviderChargeID, payments.ProviderRefund{ExternalReference: r.ID.String(), State: tc.state, Amount: money.New(3000, money.BRL)})
+			h.env.Clock.Advance(2 * time.Hour)
+			run, err := h.pay.RunReconciliation(ctx, h.tn.ID, h.tn.Actor, &h.tn.Owner.ID, payments.RunInput{})
+			if err != nil || run.Status != payments.RunCompleted {
+				t.Fatalf("conciliação: %+v %v", run, err)
+			}
+			list, err := h.env.Store.ListDiscrepancies(ctx, h.tn.ID, "open", string(payments.DiscrepancyRefundPending), 10)
+			if err != nil || len(list) != 1 || list[0].RefundID == nil || *list[0].RefundID != r.ID {
+				t.Fatalf("reembolso pendente na conciliação: %+v %v", list, err)
+			}
+			if _, err := h.pay.ResolveDiscrepancy(ctx, h.tn.ID, h.tn.Actor, &h.tn.Owner.ID, payments.ResolveInput{ID: list[0].ID,
+				Resolution: payments.ResolutionAcceptProvider, Justification: "Resultado do reembolso conferido no extrato do provedor."}); err != nil {
+				t.Fatalf("adoção do provedor: %v", err)
+			}
+			got = h.charge(t, c.InvoiceID)
+			if got.AmountRefunded.Amount() != tc.refunded || !got.AmountRefundPending.IsZero() || got.AmountChargedBack.Amount() != tc.chargedBack {
+				t.Fatalf("reembolso concluído: reembolsado=%v reservado=%v estornado=%v", got.AmountRefunded, got.AmountRefundPending, got.AmountChargedBack)
+			}
+			if cb, rf := h.accountNet(t, "chargebacks"), h.accountNet(t, "refunds"); cb != tc.chargedBack || rf != tc.refunded {
+				t.Fatalf("ledger: chargebacks=%d reembolsos=%d", cb, rf)
+			}
+			if n := h.sum(t, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND kind = 'dispute.hold_restored'`); n != tc.restored {
+				t.Fatalf("chargeback do reembolso recusado = %d", n)
+			}
+			// O painel soma o movimento líquido da conta de chargebacks: a
+			// liberação da retenção não é contada de novo como chargeback.
+			if d := h.dashboard(t, "2026-03"); d.Chargebacks != tc.chargedBack || d.Refunds != tc.refunded {
+				t.Fatalf("painel: chargebacks=%d reembolsos=%d", d.Chargebacks, d.Refunds)
+			}
+			if st.calls != 1 {
+				t.Fatalf("pedidos de reembolso ao provedor = %d", st.calls)
+			}
+			err = h.env.DB.InTenantTx(ctx, h.tn.ID, func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, `UPDATE charges SET amount_refund_pending = 1 WHERE tenant_id = $1 AND id = $2`, h.tn.ID, c.ID)
+				return err
+			})
+			if !postgres.IsNamedCheckViolation(err, "charges_refund_reservation_limit") {
+				t.Fatalf("constraint de reembolsado, reservado e estornado: %v", err)
+			}
+		})
+	}
+}
+
+// A disputa ganha em mês posterior ao da abertura estorna a retenção no mês
+// da decisão: o painel mostra o chargeback no mês da abertura e o estorno
+// (valor negativo) no mês seguinte, e os dois meses somam zero.
+func TestDashboardChargebacksAcrossMonths(t *testing.T) {
+	h := newPayHarness(t, 2*time.Second)
+	_, c := h.paidCharge(t, 10000)
+	h.simApply(t, c.ProviderChargeID, paysim.Action{Name: "chargeback", Stage: "requested"})
+	h.deliver(t)
+	h.env.Clock.Advance(30 * 24 * time.Hour)
+	h.simApply(t, c.ProviderChargeID, paysim.Action{Name: "chargeback", Stage: "won"})
+	h.deliver(t)
+	if got := h.charge(t, c.InvoiceID); got.Status != payments.ChargePaid {
+		t.Fatalf("disputa ganha: %s", got.Status)
+	}
+	for month, want := range map[string]int64{"2026-03": 10000, "2026-04": -10000} {
+		if d := h.dashboard(t, month); d.Chargebacks != want || d.Refunds != 0 {
+			t.Fatalf("painel de %s: chargebacks=%d reembolsos=%d, esperado %d", month, d.Chargebacks, d.Refunds, want)
+		}
+	}
+}
+
+// Reembolso pedido com a cobrança paga e enviado sem resposta conclusiva não
+// é repetido depois do chargeback: a nova tentativa só consulta o provedor e,
+// sem o reembolso registrado nele, o pedido é recusado e a reserva liberada.
+func TestRefundNotSentAfterChargebackWithSimulator(t *testing.T) {
+	ctx := context.Background()
+	h := newPayHarness(t, 2*time.Second)
+	_, c := h.paidCharge(t, 10000)
+	if err := h.sim.EnqueueScenario(h.apiKey, "refund_unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	r, err := h.pay.RequestRefund(ctx, h.tn.ID, h.tn.Actor, nil, refundInput(c, 4000, "disputa-1"))
+	if err != nil || r.Status != payments.RefundRequested {
+		t.Fatalf("reembolso adiado: %+v %v", r, err)
+	}
+	if _, err := h.sim.Apply(c.ProviderChargeID, paysim.Action{Name: "chargeback", Stage: "requested"}); err != nil {
+		t.Fatal(err)
+	}
+	h.deliver(t)
+	h.env.Clock.Advance(10 * time.Minute)
+	if _, err := h.pay.RecoverOperations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.pay.Refund(ctx, h.tn.ID, r.ID)
+	if err != nil || got.Status != payments.RefundFailed {
+		t.Fatalf("reembolso recusado: %+v %v", got, err)
+	}
+	view, err := h.sim.View(h.apiKey, c.ProviderChargeID)
+	if err != nil || len(view.Refunds) != 0 {
+		t.Fatalf("o provedor recebeu %d reembolsos (%v)", len(view.Refunds), err)
+	}
+	if ch := h.charge(t, c.InvoiceID); ch.Status != payments.ChargeDisputed || !ch.AmountRefundPending.IsZero() {
+		t.Fatalf("cobrança: %s reservado=%v", ch.Status, ch.AmountRefundPending)
+	}
+}
+
+// As cobranças presentes na listagem do provedor vêm antes das demais da
+// janela, de modo que o limite de linhas nunca deixa uma cobrança listada sem
+// a correspondência local. O rodízio lista as cobranças fora da janela que
+// ainda podem mudar no provedor, a começar pelas nunca verificadas.
+func TestReconciliationLocalScopeQueries(t *testing.T) {
+	ctx := context.Background()
+	h := newPayHarness(t, 2*time.Second)
+	_, first := h.paidCharge(t, 10000)
+	h.env.Clock.Advance(time.Minute)
+	_, second := h.paidCharge(t, 8000)
+	h.env.Clock.Advance(time.Minute)
+	_, third := h.paidCharge(t, 6000)
+	if r, err := h.pay.RequestRefund(ctx, h.tn.ID, h.tn.Actor, nil, refundInput(third, 6000, "integral-1")); err != nil ||
+		r.Status != payments.RefundSucceeded {
+		t.Fatalf("reembolso integral: %+v %v", r, err)
+	}
+	h.env.Clock.Advance(time.Minute)
+	account, now := first.ProviderAccountID, h.env.Clock.Now()
+	ids := func(cs []payments.Charge) []uuid.UUID {
+		out := make([]uuid.UUID, len(cs))
+		for i, c := range cs {
+			out[i] = c.ID
+		}
+		return out
+	}
+	// As verificações ficam fora da transação: t.Fatal dentro dela deixaria a
+	// conexão presa.
+	inTx := func(tenantID uuid.UUID, fn func(payments.Tx) error) {
+		t.Helper()
+		if err := h.env.Store.Payments().InTenant(ctx, tenantID, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	window := payments.ReconciliationScope{AccountID: account, WindowStart: now.Add(-time.Hour), WindowEnd: now}
+	byPID, byRef := window, window
+	byPID.ProviderChargeIDs, byPID.Limit = []string{third.ProviderChargeID}, 2
+	byRef.ReferenceIDs, byRef.Limit = []uuid.UUID{second.ID}, 1
+	for _, tc := range []struct {
+		scope payments.ReconciliationScope
+		want  []uuid.UUID
+	}{{byPID, []uuid.UUID{third.ID, first.ID}}, {byRef, []uuid.UUID{second.ID}}} {
+		var got []payments.Charge
+		inTx(h.tn.ID, func(tx payments.Tx) (err error) {
+			got, err = tx.ChargesForReconciliation(ctx, tc.scope)
+			return err
+		})
+		if !slices.Equal(ids(got), tc.want) {
+			t.Fatalf("cobranças listadas primeiro: %v, esperado %v", ids(got), tc.want)
+		}
+	}
+	inTx(h.tn.ID, func(tx payments.Tx) error { return tx.LockCustomerCredits(ctx, first.CustomerID) })
+	var lockErr error
+	inTx(h.tn.ID, func(tx payments.Tx) error {
+		lockErr = tx.LockCustomerCredits(ctx, uuid.New())
+		return nil
+	})
+	if !apperr.IsKind(lockErr, apperr.KindNotFound) {
+		t.Fatalf("bloqueio do crédito de cliente inexistente: %v", lockErr)
+	}
+
+	h.env.Clock.Advance(40 * 24 * time.Hour)
+	later := h.env.Clock.Now()
+	rotation := payments.RotationScope{AccountID: account, Since: later.Add(-180 * 24 * time.Hour), WindowStart: later.Add(-7 * 24 * time.Hour),
+		WindowEnd: later, Limit: 10}
+	rotate := func(tenantID uuid.UUID, sc payments.RotationScope, want ...uuid.UUID) {
+		t.Helper()
+		var got []payments.Charge
+		inTx(tenantID, func(tx payments.Tx) (err error) {
+			got, err = tx.ChargesForRotation(ctx, sc)
+			return err
+		})
+		if !slices.Equal(ids(got), want) {
+			t.Fatalf("rodízio: %v, esperado %v", ids(got), want)
+		}
+	}
+	mark := func(at time.Time, chargeIDs ...uuid.UUID) {
+		t.Helper()
+		inTx(h.tn.ID, func(tx payments.Tx) error { return tx.MarkChargesReconciled(ctx, chargeIDs, at) })
+	}
+	// A cobrança integralmente reembolsada já não muda no provedor.
+	rotate(h.tn.ID, rotation, first.ID, second.ID)
+	mark(later, first.ID)
+	rotate(h.tn.ID, rotation, second.ID, first.ID)
+	mark(later.Add(time.Hour), first.ID, second.ID)
+	mark(later.Add(2*time.Hour), first.ID)
+	rotate(h.tn.ID, rotation, second.ID, first.ID)
+	mark(later)
+	if n := h.sum(t, `SELECT count(*) FROM reconciliation_charge_checks WHERE tenant_id = $1`); n != 2 {
+		t.Fatalf("verificações registradas = %d", n)
+	}
+	old, inWindow := rotation, rotation
+	old.Since = later
+	inWindow.WindowStart = now.Add(-time.Hour)
+	rotate(h.tn.ID, old)
+	rotate(h.tn.ID, inWindow)
+	// Outro tenant não vê as cobranças do rodízio.
+	rotate(h.env.NewTenant(t, "outro-rodizio").ID, rotation)
 }
 
 func TestVoidedInvoiceCancelsChargeAtSimulator(t *testing.T) {

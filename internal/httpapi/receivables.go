@@ -24,7 +24,8 @@ func refundDTO(r payments.Refund) map[string]any {
 // refundCharge solicita o reembolso total ou parcial de uma cobrança paga.
 // A chave de negócio derivada do Idempotency-Key torna o pedido idempotente
 // também depois da expiração do registro HTTP; pedidos concorrentes nunca
-// somam mais que o saldo elegível (reserva sob bloqueio da cobrança).
+// somam mais que o saldo elegível (reserva sob bloqueio da cobrança). Com
+// credencial de API, a autoria fica na auditoria (requested_by nulo).
 func (a *API) refundCharge(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
 	if err != nil {
@@ -40,8 +41,7 @@ func (a *API) refundCharge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	uid := p.User.ID
-	ref, err := a.Payments.RequestRefund(r.Context(), p.TenantID, p.Actor(), &uid, payments.RefundInput{ChargeID: id,
+	ref, err := a.Payments.RequestRefund(r.Context(), p.TenantID, p.Actor(), p.UserID(), payments.RefundInput{ChargeID: id,
 		Amount: money.New(in.Amount, money.BRL), Reason: in.Reason, RequestKey: idempotencyKeyFrom(r.Context())})
 	if err != nil {
 		a.writeError(w, r, err)
@@ -106,13 +106,15 @@ func (a *API) listReconciliationRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 // runReconciliation executa a conciliação manual do provedor padrão sobre a
-// janela padrão e devolve a execução encerrada. Falha do provedor encerra a
-// execução como failed (resposta 200 com a causa em error); a repetição com
-// o mesmo Idempotency-Key devolve a mesma execução.
+// janela padrão e devolve a execução encerrada. A coleta tem prazo próprio,
+// independente do prazo da requisição (esgotado, a execução é concluída com
+// aviso de execução parcial). Falha do provedor encerra a execução como
+// failed (resposta 200 com a causa em error); a repetição com o mesmo
+// Idempotency-Key devolve a mesma execução. Com credencial de API, a autoria
+// fica na auditoria (requested_by nulo).
 func (a *API) runReconciliation(w http.ResponseWriter, r *http.Request) {
 	p := mustPrincipal(r)
-	uid := p.User.ID
-	run, err := a.Payments.RunReconciliation(r.Context(), p.TenantID, p.Actor(), &uid,
+	run, err := a.Payments.RunReconciliation(r.Context(), p.TenantID, p.Actor(), p.UserID(),
 		payments.RunInput{Trigger: payments.TriggerManual, RequestKey: idempotencyKeyFrom(r.Context())})
 	if err != nil {
 		a.writeError(w, r, err)
@@ -202,9 +204,10 @@ func (a *API) getDiscrepancy(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, r, http.StatusOK, out)
 }
 
-// resolveDiscrepancy resolve a divergência aberta com responsável (usuário
-// autenticado), justificativa e ação; a resolução fica no histórico e, quando
-// houver ajuste, no ledger.
+// resolveDiscrepancy resolve a divergência aberta com responsável,
+// justificativa e ação; a resolução fica no histórico e, quando houver
+// ajuste, no ledger. O responsável é o usuário da sessão (resolved_by) ou a
+// credencial de API, registrada na auditoria (resolved_by nulo).
 func (a *API) resolveDiscrepancy(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
 	if err != nil {
@@ -220,8 +223,7 @@ func (a *API) resolveDiscrepancy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	uid := p.User.ID
-	d, err := a.Payments.ResolveDiscrepancy(r.Context(), p.TenantID, p.Actor(), &uid, payments.ResolveInput{ID: id,
+	d, err := a.Payments.ResolveDiscrepancy(r.Context(), p.TenantID, p.Actor(), p.UserID(), payments.ResolveInput{ID: id,
 		Resolution: payments.Resolution(in.Resolution), Justification: in.Justification})
 	if err != nil {
 		a.writeError(w, r, err)

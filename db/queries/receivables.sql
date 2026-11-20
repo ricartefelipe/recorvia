@@ -135,15 +135,40 @@ SELECT t::uuid AS tenant_id FROM app_tenants_due_reconciliation(@now, @interval_
 -- name: ListChargesForReconciliation :many
 -- Cobranças locais da conta no escopo da execução: criadas ou atualizadas
 -- na janela, ou presentes na listagem do provedor (pelo ID do provedor ou
--- pela referência externa, que é o ID local).
+-- pela referência externa, que é o ID local). As presentes na listagem vêm
+-- primeiro: o limite de linhas só corta cobranças da janela ausentes da
+-- listagem, e nenhuma cobrança listada pelo provedor fica sem a
+-- correspondência local.
 SELECT * FROM charges
  WHERE tenant_id = @tenant_id AND provider_account_id = @provider_account_id
    AND ((created_at >= @window_start AND created_at < @window_end)
         OR (updated_at >= @window_start AND updated_at < @window_end)
         OR provider_charge_id = ANY (@provider_charge_ids::text[])
         OR id = ANY (@reference_ids::uuid[]))
- ORDER BY created_at, id
+ ORDER BY (provider_charge_id = ANY (@provider_charge_ids::text[]) OR id = ANY (@reference_ids::uuid[])) IS TRUE DESC, created_at, id
  LIMIT @row_limit;
+
+-- name: ListChargesForRotation :many
+-- Rodízio da conciliação: cobranças da conta vinculadas ao provedor que ainda
+-- podem mudar nele (aguardando pagamento, pagas, parcialmente reembolsadas ou
+-- em disputa), criadas desde @since e fora da janela da execução, a começar
+-- pelas nunca verificadas e pelas verificadas há mais tempo.
+SELECT c.* FROM charges c
+  LEFT JOIN reconciliation_charge_checks k ON k.tenant_id = c.tenant_id AND k.charge_id = c.id
+ WHERE c.tenant_id = @tenant_id AND c.provider_account_id = @provider_account_id
+   AND c.provider_charge_id IS NOT NULL
+   AND c.status IN ('awaiting_payment', 'paid', 'partially_refunded', 'disputed')
+   AND c.created_at >= @since
+   AND NOT (c.created_at >= @window_start AND c.created_at < @window_end)
+   AND NOT (c.updated_at >= @window_start AND c.updated_at < @window_end)
+ ORDER BY k.last_checked_at NULLS FIRST, c.created_at, c.id
+ LIMIT @row_limit;
+
+-- name: MarkChargesReconciled :exec
+-- Registra a verificação das cobranças comparadas numa execução concluída.
+INSERT INTO reconciliation_charge_checks (tenant_id, charge_id, last_checked_at)
+SELECT @tenant_id::uuid, id, @checked_at::timestamptz FROM unnest(@charge_ids::uuid[]) AS id
+ON CONFLICT (tenant_id, charge_id) DO UPDATE SET last_checked_at = excluded.last_checked_at;
 
 -- name: InsertDiscrepancy :exec
 INSERT INTO reconciliation_discrepancies (id, tenant_id, run_id, last_run_id, kind, status, dedupe_key, provider, charge_id, refund_id,

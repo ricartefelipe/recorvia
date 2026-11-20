@@ -37,8 +37,10 @@ export function RefundModal({ charge, opened, onClose }: { charge: Charge; opene
     mutationFn: (input) => paymentsApi.refund(charge.id, input, idempotency.keyFor({ charge: charge.id, ...input })),
     invalidate: ['charges', 'refunds', 'invoices', 'payment-operations', 'dashboard', 'ledger'],
     form,
+    // Recusa da API (por exemplo, saldo insuficiente) encerra a intenção: o
+    // próximo envio usa outra chave e não repete a recusa registrada.
+    idempotency,
     onSuccess: (r) => {
-      idempotency.reset();
       onClose();
       // A API registra o pedido (201) também quando o provedor o recusa.
       if (r.status === 'failed') {

@@ -54,7 +54,7 @@ func (tx paymentsTx) InsertRefund(ctx context.Context, r payments.Refund) error 
 	err := tx.q.InsertRefund(ctx, dbgen.InsertRefundParams{ID: r.ID, TenantID: tx.tenantID, ChargeID: r.ChargeID, Provider: r.Provider,
 		Origin: string(r.Origin), Status: string(r.Status), Amount: r.Amount.Amount(), CreditAmount: r.CreditAmount.Amount(),
 		Currency: r.Amount.Currency().Code(), Reason: r.Reason, ProviderRefundID: strPtr(r.ProviderRefundID), FailureReason: strPtr(r.FailureReason),
-		RequestedBy: r.RequestedBy, RequestKey: strPtr(r.RequestKey), CreatedAt: r.CreatedAt, CompletedAt: r.CompletedAt})
+		RequestedBy: authorOrNil(r.RequestedBy), RequestKey: strPtr(r.RequestKey), CreatedAt: r.CreatedAt, CompletedAt: r.CompletedAt})
 	switch {
 	case postgres.IsUniqueViolation(err, "refunds_request_key"):
 		return apperr.Conflict("request_key_reused", "A chave do pedido já foi usada em outro reembolso.")
@@ -152,6 +152,11 @@ func (tx paymentsTx) RefundCreditBase(ctx context.Context, chargeID uuid.UUID) (
 		return money.Money{}, money.Money{}, err
 	}
 	return brl(over), brl(used), nil
+}
+
+func (tx paymentsTx) LockCustomerCredits(ctx context.Context, customerID uuid.UUID) error {
+	_, err := tx.q.LockCustomerCredits(ctx, dbgen.LockCustomerCreditsParams{TenantID: tx.tenantID, CustomerID: customerID})
+	return notFound(err, "customer_not_found", "Cliente não encontrado.")
 }
 
 func (tx paymentsTx) CustomerCreditBalance(ctx context.Context, customerID uuid.UUID) (money.Money, error) {
@@ -259,7 +264,7 @@ func (tx paymentsTx) FailStaleReconciliationRuns(ctx context.Context, accountID 
 func (tx paymentsTx) InsertReconciliationRun(ctx context.Context, r payments.ReconciliationRun) error {
 	err := tx.q.InsertReconciliationRun(ctx, dbgen.InsertReconciliationRunParams{ID: r.ID, TenantID: tx.tenantID, ProviderAccountID: r.ProviderAccountID,
 		Provider: r.Provider, TriggerType: string(r.Trigger), Status: string(r.Status), WindowStart: r.WindowStart, WindowEnd: r.WindowEnd,
-		RequestedBy: r.RequestedBy, RequestKey: strPtr(r.RequestKey), LeaseUntil: r.LeaseUntil, StartedAt: r.StartedAt})
+		RequestedBy: authorOrNil(r.RequestedBy), RequestKey: strPtr(r.RequestKey), LeaseUntil: r.LeaseUntil, StartedAt: r.StartedAt})
 	switch {
 	case postgres.IsUniqueViolation(err, "reconciliation_runs_running_key"):
 		return apperr.Conflict("reconciliation_running", "Já há uma conciliação em andamento para este provedor.")
@@ -296,6 +301,30 @@ func (tx paymentsTx) ChargesForReconciliation(ctx context.Context, sc payments.R
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+func (tx paymentsTx) ChargesForRotation(ctx context.Context, sc payments.RotationScope) ([]payments.Charge, error) {
+	rows, err := tx.q.ListChargesForRotation(ctx, dbgen.ListChargesForRotationParams{TenantID: tx.tenantID, ProviderAccountID: sc.AccountID,
+		Since: sc.Since, WindowStart: sc.WindowStart, WindowEnd: sc.WindowEnd, RowLimit: int32(sc.Limit)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]payments.Charge, 0, len(rows))
+	for _, r := range rows {
+		c, err := chargeFromRow(r)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+func (tx paymentsTx) MarkChargesReconciled(ctx context.Context, chargeIDs []uuid.UUID, at time.Time) error {
+	if len(chargeIDs) == 0 {
+		return nil
+	}
+	return tx.q.MarkChargesReconciled(ctx, dbgen.MarkChargesReconciledParams{TenantID: tx.tenantID, CheckedAt: at, ChargeIds: chargeIDs})
 }
 
 func (tx paymentsTx) RefundsForCharges(ctx context.Context, chargeIDs []uuid.UUID) ([]payments.Refund, error) {
@@ -401,7 +430,7 @@ func (tx paymentsTx) UpdateDiscrepancy(ctx context.Context, d *payments.Discrepa
 	n, err := tx.q.UpdateDiscrepancy(ctx, dbgen.UpdateDiscrepancyParams{TenantID: tx.tenantID, ID: d.ID, LastRunID: d.LastRunID, Status: string(d.Status),
 		LocalAmount: amountPtr(d.LocalAmount), ProviderAmount: amountPtr(d.ProviderAmount), LocalValue: local, ProviderValue: prov,
 		Occurrences: int32(d.Occurrences), LastDetectedAt: d.LastDetectedAt, Resolution: strPtr(string(d.Resolution)),
-		Justification: strPtr(d.Justification), ResolvedBy: d.ResolvedBy, ResolvedAt: d.ResolvedAt, LedgerTransactionID: d.LedgerTransactionID,
+		Justification: strPtr(d.Justification), ResolvedBy: authorOrNil(d.ResolvedBy), ResolvedAt: d.ResolvedAt, LedgerTransactionID: d.LedgerTransactionID,
 		Version: int32(d.Version)})
 	if err != nil {
 		return err

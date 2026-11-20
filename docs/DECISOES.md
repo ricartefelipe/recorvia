@@ -201,6 +201,13 @@ por tenant). A chave é `hex(SHA-256(cliente|operação|chave))`, com 64 caracte
 `Idempotency-Key` aceito (8 a 255 caracteres).
 **Justificativa:** cobre a janela entre o commit do efeito e o registro do resultado HTTP e
 continua protegendo após a expiração da chave.
+**Consequências:** respostas 5xx, 401, 403 e 429 e conflitos transitórios, que informam `Retry-After`
+(`reconciliation_running`, `refund_outcome_unknown`), liberam a chave: a repetição com a mesma chave
+executa o pedido de novo, em vez de devolver uma recusa que já não vale. Em todos os envios com
+`Idempotency-Key` (reembolso, conciliação, pagamento manual, nota de crédito, nova cobrança, crédito do
+cliente e faturamento), a interface descarta a chave depois do sucesso e de uma recusa 4xx (o próximo envio
+é outra intenção e não repete a recusa registrada) e a mantém depois de erro de rede, 5xx ou
+`idempotency_in_progress`, para que a repetição não duplique o efeito (`useApiMutation`).
 
 ## ADR-023 Vínculo de webhooks por token opaco no endpoint
 **Decisão:** cada conta de provedor recebe uma URL `/webhooks/providers/{provedor}/{token}`; somente
@@ -344,10 +351,14 @@ referência externa = ID do reembolso). A chamada ao provedor segue o ciclo das 
 `pending → in_flight → succeeded | failed | unknown`); com resultado ambíguo, o reembolso fica `unknown`, a
 reserva é mantida e a próxima tentativa consulta a cobrança no provedor antes de repetir. A confirmação
 (resposta, webhook ou consulta) move a reserva para `amount_refunded`; a recusa a libera. O banco garante
-`amount_refunded + amount_refund_pending <= amount_paid` (`charges_refund_reservation_limit`) e
-`amount_refunded + amount_charged_back <= amount_paid` (`charges_refund_limit`). Somente cobranças `paid` ou
-`partially_refunded` aceitam pedidos, e um pedido é recusado enquanto outro reembolso da mesma cobrança
-estiver com resultado desconhecido.
+`amount_refunded + amount_refund_pending + amount_charged_back <= amount_paid`
+(`charges_refund_reservation_limit`) e `amount_refunded + amount_charged_back <= amount_paid`
+(`charges_refund_limit`). Somente cobranças `paid` ou `partially_refunded` aceitam pedidos, e um pedido é
+recusado enquanto outro reembolso da mesma cobrança estiver com resultado desconhecido. O pedido que ainda
+não chegou ao provedor quando a cobrança entra em disputa ou é estornada por chargeback não é enviado (o
+pagador receberia o valor duas vezes, pelo estorno e pelo reembolso): é encerrado como `failed` e a reserva
+é liberada; com tentativa anterior, o provedor é só consultado e o reembolso é encerrado assim se não
+constar nele.
 **Efeito na fatura:** o reembolso não reabre nem altera os valores da fatura (que continua paga); a devolução
 é registrada no histórico da fatura (`reason = 'refund'`). No ledger, `refund.succeeded` credita os valores em
 liquidação; a parte que devolve crédito do cliente gerado pelo excedente do próprio pagamento (lançamento
@@ -356,8 +367,11 @@ liquidação; a parte que devolve crédito do cliente gerado pelo excedente do p
 fica em `refunds.credit_amount`.
 **Justificativa:** reembolsar um pagamento duplicado sem consumir o crédito gerado por ele deixaria o cliente
 com o crédito e o dinheiro devolvido.
-**Consequências:** a ordem de bloqueio é cobrança, reembolso, fatura (histórico) e cliente (crédito),
-compatível com a ADR-031.
+**Consequências:** a ordem de bloqueio é cobrança, reembolso, fatura e cliente (crédito), compatível com
+a ADR-031 e com a confirmação de pagamento que gera crédito; o crédito do cliente é bloqueado antes da
+leitura do saldo que limita a parte do crédito. Webhook cujo retrato entra em conflito com o estado local
+(por exemplo, o crédito consumido por outra fatura ao mesmo tempo) não grava efeito parcial: a transação é
+desfeita e o webhook fica `ignored` numa transação própria.
 
 ## ADR-035 Associação dos reembolsos informados pelo provedor
 **Status:** aceita.
@@ -386,9 +400,18 @@ cumulativos e confirmação idempotente).
 `under_review`; a disputa ganha (`won`) estorna o lançamento de abertura e devolve a cobrança à situação dos
 reembolsos confirmados (`paid`, `partially_refunded` ou, com reembolso confirmado durante a disputa que
 completa o pago, `refunded`); a perdida (`lost`) registra `amount_charged_back` e a cobrança passa a `charged_back`, sem
-reabrir a fatura (histórico com `reason = 'chargeback'`). Há no máximo uma disputa aberta por cobrança
-(`disputes_open_key`), e cada transição fica em `dispute_events` (imutável). Retratos do provedor anteriores ao
-último registrado ou ao encerramento da disputa não alteram nem reabrem disputas.
+reabrir a fatura (histórico com `reason = 'chargeback'`). O estorno da disputa perdida é limitado ao saldo
+elegível: não inclui o reembolsado durante a disputa nem o reservado por reembolso em andamento (que,
+confirmado depois, cabe no saldo), e o lançamento `dispute.hold_released` (débito nos valores em
+liquidação, crédito em `chargebacks`) libera essa parte da retenção. Se o reembolso reservado for recusado
+depois da perda, o valor passa ao chargeback (`amount_charged_back` e `dispute.hold_restored`, um por
+reembolso), porque o valor contestado foi debitado pelo provedor. Assim, `chargebacks` registra o valor
+estornado e, com `refunds`, nunca soma mais que o pago. O painel financeiro mostra o movimento líquido das
+duas contas no mês (débitos menos créditos): a retenção liberada e a disputa ganha reduzem o chargeback do
+mês em que ocorrem, que fica negativo quando a disputa aberta em mês anterior é ganha. Há no máximo uma
+disputa aberta por cobrança (`disputes_open_key`), e cada transição fica em `dispute_events` (imutável).
+Retratos do provedor anteriores ao último registrado ou ao encerramento da disputa não alteram nem reabrem
+disputas.
 **Consequências:** a decisão por situação explícita vale para o simulador (`chargeback_requested`, `won`,
 `lost`). A documentação do Asaas não descreve situação de chargeback perdido; a decisão ganha corresponde a
 `AWAITING_CHARGEBACK_REVERSAL`, e, num retrato obtido por consulta ao provedor (por exemplo, na resolução da
@@ -424,7 +447,9 @@ registro (ocorrências, última execução); divergência aberta não constatada
 objeto é resolvida automaticamente (`auto_resolved`) e é reaberta se voltar com os mesmos valores; divergência
 resolvida manualmente não é reaberta pelos mesmos valores (valores novos geram nova divergência).
 **Resolução:** exige permissão `reconciliation.resolve`, justificativa de 10 a 2000 caracteres e registra
-responsável, data, histórico (auditoria) e, quando houver, o lançamento `reconciliation.adjustment`.
+responsável, data, histórico (auditoria) e, quando houver, o lançamento `reconciliation.adjustment`. O
+responsável fica sempre na auditoria (usuário da sessão ou credencial de API); `resolved_by` guarda somente
+o usuário e fica nulo com credencial de API e na resolução automática.
 `dismiss` registra como explicada; `keep_local` mantém o registro local; `adjust_ledger` lança o ajuste pela
 diferença de taxa (taxa do provedor menos a local) ou de valor pago (local menos o do provedor);
 `accept_provider` adota o provedor: aceita a taxa (cobrança e ledger), ajusta o valor pago, aplica o
@@ -435,9 +460,31 @@ em aberto inexistente no provedor. Cobrança do provedor sem correspondência lo
 tenants cujo plano da plataforma tem `reconciliation_automation`, com provedor padrão ativo e sem execução
 agendada nas últimas 24 horas (janela de 7 dias). A execução manual é sempre permitida (janela padrão de 30
 dias, até 93 dias).
+**Rodízio:** a listagem do Asaas filtra pela data de criação (`dateCreated`), e a leitura local cobre o
+criado ou atualizado na janela; uma cobrança antiga com chargeback, reembolso ou pagamento tardio e webhook
+perdido ficaria fora dos dois lados. Por isso cada execução consulta individualmente até 100 cobranças fora
+da janela, vinculadas ao provedor, criadas nos últimos 180 dias e ainda sujeitas a mudança (aguardando
+pagamento, pagas, parcialmente reembolsadas ou em disputa), a começar pelas nunca verificadas e pelas
+verificadas há mais tempo (`reconciliation_charge_checks`, gravada ao concluir a execução). O rodízio é de
+melhor esforço: não torna a execução parcial nem a faz falhar. A consulta que falha é pulada (a cobrança não
+é comparada nem registrada como verificada e volta primeiro na próxima execução); o prazo da coleta
+esgotado, o cancelamento da execução e três falhas seguidas que indicam provedor indisponível (sem
+resposta, limite de taxa ou erro 5xx; a recusa definitiva, própria da cobrança consultada, não conta)
+interrompem o rodízio. O que não couber ou não for consultado fica para as próximas execuções; as falhas
+ficam no log e na auditoria da execução (`rotation_failures`).
+**Limites e prazo:** a leitura local traz primeiro as cobranças presentes na listagem do provedor e depois
+as da janela, até 5000; as listadas sempre cabem (a listagem tem no máximo 2000 cobranças, e cada uma
+corresponde a no máximo duas locais, pelo ID do provedor e pela referência), de modo que o corte nunca gera
+divergência `missing_local` falsa. A coleta tem prazo próprio: 40 segundos na execução manual, que
+responde na requisição sem depender do prazo nem do cancelamento dela (abaixo do limite de escrita da
+resposta da API, de 60 segundos), e o lease menos 2 minutos na agendada. Esgotado o prazo, a coleta para e a
+comparação usa o que foi obtido.
 **Consequências:** a ordem de bloqueio na resolução é divergência e depois cobrança; a execução bloqueia as
-divergências antes de gravar referências às cobranças. Execuções com limite de páginas ou de consultas
-individuais atingido terminam concluídas com aviso de execução parcial.
+divergências antes de gravar referências às cobranças. Execuções com limite de páginas, de consultas
+individuais, de cobranças locais ou de operações com resultado desconhecido (500) atingido, ou com o prazo
+da coleta esgotado, terminam concluídas com aviso de execução parcial, que cita os motivos. O que não foi
+comparado não gera divergência nem tem divergência resolvida automaticamente; a divergência de operação que
+ficou fora da leitura limitada só é resolvida quando a operação deixa de ter resultado desconhecido.
 
 ## ADR-039 Métricas de recebíveis a partir de totais do banco
 **Status:** aceita.

@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ricartefelipe/recorvia/api"
+	"github.com/ricartefelipe/recorvia/internal/apicredentials"
 	"github.com/ricartefelipe/recorvia/internal/billing"
 	"github.com/ricartefelipe/recorvia/internal/httpapi"
 	"github.com/ricartefelipe/recorvia/internal/identity"
@@ -73,11 +74,13 @@ func newReceivablesAPI(t *testing.T) *recvAPI {
 	pay := env.Payments(resolver, payments.Config{WebhookBaseURL: srv.URL + "/webhooks/providers", CallTimeout: 2 * time.Second,
 		Lease: 10 * time.Second})
 	idsvc := identity.NewService(stubIDP{}, a.sessions, env.Store.Users(), env.Clock, identity.DefaultPolicy())
-	cfg := &config.Config{Env: config.Test, CookieName: "recorvia_session", CookieSecure: false, RateLimitPerMinute: 10000}
+	cfg := &config.Config{Env: config.Test, CookieName: "recorvia_session", CookieSecure: false, RateLimitPerMinute: 10000,
+		APICredentialRateLimitPerMinute: 10000}
+	credentials := apicredentials.NewService(env.Store.APICredentials(), a.sessions, env.Clock, apicredentials.DefaultPolicy())
 	_, router = httpapi.NewRouter(httpapi.Deps{Log: log, Config: cfg, Clock: env.Clock, Store: env.Store, Sessions: a.sessions,
 		Identity: idsvc, Tenancy: env.Tenancy, Platform: env.Platform, Customers: env.Customers, Catalog: env.Catalog,
 		Subscriptions: env.Subscriptions, Billing: env.Billing, Payments: pay, Providers: []string{"simulator"},
-		Reporting: reporting.NewService(env.Store.Reporting(), env.Clock)})
+		Reporting: reporting.NewService(env.Store.Reporting(), env.Clock), Credentials: credentials})
 	close(ready)
 	a.srv = srv
 	doc, err := openapi3.NewLoader().LoadFromData(api.OpenAPI)
@@ -537,6 +540,12 @@ func TestReceivablesAPIDisputes(t *testing.T) {
 	if acc["debits"].(float64)-acc["credits"].(float64) != 6000 {
 		t.Fatalf("chargebacks no ledger: %v", acc)
 	}
+	// O painel do mês mostra o valor líquido: a disputa ganha não conta.
+	dash, _ := owner.expect(http.StatusOK, http.MethodGet, "/api/v1/dashboard", nil)
+	r.conforms(t, "Dashboard", dash)
+	if dash["chargebacks"] != float64(6000) || dash["refunds"] != float64(0) {
+		t.Fatalf("painel: chargebacks=%v reembolsos=%v", dash["chargebacks"], dash["refunds"])
+	}
 
 	// Reenvio dos eventos não reabre nem duplica disputas.
 	r.simAction(t, won.ProviderChargeID, paysim.Action{Name: "replay"})
@@ -721,4 +730,122 @@ func TestReceivablesAPIReconciliationRequiresProvider(t *testing.T) {
 		t.Fatalf("execuções: %v", runs)
 	}
 	owner.expectProblem(http.StatusNotFound, "discrepancy_not_found", http.MethodGet, "/api/v1/reconciliation/discrepancies/"+uuid.NewString(), nil)
+}
+
+// Credencial de API com os escopos de reembolso e conciliação: a autoria das
+// ações fica na auditoria (ator api_credential) e as colunas de autoria que
+// referenciam usuários ficam nulas, sem violar as chaves estrangeiras.
+func TestReceivablesAPIWithAPICredential(t *testing.T) {
+	r := newReceivablesAPI(t)
+	tn := r.newTenant(t, "credencial-recebiveis")
+	owner := r.login(tn.Owner, &tn.ID)
+	_, _, secret := createCredential(t, owner, "payments.refund", "reconciliation.read", "reconciliation.run", "reconciliation.resolve")
+	c := r.paidCharge(t, tn, 10000)
+	fee := int64(500)
+	r.simAction(t, c.ProviderChargeID, paysim.Action{Name: "diverge", Fee: &fee})
+	r.env.Clock.Advance(time.Minute)
+
+	path := "/api/v1/charges/" + c.ID.String() + "/refunds"
+	body := map[string]any{"amount": 3000, "reason": "Cancelamento pelo ERP"}
+	key := "erp-reembolso-" + uuid.NewString()
+	refund := r.raw(http.MethodPost, path, body, bearer(secret, "Idempotency-Key", key))
+	if refund.status != http.StatusCreated || refund.body["status"] != "succeeded" {
+		t.Fatalf("reembolso por credencial: %d %v", refund.status, refund.body)
+	}
+	if again := r.raw(http.MethodPost, path, body, bearer(secret, "Idempotency-Key", key)); again.status != http.StatusCreated ||
+		again.body["id"] != refund.body["id"] || again.header.Get("Idempotent-Replayed") != "true" {
+		t.Fatalf("repetição por credencial: %d %v", again.status, again.body)
+	}
+
+	run := r.raw(http.MethodPost, "/api/v1/reconciliation/runs", nil, bearer(secret, "Idempotency-Key", "erp-conciliacao-"+uuid.NewString()))
+	if run.status != http.StatusOK || run.body["status"] != "completed" || run.body["discrepancy_count"] != float64(1) {
+		t.Fatalf("conciliação por credencial: %d %v", run.status, run.body)
+	}
+	open := r.raw(http.MethodGet, "/api/v1/reconciliation/discrepancies?status=open&kind=fee_mismatch", nil, bearer(secret))
+	items := objects(t, open.body["data"])
+	if open.status != http.StatusOK || len(items) != 1 {
+		t.Fatalf("divergências: %d %v", open.status, open.body)
+	}
+	resolved := r.raw(http.MethodPost, "/api/v1/reconciliation/discrepancies/"+items[0]["id"].(string)+"/resolve",
+		map[string]any{"resolution": "keep_local", "justification": "Taxa conferida pelo ERP no contrato."}, bearer(secret))
+	if resolved.status != http.StatusOK || resolved.body["status"] != "resolved" || resolved.body["resolved_by"] != nil {
+		t.Fatalf("resolução por credencial: %d %v", resolved.status, resolved.body)
+	}
+	r.conforms(t, "Discrepancy", resolved.body)
+
+	for table, column := range map[string]string{"refunds": "requested_by", "reconciliation_runs": "requested_by",
+		"reconciliation_discrepancies": "resolved_by"} {
+		if n := r.count(t, tn, `SELECT count(*) FROM `+table+` WHERE tenant_id = $1 AND `+column+` IS NOT NULL`); n != 0 {
+			t.Fatalf("%s.%s preenchido em %d linha(s)", table, column, n)
+		}
+	}
+	for _, action := range []string{"refund.requested", "reconciliation.run_started", "reconciliation.discrepancy_resolved"} {
+		if n := r.count(t, tn, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = $2 AND actor_type = 'api_credential'`,
+			action); n != 1 {
+			t.Fatalf("auditoria de %s pela credencial: %d", action, n)
+		}
+	}
+	// Com a sessão do usuário, a autoria continua gravada.
+	byUser, _ := owner.expect(http.StatusCreated, http.MethodPost, path, map[string]any{"amount": 1000, "reason": "Ajuste pelo painel"},
+		"Idempotency-Key", "painel-"+uuid.NewString())
+	if n := r.count(t, tn, `SELECT count(*) FROM refunds WHERE tenant_id = $1 AND id = $2 AND requested_by = $3`, byUser["id"],
+		tn.Owner.ID); n != 1 {
+		t.Fatalf("autoria do reembolso pelo painel: %d", n)
+	}
+}
+
+// A sessão do portal do cliente não alcança as rotas de reembolso e
+// conciliação do painel.
+func TestReceivablesRoutesRejectPortalSession(t *testing.T) {
+	a := newAPI(t)
+	tn := a.env.NewTenant(t, "portal-recebiveis")
+	cust := a.env.NewCustomer(t, tn)
+	owner := a.login(tn.Owner, &tn.ID)
+	cookie, csrf := openPortal(t, a, createPortalLink(t, owner, cust.ID))
+	headers := map[string]string{"X-CSRF-Token": csrf, "X-Recorvia-Tenant": tn.ID.String(), "Idempotency-Key": "portal-" + uuid.NewString()}
+	for _, tc := range []struct {
+		path string
+		body any
+	}{
+		{"/api/v1/charges/" + uuid.NewString() + "/refunds", map[string]any{"amount": 100, "reason": "Pedido do cliente"}},
+		{"/api/v1/reconciliation/runs", nil},
+		{"/api/v1/reconciliation/discrepancies/" + uuid.NewString() + "/resolve", map[string]any{"resolution": "dismiss",
+			"justification": "Pedido feito pelo portal."}},
+	} {
+		if res := a.raw(http.MethodPost, tc.path, tc.body, headers, cookie); res.status != http.StatusUnauthorized {
+			t.Fatalf("%s com a sessão do portal: %d %v", tc.path, res.status, res.body)
+		}
+	}
+}
+
+// O conflito com outra conciliação em andamento é transitório: a resposta
+// informa Retry-After e não fica registrada na Idempotency-Key, de modo que a
+// repetição com a mesma chave executa a conciliação depois que a outra
+// execução termina.
+func TestReceivablesAPIReconciliationRunningIsNotStoredInIdempotencyKey(t *testing.T) {
+	ctx := context.Background()
+	r := newReceivablesAPI(t)
+	tn := r.newTenant(t, "conciliacao-ocupada")
+	owner := r.login(tn.Owner, &tn.ID)
+	other, err := r.pay.StartReconciliation(ctx, tn.ID, tn.Actor, nil, payments.RunInput{Trigger: payments.TriggerManual})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "ocupada-" + uuid.NewString()
+	st, body, h := owner.do(http.MethodPost, "/api/v1/reconciliation/runs", nil, "Idempotency-Key", key)
+	if st != http.StatusConflict || body["code"] != "reconciliation_running" || h.Get("Retry-After") == "" {
+		t.Fatalf("execução em andamento: %d %v %v", st, body, h)
+	}
+	if _, err := r.pay.FinishReconciliation(ctx, tn.ID, other); err != nil {
+		t.Fatal(err)
+	}
+	run, h := owner.expect(http.StatusOK, http.MethodPost, "/api/v1/reconciliation/runs", nil, "Idempotency-Key", key)
+	if run["status"] != "completed" || run["id"] == other.Run.ID.String() || h.Get("Idempotent-Replayed") != "" {
+		t.Fatalf("repetição depois da outra execução: %v %v", run, h)
+	}
+	// O resultado da execução fica registrado na chave.
+	again, h := owner.expect(http.StatusOK, http.MethodPost, "/api/v1/reconciliation/runs", nil, "Idempotency-Key", key)
+	if again["id"] != run["id"] || h.Get("Idempotent-Replayed") != "true" {
+		t.Fatalf("resultado registrado: %v %v", again, h)
+	}
 }

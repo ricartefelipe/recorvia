@@ -31,8 +31,8 @@ function GrantCreditModal({ customer, currency, opened, onClose }: { customer: C
     invalidate: ['customers'],
     successMessage: 'Crédito concedido.',
     form,
+    idempotency,
     onSuccess: () => {
-      idempotency.reset();
       form.reset();
       onClose();
     },

@@ -6,10 +6,13 @@
 -- Reservas de reembolso ainda não confirmadas pelo provedor. O pedido de
 -- reembolso reserva o valor na mesma transação que bloqueia a cobrança; a
 -- confirmação move a reserva para amount_refunded. Assim, pedidos
--- concorrentes nunca somam mais que o valor pago.
+-- concorrentes nunca somam mais que o valor pago. O chargeback da disputa
+-- perdida também respeita as reservas: reembolsado, reservado e estornado
+-- nunca somam mais que o pago.
 ALTER TABLE charges ADD COLUMN amount_refund_pending bigint NOT NULL DEFAULT 0;
 ALTER TABLE charges ADD CONSTRAINT charges_refund_pending_nonnegative CHECK (amount_refund_pending >= 0);
-ALTER TABLE charges ADD CONSTRAINT charges_refund_reservation_limit CHECK (amount_refunded + amount_refund_pending <= amount_paid);
+ALTER TABLE charges ADD CONSTRAINT charges_refund_reservation_limit
+  CHECK (amount_refunded + amount_refund_pending + amount_charged_back <= amount_paid);
 
 -- Reembolsos de cobranças pagas. origin = 'recorvia' para pedidos feitos pelo
 -- Recorvia (com operação externa persistida) e 'provider' para reembolsos
@@ -197,6 +200,23 @@ CREATE TRIGGER reconciliation_discrepancies_touch BEFORE UPDATE ON reconciliatio
 SELECT app_enable_tenant_rls('reconciliation_discrepancies');
 GRANT SELECT, INSERT, UPDATE ON reconciliation_discrepancies TO recorvia_app;
 
+-- Última verificação de cada cobrança pela conciliação. Orienta o rodízio das
+-- cobranças fora da janela da execução que ainda podem mudar no provedor
+-- (aguardando pagamento, pagas, parcialmente reembolsadas ou em disputa): o
+-- provedor pode não listá-las (o Asaas filtra a listagem pela data de
+-- criação) e, com o webhook perdido, nada as atualiza localmente.
+CREATE TABLE reconciliation_charge_checks (
+  tenant_id       uuid NOT NULL,
+  charge_id       uuid NOT NULL,
+  last_checked_at timestamptz NOT NULL,
+  CONSTRAINT reconciliation_charge_checks_pkey PRIMARY KEY (tenant_id, charge_id),
+  CONSTRAINT reconciliation_charge_checks_charge_fk FOREIGN KEY (tenant_id, charge_id) REFERENCES charges (tenant_id, id)
+);
+CREATE INDEX charges_reconciliation_rotation_idx ON charges (tenant_id, provider_account_id, created_at)
+  WHERE provider_charge_id IS NOT NULL AND status IN ('awaiting_payment', 'paid', 'partially_refunded', 'disputed');
+SELECT app_enable_tenant_rls('reconciliation_charge_checks');
+GRANT SELECT, INSERT, UPDATE ON reconciliation_charge_checks TO recorvia_app;
+
 -- +goose StatementBegin
 -- Tenants elegíveis à conciliação agendada: plano da plataforma com o recurso
 -- reconciliation_automation, provedor padrão ativo e nenhuma execução
@@ -250,6 +270,8 @@ GRANT EXECUTE ON FUNCTION app_refund_stats() TO recorvia_app;
 DROP FUNCTION IF EXISTS app_refund_stats();
 DROP FUNCTION IF EXISTS app_open_discrepancy_stats();
 DROP FUNCTION IF EXISTS app_tenants_due_reconciliation(timestamptz, integer);
+DROP INDEX IF EXISTS charges_reconciliation_rotation_idx;
+DROP TABLE IF EXISTS reconciliation_charge_checks;
 DROP TABLE IF EXISTS reconciliation_discrepancies;
 DROP TABLE IF EXISTS reconciliation_runs;
 DROP TABLE IF EXISTS dispute_events;

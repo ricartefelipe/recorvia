@@ -70,6 +70,45 @@ describe('reembolsos', () => {
     );
   });
 
+  it.each([
+    ['recusa registrada na chave (saldo insuficiente) usa outra chave no próximo envio', 409, 'refund_exceeds_balance', true],
+    ['erro no servidor mantém a chave para a repetição', 503, 'provider_unavailable', false],
+  ])('%s', async (_name, status, code, newKey) => {
+    // Como o middleware de idempotência: a recusa 4xx fica registrada na
+    // chave e é devolvida de novo com a mesma chave; a resposta 5xx não.
+    const stored = new Map<string, { status: number; body: Record<string, unknown> }>();
+    const keys: string[] = [];
+    let failing = true;
+    const detail = `Recusa ${code} na primeira tentativa.`;
+    server.use(
+      http.post('/api/v1/charges/:id/refunds', ({ request }) => {
+        const key = request.headers.get('Idempotency-Key') ?? '';
+        keys.push(key);
+        const previous = stored.get(key);
+        if (previous) return HttpResponse.json(previous.body, { status: previous.status });
+        const result = failing ? { status, body: { status, code, title: 'Erro', detail } } : { status: 201, body: { ...refund() } };
+        failing = false;
+        if (result.status < 500) stored.set(key, result);
+        return HttpResponse.json(result.body, { status: result.status });
+      }),
+    );
+    const charge = makeCharge({ status: 'paid', amount_paid: 15990, refundable_amount: 15990 });
+    const { user } = renderPage(<RefundModal charge={charge} opened onClose={() => {}} />);
+    await user.type(screen.getByLabelText(/Motivo/), 'Cancelamento do contrato');
+    const submit = async () => {
+      await user.click(screen.getByRole('button', { name: 'Continuar' }));
+      const dialog = (await screen.findByText(/ao pagador/)).closest('[role="dialog"]') as HTMLElement;
+      await user.click(within(dialog).getByRole('button', { name: 'Reembolsar' }));
+    };
+    await submit();
+    await waitFor(() => expect(screen.getByTestId('live-assertive')).toHaveTextContent(detail));
+    await submit();
+    await waitFor(() => expect(keys).toHaveLength(2));
+    expect(keys[1] !== keys[0]).toBe(newKey);
+    expect(await screen.findByText('Reembolso concluído.', {}, { timeout: 5_000 })).toBeInTheDocument();
+    // Os dois envios com confirmação são lentos sob carga.
+  }, 30_000);
+
   it('cobrança sem saldo reembolsável não permite o pedido', () => {
     const charge = makeCharge({ status: 'refunded', amount_paid: 15990, amount_refunded: 15990, refundable_amount: 0 });
     renderPage(<RefundModal charge={charge} opened onClose={() => {}} />);

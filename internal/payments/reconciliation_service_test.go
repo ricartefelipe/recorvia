@@ -3,6 +3,7 @@ package payments
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ricartefelipe/recorvia/internal/audit"
 	"github.com/ricartefelipe/recorvia/internal/billing"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/money"
@@ -229,6 +231,326 @@ func TestRunReconciliationLimits(t *testing.T) {
 	}
 }
 
+// O limite de cobranças locais só corta cobranças da janela ausentes da
+// listagem do provedor; a execução é concluída com aviso de execução parcial
+// e a cobrança listada pelo provedor não vira divergência missing_local.
+func TestRunReconciliationLocalLimitMarksPartialRun(t *testing.T) {
+	f := newReconFixture(t)
+	created := f.clock.Now().Add(-time.Hour)
+	for i := range maxLocalCharges + 1 {
+		c := Charge{ID: uuid.New(), TenantID: f.tenantID, InvoiceID: uuid.New(), CustomerID: f.customer, ProviderAccountID: f.account.ID,
+			Provider: "simulator", Status: ChargePending, Amount: brl(int64(100 + i)), CreatedAt: created, UpdatedAt: created, Version: 1}
+		f.store.charges[c.ID] = c
+		f.store.chargeOrder = append([]uuid.UUID{c.ID}, f.store.chargeOrder...)
+	}
+	run := f.run(t, RunInput{})
+	if run.Status != RunCompleted || !strings.Contains(run.Error, partialLocalCharges) {
+		t.Fatalf("execução parcial: %+v", run)
+	}
+	for _, d := range f.store.discrepancyList() {
+		if d.Kind == DiscrepancyMissingLocal && d.ProviderChargeID != "pay_foreign" {
+			t.Fatalf("cobrança listada sem correspondência local: %+v", d)
+		}
+	}
+	if fee := f.discrepancyOf(t, DiscrepancyFeeMismatch); *fee.ChargeID != f.b.ID {
+		t.Fatalf("cobrança listada comparada: %+v", fee)
+	}
+}
+
+// As cobranças locais correspondentes à listagem do provedor (até duas por
+// cobrança listada) sempre cabem no limite da leitura local.
+func TestReconciliationListedChargesFitLocalLimit(t *testing.T) {
+	if listed := 2 * maxProviderPages * providerPageSize; listed >= maxLocalCharges {
+		t.Fatalf("cobranças listadas (%d) não cabem no limite local (%d)", listed, maxLocalCharges)
+	}
+}
+
+// Com mais operações de resultado desconhecido que o limite da leitura, a
+// divergência da operação que ficou fora da leitura só é resolvida
+// automaticamente quando a operação deixa de ter resultado desconhecido.
+func TestRunReconciliationUnknownOperationsLimit(t *testing.T) {
+	f := newReconFixture(t)
+	f.run(t, RunInput{})
+	target := f.discrepancyOf(t, DiscrepancyUnknownOperation)
+	for i := range maxUnknownOperations {
+		id := uuid.MustParse(fmt.Sprintf("00000000-0000-0000-0000-%012d", i))
+		f.store.operations[id] = Operation{ID: id, TenantID: f.tenantID, ChargeID: f.c.ID, Kind: OpCreateCharge, Status: OpUnknown,
+			NextAttemptAt: f.clock.Now().Add(time.Hour), Attempts: MaxOperationAttempts, CreatedAt: f.clock.Now()}
+	}
+	f.clock.Advance(time.Hour)
+	second := f.run(t, RunInput{})
+	if got := f.store.discrepancies[target.ID]; got.Status != DiscrepancyOpen || !strings.Contains(second.Error, partialUnknownOps) {
+		t.Fatalf("operação fora do limite continua desconhecida: %s %q", got.Status, second.Error)
+	}
+	op := f.operationFor(t, f.d.ID)
+	op.Status = OpFailed
+	f.store.operations[op.ID] = op
+	f.clock.Advance(time.Hour)
+	f.run(t, RunInput{})
+	if got := f.store.discrepancies[target.ID]; got.Status != DiscrepancyResolved || got.Resolution != ResolutionAutoResolved {
+		t.Fatalf("operação resolvida fora do limite: %+v", got)
+	}
+	t.Run("falha ao consultar a operação", func(t *testing.T) {
+		last := uuid.MustParse("ffffffff-ffff-ffff-ffff-ffffffffffff")
+		f.store.operations[last] = Operation{ID: last, TenantID: f.tenantID, ChargeID: f.c.ID, Kind: OpCreateCharge, Status: OpUnknown,
+			NextAttemptAt: f.clock.Now().Add(time.Hour), Attempts: MaxOperationAttempts, CreatedAt: f.clock.Now()}
+		f.store.errs["Operation"] = errors.New("banco indisponível")
+		other := f.addDiscrepancy(t, Discrepancy{Kind: DiscrepancyUnknownOperation, OperationID: uuidPtr(uuid.New()), RunID: target.RunID})
+		f.clock.Advance(time.Hour)
+		if _, err := f.svc.RunReconciliation(context.Background(), f.tenantID, f.actor, nil, RunInput{}); err == nil {
+			t.Fatal("esperava erro")
+		}
+		delete(f.store.errs, "Operation")
+		f.clock.Advance(time.Hour)
+		f.run(t, RunInput{})
+		if got := f.store.discrepancies[other.ID]; got.Status != DiscrepancyResolved {
+			t.Fatalf("operação inexistente: %s", got.Status)
+		}
+	})
+}
+
+// Cobrança paga fora da janela que o provedor não lista (o Asaas filtra a
+// listagem pela data de criação) e que nada atualizou localmente (webhook
+// perdido) é consultada pelo rodízio: o chargeback tardio vira divergência.
+func TestRunReconciliationRotationChecksChargesOutsideWindow(t *testing.T) {
+	f, _, c := paidFixture(t)
+	f.clock.Advance(40 * 24 * time.Hour)
+	f.gw.getByID = map[string]gwResult{c.ProviderChargeID: {pc: chargebackSnapshot(c.ProviderChargeID, ProviderChargebackRequested, f.clock.Now())}}
+	run := f.run(t, RunInput{Trigger: TriggerManual})
+	if run.Status != RunCompleted || run.Error != "" || !slices.Equal(f.gw.getCalls, []string{c.ProviderChargeID}) {
+		t.Fatalf("execução: %+v consultas=%v", run, f.gw.getCalls)
+	}
+	if d := f.discrepancyOf(t, DiscrepancyChargebackPending); *d.ChargeID != c.ID {
+		t.Fatalf("chargeback tardio: %+v", d)
+	}
+	if at, ok := f.store.checkedAt[c.ID]; !ok || !at.Equal(f.clock.Now()) {
+		t.Fatalf("verificação registrada: %v %v", at, ok)
+	}
+	sc := f.store.rotationScopes[0]
+	if !sc.Since.Equal(f.clock.Now().Add(-rotationSpan)) || sc.Limit != rotationLookups || !sc.WindowStart.Equal(run.WindowStart) {
+		t.Fatalf("escopo do rodízio: %+v", sc)
+	}
+	// Cobrança criada antes do prazo do rodízio não é consultada.
+	f.clock.Advance(rotationSpan)
+	f.gw.getCalls = nil
+	if run := f.run(t, RunInput{}); run.Status != RunCompleted || len(f.gw.getCalls) != 0 {
+		t.Fatalf("fora do rodízio: %+v %v", run, f.gw.getCalls)
+	}
+}
+
+// addRotationCharge acrescenta uma cobrança paga há 40 dias, fora da janela
+// da execução, vinculada ao provedor e sujeita ao rodízio, igual à A.
+func (f *reconFixture) addRotationCharge(pid string) Charge {
+	c := f.a
+	created := f.clock.Now().Add(-40 * 24 * time.Hour)
+	c.ID, c.InvoiceID, c.ProviderChargeID, c.CreatedAt, c.UpdatedAt = uuid.New(), uuid.New(), pid, created, created
+	f.store.charges[c.ID] = c
+	f.store.chargeOrder = append(f.store.chargeOrder, c.ID)
+	return c
+}
+
+func (f *payFixture) auditOf(t *testing.T, action string) audit.Entry {
+	t.Helper()
+	for _, a := range f.store.audits {
+		if a.Action == action {
+			return a
+		}
+	}
+	t.Fatalf("auditoria %s não encontrada", action)
+	return audit.Entry{}
+}
+
+// O rodízio é de melhor esforço: a falha de uma consulta não encerra a
+// execução como failed nem a marca como parcial, e a janela é comparada e
+// concluída normalmente. A cobrança cuja consulta falhou não é registrada
+// como verificada (volta primeiro na próxima execução); a recusa definitiva,
+// própria da cobrança, não interrompe o rodízio, e três falhas seguidas de
+// provedor indisponível o interrompem.
+func TestRunReconciliationRotationBestEffort(t *testing.T) {
+	cases := []struct {
+		name string
+		// results é o resultado da consulta de cada cobrança do rodízio, na
+		// ordem do rodízio (nil: cobrança consistente com o provedor).
+		results      []error
+		wantChecked  []bool
+		wantCalls    int
+		wantFailures int
+	}{
+		{name: "falha isolada é pulada", results: []error{errAmbiguous, nil}, wantChecked: []bool{false, true}, wantCalls: 2, wantFailures: 1},
+		{name: "recusa definitiva não interrompe o rodízio", results: []error{errPermanent, errPermanent, errPermanent, nil},
+			wantChecked: []bool{false, false, false, true}, wantCalls: 4, wantFailures: 3},
+		{name: "três falhas seguidas interrompem o rodízio", results: []error{errAmbiguous, errRetryable, errAmbiguous, nil},
+			wantChecked: []bool{false, false, false, false}, wantCalls: 3, wantFailures: 3},
+		{name: "consulta bem-sucedida reinicia a contagem", results: []error{errAmbiguous, errAmbiguous, nil, errRetryable, errAmbiguous, nil},
+			wantChecked: []bool{false, false, true, false, false, true}, wantCalls: 6, wantFailures: 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReconFixture(t)
+			old := make([]Charge, len(tc.results))
+			for i, res := range tc.results {
+				old[i] = f.addRotationCharge(fmt.Sprintf("pay_antiga_%d", i))
+				f.gw.getByID[old[i].ProviderChargeID] = gwResult{pc: providerPaidView(old[i], 10000, 199), err: res}
+			}
+			run := f.run(t, RunInput{Trigger: TriggerManual})
+			if run.Status != RunCompleted || run.Error != "" || run.DiscrepancyCount != 4 {
+				t.Fatalf("execução: %+v", run)
+			}
+			if fee := f.discrepancyOf(t, DiscrepancyFeeMismatch); *fee.ChargeID != f.b.ID {
+				t.Fatalf("janela comparada: %+v", fee)
+			}
+			if _, ok := f.store.checkedAt[f.b.ID]; !ok {
+				t.Fatal("cobrança da janela registrada como verificada")
+			}
+			calls := 0
+			for i, c := range old {
+				if slices.Contains(f.gw.getCalls, c.ProviderChargeID) {
+					calls++
+				}
+				if _, ok := f.store.checkedAt[c.ID]; ok != tc.wantChecked[i] {
+					t.Errorf("cobrança %d do rodízio verificada = %v, esperado %v", i, ok, tc.wantChecked[i])
+				}
+			}
+			if calls != tc.wantCalls {
+				t.Fatalf("consultas do rodízio = %d, esperado %d (%v)", calls, tc.wantCalls, f.gw.getCalls)
+			}
+			if got := f.auditOf(t, "reconciliation.run_completed").Details["rotation_failures"]; got != tc.wantFailures {
+				t.Fatalf("falhas do rodízio na auditoria = %v", got)
+			}
+		})
+	}
+}
+
+// slowGetGateway espera o fim do prazo da chamada na consulta da cobrança
+// lenta, como um provedor que não responde.
+type slowGetGateway struct {
+	*fakeGateway
+	slow string
+}
+
+func (g *slowGetGateway) GetCharge(ctx context.Context, id string) (ProviderCharge, error) {
+	if id != g.slow {
+		return g.fakeGateway.GetCharge(ctx, id)
+	}
+	g.getCalls = append(g.getCalls, id)
+	<-ctx.Done()
+	return ProviderCharge{}, &GatewayError{Kind: ErrKindAmbiguous, Message: "resposta não recebida", Err: ctx.Err()}
+}
+
+// O prazo da coleta esgotado durante o rodízio, ou o cancelamento de quem
+// chamou, interrompe somente o rodízio: a execução é concluída sem aviso de
+// execução parcial, porque a janela foi toda verificada, e o que não foi
+// consultado fica para as próximas execuções.
+func TestRunReconciliationRotationInterruptedKeepsRunComplete(t *testing.T) {
+	t.Run("prazo da coleta esgotado", func(t *testing.T) {
+		f := newReconFixture(t)
+		f.svc = NewService(f.store, f.resolver, f.clock, Config{ManualReconciliationBudget: 80 * time.Millisecond, CallTimeout: time.Minute})
+		slow, next := f.addRotationCharge("pay_antiga_lenta"), f.addRotationCharge("pay_antiga_seguinte")
+		f.resolver.override = &slowGetGateway{fakeGateway: f.gw, slow: slow.ProviderChargeID}
+		run := f.run(t, RunInput{})
+		if run.Status != RunCompleted || run.Error != "" {
+			t.Fatalf("execução: %+v", run)
+		}
+		if slices.Contains(f.gw.getCalls, next.ProviderChargeID) {
+			t.Fatalf("rodízio continuou depois do prazo: %v", f.gw.getCalls)
+		}
+		if _, ok := f.store.checkedAt[slow.ID]; ok {
+			t.Fatal("cobrança sem resposta registrada como verificada")
+		}
+		if fee := f.discrepancyOf(t, DiscrepancyFeeMismatch); *fee.ChargeID != f.b.ID {
+			t.Fatalf("janela comparada: %+v", fee)
+		}
+	})
+	t.Run("cancelamento da execução agendada", func(t *testing.T) {
+		f := newReconFixture(t)
+		f.store.plan = platformbilling.Plan{Features: []platformbilling.Feature{platformbilling.FeatureReconciliationRun}}
+		first, next := f.addRotationCharge("pay_antiga_1"), f.addRotationCharge("pay_antiga_2")
+		f.gw.getByID[first.ProviderChargeID] = gwResult{pc: providerPaidView(first, 10000, 199)}
+		f.gw.getByID[next.ProviderChargeID] = gwResult{pc: providerPaidView(next, 10000, 199)}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		f.gw.onGet = func() {
+			if f.gw.getCalls[len(f.gw.getCalls)-1] == first.ProviderChargeID {
+				cancel()
+			}
+		}
+		run, err := f.svc.RunReconciliation(ctx, f.tenantID, f.actor, nil, RunInput{Trigger: TriggerScheduled})
+		if err != nil || run.Status != RunCompleted || run.Error != "" {
+			t.Fatalf("execução: %+v %v", run, err)
+		}
+		if slices.Contains(f.gw.getCalls, next.ProviderChargeID) {
+			t.Fatalf("rodízio continuou depois do cancelamento: %v", f.gw.getCalls)
+		}
+		if _, ok := f.store.checkedAt[first.ID]; !ok {
+			t.Fatal("cobrança consultada antes do cancelamento registrada como verificada")
+		}
+	})
+}
+
+// partialListGateway devolve a primeira página da listagem e espera o fim do
+// prazo da chamada nas seguintes, como um provedor lento.
+type partialListGateway struct {
+	*fakeGateway
+	deadlines []time.Duration
+}
+
+func (g *partialListGateway) ListCharges(ctx context.Context, req ListRequest) (ListResult, error) {
+	if dl, ok := ctx.Deadline(); ok {
+		g.deadlines = append(g.deadlines, time.Until(dl))
+	}
+	if req.Offset == 0 {
+		return g.fakeGateway.ListCharges(ctx, req)
+	}
+	<-ctx.Done()
+	return ListResult{}, &GatewayError{Kind: ErrKindAmbiguous, Message: "resposta não recebida", Err: ctx.Err()}
+}
+
+// A execução manual não depende do prazo da requisição que a iniciou: a
+// coleta tem prazo próprio e, esgotado o prazo, a execução é concluída com o
+// que foi coletado e com aviso de execução parcial, sem atribuir a falha ao
+// provedor.
+func TestRunReconciliationCollectionBudget(t *testing.T) {
+	f := newReconFixture(t)
+	const budget = 80 * time.Millisecond
+	f.svc = NewService(f.store, f.resolver, f.clock, Config{ManualReconciliationBudget: budget, CallTimeout: time.Minute})
+	f.gw.listPages[0].HasMore = true
+	gw := &partialListGateway{fakeGateway: f.gw}
+	f.resolver.override = gw
+	request, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	run, err := f.svc.RunReconciliation(request, f.tenantID, f.actor, nil, RunInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != RunCompleted || !strings.Contains(run.Error, partialBudget) || strings.Contains(run.Error, "provedor:") {
+		t.Fatalf("execução parcial pelo prazo: %+v", run)
+	}
+	if len(gw.deadlines) != 2 || gw.deadlines[0] < budget/2 {
+		t.Fatalf("prazo da coleta independente da requisição: %v", gw.deadlines)
+	}
+	if fee := f.discrepancyOf(t, DiscrepancyFeeMismatch); *fee.ChargeID != f.b.ID {
+		t.Fatalf("página coletada é comparada: %+v", fee)
+	}
+	for _, d := range f.store.discrepancyList() {
+		if d.Kind == DiscrepancyMissingProvider {
+			t.Fatalf("cobrança não consultada não vira divergência: %+v", d)
+		}
+	}
+	t.Run("cancelamento da execução agendada encerra como falha", func(t *testing.T) {
+		f := newReconFixture(t)
+		f.store.plan = platformbilling.Plan{Features: []platformbilling.Feature{platformbilling.FeatureReconciliationRun}}
+		f.gw.listPages[0].HasMore = true
+		f.resolver.override = &partialListGateway{fakeGateway: f.gw}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		f.gw.onList = cancel
+		run, err := f.svc.RunReconciliation(ctx, f.tenantID, f.actor, nil, RunInput{Trigger: TriggerScheduled})
+		if err != nil || run.Status != RunFailed || !strings.Contains(run.Error, "listagem do provedor") {
+			t.Fatalf("execução cancelada: %+v %v", run, err)
+		}
+	})
+}
+
 func TestRunReconciliationRules(t *testing.T) {
 	t.Run("janela inválida", func(t *testing.T) {
 		f := newReconFixture(t)
@@ -298,7 +620,7 @@ func TestRunReconciliationRules(t *testing.T) {
 			}
 		})
 	}
-	for _, m := range []string{"ChargesForReconciliation", "RefundsForCharges", "UnknownOperations"} {
+	for _, m := range []string{"ChargesForReconciliation", "ChargesForRotation", "RefundsForCharges", "UnknownOperations"} {
 		t.Run("falha ao ler: "+m, func(t *testing.T) {
 			f := newReconFixture(t)
 			f.store.errs[m] = errors.New(m)
@@ -307,7 +629,8 @@ func TestRunReconciliationRules(t *testing.T) {
 			}
 		})
 	}
-	for _, m := range []string{"DiscrepancyByKey", "InsertDiscrepancy", "Emit", "OpenDiscrepanciesForSubjects", "FinishReconciliationRun"} {
+	for _, m := range []string{"DiscrepancyByKey", "InsertDiscrepancy", "Emit", "OpenDiscrepanciesForSubjects", "MarkChargesReconciled",
+		"FinishReconciliationRun"} {
 		t.Run("falha ao concluir: "+m, func(t *testing.T) {
 			f := newReconFixture(t)
 			boom := errors.New(m)

@@ -128,6 +128,9 @@ type Config struct {
 	Lease time.Duration
 	// Log registra falhas tratadas em melhor esforço (opcional).
 	Log *slog.Logger
+	// ManualReconciliationBudget limita a coleta da conciliação manual
+	// (padrão ManualReconciliationBudget).
+	ManualReconciliationBudget time.Duration
 }
 
 // Service implementa os casos de uso de pagamentos.
@@ -145,6 +148,9 @@ func NewService(store Store, resolver GatewayResolver, c clock.Clock, cfg Config
 	}
 	if cfg.Lease <= cfg.CallTimeout {
 		cfg.Lease = 3 * cfg.CallTimeout
+	}
+	if cfg.ManualReconciliationBudget <= 0 {
+		cfg.ManualReconciliationBudget = ManualReconciliationBudget
 	}
 	return &Service{store: store, resolver: resolver, clock: c, cfg: cfg}
 }
@@ -789,7 +795,9 @@ func (s *Service) ProcessWebhook(ctx context.Context, tenantID, webhookID, messa
 			snapshot = &cp
 		}
 	}
-	return s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+	var conflict error
+	err = s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		conflict = nil
 		first, err := tx.MarkInbox(ctx, ConsumerWebhooks, messageID)
 		if err != nil || !first {
 			return err
@@ -808,13 +816,33 @@ func (s *Service) ProcessWebhook(ctx context.Context, tenantID, webhookID, messa
 		}
 		if err := s.applyProviderStateFrom(ctx, tx, &c, *snapshot, now, providerActor, authoritative); err != nil {
 			if apperr.IsKind(err, apperr.KindConflict) {
-				return tx.UpdateWebhookStatus(ctx, webhookID, "ignored", err.Error(), now)
+				// O conflito pode surgir depois de efeitos já gravados na
+				// transação (por exemplo, o primeiro de dois reembolsos
+				// confirmados ou o reembolso antes do consumo do crédito):
+				// a transação é desfeita por inteiro e o webhook é marcado
+				// como ignorado numa transação própria.
+				conflict = err
+				return errWebhookConflict
 			}
 			return err
 		}
 		return tx.UpdateWebhookStatus(ctx, webhookID, "processed", "", now)
 	})
+	if !errors.Is(err, errWebhookConflict) {
+		return err
+	}
+	return s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		first, err := tx.MarkInbox(ctx, ConsumerWebhooks, messageID)
+		if err != nil || !first {
+			return err
+		}
+		return tx.UpdateWebhookStatus(ctx, webhookID, "ignored", conflict.Error(), s.clock.Now())
+	})
 }
+
+// errWebhookConflict desfaz a transação do webhook cujo estado não pôde ser
+// aplicado por conflito com o estado local.
+var errWebhookConflict = errors.New("payments: webhook em conflito com o estado local")
 
 // statusRank ordena situações do provedor para impedir regressão por evento antigo.
 func statusRank(s ProviderStatus) int {

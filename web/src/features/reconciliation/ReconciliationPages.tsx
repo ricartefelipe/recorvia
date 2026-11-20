@@ -19,6 +19,7 @@ import {
 } from '@mantine/core';
 import { IconInfoCircle, IconPlayerPlay, IconScale } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
 import { Controller, useForm, useWatch } from 'react-hook-form';
 import { Link, useParams } from 'react-router';
 import { z } from 'zod';
@@ -31,6 +32,7 @@ import { confirmAction, KeyValue, PageHeader } from '../../components/ui';
 import { useApiMutation, useUrlFilters } from '../../lib/hooks';
 import { useIdempotencyKey } from '../../lib/idempotency';
 import {
+  actorTypeLabels,
   discrepancyKindLabels,
   discrepancyStatusLabels,
   labelOf,
@@ -87,8 +89,10 @@ export function RunsTab() {
   const run = useApiMutation<void, ReconciliationRun>({
     mutationFn: () => reconciliationApi.run(idempotency.keyFor({ operation: 'reconciliation-run' })),
     invalidate: ['reconciliation', 'dashboard'],
+    // Recusa da API (por exemplo, outra execução em andamento) encerra a
+    // intenção: o próximo clique usa outra chave e não repete a recusa.
+    idempotency,
     onSuccess: (r) => {
-      idempotency.reset();
       // A falha do provedor encerra a execução como "failed", com a causa.
       if (r.status === 'failed') {
         notifyError(`A conciliação não foi concluída: ${r.error || 'falha ao consultar o provedor'}.`);
@@ -412,6 +416,23 @@ export function ResolveDiscrepancyForm({ discrepancy }: { discrepancy: Discrepan
   );
 }
 
+/**
+ * Responsável pela resolução da divergência. A resolução automática é da
+ * conciliação; a manual tem o ator no evento de resolução do histórico: o
+ * usuário da sessão (também em `resolved_by`) ou a credencial de API, que
+ * deixa `resolved_by` nulo.
+ */
+export function discrepancyResolver(d: Discrepancy): ReactNode {
+  if (d.resolution === 'auto_resolved') return 'conciliação automática';
+  const event = d.history?.find((e) => e.action === 'reconciliation.discrepancy_resolved');
+  if (event?.actor_type === 'user') return event.actor_label || <ShortId id={event.actor_id ?? d.resolved_by} />;
+  if (event) {
+    const type = labelOf(actorTypeLabels, event.actor_type);
+    return event.actor_label ? `${type} “${event.actor_label}”` : type;
+  }
+  return d.resolved_by ? <ShortId id={d.resolved_by} /> : 'não identificado no histórico';
+}
+
 export function DiscrepancyDetailPage() {
   const { id = '' } = useParams();
   const { keys } = useTenant();
@@ -461,7 +482,7 @@ export function DiscrepancyDetailPage() {
                   <Text size="sm">Resolução: {labelOf(resolutionLabels, d.resolution)}</Text>
                   <Text size="sm">Justificativa: {d.justification ?? '—'}</Text>
                   <Text size="sm">
-                    Responsável: {d.resolved_by ? <ShortId id={d.resolved_by} /> : 'conciliação automática'} em{' '}
+                    Responsável: {discrepancyResolver(d)} em{' '}
                     <DateTime value={d.resolved_at} />
                   </Text>
                 </Stack>

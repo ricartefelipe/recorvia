@@ -29,6 +29,10 @@ type RefundTx interface {
 	// RefundCreditBase devolve o excedente do pagamento da cobrança que virou
 	// crédito do cliente e quanto dele já foi devolvido por reembolsos.
 	RefundCreditBase(ctx context.Context, chargeID uuid.UUID) (overpaid, refunded money.Money, err error)
+	// LockCustomerCredits bloqueia, até o fim da transação, as movimentações
+	// de crédito do cliente (a mesma serialização do consumo do crédito), para
+	// que o saldo lido em seguida não mude antes do consumo.
+	LockCustomerCredits(ctx context.Context, customerID uuid.UUID) error
 	CustomerCreditBalance(ctx context.Context, customerID uuid.UUID) (money.Money, error)
 }
 
@@ -51,7 +55,17 @@ type ReconciliationTx interface {
 	FailStaleReconciliationRuns(ctx context.Context, accountID uuid.UUID, now time.Time) (int, error)
 	InsertReconciliationRun(ctx context.Context, r ReconciliationRun) error
 	FinishReconciliationRun(ctx context.Context, r ReconciliationRun) error
+	// ChargesForReconciliation lista as cobranças locais da execução: as
+	// presentes na listagem do provedor primeiro e depois as criadas ou
+	// atualizadas na janela, até o limite.
 	ChargesForReconciliation(ctx context.Context, q ReconciliationScope) ([]Charge, error)
+	// ChargesForRotation lista as cobranças do rodízio: fora da janela, ainda
+	// sujeitas a mudança no provedor, a começar pelas verificadas há mais
+	// tempo.
+	ChargesForRotation(ctx context.Context, q RotationScope) ([]Charge, error)
+	// MarkChargesReconciled registra a verificação das cobranças comparadas
+	// numa execução concluída.
+	MarkChargesReconciled(ctx context.Context, chargeIDs []uuid.UUID, at time.Time) error
 	RefundsForCharges(ctx context.Context, chargeIDs []uuid.UUID) ([]Refund, error)
 	// UnknownOperations lista as operações com resultado desconhecido:
 	// situação unknown ou em execução com o lease expirado em now.
@@ -71,4 +85,15 @@ type ReconciliationScope struct {
 	ProviderChargeIDs []string
 	ReferenceIDs      []uuid.UUID
 	Limit             int
+}
+
+// RotationScope delimita o rodízio de cobranças fora da janela da execução:
+// cobranças da conta vinculadas ao provedor, aguardando pagamento, pagas,
+// parcialmente reembolsadas ou em disputa, criadas desde Since.
+type RotationScope struct {
+	AccountID   uuid.UUID
+	Since       time.Time
+	WindowStart time.Time
+	WindowEnd   time.Time
+	Limit       int
 }

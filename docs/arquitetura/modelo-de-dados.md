@@ -112,6 +112,7 @@ erDiagram
 | `payment_operations` (`kind = 'refund'`, `'cancel_charge'`) | chamada externa do reembolso (vinculada por `refund_id`, referência externa = ID do reembolso) e do cancelamento no provedor (uma por cobrança) |
 | `disputes`, `dispute_events` | disputa por cobrança (`opened`, `under_review`, `won`, `lost`) com o valor contestado e o histórico imutável de transições com a situação informada pelo provedor |
 | `reconciliation_runs` | execução manual ou agendada (`trigger_type`) sobre a janela `[window_start, window_end)` da conta do provedor, com `lease_until` para encerrar execuções interrompidas e `request_key` derivada do `Idempotency-Key` |
+| `reconciliation_charge_checks` | última verificação de cada cobrança por uma execução de conciliação concluída; orienta o rodízio das cobranças fora da janela que ainda podem mudar no provedor (nunca verificadas e verificadas há mais tempo primeiro) |
 | `reconciliation_discrepancies` | divergência deduplicada por `dedupe_key` (tipo, objeto e valores) com primeira e última execução, ocorrências, valores inteiros usados na resolução (`local_amount`, `provider_amount`), retratos exibidos (`local_value`, `provider_value`), resolução, justificativa, responsável e lançamento de ajuste |
 
 Funções `SECURITY DEFINER` da etapa: `app_tenants_due_reconciliation` (tenants elegíveis à conciliação
@@ -129,7 +130,7 @@ transacional por cobrança (`pg_advisory_xact_lock`), sem bloquear a linha da co
 | Webhook único por provedor | `UNIQUE (tenant_id, provider, provider_event_id)` |
 | Cobrança do provedor vinculada uma vez | `UNIQUE (tenant_id, provider, provider_charge_id)` |
 | Um pagamento por cobrança; pedido manual único | `payments_charge_key`, `payments_request_key` |
-| Reembolso nunca maior que o pago | `charges_refund_limit` (reembolsado + estornado) e `charges_refund_reservation_limit` (reembolsado + reservado) |
+| Reembolso e chargeback nunca maiores que o pago | `charges_refund_limit` (reembolsado + estornado) e `charges_refund_reservation_limit` (reembolsado + reservado + estornado) |
 | Pedido de reembolso único; reembolso do provedor registrado uma vez | `refunds_request_key`, `refunds_provider_refund_key` |
 | Operação de reembolso vinculada ao reembolso; um cancelamento no provedor por cobrança | `payment_operations_refund_link`, `payment_operations_refund_fk`, `payment_operations_cancel_key` |
 | Uma disputa aberta por cobrança; histórico imutável | `disputes_open_key`, `app_reject_mutation` em `dispute_events` |

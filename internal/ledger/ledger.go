@@ -258,6 +258,23 @@ func ChargebackOpened(id, tenant, disputeID uuid.UUID, amount money.Money, at ti
 		"dispute.opened:"+disputeID.String(), pair(Chargebacks, ProviderClearing, amount))
 }
 
+// ChargebackHoldReleased: na disputa perdida, a parte da retenção que não
+// foi estornada ao pagador por já ter sido devolvida por reembolso
+// (confirmado ou ainda reservado) volta aos valores em liquidação. Junto com
+// dispute.opened, deixa em chargebacks exatamente o valor estornado.
+func ChargebackHoldReleased(id, tenant, disputeID uuid.UUID, amount money.Money, at time.Time) (Transaction, bool, error) {
+	return build(id, tenant, "dispute.hold_released", "Retenção de chargeback liberada: valor já reembolsado ao pagador", at, "dispute",
+		disputeID, "dispute.hold_released:"+disputeID.String(), pair(ProviderClearing, Chargebacks, amount))
+}
+
+// ChargebackHoldRestored: reembolso reservado recusado depois da disputa
+// perdida. O valor, liberado da retenção na perda por estar reservado ao
+// pagador, passa ao chargeback (um lançamento por reembolso).
+func ChargebackHoldRestored(id, tenant, refundID uuid.UUID, amount money.Money, at time.Time) (Transaction, bool, error) {
+	return build(id, tenant, "dispute.hold_restored", "Chargeback do valor de reembolso recusado depois da disputa perdida", at, "refund",
+		refundID, "dispute.hold_restored:"+refundID.String(), pair(Chargebacks, ProviderClearing, amount))
+}
+
 // InvoiceWrittenOff: saldo considerado incobrável.
 func InvoiceWrittenOff(id, tenant, invoiceID uuid.UUID, amount money.Money, at time.Time) (Transaction, bool, error) {
 	return build(id, tenant, "invoice.uncollectible", "Saldo considerado incobrável", at, "invoice", invoiceID,

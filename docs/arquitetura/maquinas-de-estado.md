@@ -115,7 +115,9 @@ na recusa, o motivo, que deixa de constar na cobrança paga.
 
 Reembolsos confirmados durante uma disputa ou depois do chargeback somam ao valor reembolsado sem mudar
 a situação da cobrança. O saldo reembolsável é o pago menos o reembolsado, o estornado e o reservado por
-reembolsos em andamento (`amount_refund_pending`).
+reembolsos em andamento (`amount_refund_pending`). A disputa perdida estorna no máximo esse saldo: o valor
+já reembolsado ou reservado não é estornado de novo, e a confirmação posterior do reembolso reservado
+continua cabendo no saldo.
 
 ## Reembolso (`refunds`)
 
@@ -134,8 +136,10 @@ stateDiagram-v2
 `failed` libera a reserva; `succeeded` a converte em valor reembolsado. Enquanto houver reembolso
 `unknown`, a cobrança não aceita novos pedidos. O reembolso permanece `requested` quando o provedor aceita
 o pedido sem efetivá-lo, quando a chamada falha de forma repetível (operação `pending` com backoff) e
-quando outro reembolso da mesma cobrança ainda está em execução no provedor (operação adiada). A
-resposta de `POST /api/v1/charges/{id}/refunds` traz a situação alcançada na própria requisição.
+quando outro reembolso da mesma cobrança ainda está em execução no provedor (operação adiada). Pedido que
+ainda não chegou ao provedor quando a cobrança entra em disputa ou é estornada por chargeback passa a
+`failed` sem ser enviado (o pagador receberia o valor duas vezes). A resposta de
+`POST /api/v1/charges/{id}/refunds` traz a situação alcançada na própria requisição.
 
 ## Disputa (`disputes`)
 
@@ -148,6 +152,11 @@ stateDiagram-v2
   under_review --> won: estorna a retenção
   under_review --> lost: registra o chargeback
 ```
+
+Na disputa perdida, a parte da retenção correspondente ao valor reembolsado (confirmado durante a disputa
+ou ainda reservado) volta aos valores em liquidação (`dispute.hold_released`): `chargebacks` registra
+somente o valor estornado. Reembolso reservado recusado depois da perda passa ao chargeback
+(`dispute.hold_restored`).
 
 Cada transição gera uma entrada imutável em `dispute_events`. Há no máximo uma disputa aberta por
 cobrança.

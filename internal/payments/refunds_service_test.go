@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -435,6 +436,86 @@ func TestRefundConsumesCustomerCreditFromOverpayment(t *testing.T) {
 				t.Fatalf("falha ao registrar mantém a operação para a recuperação: %+v", r)
 			}
 		})
+	}
+}
+
+// Conflito ao aplicar o webhook desfaz todos os efeitos da transação: o
+// reembolso confirmado antes do consumo do crédito não fica gravado sem a
+// cobrança, o ledger e o evento, a reserva não fica presa e o retrato
+// seguinte confirma o reembolso.
+func TestWebhookConflictRollsBackPartialEffects(t *testing.T) {
+	f, _, c := paidFixture(t)
+	f.store.overpaid[c.ID] = brl(2000)
+	f.store.creditBalance[f.customer] = brl(1500)
+	f.gw.refundResults = []refundRes{{pr: ProviderRefund{Status: "PENDING", State: RefundStatePending, Amount: brl(3000)}}}
+	r := f.refund(t, c.ID, 3000, "")
+	historyBefore := len(f.store.invoiceHistory)
+	// Outra fatura consome o crédito do cliente ao mesmo tempo: o consumo
+	// pelo reembolso é recusado.
+	f.store.errs["GrantCustomerCredit"] = apperr.Conflict("insufficient_credit", "Saldo de crédito insuficiente.")
+	done := ProviderRefund{ExternalReference: r.ID.String(), State: RefundStateDone, Amount: brl(3000)}
+	wid := f.storeWebhook(t, refundWebhook("evt_done", c.ProviderChargeID, ProviderPartiallyRefunded, done))
+	msg := f.process(t, wid)
+	if w := f.store.webhooks[wid]; w.Status != "ignored" || !strings.Contains(w.Error, "insufficient_credit") ||
+		!f.store.inbox[inboxKey(ConsumerWebhooks, msg)] {
+		t.Fatalf("webhook ignorado e registrado no inbox: %s %q", w.Status, w.Error)
+	}
+	if got := f.store.refunds[r.ID]; got.Status != RefundRequested || !got.CreditAmount.IsZero() || got.CompletedAt != nil {
+		t.Fatalf("reembolso sem efeito parcial: %+v", got)
+	}
+	if ch := f.store.charges[c.ID]; ch.AmountRefunded.IsPositive() || ch.AmountRefundPending.Amount() != 3000 || ch.Status != ChargePaid {
+		t.Fatalf("cobrança: %s reembolsado=%v reservado=%v", ch.Status, ch.AmountRefunded, ch.AmountRefundPending)
+	}
+	if len(f.store.invoiceHistory) != historyBefore || len(postedByKind(f.store.posted, "refund.succeeded")) != 0 ||
+		slices.Contains(f.store.eventTypes(), outbox.EventRefundSucceeded) {
+		t.Fatalf("histórico, ledger e eventos sem efeito parcial: %d %v %v", len(f.store.invoiceHistory)-historyBefore,
+			f.store.ledgerKinds(), f.store.eventTypes())
+	}
+	// O crédito foi consumido pela outra fatura: o retrato seguinte confirma
+	// o reembolso sem a parte do crédito.
+	delete(f.store.errs, "GrantCustomerCredit")
+	f.store.creditBalance[f.customer] = brl(0)
+	wid = f.storeWebhook(t, refundWebhook("evt_done_2", c.ProviderChargeID, ProviderPartiallyRefunded, done))
+	f.process(t, wid)
+	got := f.store.refunds[r.ID]
+	if f.store.webhooks[wid].Status != "processed" || got.Status != RefundSucceeded || !got.CreditAmount.IsZero() {
+		t.Fatalf("confirmação seguinte: %s %+v", f.store.webhooks[wid].Status, got)
+	}
+	if ch := f.store.charges[c.ID]; ch.AmountRefunded.Amount() != 3000 || !ch.AmountRefundPending.IsZero() ||
+		len(postedByKind(f.store.posted, "refund.succeeded")) != 1 {
+		t.Fatalf("cobrança e ledger: reembolsado=%v reservado=%v %v", ch.AmountRefunded, ch.AmountRefundPending, f.store.ledgerKinds())
+	}
+	t.Run("falha ao marcar o webhook ignorado", func(t *testing.T) {
+		f, _, c := paidFixture(t)
+		f.store.errs["UpdateCharge"] = apperr.Conflict("x", "x")
+		wid := f.storeWebhook(t, refundWebhook("evt_x", c.ProviderChargeID, ProviderPartiallyRefunded,
+			ProviderRefund{ProviderRefundID: "rf_painel", State: RefundStateDone, Amount: brl(1000)}))
+		f.store.errs["UpdateWebhookStatus"] = errors.New("banco indisponível")
+		if err := f.svc.ProcessWebhook(context.Background(), f.tenantID, wid, uuid.New()); err == nil {
+			t.Fatal("esperava erro")
+		}
+		if f.store.webhooks[wid].Status != "received" || len(f.store.refunds) != 0 {
+			t.Fatal("nada gravado")
+		}
+	})
+}
+
+// O crédito do cliente é bloqueado antes da leitura do saldo usado na parte
+// do reembolso que devolve crédito, para que o consumo valide o mesmo saldo.
+func TestRefundCreditPortionLocksCreditBeforeReadingBalance(t *testing.T) {
+	f, _, c := paidFixture(t)
+	f.store.overpaid[c.ID] = brl(2000)
+	f.store.creditBalance[f.customer] = brl(1500)
+	f.store.creditSteps = nil
+	if r := f.refund(t, c.ID, 3000, ""); r.Status != RefundSucceeded || r.CreditAmount.Amount() != 1500 {
+		t.Fatalf("reembolso: %+v", r)
+	}
+	if !slices.Equal(f.store.creditSteps, []string{"lock", "balance"}) {
+		t.Fatalf("ordem: %v", f.store.creditSteps)
+	}
+	f.store.errs["LockCustomerCredits"] = errors.New("bloqueio indisponível")
+	if r := f.refund(t, c.ID, 1000, ""); r.Status != RefundRequested {
+		t.Fatalf("falha no bloqueio mantém o reembolso para a recuperação: %s", r.Status)
 	}
 }
 

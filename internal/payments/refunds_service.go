@@ -171,7 +171,10 @@ func (s *Service) prepareRefundWork(ctx context.Context, tx Tx, w *opWork, now t
 			wait = true
 		}
 	}
-	if wait {
+	// O pedido nunca enviado de cobrança que deixou de aceitar reembolso
+	// (disputa ou chargeback) não chega ao provedor e é encerrado na
+	// execução (ver refundAtProvider): não aguarda os demais.
+	if wait && (w.charge.AcceptsRefund() || op.Attempts > 0) {
 		op.NextAttemptAt, op.UpdatedAt = now.Add(refundSerializationDelay), now
 		return true, tx.UpdateOperation(ctx, op)
 	}
@@ -231,9 +234,18 @@ func lookupKind(err error) outcome {
 	return outcomeAmbiguous
 }
 
+// errRefundChargeDisputed encerra o reembolso que não chegou ao provedor
+// porque a cobrança entrou em disputa (ou foi estornada por chargeback)
+// depois do pedido.
+var errRefundChargeDisputed = errors.New("reembolso não enviado ao provedor: a cobrança entrou em disputa (chargeback) depois do pedido")
+
 // refundAtProvider executa o reembolso. Depois de uma tentativa anterior,
 // consulta a cobrança no provedor antes de repetir: se o reembolso já consta
-// (efetivado, recusado ou em processamento), não repete o pedido.
+// (efetivado, recusado ou em processamento), não repete o pedido. Cobrança
+// que entrou em disputa ou foi estornada depois do pedido não recebe o envio
+// (o pagador receberia o valor duas vezes, pelo estorno e pelo reembolso): o
+// pedido que não está no provedor é encerrado como recusado e a reserva é
+// liberada.
 func refundAtProvider(ctx context.Context, gw Gateway, w opWork) refundResult {
 	if refundMayBeAtProvider(w) {
 		pc, err := gw.GetCharge(ctx, w.charge.ProviderChargeID)
@@ -243,6 +255,9 @@ func refundAtProvider(ctx context.Context, gw Gateway, w opWork) refundResult {
 		if planRefundSync(pc, w.refunds, w.dispatched).covers(w.refund.ID) {
 			return refundResult{outcome: outcomeSucceeded, snapshot: &pc}
 		}
+	}
+	if !w.charge.AcceptsRefund() {
+		return refundResult{outcome: outcomePermanent, err: errRefundChargeDisputed}
 	}
 	pr, err := gw.Refund(ctx, RefundRequest{ProviderChargeID: w.charge.ProviderChargeID, Amount: w.refund.Amount,
 		Description: w.refund.Reason, ExternalReference: w.refund.ID.String()})
@@ -433,7 +448,10 @@ func (s *Service) finishRefundOperation(ctx context.Context, tx Tx, ops map[uuid
 
 // refundCreditPortion calcula a parte do reembolso que devolve crédito do
 // cliente gerado pelo excedente do pagamento desta cobrança, limitada ao
-// excedente ainda não devolvido e ao saldo de crédito disponível.
+// excedente ainda não devolvido e ao saldo de crédito disponível. O crédito
+// do cliente é bloqueado antes da leitura do saldo: a parte calculada é a
+// mesma que o consumo valida, mesmo com outra fatura consumindo o crédito ao
+// mesmo tempo.
 func refundCreditPortion(ctx context.Context, tx Tx, c *Charge, amount money.Money) (money.Money, error) {
 	zero := money.Zero(amount.Currency())
 	overpaid, used, err := tx.RefundCreditBase(ctx, c.ID)
@@ -443,6 +461,9 @@ func refundCreditPortion(ctx context.Context, tx Tx, c *Charge, amount money.Mon
 	avail, err := overpaid.Sub(used)
 	if err != nil || !avail.IsPositive() {
 		return zero, err
+	}
+	if err := tx.LockCustomerCredits(ctx, c.CustomerID); err != nil {
+		return money.Money{}, err
 	}
 	balance, err := tx.CustomerCreditBalance(ctx, c.CustomerID)
 	if err != nil || !balance.IsPositive() {
@@ -458,8 +479,8 @@ func refundCreditPortion(ctx context.Context, tx Tx, c *Charge, amount money.Mon
 // completeRefund registra o reembolso efetivado: atualiza cobrança e
 // reembolso, devolve a parte de crédito do cliente, lança refund.succeeded
 // no ledger e registra a devolução no histórico da fatura, que não é
-// reaberta. Ordem de bloqueio: cobrança (já bloqueada), fatura (histórico) e
-// cliente (crédito).
+// reaberta. Ordem de bloqueio: cobrança (já bloqueada), fatura e cliente
+// (crédito), a mesma da confirmação de pagamento que gera crédito.
 func (s *Service) completeRefund(ctx context.Context, tx Tx, c *Charge, r *Refund, providerRefundID string, now time.Time, actor audit.Actor) error {
 	if !r.Open() {
 		return nil
@@ -497,6 +518,10 @@ func (s *Service) settleRefund(ctx context.Context, tx Tx, c *Charge, r *Refund,
 	if err := c.ConfirmRefund(r.Amount, reserved, now); err != nil {
 		return err
 	}
+	inv, err := tx.Invoice(ctx, c.InvoiceID, true)
+	if err != nil {
+		return err
+	}
 	fromCredit, err := refundCreditPortion(ctx, tx, c, r.Amount)
 	if err != nil {
 		return err
@@ -506,10 +531,6 @@ func (s *Service) settleRefund(ctx context.Context, tx Tx, c *Charge, r *Refund,
 		r.ProviderRefundID = providerRefundID
 	}
 	if err := tx.UpdateRefund(ctx, r); err != nil {
-		return err
-	}
-	inv, err := tx.Invoice(ctx, c.InvoiceID, false)
-	if err != nil {
 		return err
 	}
 	status := inv.Status
@@ -545,7 +566,9 @@ func (s *Service) settleRefund(ctx context.Context, tx Tx, c *Charge, r *Refund,
 		map[string]any{"charge_id": c.ID, "amount": r.Amount.Amount(), "credit_amount": fromCredit.Amount(), "provider_refund_id": r.ProviderRefundID}))
 }
 
-// failRefund registra o reembolso recusado e libera a reserva.
+// failRefund registra o reembolso recusado e libera a reserva. Na cobrança
+// estornada por chargeback, o valor liberado passa ao chargeback
+// (chargeBackFailedRefund).
 func (s *Service) failRefund(ctx context.Context, tx Tx, c *Charge, r *Refund, reason string, now time.Time, actor audit.Actor) error {
 	if !r.Open() {
 		return nil
@@ -553,6 +576,11 @@ func (s *Service) failRefund(ctx context.Context, tx Tx, c *Charge, r *Refund, r
 	if r.Origin == RefundOriginRecorvia {
 		if err := c.ReleaseRefund(r.Amount, now); err != nil {
 			return err
+		}
+		if c.Status == ChargeChargedBack {
+			if err := s.chargeBackFailedRefund(ctx, tx, c, *r, now, actor); err != nil {
+				return err
+			}
 		}
 	}
 	r.Status, r.FailureReason, r.CompletedAt, r.UpdatedAt = RefundFailed, truncate(reason, 500), &now, now
@@ -565,6 +593,33 @@ func (s *Service) failRefund(ctx context.Context, tx Tx, c *Charge, r *Refund, r
 	}
 	return tx.Audit(ctx, audit.New(c.TenantID, now, actor, "refund.failed", "refund", r.ID.String(),
 		map[string]any{"charge_id": c.ID, "amount": r.Amount.Amount(), "reason": r.FailureReason}))
+}
+
+// chargeBackFailedRefund estorna por chargeback o valor do reembolso recusado
+// depois da disputa perdida. A disputa contestou esse valor, que ficou fora
+// do estorno por estar reservado ao pagador (closeLostDispute); sem o
+// reembolso, o valor contestado é debitado pelo chargeback. O lançamento
+// dispute.hold_restored devolve a retenção liberada na perda, e chargebacks e
+// reembolsos da cobrança continuam somando o valor contestado.
+func (s *Service) chargeBackFailedRefund(ctx context.Context, tx Tx, c *Charge, r Refund, now time.Time, actor audit.Actor) error {
+	d, err := tx.LatestDispute(ctx, c.ID)
+	if err != nil || d == nil || d.Status != DisputeLost {
+		return err
+	}
+	if c.AmountChargedBack, err = c.AmountChargedBack.Add(r.Amount); err != nil {
+		return err
+	}
+	t, ok, err := ledger.ChargebackHoldRestored(ids.New(), c.TenantID, r.ID, r.Amount, now)
+	if err != nil {
+		return err
+	}
+	if ok {
+		if err := tx.PostLedger(ctx, t); err != nil {
+			return err
+		}
+	}
+	return tx.Audit(ctx, audit.New(c.TenantID, now, actor, "dispute.chargeback_increased", "dispute", d.ID.String(),
+		map[string]any{"charge_id": c.ID, "refund_id": r.ID, "amount": r.Amount.Amount(), "charged_back_amount": c.AmountChargedBack.Amount()}))
 }
 
 // recordProviderRefund registra um reembolso feito diretamente no provedor.

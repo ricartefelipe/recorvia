@@ -27,7 +27,8 @@ func disputeOccurredAt(pc ProviderCharge, now time.Time) time.Time {
 // cobrança paga (bloqueada pelo chamador). Abre a disputa quando ainda não
 // há disputa aberta (lançamento dispute.opened, que retém o valor), registra
 // a análise, estorna o lançamento quando a disputa é ganha e registra o
-// chargeback na cobrança quando é perdida. Eventos de disputa já encerrada
+// chargeback na cobrança quando é perdida (liberando a retenção da parte já
+// reembolsada ao pagador, ver closeLostDispute). Eventos de disputa já encerrada
 // ou anteriores ao encerramento não reabrem disputas. Com retrato obtido por
 // consulta (authoritative), a cobrança novamente recebida sem chargeback
 // (inclusive parcialmente reembolsada) encerra a disputa aberta como ganha.
@@ -75,19 +76,20 @@ func (s *Service) syncDispute(ctx context.Context, tx Tx, c *Charge, pc Provider
 	if err := tx.InsertDisputeEvent(ctx, ev); err != nil {
 		return err
 	}
+	charged := money.Zero(d.Amount.Currency())
 	switch target {
 	case DisputeWon:
-		if err := c.CloseDispute(true, money.Zero(c.AmountPaid.Currency()), now); err != nil {
+		if err := c.CloseDispute(true, charged, now); err != nil {
 			return err
 		}
 		if err := tx.ReverseLedger(ctx, "dispute.opened:"+d.ID.String(), "Chargeback revertido: disputa ganha", now); err != nil {
 			return err
 		}
 	case DisputeLost:
-		if err := c.CloseDispute(false, d.Amount, now); err != nil {
+		if charged, err = s.closeLostDispute(ctx, tx, c, d, now); err != nil {
 			return err
 		}
-		if err := s.recordChargebackOnInvoice(ctx, tx, c, d, actor, now); err != nil {
+		if err := s.recordChargebackOnInvoice(ctx, tx, c, d, charged, actor, now); err != nil {
 			return err
 		}
 	default:
@@ -95,11 +97,40 @@ func (s *Service) syncDispute(ctx context.Context, tx Tx, c *Charge, pc Provider
 			map[string]any{"charge_id": c.ID, "provider_status": pc.RawStatus}))
 	}
 	if err := tx.Emit(ctx, outbox.New(c.TenantID, outbox.EventDisputeClosed, "dispute", d.ID,
-		map[string]any{"dispute_id": d.ID, "charge_id": c.ID, "invoice_id": c.InvoiceID, "result": string(d.Status), "amount": d.Amount.Amount()}, now)); err != nil {
+		map[string]any{"dispute_id": d.ID, "charge_id": c.ID, "invoice_id": c.InvoiceID, "result": string(d.Status), "amount": d.Amount.Amount(),
+			"charged_back_amount": charged.Amount()}, now)); err != nil {
 		return err
 	}
 	return tx.Audit(ctx, audit.New(c.TenantID, now, actor, "dispute."+string(d.Status), "dispute", d.ID.String(),
-		map[string]any{"charge_id": c.ID, "amount": d.Amount.Amount(), "provider_status": pc.RawStatus}))
+		map[string]any{"charge_id": c.ID, "amount": d.Amount.Amount(), "charged_back_amount": charged.Amount(), "provider_status": pc.RawStatus}))
+}
+
+// closeLostDispute registra na cobrança o chargeback da disputa perdida e
+// devolve o valor efetivamente estornado. A retenção da abertura cobre o
+// saldo contestado naquele momento; a parte devolvida ao pagador por
+// reembolso confirmado durante a disputa, ou ainda reservada por reembolso em
+// andamento, não é estornada de novo (ver Charge.CloseDispute) e volta aos
+// valores em liquidação pelo lançamento dispute.hold_released. Assim, o
+// ledger registra em chargebacks exatamente o valor estornado, e chargebacks
+// e reembolsos nunca somam mais que o pago.
+func (s *Service) closeLostDispute(ctx context.Context, tx Tx, c *Charge, d Dispute, now time.Time) (money.Money, error) {
+	before := c.AmountChargedBack
+	if err := c.CloseDispute(false, d.Amount, now); err != nil {
+		return money.Money{}, err
+	}
+	charged, err := c.AmountChargedBack.Sub(before)
+	if err != nil {
+		return money.Money{}, err
+	}
+	released, err := d.Amount.Sub(charged)
+	if err != nil || !released.IsPositive() {
+		return charged, err
+	}
+	t, ok, err := ledger.ChargebackHoldReleased(ids.New(), c.TenantID, d.ID, released, now)
+	if err != nil || !ok {
+		return charged, err
+	}
+	return charged, tx.PostLedger(ctx, t)
 }
 
 // receivedWithoutChargeback informa se a situação do provedor é de cobrança
@@ -109,8 +140,11 @@ func receivedWithoutChargeback(st ProviderStatus) bool {
 }
 
 // openDispute abre a disputa pelo saldo ainda não reembolsado nem estornado
-// e retém o valor no ledger. created=false quando não há saldo a contestar
-// ou a cobrança não está paga.
+// e retém o valor no ledger. Reembolsos reservados e ainda não confirmados
+// continuam no saldo contestado: o provedor pode recusá-los, e, se forem
+// confirmados, a disputa perdida libera essa parte da retenção
+// (closeLostDispute). created=false quando não há saldo a contestar ou a
+// cobrança não está paga.
 func (s *Service) openDispute(ctx context.Context, tx Tx, c *Charge, pc ProviderCharge, occurred, now time.Time, actor audit.Actor) (Dispute, bool, error) {
 	if c.Status != ChargePaid && c.Status != ChargePartiallyRefunded {
 		return Dispute{}, false, nil
@@ -153,15 +187,16 @@ func (s *Service) openDispute(ctx context.Context, tx Tx, c *Charge, pc Provider
 }
 
 // recordChargebackOnInvoice registra o chargeback no histórico da fatura,
-// que não é reaberta (ADR-034).
-func (s *Service) recordChargebackOnInvoice(ctx context.Context, tx Tx, c *Charge, d Dispute, actor audit.Actor, now time.Time) error {
+// que não é reaberta (ADR-034): amount é o valor estornado e disputed_amount
+// o valor contestado na abertura.
+func (s *Service) recordChargebackOnInvoice(ctx context.Context, tx Tx, c *Charge, d Dispute, charged money.Money, actor audit.Actor, now time.Time) error {
 	inv, err := tx.Invoice(ctx, c.InvoiceID, false)
 	if err != nil {
 		return err
 	}
 	status := inv.Status
 	return tx.InsertInvoiceHistory(ctx, inv.ID, actor, []billing.StatusChange{{From: &status, To: status, At: now, Reason: "chargeback",
-		Details: map[string]any{"dispute_id": d.ID, "charge_id": c.ID, "amount": d.Amount.Amount()}}})
+		Details: map[string]any{"dispute_id": d.ID, "charge_id": c.ID, "amount": charged.Amount(), "disputed_amount": d.Amount.Amount()}}})
 }
 
 // LatestDispute retorna a disputa mais recente da cobrança (nil se não houver).

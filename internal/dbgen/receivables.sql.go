@@ -826,7 +826,7 @@ SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, at
         OR (updated_at >= $3 AND updated_at < $4)
         OR provider_charge_id = ANY ($5::text[])
         OR id = ANY ($6::uuid[]))
- ORDER BY created_at, id
+ ORDER BY (provider_charge_id = ANY ($5::text[]) OR id = ANY ($6::uuid[])) IS TRUE DESC, created_at, id
  LIMIT $7
 `
 
@@ -842,7 +842,10 @@ type ListChargesForReconciliationParams struct {
 
 // Cobranças locais da conta no escopo da execução: criadas ou atualizadas
 // na janela, ou presentes na listagem do provedor (pelo ID do provedor ou
-// pela referência externa, que é o ID local).
+// pela referência externa, que é o ID local). As presentes na listagem vêm
+// primeiro: o limite de linhas só corta cobranças da janela ausentes da
+// listagem, e nenhuma cobrança listada pelo provedor fica sem a
+// correspondência local.
 func (q *Queries) ListChargesForReconciliation(ctx context.Context, arg ListChargesForReconciliationParams) ([]Charge, error) {
 	rows, err := q.db.Query(ctx, listChargesForReconciliation,
 		arg.TenantID,
@@ -851,6 +854,85 @@ func (q *Queries) ListChargesForReconciliation(ctx context.Context, arg ListChar
 		arg.WindowEnd,
 		arg.ProviderChargeIds,
 		arg.ReferenceIds,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Charge
+	for rows.Next() {
+		var i Charge
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.InvoiceID,
+			&i.CustomerID,
+			&i.ProviderAccountID,
+			&i.Provider,
+			&i.Attempt,
+			&i.ProviderChargeID,
+			&i.Status,
+			&i.Amount,
+			&i.Currency,
+			&i.AmountPaid,
+			&i.FeeAmount,
+			&i.AmountRefunded,
+			&i.AmountChargedBack,
+			&i.CheckoutUrl,
+			&i.DueDate,
+			&i.PaidAt,
+			&i.FailureReason,
+			&i.ProviderStatus,
+			&i.ProviderStatusAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Version,
+			&i.AmountRefundPending,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listChargesForRotation = `-- name: ListChargesForRotation :many
+SELECT c.id, c.tenant_id, c.invoice_id, c.customer_id, c.provider_account_id, c.provider, c.attempt, c.provider_charge_id, c.status, c.amount, c.currency, c.amount_paid, c.fee_amount, c.amount_refunded, c.amount_charged_back, c.checkout_url, c.due_date, c.paid_at, c.failure_reason, c.provider_status, c.provider_status_at, c.created_at, c.updated_at, c.version, c.amount_refund_pending FROM charges c
+  LEFT JOIN reconciliation_charge_checks k ON k.tenant_id = c.tenant_id AND k.charge_id = c.id
+ WHERE c.tenant_id = $1 AND c.provider_account_id = $2
+   AND c.provider_charge_id IS NOT NULL
+   AND c.status IN ('awaiting_payment', 'paid', 'partially_refunded', 'disputed')
+   AND c.created_at >= $3
+   AND NOT (c.created_at >= $4 AND c.created_at < $5)
+   AND NOT (c.updated_at >= $4 AND c.updated_at < $5)
+ ORDER BY k.last_checked_at NULLS FIRST, c.created_at, c.id
+ LIMIT $6
+`
+
+type ListChargesForRotationParams struct {
+	TenantID          uuid.UUID
+	ProviderAccountID uuid.UUID
+	Since             time.Time
+	WindowStart       time.Time
+	WindowEnd         time.Time
+	RowLimit          int32
+}
+
+// Rodízio da conciliação: cobranças da conta vinculadas ao provedor que ainda
+// podem mudar nele (aguardando pagamento, pagas, parcialmente reembolsadas ou
+// em disputa), criadas desde @since e fora da janela da execução, a começar
+// pelas nunca verificadas e pelas verificadas há mais tempo.
+func (q *Queries) ListChargesForRotation(ctx context.Context, arg ListChargesForRotationParams) ([]Charge, error) {
+	rows, err := q.db.Query(ctx, listChargesForRotation,
+		arg.TenantID,
+		arg.ProviderAccountID,
+		arg.Since,
+		arg.WindowStart,
+		arg.WindowEnd,
 		arg.RowLimit,
 	)
 	if err != nil {
@@ -1346,6 +1428,24 @@ type LockChargeRefundClaimsParams struct {
 // operações de reembolso de uma cobrança sem bloquear a linha da cobrança.
 func (q *Queries) LockChargeRefundClaims(ctx context.Context, arg LockChargeRefundClaimsParams) error {
 	_, err := q.db.Exec(ctx, lockChargeRefundClaims, arg.TenantID, arg.ChargeID)
+	return err
+}
+
+const markChargesReconciled = `-- name: MarkChargesReconciled :exec
+INSERT INTO reconciliation_charge_checks (tenant_id, charge_id, last_checked_at)
+SELECT $1::uuid, id, $2::timestamptz FROM unnest($3::uuid[]) AS id
+ON CONFLICT (tenant_id, charge_id) DO UPDATE SET last_checked_at = excluded.last_checked_at
+`
+
+type MarkChargesReconciledParams struct {
+	TenantID  uuid.UUID
+	CheckedAt time.Time
+	ChargeIds []uuid.UUID
+}
+
+// Registra a verificação das cobranças comparadas numa execução concluída.
+func (q *Queries) MarkChargesReconciled(ctx context.Context, arg MarkChargesReconciledParams) error {
+	_, err := q.db.Exec(ctx, markChargesReconciled, arg.TenantID, arg.CheckedAt, arg.ChargeIds)
 	return err
 }
 

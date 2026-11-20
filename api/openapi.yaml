@@ -1450,7 +1450,10 @@ components:
       name: Idempotency-Key
       in: header
       required: true
-      description: Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado.
+      description: >-
+        Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx,
+        401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a
+        repetição com a mesma chave executa o pedido novamente.
       schema: { type: string, minLength: 8, maxLength: 255 }
     ID:
       name: id
@@ -2428,7 +2431,13 @@ components:
         provider_value: { type: object, additionalProperties: true }
         resolution: { type: string, nullable: true }
         justification: { type: string, nullable: true }
-        resolved_by: { type: string, format: uuid, nullable: true }
+        resolved_by:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Usuário da sessão que resolveu a divergência. Nulo na resolução automática (auto_resolved) e na resolução por
+            credencial de API; o responsável fica sempre no histórico (ator do evento reconciliation.discrepancy_resolved).
         resolved_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
         history:
@@ -2611,8 +2620,13 @@ components:
         active_subscriptions: { type: integer }
         new_subscriptions: { type: integer }
         canceled_subscriptions: { type: integer }
-        refunds: { type: integer, format: int64 }
-        chargebacks: { type: integer, format: int64 }
+        refunds: { type: integer, format: int64, description: Movimento líquido da conta de reembolsos no mês }
+        chargebacks:
+          type: integer
+          format: int64
+          description: >-
+            Movimento líquido da conta de chargebacks no mês (débitos menos créditos). A retenção liberada e a disputa ganha
+            reduzem o mês em que ocorrem; negativo quando a disputa aberta em mês anterior é ganha.
         open_discrepancies: { type: integer }
         unknown_operations: { type: integer }
         definitions: { type: object, additionalProperties: { type: string } }

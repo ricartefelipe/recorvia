@@ -185,11 +185,19 @@ func (c *Charge) Refundable() (money.Money, error) {
 	return r.Sub(pending)
 }
 
+// AcceptsRefund informa se a cobrança aceita pedido ou envio de reembolso:
+// somente cobranças pagas, inclusive parcialmente reembolsadas. Em disputa ou
+// estornada por chargeback, o reembolso poderia devolver o valor ao pagador
+// duas vezes.
+func (c *Charge) AcceptsRefund() bool {
+	return c.Status == ChargePaid || c.Status == ChargePartiallyRefunded
+}
+
 // ReserveRefund reserva o valor de um novo pedido de reembolso. Somente
 // cobranças pagas (inclusive parcialmente reembolsadas) aceitam pedidos, e a
 // soma das reservas com o já reembolsado e estornado nunca excede o pago.
 func (c *Charge) ReserveRefund(amount money.Money, at time.Time) error {
-	if c.Status != ChargePaid && c.Status != ChargePartiallyRefunded {
+	if !c.AcceptsRefund() {
 		return apperr.Conflict("charge_not_refundable", fmt.Sprintf("A cobrança não aceita reembolso na situação %s.", c.Status))
 	}
 	elig, err := c.Refundable()
@@ -271,7 +279,11 @@ func (c *Charge) OpenDispute(at time.Time) error { return c.transition(ChargeDis
 // CloseDispute encerra a disputa: won devolve a cobrança à situação
 // correspondente aos reembolsos confirmados (paga, parcialmente reembolsada
 // ou reembolsada, inclusive pelos reembolsos confirmados durante a disputa);
-// lost registra o valor estornado ao pagador.
+// lost registra o valor estornado ao pagador, limitado ao saldo elegível
+// (pago menos reembolsado, estornado e reservado por reembolsos em
+// andamento): o valor devolvido por reembolso não é estornado de novo, e o
+// reembolso pedido antes da disputa e confirmado depois dela continua
+// cabendo no saldo.
 func (c *Charge) CloseDispute(won bool, amount money.Money, at time.Time) error {
 	if c.Status != ChargeDisputed {
 		return apperr.Conflict("no_open_dispute", "A cobrança não está em disputa.")
@@ -285,13 +297,12 @@ func (c *Charge) CloseDispute(won bool, amount money.Money, at time.Time) error 
 		}
 		return c.transition(ChargePaid, at)
 	}
-	// O estorno nunca excede o pago menos o já reembolsado e estornado.
-	limit, err := c.AmountPaid.Sub(c.AmountRefunded)
+	limit, err := c.Refundable()
 	if err != nil {
 		return err
 	}
-	if limit, err = limit.Sub(c.AmountChargedBack); err != nil {
-		return err
+	if limit.IsNegative() {
+		limit = money.Zero(limit.Currency())
 	}
 	if cmp, err := amount.Cmp(limit); err != nil {
 		return err
