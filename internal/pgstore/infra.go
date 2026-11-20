@@ -3,10 +3,12 @@ package pgstore
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/ricartefelipe/recorvia/internal/audit"
 	"github.com/ricartefelipe/recorvia/internal/dbgen"
 	"github.com/ricartefelipe/recorvia/internal/infra/postgres"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
@@ -482,10 +484,41 @@ func deadLetterFromRow(r dbgen.DeadLetter) DeadLetter {
 // (o inbox desse consumidor continua deduplicando).
 type ReplayEmitter func(targetQueue, originalMessageID, eventType string, aggregateID uuid.UUID, payload []byte) error
 
-// ResolveDeadLetter marca a mensagem como reprocessada ou descartada e,
-// no reprocessamento, grava a reentrega na mesma transação.
-func (s *Store) ResolveDeadLetter(ctx context.Context, tenantID, id uuid.UUID, status string, by uuid.UUID, note string,
+// DeadLetterResolution descreve o tratamento manual de uma mensagem não
+// processada.
+type DeadLetterResolution struct {
+	// Status é DeadLetterReplayed ou DeadLetterDiscarded.
+	Status string
+	Actor  audit.Actor
+	// By é o usuário que tratou a mensagem; nil quando o tratamento vem de
+	// uma credencial de API (a autoria fica na auditoria, pelo ator).
+	By *uuid.UUID
+	// Note é a justificativa do tratamento, gravada na resolução e na
+	// auditoria.
+	Note string
+}
+
+// Situações finais de uma dead letter tratada manualmente.
+const (
+	DeadLetterReplayed  = "replayed"
+	DeadLetterDiscarded = "discarded"
+)
+
+// ResolveDeadLetter marca a mensagem como reprocessada ou descartada e, na
+// mesma transação, grava a reentrega (no reprocessamento) e a auditoria, com a
+// justificativa. A auditoria é a única autoria das resoluções feitas por
+// credencial de API, por isso não pode ser perdida separadamente da resolução.
+func (s *Store) ResolveDeadLetter(ctx context.Context, tenantID, id uuid.UUID, res DeadLetterResolution,
 	replay func(ctx context.Context, emit ReplayEmitter, d DeadLetter) error) (DeadLetter, error) {
+	var action string
+	switch res.Status {
+	case DeadLetterReplayed:
+		action = "operations.dead_letter_replayed"
+	case DeadLetterDiscarded:
+		action = "operations.dead_letter_discarded"
+	default:
+		return DeadLetter{}, fmt.Errorf("pgstore: situação de dead letter inválida: %q", res.Status)
+	}
 	var out DeadLetter
 	err := s.inTenant(ctx, tenantID, func(b base) error {
 		r, err := b.q.GetDeadLetterForUpdate(ctx, dbgen.GetDeadLetterForUpdateParams{TenantID: &tenantID, ID: id})
@@ -509,12 +542,16 @@ func (s *Store) ResolveDeadLetter(ctx context.Context, tenantID, id uuid.UUID, s
 			}
 		}
 		now := s.clock.Now()
-		if err := b.q.ResolveDeadLetter(ctx, dbgen.ResolveDeadLetterParams{Status: status, ResolvedAt: &now, ResolvedBy: uuidOrNil(by), ResolutionNote: &note,
-			TenantID: &tenantID, ID: id}); err != nil {
+		if err := b.q.ResolveDeadLetter(ctx, dbgen.ResolveDeadLetterParams{Status: res.Status, ResolvedAt: &now, ResolvedBy: res.By,
+			ResolutionNote: &res.Note, TenantID: &tenantID, ID: id}); err != nil {
 			return err
 		}
-		out.Status, out.ResolvedAt, out.ResolutionNote = status, &now, note
-		return nil
+		out.Status, out.ResolvedAt, out.ResolutionNote = res.Status, &now, res.Note
+		return b.Audit(ctx, audit.New(tenantID, now, res.Actor, action, "dead_letter", id.String(),
+			map[string]any{"consumer": out.Consumer, "event_type": out.EventType, "reason": res.Note}))
 	})
-	return out, err
+	if err != nil {
+		return DeadLetter{}, err
+	}
+	return out, nil
 }

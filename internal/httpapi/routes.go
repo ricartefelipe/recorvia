@@ -16,7 +16,9 @@ var (
 
 // registerTenantRoutes declara as rotas com organização ativa. Cada rota
 // informa a permissão exigida; operações financeiras de criação exigem
-// Idempotency-Key.
+// Idempotency-Key. As rotas com userSession() recusam credenciais de API; nas
+// demais, a autoria vem de Principal.UserID() (nula para credenciais, com o
+// ator api_credential na auditoria), como decide a ADR-059.
 func (a *API) registerTenantRoutes(r chi.Router) {
 	t := func(method, pattern string, perm tenancy.Permission, h http.HandlerFunc, opts ...routeOpt) {
 		a.handle(r, method, pattern, TenantScoped, perm, h, opts...)
@@ -29,18 +31,18 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	t(patch, "/api/v1/organization", tenancy.PermOrganizationUpdate, a.updateOrganization)
 	t(get, "/api/v1/roles", tenancy.PermMembersRead, a.listRoles)
 	t(get, "/api/v1/members", tenancy.PermMembersRead, a.listMembers)
-	t(patch, "/api/v1/members/{user_id}", tenancy.PermMembersManage, a.updateMemberRole)
-	t(del, "/api/v1/members/{user_id}", tenancy.PermMembersManage, a.removeMember)
+	t(patch, "/api/v1/members/{user_id}", tenancy.PermMembersManage, a.updateMemberRole, userSession())
+	t(del, "/api/v1/members/{user_id}", tenancy.PermMembersManage, a.removeMember, userSession())
 	t(get, "/api/v1/invitations", tenancy.PermMembersRead, a.listInvitations)
-	t(post, "/api/v1/invitations", tenancy.PermMembersManage, a.createInvitation)
-	t(del, "/api/v1/invitations/{id}", tenancy.PermMembersManage, a.revokeInvitation)
+	t(post, "/api/v1/invitations", tenancy.PermMembersManage, a.createInvitation, userSession())
+	t(del, "/api/v1/invitations/{id}", tenancy.PermMembersManage, a.revokeInvitation, userSession())
 
 	t(get, "/api/v1/platform/overview", tenancy.PermPlatformRead, a.platformOverview)
 	t(get, "/api/v1/platform/plans", tenancy.PermPlatformRead, a.platformPlans)
-	t(put, "/api/v1/platform/plan", tenancy.PermPlatformManage, a.changePlatformPlan)
+	t(put, "/api/v1/platform/plan", tenancy.PermPlatformManage, a.changePlatformPlan, userSession())
 	t(get, "/api/v1/platform/addons", tenancy.PermPlatformRead, a.platformAddons)
 	t(get, "/api/v1/platform/addon-orders", tenancy.PermPlatformRead, a.listAddonOrders)
-	t(post, "/api/v1/platform/addon-orders", tenancy.PermPlatformManage, a.createAddonOrder)
+	t(post, "/api/v1/platform/addon-orders", tenancy.PermPlatformManage, a.createAddonOrder, userSession())
 	t(get, "/api/v1/platform/statements", tenancy.PermPlatformRead, a.listPlatformStatements)
 
 	t(get, "/api/v1/customers", tenancy.PermCustomersRead, a.listCustomers)
@@ -110,10 +112,10 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	t(post, "/api/v1/payment-operations/{id}/retry", tenancy.PermPaymentsCharge, a.retryOperation)
 	t(get, "/api/v1/payment-providers", tenancy.PermIntegrationsRead, a.listProviders)
 	t(put, "/api/v1/payment-providers/{provider}", tenancy.PermIntegrationsWrite, a.configureProvider)
-	t(get, "/api/v1/api-credentials", tenancy.PermAPICredentials, a.listAPICredentials)
-	t(post, "/api/v1/api-credentials", tenancy.PermAPICredentials, a.createAPICredential)
-	t(post, "/api/v1/api-credentials/{id}/rotate", tenancy.PermAPICredentials, a.rotateAPICredential)
-	t(del, "/api/v1/api-credentials/{id}", tenancy.PermAPICredentials, a.revokeAPICredential)
+	t(get, "/api/v1/api-credentials", tenancy.PermAPICredentials, a.listAPICredentials, userSession())
+	t(post, "/api/v1/api-credentials", tenancy.PermAPICredentials, a.createAPICredential, userSession())
+	t(post, "/api/v1/api-credentials/{id}/rotate", tenancy.PermAPICredentials, a.rotateAPICredential, userSession())
+	t(del, "/api/v1/api-credentials/{id}", tenancy.PermAPICredentials, a.revokeAPICredential, userSession())
 
 	t(get, "/api/v1/collection-policies", tenancy.PermCollectionsRead, a.listCollectionPolicies)
 	t(post, "/api/v1/collection-policies", tenancy.PermCollectionsWrite, a.createCollectionPolicy)

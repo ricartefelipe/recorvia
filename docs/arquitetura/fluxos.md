@@ -500,9 +500,11 @@ sequenceDiagram
   A->>A: SHA-256 do segredo comparado em tempo constante (vigente e anterior)
   A->>DB: last_used_at (no máximo 1 escrita por minuto)
   A->>A: escopos efetivos = escopos ∩ permissões atuais do emissor
-  A->>A: X-Recorvia-Tenant (se enviado) = tenant da credencial; permissão da rota pelos escopos
   A->>R: limite de taxa por credencial
-  A-->>I: resposta (auditoria com ator api_credential)
+  A->>A: rota restrita à sessão de usuário? → 403 user_session_required
+  A->>A: X-Recorvia-Tenant (se enviado) = tenant da credencial; permissão da rota pelos escopos
+  A->>DB: tx do tenant: alteração com autoria nula + auditoria (ator api_credential)
+  A-->>I: resposta
 ```
 
 Sem CSRF (o navegador não envia `Authorization: Bearer` por conta própria). O token do Recorvia tem
@@ -512,6 +514,18 @@ malformado, desconhecido, revogado, expirado ou com segredo errado responde 401 
 `WWW-Authenticate: Bearer` e conta como tentativa inválida da origem. Organização inativa, plano sem
 `api_access` ou emissor que deixou a organização respondem 403. A rotação mantém o identificador e
 aceita o segredo anterior por 24 horas; a revogação vale na requisição seguinte.
+
+Autoria (ADR-059): nas rotas que aceitam credencial, as colunas de autoria que referenciam `users`
+(`created_by`, `updated_by`, `resolved_by` e afins) ficam nulas e a autoria fica na auditoria da
+mesma transação, com o ator `api_credential`; o link do portal registra a credencial como autora.
+Os atos que exigem uma pessoa identificada recusam a credencial com 403 `user_session_required`
+antes da verificação de escopos: conta e sessão (inclusive `GET /api/v1/session`), gestão de membros
+e convites, contratação de plano e de serviços adicionais da plataforma e gestão de credenciais,
+inclusive a listagem `GET /api/v1/api-credentials`. Continuam disponíveis à credencial, pelos
+escopos `members.read` e `platform_billing.read`, as leituras de membros, papéis e convites e as da
+plataforma (visão geral, planos, serviços adicionais, pedidos e extratos). A lista das rotas
+restritas à sessão, gerada a partir das rotas registradas, está na seção "Rotas restritas à sessão
+de usuário" de [permissoes.md](permissoes.md).
 
 ## Portal do cliente
 

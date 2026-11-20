@@ -31,9 +31,20 @@ type creditReturn struct {
 }
 
 type grantCall struct {
-	customerID, by uuid.UUID
-	amount         money.Money
-	reason, key    string
+	customerID  uuid.UUID
+	by          *uuid.UUID
+	amount      money.Money
+	reason, key string
+}
+
+// same compara a chamada registrada com a esperada, inclusive a autoria
+// nula das concessões feitas por credencial de API.
+func (g grantCall) same(o grantCall) bool {
+	if (g.by == nil) != (o.by == nil) || (g.by != nil && *g.by != *o.by) {
+		return false
+	}
+	g.by, o.by = nil, nil
+	return g == o
 }
 
 type statusWrite struct {
@@ -151,7 +162,7 @@ func (s *invoiceStore) ReturnCustomerCredit(_ context.Context, customerID, invoi
 	return nil
 }
 
-func (s *invoiceStore) GrantCustomerCredit(_ context.Context, customerID uuid.UUID, amount money.Money, reason string, by uuid.UUID, key string) (uuid.UUID, bool, error) {
+func (s *invoiceStore) GrantCustomerCredit(_ context.Context, customerID uuid.UUID, amount money.Money, reason string, by *uuid.UUID, key string) (uuid.UUID, bool, error) {
 	s.grantCalls = append(s.grantCalls, grantCall{customerID, by, amount, reason, key})
 	if err := s.fail("GrantCustomerCredit"); err != nil {
 		return uuid.Nil, false, err
@@ -379,10 +390,10 @@ func TestServiceGrantCredit(t *testing.T) {
 	customer := uuid.New()
 	ctx := context.Background()
 
-	if err := f.svc.GrantCredit(ctx, f.tenantID, f.actor, f.userID, customer, brl(2500), "cortesia por instabilidade", "user:1|POST|chave-1"); err != nil {
+	if err := f.svc.GrantCredit(ctx, f.tenantID, f.actor, &f.userID, customer, brl(2500), "cortesia por instabilidade", "user:1|POST|chave-1"); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.store.grantCalls) != 1 || f.store.grantCalls[0] != (grantCall{customer, f.userID, brl(2500), "cortesia por instabilidade", "user:1|POST|chave-1"}) {
+	if len(f.store.grantCalls) != 1 || !f.store.grantCalls[0].same(grantCall{customer, &f.userID, brl(2500), "cortesia por instabilidade", "user:1|POST|chave-1"}) {
 		t.Fatalf("concessão: %+v", f.store.grantCalls)
 	}
 	creditID := f.store.grants["user:1|POST|chave-1"]
@@ -399,7 +410,7 @@ func TestServiceGrantCredit(t *testing.T) {
 	}
 
 	// Mesmo pedido repetido (mesma chave): não concede nem lança de novo.
-	if err := f.svc.GrantCredit(ctx, f.tenantID, f.actor, f.userID, customer, brl(2500), "cortesia por instabilidade", "user:1|POST|chave-1"); err != nil {
+	if err := f.svc.GrantCredit(ctx, f.tenantID, f.actor, &f.userID, customer, brl(2500), "cortesia por instabilidade", "user:1|POST|chave-1"); err != nil {
 		t.Fatalf("repetição deve ser aceita sem erro: %v", err)
 	}
 	if len(f.store.posted) != 1 || len(f.store.audits) != 1 || len(f.store.grants) != 1 {
@@ -407,11 +418,28 @@ func TestServiceGrantCredit(t *testing.T) {
 	}
 
 	// Outra chave é outro pedido.
-	if err := f.svc.GrantCredit(ctx, f.tenantID, f.actor, f.userID, customer, brl(100), "ajuste comercial", "user:1|POST|chave-2"); err != nil {
+	if err := f.svc.GrantCredit(ctx, f.tenantID, f.actor, &f.userID, customer, brl(100), "ajuste comercial", "user:1|POST|chave-2"); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.store.posted) != 2 {
 		t.Fatal("nova chave gera nova concessão")
+	}
+}
+
+// Concessão feita por credencial de API: a autoria chega nula ao
+// armazenamento e o ator da credencial fica na auditoria.
+func TestServiceGrantCreditByAPICredential(t *testing.T) {
+	f := newInvoiceFixture(t)
+	customer := uuid.New()
+	actor := audit.APICredential(uuid.New(), "ERP")
+	if err := f.svc.GrantCredit(context.Background(), f.tenantID, actor, nil, customer, brl(700), "crédito via integração", "k"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.store.grantCalls) != 1 || !f.store.grantCalls[0].same(grantCall{customer, nil, brl(700), "crédito via integração", "k"}) {
+		t.Fatalf("concessão: %+v", f.store.grantCalls)
+	}
+	if len(f.store.audits) != 1 || f.store.audits[0].Actor != actor {
+		t.Fatalf("auditoria pelo ator da credencial: %+v", f.store.audits)
 	}
 }
 
@@ -432,7 +460,7 @@ func TestServiceGrantCreditValidation(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := newInvoiceFixture(t)
-			err := f.svc.GrantCredit(context.Background(), f.tenantID, f.actor, f.userID, uuid.New(), c.amount, c.reason, "k")
+			err := f.svc.GrantCredit(context.Background(), f.tenantID, f.actor, &f.userID, uuid.New(), c.amount, c.reason, "k")
 			wantAppErr(t, err, apperr.KindInvalid, c.code)
 			if e, _ := apperr.As(err); len(e.Fields) != 1 || e.Fields[0].Field != c.field {
 				t.Fatalf("campo: %+v", e.Fields)
@@ -450,7 +478,7 @@ func TestServiceGrantCreditFailures(t *testing.T) {
 			f := newInvoiceFixture(t)
 			boom := errors.New("falha em " + m)
 			f.store.errs[m] = boom
-			if err := f.svc.GrantCredit(context.Background(), f.tenantID, f.actor, f.userID, uuid.New(), brl(100), "cortesia", "k"); !errors.Is(err, boom) {
+			if err := f.svc.GrantCredit(context.Background(), f.tenantID, f.actor, &f.userID, uuid.New(), brl(100), "cortesia", "k"); !errors.Is(err, boom) {
 				t.Fatalf("esperava %v, obtive %v", boom, err)
 			}
 			if len(f.store.grants) != 0 || len(f.store.posted) != 0 || len(f.store.audits) != 0 {

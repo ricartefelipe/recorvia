@@ -57,3 +57,10 @@ Todas as mudanças relevantes são registradas aqui. Formato baseado em
   ignorada; o valor recebido passa a ser aplicado.
 - Chave de negócio derivada do `Idempotency-Key` passa a ter tamanho fixo
   (chaves longas provocavam erro interno).
+- Credenciais de API recebiam erro interno ao criar políticas de cobrança,
+  personalizar templates e criar endpoints de webhook (autoria `uuid.Nil`
+  violava a FK para `users`); a autoria passa a ser nula, com o ator
+  `api_credential` na auditoria. Gestão de membros, convites, plano da
+  plataforma e credenciais recusa credenciais com 403
+  `user_session_required`, e o tratamento de dead letters grava a auditoria,
+  com a justificativa, na mesma transação da resolução (ADR-059).

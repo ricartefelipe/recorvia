@@ -6,7 +6,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ricartefelipe/recorvia/internal/audit"
 	"github.com/ricartefelipe/recorvia/internal/infra/rabbit"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/pgstore"
@@ -159,10 +158,10 @@ func (a *API) resolveDeadLetter(replay bool) http.HandlerFunc {
 			return
 		}
 		p := mustPrincipal(r)
-		status, action := "discarded", "operations.dead_letter_discarded"
+		res := pgstore.DeadLetterResolution{Status: pgstore.DeadLetterDiscarded, Actor: p.Actor(), By: p.UserID(), Note: in.Reason}
 		var fn func(context.Context, pgstore.ReplayEmitter, pgstore.DeadLetter) error
 		if replay {
-			status, action = "replayed", "operations.dead_letter_replayed"
+			res.Status = pgstore.DeadLetterReplayed
 			fn = func(_ context.Context, emit pgstore.ReplayEmitter, d pgstore.DeadLetter) error {
 				if d.EventType == "" || len(d.Payload) == 0 {
 					return apperr.Conflict("dead_letter_not_replayable", "A mensagem não possui conteúdo para reprocessamento.")
@@ -170,13 +169,8 @@ func (a *API) resolveDeadLetter(replay bool) http.HandlerFunc {
 				return emit(rabbit.QueueName(d.Consumer), d.MessageID, d.EventType, uuid.Nil, d.Payload)
 			}
 		}
-		d, err := a.Store.ResolveDeadLetter(r.Context(), p.TenantID, id, status, p.User.ID, in.Reason, fn)
+		d, err := a.Store.ResolveDeadLetter(r.Context(), p.TenantID, id, res, fn)
 		if err != nil {
-			a.writeError(w, r, err)
-			return
-		}
-		if err := a.Store.AppendAudit(r.Context(), p.TenantID, audit.New(p.TenantID, a.Clock.Now(), p.Actor(), action, "dead_letter", id.String(),
-			map[string]any{"consumer": d.Consumer, "event_type": d.EventType})); err != nil {
 			a.writeError(w, r, err)
 			return
 		}

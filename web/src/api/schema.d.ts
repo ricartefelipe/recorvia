@@ -3009,6 +3009,15 @@ export interface components {
                 "application/problem+json": components["schemas"]["Problem"];
             };
         };
+        /** @description Acesso negado (RFC 9457). A operação exige a sessão de um usuário: credenciais de API recebem o código `user_session_required`, mesmo com escopos; outros códigos indicam permissão insuficiente. */
+        UserSessionRequired: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/problem+json": components["schemas"]["Problem"];
+            };
+        };
         /** @description Situação de saúde */
         Health: {
             headers: {
@@ -3134,6 +3143,7 @@ export interface operations {
                     };
                 };
             };
+            403: components["responses"]["UserSessionRequired"];
         };
     };
     getSession: {
@@ -3155,6 +3165,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Problem"];
+            403: components["responses"]["UserSessionRequired"];
         };
     };
     switchTenant: {
@@ -3185,7 +3196,7 @@ export interface operations {
                     "application/json": components["schemas"]["Session"];
                 };
             };
-            403: components["responses"]["Problem"];
+            403: components["responses"]["UserSessionRequired"];
         };
     };
     createOrganization: {
@@ -3213,6 +3224,7 @@ export interface operations {
                     "application/json": components["schemas"]["Session"];
                 };
             };
+            403: components["responses"]["UserSessionRequired"];
             409: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
         };
@@ -3248,7 +3260,7 @@ export interface operations {
                     };
                 };
             };
-            403: components["responses"]["Problem"];
+            403: components["responses"]["UserSessionRequired"];
             422: components["responses"]["Problem"];
         };
     };
@@ -3381,6 +3393,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            403: components["responses"]["UserSessionRequired"];
             409: components["responses"]["Problem"];
         };
     };
@@ -3415,6 +3428,7 @@ export interface operations {
                     "application/json": components["schemas"]["Member"];
                 };
             };
+            403: components["responses"]["UserSessionRequired"];
             409: components["responses"]["Problem"];
         };
     };
@@ -3474,7 +3488,7 @@ export interface operations {
                     "application/json": components["schemas"]["InvitationCreated"];
                 };
             };
-            403: components["responses"]["Problem"];
+            403: components["responses"]["UserSessionRequired"];
         };
     };
     revokeInvitation: {
@@ -3500,6 +3514,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            403: components["responses"]["UserSessionRequired"];
             409: components["responses"]["Problem"];
         };
     };
@@ -3580,6 +3595,7 @@ export interface operations {
                     "application/json": components["schemas"]["PlatformOverview"];
                 };
             };
+            403: components["responses"]["UserSessionRequired"];
             409: components["responses"]["Problem"];
         };
     };
@@ -3663,6 +3679,7 @@ export interface operations {
                     "application/json": components["schemas"]["AddonOrder"];
                 };
             };
+            403: components["responses"]["UserSessionRequired"];
         };
     };
     listPlatformStatements: {
@@ -6248,6 +6265,7 @@ export interface operations {
                     };
                 };
             };
+            403: components["responses"]["UserSessionRequired"];
         };
     };
     createApiCredential: {
@@ -6281,6 +6299,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiCredentialWithSecret"];
                 };
             };
+            403: components["responses"]["UserSessionRequired"];
             422: components["responses"]["Problem"];
         };
     };
@@ -6309,6 +6328,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiCredentialWithSecret"];
                 };
             };
+            403: components["responses"]["UserSessionRequired"];
         };
     };
     revokeApiCredential: {
@@ -6334,6 +6354,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            403: components["responses"]["UserSessionRequired"];
         };
     };
     listDeadLetters: {

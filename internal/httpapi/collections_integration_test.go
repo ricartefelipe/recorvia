@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ricartefelipe/recorvia/internal/apicredentials"
 	"github.com/ricartefelipe/recorvia/internal/collections"
 	"github.com/ricartefelipe/recorvia/internal/customers"
 	"github.com/ricartefelipe/recorvia/internal/httpapi"
@@ -61,9 +62,9 @@ type dunningAPI struct {
 }
 
 // newDunningAPI monta a API com políticas de cobrança, templates,
-// notificações e webhooks enviados. O validador de destino resolve
-// hooks.cliente.test para um endereço público e interno.cliente.test para
-// uma rede privada.
+// notificações, webhooks enviados e credenciais de API. O validador de
+// destino resolve hooks.cliente.test para um endereço público e
+// interno.cliente.test para uma rede privada.
 func newDunningAPI(t *testing.T) *dunningAPI {
 	t.Helper()
 	a := newAPI(t)
@@ -77,12 +78,15 @@ func newDunningAPI(t *testing.T) *dunningAPI {
 			webhooks.Config{Jitter: func() float64 { return 0.5 }}),
 	}
 	idsvc := identity.NewService(stubIDP{}, a.sessions, env.Store.Users(), env.Clock, identity.DefaultPolicy())
-	cfg := &config.Config{Env: config.Test, CookieName: "recorvia_session", CookieSecure: false, RateLimitPerMinute: 10000}
+	cfg := &config.Config{Env: config.Test, CookieName: "recorvia_session", CookieSecure: false, RateLimitPerMinute: 10000,
+		APICredentialRateLimitPerMinute: 10000}
 	pay := env.Payments(gateways.NewResolver(time.Second), payments.Config{WebhookBaseURL: "http://api.test/webhooks/providers"})
+	credentials := apicredentials.NewService(env.Store.APICredentials(), a.sessions, env.Clock, apicredentials.DefaultPolicy())
 	_, router := httpapi.NewRouter(httpapi.Deps{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: cfg, Clock: env.Clock,
 		Store: env.Store, Sessions: a.sessions, Identity: idsvc, Tenancy: env.Tenancy, Platform: env.Platform, Customers: env.Customers,
 		Catalog: env.Catalog, Subscriptions: env.Subscriptions, Billing: env.Billing, Payments: pay,
-		Reporting: reporting.NewService(env.Store.Reporting(), env.Clock), Notifications: d.notif, Collections: d.coll, Webhooks: d.webhooks})
+		Reporting: reporting.NewService(env.Store.Reporting(), env.Clock), Notifications: d.notif, Collections: d.coll, Webhooks: d.webhooks,
+		Credentials: credentials})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
 	a.srv = srv
