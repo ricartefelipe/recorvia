@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/infra/secrets"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
+	"github.com/ricartefelipe/recorvia/internal/portal"
 )
 
 func keyring(t *testing.T) *secrets.Keyring {
@@ -113,5 +115,69 @@ func TestRedisFailureMakesAuthenticationUnavailable(t *testing.T) {
 	_, _, err := svc.Authenticate(context.Background(), "qualquer-sessao")
 	if !apperr.IsKind(err, apperr.KindUnavailable) {
 		t.Fatalf("esperava indisponível, obtive %v", err)
+	}
+}
+
+func TestPortalSessionsAndFailureCounter(t *testing.T) {
+	ctx := context.Background()
+	rdb := startRedis(t)
+	st := redisstore.NewPortalSessions(redisstore.New(rdb, keyring(t), "portal"))
+	sess := portal.Session{ID: "sessao-do-portal", TenantID: uuid.New(), CustomerID: uuid.New(), LinkID: uuid.New(), CSRFToken: "csrf",
+		ExpiresAt: time.Now().Add(time.Hour)}
+	if err := st.Save(ctx, sess, 0); !errors.Is(err, portal.ErrSessionNotFound) {
+		t.Fatalf("TTL não positiva deve ser recusada: %v", err)
+	}
+	if err := st.Save(ctx, sess, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Get(ctx, sess.ID)
+	if err != nil || got.CustomerID != sess.CustomerID || got.LinkID != sess.LinkID {
+		t.Fatalf("sessão lida: %+v %v", got, err)
+	}
+	// Chave pelo hash do identificador, conteúdo cifrado e namespace próprio.
+	keys, err := rdb.Keys(ctx, "recorvia:portal:portal_session:*").Result()
+	if err != nil || len(keys) != 1 || strings.Contains(keys[0], sess.ID) {
+		t.Fatalf("chaves: %v %v", keys, err)
+	}
+	raw, err := rdb.Get(ctx, keys[0]).Bytes()
+	if err != nil || bytes.Contains(raw, []byte(sess.CustomerID.String())) {
+		t.Fatalf("conteúdo da sessão não deveria estar em claro: %s", raw)
+	}
+	if ttl := rdb.TTL(ctx, keys[0]).Val(); ttl <= 0 || ttl > time.Minute {
+		t.Fatalf("TTL da sessão: %v", ttl)
+	}
+	// A sessão do painel com o mesmo identificador não é lida como sessão do portal.
+	web := redisstore.New(rdb, keyring(t), "web")
+	if _, err := web.Get(ctx, sess.ID); !errors.Is(err, identity.ErrSessionNotFound) {
+		t.Fatalf("namespaces devem ser separados: %v", err)
+	}
+	if err := st.Delete(ctx, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Get(ctx, sess.ID); !errors.Is(err, portal.ErrSessionNotFound) {
+		t.Fatalf("sessão removida: %v", err)
+	}
+
+	// Contador de falhas em janela fixa iniciada na primeira falha.
+	if n, err := web.Failures(ctx, "portal_access:ip:203.0.113.7"); err != nil || n != 0 {
+		t.Fatalf("contador inicial: %d %v", n, err)
+	}
+	for range 3 {
+		if err := web.RecordFailure(ctx, "portal_access:ip:203.0.113.7", time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := web.Failures(ctx, "portal_access:ip:203.0.113.7"); err != nil || n != 3 {
+		t.Fatalf("contador após três falhas: %d %v", n, err)
+	}
+	fkeys, err := rdb.Keys(ctx, "recorvia:failures:*").Result()
+	if err != nil || len(fkeys) != 1 || strings.Contains(fkeys[0], "203.0.113.7") {
+		t.Fatalf("a chave do contador guarda apenas o hash da origem: %v %v", fkeys, err)
+	}
+	if ttl := rdb.TTL(ctx, fkeys[0]).Val(); ttl <= 0 || ttl > time.Minute {
+		t.Fatalf("janela do contador: %v", ttl)
+	}
+	if n, _ := web.Failures(ctx, "api_credential:ip:203.0.113.7"); n != 0 {
+		t.Fatalf("contadores de chaves diferentes são independentes: %d", n)
 	}
 }

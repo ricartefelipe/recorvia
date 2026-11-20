@@ -19,21 +19,10 @@ import (
 // implementada continuar aqui ou se o contrato tiver operação sem handler
 // e fora desta lista.
 var pendingOperations = map[string]bool{
-	"GET /portal/access": true, "GET /api/portal/v1/session": true, "GET /api/portal/v1/invoices": true,
-	"GET /api/portal/v1/invoices/{id}": true, "GET /api/portal/v1/invoices/{id}/document": true,
-	"PUT /api/portal/v1/contact-preferences": true, "POST /api/portal/v1/logout": true,
-	"POST /api/v1/customers/{id}/portal-links": true, "POST /api/v1/charges/{id}/refunds": true, "GET /api/v1/refunds": true, "GET /api/v1/disputes": true,
+	"POST /api/v1/charges/{id}/refunds": true, "GET /api/v1/refunds": true, "GET /api/v1/disputes": true,
 	"GET /api/v1/reconciliation/runs": true, "POST /api/v1/reconciliation/runs": true,
 	"GET /api/v1/reconciliation/discrepancies": true, "GET /api/v1/reconciliation/discrepancies/{id}": true,
 	"POST /api/v1/reconciliation/discrepancies/{id}/resolve": true,
-	"GET /api/v1/collection-policies":                        true, "POST /api/v1/collection-policies": true, "PATCH /api/v1/collection-policies/{id}": true,
-	"GET /api/v1/notification-templates": true, "PUT /api/v1/notification-templates/{key}": true, "GET /api/v1/notifications": true,
-	"GET /api/v1/webhook-event-types": true, "GET /api/v1/webhook-endpoints": true, "POST /api/v1/webhook-endpoints": true,
-	"PATCH /api/v1/webhook-endpoints/{id}": true, "DELETE /api/v1/webhook-endpoints/{id}": true,
-	"POST /api/v1/webhook-endpoints/{id}/rotate-secret": true, "GET /api/v1/webhook-endpoints/{id}/deliveries": true,
-	"POST /api/v1/webhook-deliveries/{id}/retry": true,
-	"GET /api/v1/api-credentials":                true, "POST /api/v1/api-credentials": true, "POST /api/v1/api-credentials/{id}/rotate": true,
-	"DELETE /api/v1/api-credentials/{id}": true,
 }
 
 // Rotas utilitárias fora do contrato de negócio.
@@ -104,7 +93,8 @@ func TestRoutesMatchOpenAPIContract(t *testing.T) {
 
 func TestEveryRouteDeclaresAccess(t *testing.T) {
 	a, _ := NewRouter(Deps{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Clock: clock.System{}})
-	public := map[string]bool{"GET /auth/login": true, "GET /auth/callback": true, "POST /webhooks/providers/{provider}/{token}": true}
+	public := map[string]bool{"GET /auth/login": true, "GET /auth/callback": true, "POST /webhooks/providers/{provider}/{token}": true,
+		"GET /portal/access": true}
 	for _, r := range a.Routes() {
 		key := r.Method + " " + r.Pattern
 		if r.Access == Public && !public[key] {

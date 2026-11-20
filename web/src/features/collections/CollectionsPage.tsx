@@ -334,6 +334,11 @@ function PoliciesTab() {
   );
 }
 
+/** Marcação de uma variável no assunto e no corpo do template ({{nome}}). */
+export function placeholder(name: string): string {
+  return `{{${name}}}`;
+}
+
 const templateSchema = z.object({
   subject: requiredText(3, 200, 'O assunto'),
   body: z.string().trim().min(10, 'O corpo deve ter pelo menos 10 caracteres.').max(10000, 'O corpo deve ter no máximo 10.000 caracteres.'),
@@ -351,7 +356,8 @@ function TemplateModal({ template, onClose }: { template: NotificationTemplate; 
     onSuccess: onClose,
   });
   const { ref, ...bodyField } = form.register('body');
-  const insert = (variable: string) => {
+  const insert = (name: string) => {
+    const variable = placeholder(name);
     const el = bodyRef.current;
     const current = form.getValues('body');
     const start = el?.selectionStart ?? current.length;
@@ -392,7 +398,7 @@ function TemplateModal({ template, onClose }: { template: NotificationTemplate; 
               <Group gap={6}>
                 {template.variables.map((v) => (
                   <Button key={v} size="compact-xs" variant="light" onClick={() => insert(v)} aria-label={`Inserir variável ${v}`}>
-                    {v}
+                    {placeholder(v)}
                   </Button>
                 ))}
               </Group>
@@ -449,7 +455,7 @@ function TemplatesTab() {
                     </Text>
                     <Group gap={4}>
                       {t.variables.map((v) => (
-                        <Code key={v}>{v}</Code>
+                        <Code key={v}>{placeholder(v)}</Code>
                       ))}
                     </Group>
                     <Group justify="space-between">

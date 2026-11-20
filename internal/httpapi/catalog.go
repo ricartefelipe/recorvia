@@ -250,8 +250,8 @@ func (a *API) createPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	uid := p.User.ID
-	d, err := a.Catalog.CreatePlan(r.Context(), p.TenantID, p.Actor(), &uid, catalog.PlanInput{ProductID: in.ProductID, Code: in.Code, Name: in.Name,
+	uid := p.UserID()
+	d, err := a.Catalog.CreatePlan(r.Context(), p.TenantID, p.Actor(), uid, catalog.PlanInput{ProductID: in.ProductID, Code: in.Code, Name: in.Name,
 		Description: in.Description, Interval: in.BillingInterval, TrialDays: in.TrialDays}, in.Price.domain())
 	if err != nil {
 		a.writeError(w, r, err)
@@ -320,8 +320,8 @@ func (a *API) addPrice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	uid := p.User.ID
-	pv, err := a.Catalog.AddPriceVersion(r.Context(), p.TenantID, p.Actor(), &uid, id, in.domain())
+	uid := p.UserID()
+	pv, err := a.Catalog.AddPriceVersion(r.Context(), p.TenantID, p.Actor(), uid, id, in.domain())
 	if err != nil {
 		a.writeError(w, r, err)
 		return

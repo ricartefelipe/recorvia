@@ -48,6 +48,16 @@ type Metrics struct {
 	DependencyUp        *prometheus.GaugeVec
 	DBServerConnections prometheus.Gauge
 	DBServerMaxConns    prometheus.Gauge
+	// NotificationsDispatched conta os resultados do envio de notificações
+	// (sent, retried, failed, deferred, skipped, lost_lease).
+	NotificationsDispatched *prometheus.CounterVec
+	// WebhookDeliveries conta os resultados das entregas de webhooks
+	// (succeeded, retrying, exhausted, lost_lease).
+	WebhookDeliveries *prometheus.CounterVec
+	// CollectionActions conta as ações da régua de cobrança
+	// (reminder_scheduled, invoice_overdue, subscription_suspended,
+	// subscription_reactivated).
+	CollectionActions *prometheus.CounterVec
 }
 
 // NewMetrics registra os coletores.
@@ -93,11 +103,21 @@ func NewMetrics(service string) *Metrics {
 			[]string{"dependency"}),
 		DBServerConnections: prometheus.NewGauge(prometheus.GaugeOpts{Name: "recorvia_db_server_connections", Help: "Conexões de clientes abertas no servidor PostgreSQL (todas as aplicações).", ConstLabels: cl}),
 		DBServerMaxConns:    prometheus.NewGauge(prometheus.GaugeOpts{Name: "recorvia_db_server_max_connections", Help: "Limite de conexões do servidor PostgreSQL para papéis comuns (max_connections menos as reservadas).", ConstLabels: cl}),
+		NotificationsDispatched: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "recorvia_notifications_dispatched_total",
+			Help: "Resultados do envio de notificações por e-mail (sent, retried, failed, deferred, skipped, lost_lease).", ConstLabels: cl},
+			[]string{"outcome"}),
+		WebhookDeliveries: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "recorvia_webhook_deliveries_total",
+			Help: "Resultados das tentativas de entrega de webhooks enviados (succeeded, retrying, exhausted, lost_lease).", ConstLabels: cl},
+			[]string{"outcome"}),
+		CollectionActions: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "recorvia_collection_actions_total",
+			Help: "Ações da régua de cobrança (reminder_scheduled, invoice_overdue, subscription_suspended, subscription_reactivated).", ConstLabels: cl},
+			[]string{"action"}),
 	}
 	reg.MustRegister(m.HTTPRequests, m.HTTPDuration, m.ConsumerProcessed, m.ConsumerDuration, m.ConsumerInFlight, m.ConsumerConcurrency,
 		m.OutboxPublished, m.OutboxPublishFailed, m.OutboxPending, m.OutboxOldestSeconds, m.JobRuns, m.JobDuration, m.JobLastSuccess,
 		m.ChargeFailures, m.PaymentOperations, m.Discrepancies, m.WebhooksReceived, m.InvoicesIssued, m.DependencyUp,
-		m.DBServerConnections, m.DBServerMaxConns)
+		m.DBServerConnections, m.DBServerMaxConns,
+		m.NotificationsDispatched, m.WebhookDeliveries, m.CollectionActions)
 	return m
 }
 

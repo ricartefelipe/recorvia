@@ -330,6 +330,287 @@ fechamento não fatura e rejeitaria os que ele fatura.
 **Consequências:** a mudança é lida sem bloqueio dentro da transação da ingestão, que já mantém a
 assinatura em `FOR SHARE`.
 
+## ADR-040 Régua de cobrança pelo passo mais recente, com janela e limite aplicados no envio
+**Status:** aceita.
+**Contexto:** a régua precisa de passos relativos ao vencimento, janela de horário no fuso do
+tenant, limite de mensagens por cliente e interrupção após a resolução da fatura, com várias
+instâncias do worker e sem rajadas de lembretes após uma indisponibilidade.
+**Decisão:** a política padrão do tenant (no máximo uma, índice único parcial) rege os lembretes de
+todas as faturas em aberto. O job `collections.run` (agendador com lease) agenda, para cada fatura,
+somente o passo mais recente já alcançado no dia civil do tenant (passos anteriores à emissão não se
+aplicam, e passos até o vencimento deixam de valer depois dele); a identidade de negócio é
+`reminder:<fatura>:<dias>`. O template decorre do passo: até o
+dia do vencimento, `reminder_before_due`; depois, `reminder_after_due`. A janela `[início, fim)` e o
+limite diário são aplicados no envio: fora da janela a notificação é adiada para a abertura
+seguinte; com o limite atingido (lembretes enviados ou em envio no dia civil, sem contar o próprio
+lembrete avaliado, que pode estar em envio quando reivindicado de novo após o lease), para a
+abertura do dia seguinte. A contagem é serializada por cliente com `pg_try_advisory_xact_lock`
+(sem espera: se outra instância detém o bloqueio, a notificação fica para a próxima execução). Lembretes de faturas
+pagas, canceladas, baixadas ou quitadas por nota de crédito são cancelados pelo consumidor
+`collections.invoice_resolved` e, de novo, na verificação do envio; um lembrete com passo posterior
+registrado para a mesma fatura é cancelado como substituído, e um lembrete de vencimento próximo
+ainda não enviado quando o vencimento passa é cancelado. A primeira política criada passa a ser a
+padrão; criação e alteração de políticas se serializam por tenant (`pg_advisory_xact_lock`) antes
+de ler a padrão, de modo que gravações simultâneas não produzem duas políticas padrão.
+**Justificativa:** agendar só o passo mais recente evita várias mensagens de uma vez após atraso
+do worker; aplicar janela e limite no envio vale também para retentativas e para mudanças da
+política depois do agendamento.
+**Consequências:** um passo perdido por indisponibilidade não é enviado depois. A régua exige o
+recurso `email_dunning` do plano da plataforma. As faturas candidatas são percorridas em páginas
+(cursor por vencimento e ID). A descoberta de tenants dos jobs `collections.run`,
+`notifications.dispatch` e `webhooks.deliver` também é paginada (funções `app_tenants_*` com cursor
+pelo ID do tenant, em ordem crescente), e cada execução começa depois do último tenant visitado na
+anterior (rodízio): nenhum limite fixo deixa tenants de fora, e uma execução interrompida é
+retomada de onde parou. Na API, `PATCH /api/v1/collection-policies/{id}` exige `If-Match` e
+mantém os campos opcionais omitidos (`is_default`, `suspend_after_days`, `reactivate_on_payment`);
+`suspend_after_days: null` remove a suspensão. A política deixa de ser a padrão quando outra é
+marcada como padrão ou quando `is_default: false` é enviado explicitamente; nesse caso o tenant
+fica sem régua até definir outra padrão.
+
+## ADR-041 Inadimplência, suspensão e reativação pela política
+**Status:** aceita.
+**Decisão:** a fatura vencida e em aberto recebe um registro único em `invoice_delinquencies`, o
+que torna o evento `invoice.overdue` idempotente, e a assinatura ativa passa a `past_due`. Faturas
+avulsas e de assinaturas fora de `active` e `past_due` (canceladas, suspensas ou em avaliação)
+também são marcadas, sem alterar a assinatura. A assinatura em `past_due` volta a `active` quando não
+restam faturas vencidas em aberto: no pagamento e na nota de crédito (na mesma transação) e, para
+fatura cancelada ou baixada como incobrável, pelo consumidor da fatura resolvida ou pela execução
+seguinte do job (a descoberta inclui tenants com assinaturas em `past_due`). Quando a
+fatura vencida mais antiga atinge `suspend_after_days` dias civis de atraso, a assinatura é suspensa
+pela política na mesma transação do registro em `collection_suspensions` (uma ativa por assinatura),
+do histórico (com `origin = collection_policy`), do evento, da auditoria (ator do sistema) e do aviso
+`subscription_suspended`. Somente essas suspensões são reativadas automaticamente: sem faturas
+vencidas em aberto e com `reactivate_on_payment` na política que suspendeu, a assinatura é reativada
+pela regra de reativação do domínio (consumidor da fatura resolvida e job). Reativação manual ou
+cancelamento encerram o registro como `released` na revisão seguinte da assinatura; uma reativação
+manual com a mesma fatura ainda vencida não é desfeita pela régua. A suspensão vigente só é
+considerada da política se o instante da suspensão da assinatura for o do registro: uma reativação
+manual seguida de nova suspensão manual libera o registro em vez de reativar a assinatura.
+**Ordem de bloqueio:** as faturas vencidas da assinatura são bloqueadas em modo compartilhado (em
+ordem de ID) antes da assinatura (`FOR UPDATE`), e as gravações com chave estrangeira para cliente
+vêm por último (ADR-031). Antes de gravar uma notificação, o adaptador bloqueia explicitamente as
+linhas referenciadas (`FOR KEY SHARE`) na ordem fatura, assinatura e cliente, porque a verificação
+das chaves estrangeiras seguiria a ordem de criação das restrições.
+**Consequências:** suspensões manuais nunca são revertidas pela régua; execuções concorrentes do job
+e do consumidor se serializam na assinatura sem duplicar registros (verificado em teste de
+integração concorrente).
+
+## ADR-042 Notificações com identidade de negócio, conteúdo cifrado e envio com lease
+**Status:** aceita.
+**Decisão:** cada notificação tem `business_key` única por tenant (por exemplo, fatura e passo); a
+gravação usa `ON CONFLICT DO NOTHING`, de modo que reentregas e execuções concorrentes não duplicam
+o envio. As situações seguem o contrato (`scheduled`, `sending`, `sent`, `failed`, `canceled`,
+`suppressed`), com motivo estável e histórico imutável em `notification_events`. O conteúdo é
+renderizado no agendamento e gravado cifrado com o keyring (AAD: tenant e notificação); assunto e
+destinatários ficam em claro para o histórico. Os destinatários são os contatos com
+`receives_billing_email` (sem contatos, o e-mail principal do cliente) e são reavaliados no envio;
+sem destinatário, a notificação é suprimida. O job `notifications.dispatch` reivindica notificações
+vencidas com `FOR UPDATE SKIP LOCKED` e lease numa transação curta, envia fora de transação e grava o
+resultado somente se o número de tentativas não mudou (token de exclusão). O resultado é gravado com
+contexto desvinculado do job (com tempo limite próprio), para que um desligamento ou o tempo limite
+da tarefa logo após o aceite do SMTP não deixe a notificação em `sending` e não leve a reenvio.
+Falhas transitórias voltam a `scheduled` com espera de 1 min, 5 min, 15 min e 1 h (jitter de ±20%),
+até 5 tentativas; respostas SMTP 5xx encerram como `failed`. Recusas de destinatários no `RCPT` não
+impedem a entrega aos demais: a mensagem segue para os aceitos e os recusados ficam em `last_error`
+e no histórico; o envio só falha se nenhum destinatário for aceito (permanente se todas as recusas
+forem 5xx). Depois da resposta ao `DATA`, uma falha no `QUIT` não conta como falha de envio. Uma
+notificação cujo conteúdo não decifra (chave retirada do keyring ou dado corrompido) é encerrada
+como `failed` com o motivo `content_unavailable`, sem interromper o envio das demais do tenant. O
+SMTP usa tempo limite por envio e o modo TLS da configuração (`starttls` falha se o servidor não
+oferecer STARTTLS; `none` é recusado em produção).
+**Consequências:** a entrega é pelo menos uma vez: um worker interrompido após o aceite do SMTP e
+antes do registro leva a um reenvio após o lease; o `Message-ID` é estável por notificação
+(`<id@domínio do remetente>`), o que permite ao destinatário identificar duplicatas. O histórico da
+API (`GET /api/v1/notifications`) traz identidade de negócio, destinatários, assunto, situação e
+tentativas, nunca o conteúdo decifrado. O worker conta os resultados do envio em
+`recorvia_notifications_dispatched_total{outcome}`, sem rótulos de tenant, cliente ou fatura.
+
+## ADR-043 Templates de texto simples com lista fechada de variáveis
+**Status:** aceita.
+**Decisão:** o tenant personaliza assunto e corpo dos templates `invoice_issued`,
+`reminder_before_due`, `reminder_after_due`, `payment_confirmed` e `subscription_suspended` em texto
+simples com variáveis `{{nome}}` de uma lista fechada por template; variáveis desconhecidas, chaves
+malformadas, caracteres inválidos e assunto com quebra de linha são rejeitados na gravação. Sem
+personalização vale o padrão do sistema. A renderização remove caracteres de controle dos valores,
+reduz o assunto a uma linha e gera a versão HTML escapando todo o texto (inclusive o do tenant);
+somente variáveis de URL com esquema http ou https viram link. O convite de membro usa sempre o
+template do sistema.
+**Justificativa:** HTML livre do tenant exigiria sanitização complexa e abriria espaço para
+conteúdo malicioso enviado em nome da plataforma.
+
+## ADR-044 E-mail de convite pelo evento `member.invited` com token cifrado
+**Status:** aceita.
+**Contexto:** o token do convite é guardado apenas como hash (RF-01), mas o e-mail precisa do link
+de aceite e é enviado pelo worker a partir do evento.
+**Decisão:** ao criar o convite, o caso de uso cifra o token com o keyring (AAD: tenant e convite) e
+o inclui no payload de `member.invited`. O consumidor `notifications.member_invited` decifra o
+token, monta o link com a URL pública e grava a notificação com o conteúdo cifrado. Convite que
+deixou de estar pendente (aceito, revogado ou expirado) não é enviado; evento sem token (ou com
+token que não decifra) gera notificação suprimida com o motivo.
+**Consequências:** o token nunca fica em claro no banco; o ciphertext permanece na outbox até a
+retenção de eventos publicados (7 dias, a mesma validade do convite).
+
+## ADR-045 Webhooks enviados no formato Standard Webhooks, com rotação e proteção SSRF
+**Status:** aceita (complementa a ADR-017).
+**Decisão:** as entregas usam os cabeçalhos `webhook-id` (id do evento da outbox, estável entre
+tentativas e reenvios), `webhook-timestamp` (segundos Unix da tentativa) e `webhook-signature`
+(`v1,<base64>` por segredo válido, separados por espaço), com HMAC-SHA256 sobre
+`id.timestamp.corpo`; o corpo é idêntico em todas as tentativas. Os segredos (`whsec_` + 256 bits)
+são cifrados com o keyring e exibidos uma única vez. A rotação cria um novo segredo corrente e
+mantém os anteriores válidos pela janela informada (0 a 168 h, padrão 24 h, validada como inteiro
+antes da conversão em duração), período em que as entregas levam todas as assinaturas válidas; valem
+no máximo 5 segredos ao mesmo tempo, e a rotação encerra os anteriores mais antigos além desse
+limite, de modo que a listagem coincide com os segredos que assinam as entregas. Um segredo que não
+decifra é ignorado na assinatura; sem nenhum segredo utilizável, a entrega é encerrada com o motivo.
+O consumidor `webhooks.fanout` grava o evento e uma entrega por endpoint ativo que o assina (única
+por endpoint e evento); o job
+`webhooks.deliver` reivindica entregas com lease, faz a requisição fora de transação e registra cada
+tentativa. Retentativas usam backoff exponencial (30 s dobrando até 6 h, jitter de ±20%) até 10
+tentativas; destino bloqueado pela proteção SSRF encerra a entrega. O reenvio manual (auditado)
+concede uma tentativa adicional imediata, até o total de 100 tentativas por entrega (além disso,
+`409 delivery_attempts_limit`). Um tenant com destinos lentos não retém os demais: cada tenant tem
+um orçamento de tempo por execução (20 s) e a execução tem o seu (1 min, abaixo do tempo limite da
+tarefa); esgotado o orçamento, as entregas reivindicadas e não tentadas voltam à fila sem consumir
+tentativa e a execução seguinte começa pelos tenants restantes (rodízio). Após 3 tentativas
+seguidas sem resposta de um endpoint na mesma execução (tempo esgotado ou conexão recusada), as
+demais entregas dele são adiadas por 5 min, também sem consumir tentativa. O resultado de cada
+tentativa é gravado com contexto desvinculado do job. O cliente HTTP resolve o DNS e recusa o
+destino se qualquer endereço for interno, conecta no IP validado e confere o endereço efetivo no
+`Dialer.Control` (DNS rebinding), não usa proxy do ambiente, não segue redirecionamentos, limita
+tempos e o corpo lido da resposta e exige https em produção. As exceções vêm somente de
+`RECORVIA_WEBHOOK_ALLOWED_PRIVATE_CIDRS` (proibidas em produção); endereços de metadados de nuvem
+(169.254.169.254, fd00:ec2::254 e equivalentes) nunca são aceitos. Endpoints e entregas exigem o
+recurso `outbound_webhooks` do plano da plataforma (criação, rotação, reenvio e alteração que deixa
+o endpoint ativo); desativar ou remover um endpoint é sempre permitido, inclusive após um downgrade.
+A remoção desativa o endpoint, retira-o da listagem e encerra as entregas pendentes. O limite de 20
+endpoints por tenant é contado sob bloqueio consultivo do tenant (`pg_advisory_xact_lock`), o que
+impede ultrapassá-lo com criações simultâneas. O limite de 2000 caracteres da URL vale para o valor
+informado e para a forma normalizada gravada.
+**Justificativa:** o formato Standard Webhooks tem bibliotecas de verificação conhecidas, e a
+validação do IP na conexão fecha a janela entre a checagem do DNS e a requisição.
+**Consequências:** a entrega é pelo menos uma vez; o destinatário deduplica pelo `webhook-id`. A API
+devolve o segredo somente nas respostas de criação e de rotação; listagens, histórico e auditoria
+mostram apenas identificador e validade de cada segredo. O worker conta os resultados das
+tentativas em `recorvia_webhook_deliveries_total{outcome}`, sem rótulos de tenant ou endpoint.
+
+## ADR-046 Credenciais de API: formato do token, hash e comparação em tempo constante
+**Status:** aceita.
+**Contexto:** integrações precisam de credenciais próprias (RF-14), sem depender da sessão do
+navegador, e o banco não pode guardar nada que permita reconstruir um token válido.
+**Decisão:** o token tem o formato `rcv_<identificador>_<segredo>`: identificador público de 80 bits
+e segredo de 256 bits gerados com `crypto/rand`, ambos em base32 minúsculo sem preenchimento (16 e
+52 caracteres, 73 no total). Somente o SHA-256 do segredo é persistido (`api_credentials`); um hash
+rápido basta porque o segredo é aleatório e não há espaço de busca a explorar. O token é exibido uma
+única vez, na criação ou na rotação. A autenticação localiza a credencial pelo identificador
+(`app_find_api_credential`, `SECURITY DEFINER`, que devolve apenas credencial e tenant) e compara o
+hash dentro da transação do tenant com `subtle.ConstantTimeCompare`, sempre contra o segredo vigente
+e contra o anterior (ou um valor neutro de mesmo tamanho), para que o tempo de resposta não indique
+qual hash coincidiu. O formato é validado antes de qualquer consulta, sem normalização. O último uso
+(`last_used_at`) é registrado com resolução de 1 minuto para não gerar uma escrita por requisição.
+**Consequências:** a listagem mostra apenas o prefixo (`rcv_<identificador>`); um segredo perdido
+exige rotação. O prefixo fixo facilita a detecção de vazamentos por varredura de segredos. Cada
+organização tem no máximo 50 credenciais ativas (`api_credential_limit`, 409); a criação bloqueia a
+linha da organização com `FOR NO KEY UPDATE` antes de contar as ativas, o que serializa criações
+simultâneas sem conflitar com inserções que apenas referenciam a organização. Como credenciais nunca
+são excluídas, a listagem (sem cursor no contrato) traz sempre todas as ativas primeiro e completa
+o limite de 200 itens com as revogadas e expiradas mais recentes.
+
+## ADR-047 Escopos das credenciais limitados a quem as emite
+**Status:** aceita.
+**Decisão:** os escopos são permissões existentes de `internal/tenancy/permissions.go`, validadas,
+sem repetição e em ordem estável. Na criação, cada escopo precisa ser concedido ao papel de quem
+cria (`scope_exceeds_permissions`, 403). `members.manage`, `platform_billing.manage` e
+`api_credentials.manage` não são delegáveis: exigem uma pessoa identificada, e uma credencial não pode
+emitir nem administrar outras credenciais. Em cada requisição, os escopos efetivos são a interseção
+dos escopos gravados com as permissões atuais do papel de quem emitiu o segredo vigente (quem
+rotacionou por último ou, sem rotação, quem criou); se essa pessoa deixar a organização, a credencial
+para de autenticar (`api_credential_issuer_inactive`, 403) até ser rotacionada por um membro ativo,
+que passa a ser o responsável. A criação e a rotação exigem o recurso `api_access` do plano da
+plataforma, também verificado a cada requisição (troca para um plano sem o recurso suspende o uso);
+a revogação e a listagem não dependem do plano. Escopos, nome, autoria e validade são imutáveis no
+banco (gatilho `app_api_credentials_guard`).
+**Consequências:** rebaixar um membro reduz imediatamente as credenciais que ele emitiu, sem regravá-las.
+Rotas de conta e de sessão (`Authenticated`) e a gestão de credenciais não aceitam credenciais.
+
+## ADR-048 Rotação com janela de 24 horas e revogação imediata
+**Status:** aceita.
+**Decisão:** a rotação troca o segredo da mesma credencial (identificador, nome, escopos e validade
+mantidos) e guarda o hash anterior com validade de 24 horas (`previous_secret_expires_at`, nunca além
+da validade da credencial), prazo informado no contrato da API. Uma nova rotação dentro da janela
+descarta imediatamente o segredo de antes da primeira: no máximo dois segredos valem ao mesmo tempo. A
+revogação invalida os dois na hora e é idempotente; credencial revogada não pode ser alterada nem
+reativada (gatilho). Rotação de credencial revogada ou expirada é recusada (409). Rotações concorrentes
+são serializadas pelo bloqueio da linha e pela versão.
+**Justificativa:** manter o identificador preserva o cliente de idempotência e o histórico de uso; a
+janela permite trocar o segredo na integração sem indisponibilidade.
+
+## ADR-049 Autenticação Bearer na mesma pilha da sessão do navegador
+**Status:** aceita.
+**Decisão:** o middleware de autenticação aceita `Authorization: Bearer rcv_…`, que tem precedência
+sobre o cookie, e, sem esse header, mantém a sessão por cookie. Um `Authorization` em outro formato
+(por exemplo, HTTP Basic de um proxy à frente da aplicação, que o navegador repete em todas as
+requisições) é ignorado quando há cookie de sessão; sem cookie, é tratado como credencial inválida
+(401 `api_credential_invalid`). Com Bearer, o principal é do tipo `api_credential`: o tenant é o da
+credencial (um `X-Recorvia-Tenant` divergente gera 409 `tenant_mismatch`), a permissão da rota é
+verificada pelos escopos efetivos, não há verificação CSRF (navegadores não enviam `Bearer` por
+conta própria e o CORS só libera origens configuradas), a auditoria registra o ator
+`api_credential`, o cliente de idempotência é `api_credential:<id>` e o limite de taxa é por
+credencial (`RECORVIA_API_CREDENTIAL_RATE_LIMIT_PER_MINUTE`, padrão 600). Colunas de autoria que
+referenciam `users` ficam nulas nas ações feitas por credencial; a autoria completa fica na auditoria.
+Respostas 401 incluem `WWW-Authenticate: Bearer`.
+**Consequências:** as rotas existentes passam a servir integrações sem duplicação; nenhuma rota de
+tenant precisa saber o tipo do principal além da autoria.
+
+## ADR-050 Portal do cliente: link de uso único e sessão restrita
+**Status:** aceita.
+**Decisão:** o link (`customer_portal_links`) guarda apenas o SHA-256 de um token de 256 bits e vale
+por 72 horas por padrão (`RECORVIA_PORTAL_LINK_TTL`, de 15 minutos a 30 dias). Cada cliente tem no
+máximo um link não revogado (índice único parcial): gerar um novo link revoga o anterior, pendente ou
+já trocado, o que também encerra a sessão aberta com ele; é a forma de revogação disponível no
+contrato. A geração bloqueia o cliente com `FOR NO KEY UPDATE`, serializando gerações concorrentes sem
+conflitar com inserções que apenas referenciam o cliente. `GET /portal/access` localiza o link pelo
+hash (`app_find_portal_link`), bloqueia a linha, exige link pendente, cliente e organização ativos,
+marca o uso, audita com o ator `customer_portal` e grava a sessão no Redis antes do commit; se o
+commit falhar, a sessão é descartada, e se o Redis falhar o link continua utilizável. A sessão tem
+namespace e cookie próprios (`recorvia_portal`; `__Host-` em produção), `HttpOnly`, `Secure`
+conforme a configuração, `SameSite=Strict`, token CSRF próprio, duração máxima de 2 horas
+(`RECORVIA_PORTAL_SESSION_TTL`) e encerramento após 30 minutos sem uso
+(`RECORVIA_PORTAL_SESSION_IDLE_TTL`). Toda requisição do portal revalida a sessão contra o link de
+origem (não revogado), o cliente e a organização (ativos), na transação do tenant gravado na sessão.
+**Escopo dos dados:** tenant e cliente vêm sempre da sessão, nunca da requisição. As consultas do
+portal (`db/queries/portal.sql`) filtram `tenant_id` e `customer_id` e excluem rascunhos; o caso de
+uso confere de novo cliente, tenant e situação antes de responder, e fatura de outro cliente, de
+outro tenant ou em rascunho responde 404 `invoice_not_found`. A listagem traz as 100 faturas emitidas
+mais recentes, sem paginação (o contrato não prevê cursor), com itens pelo valor líquido do desconto
+(a soma é o total) e sem histórico, cobranças ou identificadores internos. O link de pagamento
+hospedado é o da tentativa mais recente aguardando pagamento, exibido apenas para fatura em aberto
+com saldo e apenas com esquema `http(s)` absoluto. O documento comercial é o mesmo HTML do painel
+(sem scripts, CSP restritiva); para o cliente, a baixa como incobrável, registro interno da
+organização, aparece como "Encerrada", no documento e na interface. As preferências de contato alteram somente
+`receives_billing_email` de contatos do próprio cliente (contato alheio responde 404 e nada da
+requisição é aplicado), com o cliente bloqueado durante a alteração; somente mudanças efetivas são
+gravadas e auditadas (`customer.contact_preferences_updated`, ator `customer_portal`, sem e-mails nos
+detalhes).
+**Consequências:** o portal nunca aceita a sessão do painel nem credenciais de API, e vice-versa.
+Arquivar o cliente, suspender a organização ou gerar novo link encerra o acesso na requisição
+seguinte. Uma sessão órfã (commit perdido depois da gravação no Redis) não é alcançável: o
+identificador nunca chegou ao navegador. Um link inválido em `GET /portal/access` responde 401 com
+`application/problem+json`, como define o contrato; uma página amigável para esse caso exigiria
+alterar o contrato.
+
+## ADR-051 Limitação de tentativas de autenticação por origem
+**Status:** aceita.
+**Decisão:** tentativas inválidas de troca de link do portal e de autenticação por credencial
+(token malformado, desconhecido, expirado, revogado, já usado ou com segredo errado) incrementam um
+contador por origem (IP) no Redis, em janela fixa iniciada na primeira falha; a chave guarda apenas o
+hash da origem. Com 10 falhas em 15 minutos no portal ou 30 falhas em 10 minutos nas credenciais, a
+origem recebe 429 mesmo com um token válido até a janela terminar. A rota `/portal/access` tem também
+limite de 30 requisições por minuto por IP. Falhas de infraestrutura não contam como tentativas
+inválidas, e a indisponibilidade do contador libera a verificação (os limites são proteção
+auxiliar; o token continua sendo verificado).
+**Consequências:** varreduras de identificadores e de links custam pouco ao banco; uma integração
+com token revogado é bloqueada temporariamente pela própria origem, sem afetar outras origens.
+
 ## ADR-052 Observabilidade local em perfil opcional, com configurações nas imagens
 **Status:** aceita.
 **Contexto:** a API e o worker já expunham métricas Prometheus e rastreamento OpenTelemetry
