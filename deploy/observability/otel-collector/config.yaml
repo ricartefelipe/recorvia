@@ -1,0 +1,67 @@
+# OpenTelemetry Collector do ambiente local (perfil observability).
+# Recebe OTLP da API e do worker, remove atributos sensíveis dos spans e
+# encaminha os rastros ao Jaeger. As métricas de negócio não passam pelo
+# Collector: o Prometheus coleta diretamente /metrics de cada processo.
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  # Redação antes de qualquer exportação (conferida por
+  # TestCollectorRedactsSensitiveSpanAttributes):
+  # - o token opaco que identifica a conta do provedor faz parte do caminho
+  #   dos webhooks recebidos (/webhooks/providers/{provedor}/{token});
+  # - a consulta da URL pode conter tokens de uso único;
+  # - o endereço do cliente final (ou do par da conexão) é dado pessoal e não
+  #   é necessário para o diagnóstico.
+  transform/redact:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          - replace_pattern(attributes["url.path"], "^/webhooks/providers/([^/]+)/[^/]+$", "/webhooks/providers/$$1/{token}")
+          - replace_pattern(attributes["url.full"], "/webhooks/providers/([^/?]+)/[^/?]+", "/webhooks/providers/$$1/{token}")
+          - replace_pattern(attributes["url.full"], "[?].*", "")
+          - delete_key(attributes, "url.query")
+          - delete_key(attributes, "client.address")
+          - delete_key(attributes, "network.peer.address")
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+
+exporters:
+  otlp_grpc/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      level: normal
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/redact, batch]
+      exporters: [otlp_grpc/jaeger]

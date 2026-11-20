@@ -1,0 +1,416 @@
+# Regras de alerta do Recorvia. Somente métricas existentes no código
+# (internal/infra/telemetry), no plugin rabbitmq_prometheus, o "up" e o
+# process_start_time_seconds das coletas; nenhum rótulo identifica tenant,
+# cliente ou fatura. As regras de reembolso usam métricas que chegam com a
+# etapa 5 (recebíveis e conciliação) e ficam sem dados até a integração. Os limites são
+# pontos de partida para o ambiente local e devem ser calibrados com o
+# volume real. Catálogo e justificativas: docs/operacao/observabilidade.md.
+#
+# Convenções: severity=critical exige ação imediata (perda de processamento
+# ou de dinheiro em risco); severity=warning exige análise no mesmo dia.
+# A anotação "runbook" aponta para o procedimento em docs/operacao/runbooks.
+#
+# Filas principais: recorvia.<consumidor>, sem os sufixos .retry.N e .dlq.
+
+groups:
+  - name: recorvia-alvos
+    rules:
+      - alert: RecorviaTargetDown
+        expr: up{job=~"recorvia-api|recorvia-worker|rabbitmq"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          area: plataforma
+        annotations:
+          summary: "Coleta de métricas falhando para {{ $labels.job }}"
+          description: "O Prometheus não consegue coletar {{ $labels.instance }} há 2 minutos: processo parado, reiniciando ou inacessível."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#processo-ou-broker-indisponivel
+
+  - name: recorvia-mensageria
+    rules:
+      - alert: RecorviaOutboxBacklog
+        expr: max(recorvia_outbox_pending) > 1000
+        for: 10m
+        labels:
+          severity: warning
+          area: mensageria
+        annotations:
+          summary: "Outbox com {{ $value }} eventos pendentes"
+          description: "Eventos gravados e ainda não publicados no RabbitMQ acima de 1000 por 10 minutos."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#outbox-acumulada-ou-parada
+      - alert: RecorviaOutboxStalled
+        expr: max(recorvia_outbox_oldest_pending_seconds) > 300
+        for: 5m
+        labels:
+          severity: critical
+          area: mensageria
+        annotations:
+          summary: "Evento mais antigo da outbox pendente há {{ $value | humanizeDuration }}"
+          description: "A publicação da outbox está parada ou atrasada: cobranças, webhooks e notas de crédito não avançam."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#outbox-acumulada-ou-parada
+      - alert: RecorviaOutboxPublishFailures
+        expr: sum(increase(recorvia_outbox_publish_failures_total[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+          area: mensageria
+        annotations:
+          summary: "Falhas de publicação da outbox há mais de 10 minutos"
+          description: "O relay não obtém confirmação do broker; os eventos são reenviados após o lease."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#outbox-acumulada-ou-parada
+      - alert: RecorviaQueueBacklog
+        expr: max by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~"recorvia\\..+", queue!~".+\\.(retry\\.[0-9]+|dlq)"}) > 500
+        for: 10m
+        labels:
+          severity: warning
+          area: mensageria
+        annotations:
+          summary: "Fila {{ $labels.queue }} com {{ $value }} mensagens prontas"
+          description: "Mensagens aguardando consumo acima de 500 por 10 minutos."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#fila-acumulada-ou-atrasada
+      - alert: RecorviaQueueLag
+        expr: time() - min by (queue) (rabbitmq_detailed_queue_head_message_timestamp{queue=~"recorvia\\..+", queue!~".+\\.(retry\\.[0-9]+|dlq)"} > 0) > 300
+        for: 5m
+        labels:
+          severity: warning
+          area: mensageria
+        annotations:
+          summary: "Fila {{ $labels.queue }} com atraso de {{ $value | humanizeDuration }}"
+          description: "A mensagem na cabeça da fila ocorreu há mais de 5 minutos (carimbo de tempo do evento)."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#fila-acumulada-ou-atrasada
+      - alert: RecorviaQueueWithoutConsumer
+        expr: max by (queue) (rabbitmq_detailed_queue_consumers{queue=~"recorvia\\..+", queue!~".+\\.(retry\\.[0-9]+|dlq)"}) == 0
+        for: 5m
+        labels:
+          severity: critical
+          area: mensageria
+        annotations:
+          summary: "Fila {{ $labels.queue }} sem consumidor"
+          description: "Nenhum worker consome a fila há 5 minutos; os eventos acumulam sem processamento."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#processo-ou-broker-indisponivel
+      - alert: RecorviaDeadLetterQueueNotDrained
+        expr: max by (queue) (rabbitmq_detailed_queue_messages{queue=~"recorvia\\..+\\.dlq"}) > 0
+        for: 10m
+        labels:
+          severity: warning
+          area: mensageria
+        annotations:
+          summary: "DLQ {{ $labels.queue }} com {{ $value }} mensagens não registradas"
+          description: "O registrador da DLQ não está gravando as mensagens em dead_letters (banco indisponível ou falha de gravação)."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#dlq-nao-esvaziada
+      - alert: RecorviaMessagesDeadLettered
+        expr: sum by (consumer) (increase(recorvia_consumer_messages_total{outcome="dead_letter"}[15m])) > 0
+        labels:
+          severity: warning
+          area: mensageria
+        annotations:
+          summary: "Mensagens enviadas à DLQ pelo consumidor {{ $labels.consumer }}"
+          description: "Mensagens esgotaram as retentativas ou foram rejeitadas como inválidas e aguardam triagem."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#mensagens-na-dlq
+      - alert: RecorviaConsumerRetryRate
+        expr: |
+          sum by (consumer) (rate(recorvia_consumer_messages_total{outcome="retry"}[10m]))
+            / sum by (consumer) (rate(recorvia_consumer_messages_total[10m])) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+          area: mensageria
+        annotations:
+          summary: "Consumidor {{ $labels.consumer }} com {{ $value | humanizePercentage }} de retentativas"
+          description: "Mais de 10% das mensagens processadas voltaram para as filas de espera nos últimos 15 minutos."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#retentativas-elevadas
+      - alert: RecorviaMessagesRequeued
+        expr: sum by (consumer) (increase(recorvia_consumer_messages_total{outcome="requeue"}[10m])) > 0
+        labels:
+          severity: warning
+          area: mensageria
+        annotations:
+          summary: "Mensagens devolvidas à fila pelo consumidor {{ $labels.consumer }}"
+          description: "Não foi possível publicar a retentativa ou a DLQ; a mensagem voltou à fila principal."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#retentativas-elevadas
+      - alert: RecorviaWorkerSaturated
+        expr: max by (instance, consumer) (recorvia_consumer_in_flight / recorvia_consumer_concurrency) >= 0.9
+        for: 15m
+        labels:
+          severity: warning
+          area: mensageria
+        annotations:
+          summary: "Consumidor {{ $labels.consumer }} saturado em {{ $labels.instance }}"
+          description: "Todas as vagas de processamento ocupadas por 15 minutos: aumentar a concorrência ou investigar lentidão."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#worker-saturado
+
+  - name: recorvia-cobranca
+    rules:
+      - alert: RecorviaChargesDeclined
+        expr: sum by (provider) (increase(recorvia_charge_failures_total{kind="permanent"}[30m])) > 5
+        labels:
+          severity: warning
+          area: cobranca
+        annotations:
+          summary: "Provedor {{ $labels.provider }} recusou cobranças nos últimos 30 minutos"
+          description: "Recusas definitivas na criação de cobranças (validação, credencial ou cadastro do cliente)."
+          runbook: docs/operacao/runbooks/faturamento.md#falhas-de-cobranca
+      - alert: RecorviaPaymentProviderUnavailable
+        expr: sum by (provider) (increase(recorvia_charge_failures_total{kind=~"retryable|ambiguous"}[10m])) > 3
+        for: 5m
+        labels:
+          severity: critical
+          area: cobranca
+        annotations:
+          summary: "Provedor {{ $labels.provider }} indisponível ou sem resposta"
+          description: "Falhas repetíveis ou ambíguas na criação de cobranças; operações ficam pendentes ou com resultado desconhecido."
+          runbook: docs/operacao/runbooks/faturamento.md#falhas-de-cobranca
+      - alert: RecorviaPaymentOperationsUnknown
+        expr: max(recorvia_payment_operations{status="unknown"}) > 0
+        for: 30m
+        labels:
+          severity: warning
+          area: cobranca
+        annotations:
+          summary: "{{ $value }} operações com resultado desconhecido há 30 minutos"
+          description: "Chamadas ao provedor sem confirmação segura; a recuperação consulta pela referência externa e o restante vai para a conciliação."
+          runbook: docs/operacao/runbooks/conciliacao.md#operacoes-com-resultado-desconhecido
+      - alert: RecorviaPaymentOperationsExhausted
+        # As esgotadas em "unknown" já são cobertas por
+        # RecorviaPaymentOperationsUnknown (seguem para a conciliação).
+        expr: max by (status) (recorvia_payment_operations_exhausted{status=~"pending|in_flight"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+          area: cobranca
+        annotations:
+          summary: "{{ $value }} operações de pagamento esgotadas ({{ $labels.status }})"
+          description: "Operações que chegaram ao limite de tentativas automáticas sem confirmação e não são mais retomadas pela recuperação: as faturas ficam sem cobrança."
+          runbook: docs/operacao/runbooks/conciliacao.md#operacoes-esgotadas
+      - alert: RecorviaPaymentOperationsPending
+        expr: max(recorvia_payment_operations{status="pending"}) > 50
+        for: 15m
+        labels:
+          severity: warning
+          area: cobranca
+        annotations:
+          summary: "{{ $value }} operações de pagamento pendentes"
+          description: "Operações aguardando nova tentativa acima de 50 por 15 minutos."
+          runbook: docs/operacao/runbooks/faturamento.md#falhas-de-cobranca
+      - alert: RecorviaWebhooksRejected
+        # invalid (corpo malformado) fica de fora: é recusa definitiva de um
+        # envio isolado, contada no painel. too_large entra: um provedor real
+        # com corpo acima do limite perde o evento em todas as reentregas.
+        expr: sum by (provider, outcome) (increase(recorvia_provider_webhooks_total{outcome=~"unauthenticated|unknown_endpoint|too_large|error"}[15m])) > 5
+        labels:
+          severity: warning
+          area: cobranca
+        annotations:
+          summary: "Webhooks de {{ $labels.provider }} recusados ({{ $labels.outcome }})"
+          description: "Recebimentos recusados por autenticação, endpoint desconhecido, corpo acima do limite ou falha de persistência."
+          runbook: docs/operacao/runbooks/faturamento.md#webhooks-recusados
+
+  - name: recorvia-conciliacao
+    rules:
+      - alert: RecorviaReconciliationDiscrepanciesOpen
+        expr: max by (kind) (recorvia_reconciliation_open_discrepancies) > 0
+        for: 4h
+        labels:
+          severity: warning
+          area: conciliacao
+        annotations:
+          summary: "{{ $value }} divergências de conciliação abertas ({{ $labels.kind }})"
+          description: "Divergências abertas há mais de 4 horas aguardam análise e resolução com justificativa."
+          runbook: docs/operacao/runbooks/conciliacao.md#divergencias-abertas
+      - alert: RecorviaReconciliationDiscrepanciesHigh
+        expr: sum(max by (kind) (recorvia_reconciliation_open_discrepancies)) > 25
+        for: 30m
+        labels:
+          severity: critical
+          area: conciliacao
+        annotations:
+          summary: "{{ $value }} divergências de conciliação abertas"
+          description: "Volume de divergências indica falha sistêmica (webhooks não processados, provedor ou relatório de liquidação)."
+          runbook: docs/operacao/runbooks/conciliacao.md#divergencias-abertas
+      # recorvia_refunds_in_progress e recorvia_refunds_total são exportadas
+      # pela etapa 5 (recebíveis e conciliação), ainda não integrada.
+      - alert: RecorviaRefundsUnknown
+        expr: max(recorvia_refunds_in_progress{status="unknown"}) > 0
+        for: 30m
+        labels:
+          severity: warning
+          area: conciliacao
+        annotations:
+          summary: "{{ $value }} reembolsos com resultado desconhecido há 30 minutos"
+          description: "Pedidos de reembolso sem confirmação segura do provedor: o cliente pode ter sido reembolsado sem registro local."
+          runbook: docs/operacao/runbooks/conciliacao.md#reembolsos-sem-confirmacao
+      - alert: RecorviaRefundsFailed
+        expr: sum(increase(recorvia_refunds_total{outcome="failed"}[1h])) > 0
+        labels:
+          severity: warning
+          area: conciliacao
+        annotations:
+          summary: "Reembolsos recusados pelo provedor na última hora"
+          description: "O valor não foi devolvido ao cliente; o reembolso precisa de nova solicitação ou de devolução por outro meio."
+          runbook: docs/operacao/runbooks/conciliacao.md#reembolsos-sem-confirmacao
+
+  - name: recorvia-faturamento
+    rules:
+      # O último sucesso só existe depois de um sucesso real: sem nenhum
+      # sucesso desde a partida do worker (reinício com a tarefa falhando ou
+      # reivindicação falhando a cada ciclo), a série não existe e a segunda
+      # parte usa a idade do processo mais antigo, que é o mínimo do tempo
+      # sem sucesso.
+      - alert: RecorviaBillingCycleStale
+        expr: |
+          time() - max(recorvia_job_last_success_timestamp_seconds{task="billing.run_cycle"}) > 900
+            or
+          (time() - min(process_start_time_seconds{job="recorvia-worker"}) > 900
+            and on () absent(recorvia_job_last_success_timestamp_seconds{task="billing.run_cycle"}))
+        labels:
+          severity: critical
+          area: faturamento
+        annotations:
+          summary: "Motor de faturamento sem sucesso há {{ $value | humanizeDuration }}"
+          description: "A tarefa billing.run_cycle (intervalo de 1 minuto) não conclui com sucesso há mais de 15 minutos, ou não concluiu nenhuma vez desde a partida do worker."
+          runbook: docs/operacao/runbooks/faturamento.md#motor-de-faturamento-parado
+      - alert: RecorviaScheduledTaskFailing
+        expr: sum by (task) (increase(recorvia_job_runs_total{outcome="failure"}[30m])) >= 3
+        labels:
+          severity: warning
+          area: faturamento
+        annotations:
+          summary: "Tarefa agendada {{ $labels.task }} falhando"
+          description: "Três ou mais falhas da tarefa nos últimos 30 minutos."
+          runbook: docs/operacao/runbooks/faturamento.md#tarefas-agendadas-falhando
+      # Proporcional ao intervalo de cada tarefa: as horárias e a diária
+      # nunca chegam a três falhas em 30 minutos (a próxima execução é
+      # agendada um intervalo depois, mesmo após falha). Três intervalos, no
+      # mínimo 15 minutos. O motor de faturamento e a coleta de métricas têm
+      # alertas próprios.
+      - alert: RecorviaScheduledTaskStale
+        expr: |
+          (
+            time() - max by (task) (recorvia_job_last_success_timestamp_seconds{task!~"billing\\.run_cycle|metrics\\.collect"})
+              > on (task) clamp_min(3 * max by (task) (recorvia_job_interval_seconds), 900)
+          )
+          or
+          (
+            max by (task) (recorvia_job_interval_seconds{task!~"billing\\.run_cycle|metrics\\.collect"}) * 0
+              + on () group_left () (time() - min(process_start_time_seconds{job="recorvia-worker"}))
+              > on (task) clamp_min(3 * max by (task) (recorvia_job_interval_seconds), 900)
+            unless on (task) max by (task) (recorvia_job_last_success_timestamp_seconds)
+          )
+        labels:
+          severity: warning
+          area: faturamento
+        annotations:
+          summary: "Tarefa agendada {{ $labels.task }} sem sucesso há {{ $value | humanizeDuration }}"
+          description: "A tarefa não conclui com sucesso há mais de três intervalos (no mínimo 15 minutos): falha a cada execução ou não é executada."
+          runbook: docs/operacao/runbooks/faturamento.md#tarefas-agendadas-falhando
+      - alert: RecorviaMetricsCollectionStale
+        expr: |
+          time() - max(recorvia_job_last_success_timestamp_seconds{task="metrics.collect"}) > 120
+            or
+          (time() - min(process_start_time_seconds{job="recorvia-worker"}) > 120
+            and on () absent(recorvia_job_last_success_timestamp_seconds{task="metrics.collect"}))
+        labels:
+          severity: warning
+          area: faturamento
+        annotations:
+          summary: "Coleta de métricas do worker parada"
+          description: "A tarefa metrics.collect não conclui há mais de 2 minutos, ou não concluiu nenhuma vez desde a partida do worker; as métricas da outbox, das operações e do banco estão desatualizadas."
+          runbook: docs/operacao/runbooks/faturamento.md#tarefas-agendadas-falhando
+
+  - name: recorvia-notificacoes
+    rules:
+      - alert: RecorviaEmailDeliveryStalled
+        expr: |
+          sum(increase(recorvia_notifications_dispatched_total{outcome=~"retried|failed"}[15m])) > 0
+            and on () sum(increase(recorvia_notifications_dispatched_total{outcome="sent"}[15m])) == 0
+        for: 15m
+        labels:
+          severity: warning
+          area: notificacoes
+        annotations:
+          summary: "Envio de e-mails sem sucesso"
+          description: "Tentativas de envio falhando e nenhum e-mail aceito pelo servidor SMTP há pelo menos 15 minutos: servidor indisponível, credencial ou rede."
+          runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#envio-de-e-mails-parado
+      - alert: RecorviaNotificationsFailed
+        expr: sum(increase(recorvia_notifications_dispatched_total{outcome="failed"}[30m])) > 5
+        labels:
+          severity: warning
+          area: notificacoes
+        annotations:
+          summary: "Notificações com falha definitiva nos últimos 30 minutos"
+          description: "E-mails encerrados por recusa permanente do servidor SMTP, fim das tentativas ou conteúdo indisponível: o destinatário não foi avisado."
+          runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#notificacoes-com-falha-definitiva
+      - alert: RecorviaWebhookDeliveriesFailing
+        # Falhas de um destino isolado (endpoint do tenant fora do ar) não
+        # disparam enquanto outros destinos recebem.
+        expr: |
+          sum(increase(recorvia_webhook_deliveries_total{outcome=~"retrying|exhausted"}[30m])) >= 10
+            and on () sum(increase(recorvia_webhook_deliveries_total{outcome="succeeded"}[30m])) == 0
+        for: 15m
+        labels:
+          severity: warning
+          area: notificacoes
+        annotations:
+          summary: "Nenhuma entrega de webhook bem-sucedida em 30 minutos"
+          description: "Entregas de webhooks aos tenants falhando para todos os destinos: saída de rede, DNS ou proteção contra SSRF do worker."
+          runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#webhooks-enviados-sem-sucesso
+
+  - name: recorvia-banco
+    rules:
+      - alert: RecorviaDBPoolSaturated
+        expr: |
+          max by (service, instance) (recorvia_db_pool_connections{state="acquired"})
+            / max by (service, instance) (recorvia_db_pool_max_connections) >= 0.9
+        for: 5m
+        labels:
+          severity: warning
+          area: banco
+        annotations:
+          summary: "Pool de conexões de {{ $labels.service }} em {{ $value | humanizePercentage }}"
+          description: "Conexões em uso acima de 90% do pool por 5 minutos em {{ $labels.instance }}."
+          runbook: docs/operacao/runbooks/faturamento.md#conexoes-do-banco
+      - alert: RecorviaDBPoolWaiting
+        expr: sum by (service, instance) (rate(recorvia_db_pool_empty_acquire_wait_seconds_total[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+          area: banco
+        annotations:
+          summary: "Espera por conexão do banco em {{ $labels.service }}"
+          description: "Requisições aguardam conexão livre do pool (mais de 0,2 s de espera por segundo)."
+          runbook: docs/operacao/runbooks/faturamento.md#conexoes-do-banco
+      - alert: RecorviaDBServerConnectionsHigh
+        expr: max(recorvia_db_server_connections) / max(recorvia_db_server_max_connections) > 0.8
+        for: 10m
+        labels:
+          severity: critical
+          area: banco
+        annotations:
+          summary: "PostgreSQL com {{ $value | humanizePercentage }} das conexões em uso"
+          description: "Conexões de clientes acima de 80% do limite para papéis comuns; novas conexões serão recusadas no limite."
+          runbook: docs/operacao/runbooks/faturamento.md#conexoes-do-banco
+      - alert: RecorviaDependencyUnavailable
+        expr: min by (service, dependency) (recorvia_dependency_up) == 0
+        for: 2m
+        labels:
+          severity: critical
+          area: banco
+        annotations:
+          summary: "Dependência {{ $labels.dependency }} indisponível para {{ $labels.service }}"
+          description: "A última verificação da dependência falhou há pelo menos 2 minutos."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#processo-ou-broker-indisponivel
+
+  - name: recorvia-api
+    rules:
+      - alert: RecorviaHTTPErrorRate
+        expr: |
+          sum(rate(recorvia_http_requests_total{status_class="5xx"}[5m]))
+            / sum(rate(recorvia_http_requests_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          area: api
+        annotations:
+          summary: "{{ $value | humanizePercentage }} das requisições com erro 5xx"
+          description: "Taxa de erros internos acima de 5% por 10 minutos."
+          runbook: docs/operacao/runbooks/faturamento.md#erros-internos-da-api

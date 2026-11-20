@@ -1,0 +1,299 @@
+# Ambiente local do Recorvia. Uso: make up (docker compose up -d --build --wait).
+# Nenhum serviço depende de bind mount de arquivos do repositório: as
+# configurações entram nas imagens, o que funciona também com Docker Desktop.
+name: recorvia
+
+x-go-build: &go-build
+  context: .
+  dockerfile: deploy/docker/go.Dockerfile
+
+x-app-env: &app-env
+  RECORVIA_ENV: development
+  RECORVIA_LOG_LEVEL: info
+  RECORVIA_DATABASE_URL: postgres://recorvia_app:${RECORVIA_APP_PASSWORD}@postgres:5432/recorvia?sslmode=disable
+  RECORVIA_REDIS_URL: redis://redis:6379/0
+  RECORVIA_AMQP_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+  RECORVIA_PUBLIC_URL: http://localhost:${WEB_PORT:-8080}
+  RECORVIA_OIDC_ISSUER: http://localhost:${KEYCLOAK_PORT:-8180}/realms/recorvia
+  RECORVIA_OIDC_DISCOVERY_URL: http://keycloak:8080/realms/recorvia
+  RECORVIA_OIDC_CLIENT_ID: recorvia-web
+  RECORVIA_OIDC_CLIENT_SECRET: ${RECORVIA_OIDC_CLIENT_SECRET}
+  RECORVIA_OIDC_REDIRECT_URL: ${RECORVIA_OIDC_REDIRECT_URL:-http://localhost:8080/auth/callback}
+  RECORVIA_COOKIE_SECURE: "false"
+  RECORVIA_COOKIE_NAME: recorvia_session
+  RECORVIA_ENCRYPTION_KEYS: ${RECORVIA_ENCRYPTION_KEYS}
+  RECORVIA_ENCRYPTION_ACTIVE_KEY: ${RECORVIA_ENCRYPTION_ACTIVE_KEY}
+  RECORVIA_SMTP_ADDR: mailpit:1025
+  RECORVIA_SMTP_FROM: cobranca@recorvia.local
+  RECORVIA_SMTP_TLS: none
+  RECORVIA_SMTP_TIMEOUT: 15s
+  RECORVIA_PAYSIM_URL: http://paysim:8090
+  RECORVIA_WEBHOOK_PUBLIC_URL: http://api:8081/webhooks/providers
+  RECORVIA_WEBHOOK_ALLOWED_PRIVATE_CIDRS: 172.16.0.0/12,192.168.0.0/16,10.0.0.0/8
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
+services:
+  postgres:
+    image: postgres:18.7-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?defina no .env}
+      POSTGRES_DB: postgres
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate-bootstrap:
+    image: recorvia-migrate:local
+    build:
+      <<: *go-build
+      args: { CMD: migrate }
+    command: ["bootstrap"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      RECORVIA_BOOTSTRAP_DATABASE_URL: postgres://postgres:${POSTGRES_SUPERUSER_PASSWORD}@postgres:5432/postgres?sslmode=disable
+      RECORVIA_OWNER_PASSWORD: ${RECORVIA_OWNER_PASSWORD:?defina no .env}
+      RECORVIA_APP_PASSWORD: ${RECORVIA_APP_PASSWORD:?defina no .env}
+    restart: "no"
+
+  migrate:
+    image: recorvia-migrate:local
+    command: ["up"]
+    depends_on:
+      migrate-bootstrap: { condition: service_completed_successfully }
+    environment:
+      RECORVIA_MIGRATIONS_DATABASE_URL: postgres://recorvia_owner:${RECORVIA_OWNER_PASSWORD}@postgres:5432/recorvia?sslmode=disable
+    restart: "no"
+
+  redis:
+    image: redis:8.8.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4.2.9-management-alpine
+    # Servidor e healthcheck (docker exec) com o mesmo usuário: num volume
+    # novo, o healthcheck como root criaria o .erlang.cookie inacessível ao
+    # servidor.
+    user: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?defina no .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?defina no .env}
+    ports:
+      - "127.0.0.1:${RABBITMQ_UI_PORT:-15672}:15672"
+      - "127.0.0.1:${RABBITMQ_PORT:-5672}:5672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  keycloak:
+    image: recorvia-keycloak:local
+    build:
+      context: deploy/keycloak
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?defina no .env}
+      KC_HOSTNAME: http://localhost:${KEYCLOAK_PORT:-8180}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${KEYCLOAK_PORT:-8180}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  mailpit:
+    image: axllent/mailpit:v1.33.1
+    ports:
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  paysim:
+    image: recorvia-paysim:local
+    build:
+      <<: *go-build
+      args: { CMD: paysim }
+    environment:
+      PAYSIM_ADDR: ":8090"
+      PAYSIM_PUBLIC_URL: http://localhost:${PAYSIM_PORT:-8090}
+      PAYSIM_STATE_FILE: /data/state.json
+      PAYSIM_TIMEOUT_DELAY: 25s
+    ports:
+      - "127.0.0.1:${PAYSIM_PORT:-8090}:8090"
+    volumes:
+      - paysim-data:/data
+    healthcheck:
+      test: ["CMD", "/app", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    image: recorvia-api:local
+    build:
+      <<: *go-build
+      args: { CMD: api }
+    environment:
+      <<: *app-env
+      RECORVIA_HTTP_ADDR: ":8081"
+      RECORVIA_METRICS_ADDR: ":9091"
+    ports:
+      - "127.0.0.1:${API_PORT:-18081}:8081"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "/app", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    stop_grace_period: 25s
+
+  worker:
+    image: recorvia-worker:local
+    build:
+      <<: *go-build
+      args: { CMD: worker }
+    environment:
+      <<: *app-env
+      RECORVIA_METRICS_ADDR: ":9091"
+      RECORVIA_WORKER_CONCURRENCY: "4"
+      RECORVIA_WORKER_PREFETCH: "8"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "/app", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    stop_grace_period: 2m
+
+  # Interface web: SPA estática e proxy para a API (mesma origem, cookies de
+  # sessão sem CORS).
+  web:
+    image: recorvia-web:local
+    build:
+      context: web
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8080}:8080"
+    depends_on:
+      api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # Execução única: fica fora do "up" (que espera serviços em execução) e é
+  # chamado por "make up" com "docker compose run --rm seed".
+  seed:
+    image: recorvia-seed:local
+    profiles: ["seed"]
+    build:
+      <<: *go-build
+      args: { CMD: seed }
+    environment:
+      <<: *app-env
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      paysim: { condition: service_healthy }
+    restart: "no"
+
+  # Perfil observability (make up-obs): OpenTelemetry Collector, Jaeger,
+  # Prometheus e Grafana com configurações embutidas nas imagens (ADR-020,
+  # ADR-052). O make up-obs aponta OTEL_EXPORTER_OTLP_ENDPOINT da API e do
+  # worker para o Collector; sem o perfil, a exportação de rastros fica
+  # desligada.
+  otel-collector:
+    image: recorvia-otel-collector:local
+    profiles: ["observability"]
+    build:
+      context: deploy/observability/otel-collector
+    depends_on:
+      jaeger: { condition: service_healthy }
+    # Imagem sem shell nem cliente HTTP: sem healthcheck (a disponibilidade
+    # aparece no "up" da coleta otel-collector do Prometheus).
+
+  jaeger:
+    image: recorvia-jaeger:local
+    profiles: ["observability"]
+    build:
+      context: deploy/observability/jaeger
+    ports:
+      - "127.0.0.1:${JAEGER_UI_PORT:-16686}:16686"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:13133/status"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+
+  prometheus:
+    image: recorvia-prometheus:local
+    profiles: ["observability"]
+    build:
+      context: deploy/observability/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+
+  grafana:
+    image: recorvia-grafana:local
+    profiles: ["observability"]
+    build:
+      context: deploy/observability/grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      # Somente para o ambiente local (porta publicada apenas em 127.0.0.1).
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-local-grafana-admin}
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      prometheus: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      # A primeira inicialização executa as migrations internas do Grafana.
+      start_period: 180s
+
+volumes:
+  postgres-data:
+  rabbitmq-data:
+  paysim-data:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,15 @@
+# Fonte de dados provisionada (somente leitura na interface). Os rastros são
+# consultados na interface do próprio Jaeger: a fonte de dados Jaeger do
+# Grafana usa a API HTTP v1, removida no Jaeger 2.21 (o Jaeger 2.23 expõe só a
+# API v3). Ver ADR-052.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
