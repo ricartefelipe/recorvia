@@ -8,9 +8,24 @@ coverage*.html
 
 # Ambiente local
 .env
+.env.*
+!.env.example
 *.local
+*.log
+.DS_Store
+Thumbs.db
+
+# Editores e ferramentas locais (configuração pessoal, fora do repositório)
 .idea/
 .vscode/
+*.iml
+*.swp
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.cursor/
+.aider*
+.junie/
 
 # Frontend
 web/node_modules/
@@ -19,6 +34,8 @@ web/playwright-report/
 web/test-results/
 web/blob-report/
 web/.vite/
+web/.eslintcache
+*.tsbuildinfo
 
 # Dados locais
 /tmp/

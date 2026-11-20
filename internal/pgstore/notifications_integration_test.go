@@ -207,12 +207,13 @@ func TestNotificationRespectsContactPreferencesAndEncryptsContent(t *testing.T) 
 	if err := svc.HandleInvoiceIssued(ctx, tn.ID, invoiceID, ids.New()); err != nil {
 		t.Fatal(err)
 	}
-	var status, reason string
+	var status, reason, keyID string
+	var id uuid.UUID
 	var recipients []string
 	var content []byte
 	err := env.DB.InTenantTx(ctx, tn.ID, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT status, status_reason, recipients, content_ciphertext FROM notifications WHERE tenant_id = $1`, tn.ID).
-			Scan(&status, &reason, &recipients, &content)
+		return tx.QueryRow(ctx, `SELECT id, status, status_reason, recipients, content_ciphertext, content_key_id FROM notifications WHERE tenant_id = $1`, tn.ID).
+			Scan(&id, &status, &reason, &recipients, &content, &keyID)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -220,8 +221,19 @@ func TestNotificationRespectsContactPreferencesAndEncryptsContent(t *testing.T) 
 	if status != "suppressed" || reason != notifications.ReasonNoRecipient || len(recipients) != 0 {
 		t.Fatalf("contato sem preferência de cobrança deveria suprimir: %s %s %v", status, reason, recipients)
 	}
-	if len(content) == 0 || strings.Contains(string(content), c.Name) || strings.Contains(string(content), "R$") {
+	// O texto cifrado são bytes aleatórios: procurar nele um marcador curto
+	// (como "R$") acusa coincidências. A conferência usa o nome do cliente,
+	// longo o bastante para não ocorrer por acaso, e prova pela decifragem
+	// que o conteúdo guardado é o texto com os dados do cliente.
+	if len(content) == 0 || strings.Contains(string(content), c.Name) {
 		t.Fatal("conteúdo deve ficar cifrado em repouso")
+	}
+	plain, err := env.Keyring.Decrypt(content, keyID, []byte(tn.ID.String()+"/notification/"+id.String()+"/content"))
+	if err != nil {
+		t.Fatalf("o conteúdo deve decifrar com a chave e o contexto da notificação: %v", err)
+	}
+	if !strings.Contains(string(plain), c.Name) || !strings.Contains(string(plain), "R$") {
+		t.Fatalf("conteúdo decifrado sem os dados da fatura: %s", plain)
 	}
 }
 
