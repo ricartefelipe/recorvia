@@ -295,7 +295,7 @@ func (a *API) grantCredit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	if err := a.Billing.GrantCredit(r.Context(), p.TenantID, p.Actor(), p.User.ID, id, money.New(in.Amount, money.BRL), in.Reason,
+	if err := a.Billing.GrantCredit(r.Context(), p.TenantID, p.Actor(), p.UserID(), id, money.New(in.Amount, money.BRL), in.Reason,
 		idempotencyKeyFrom(r.Context())); err != nil {
 		a.writeError(w, r, err)
 		return

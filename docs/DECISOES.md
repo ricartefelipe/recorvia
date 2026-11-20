@@ -986,3 +986,85 @@ raras. Na recuperação de desastre, as operações restauradas vinculam as cobr
 perdida com a mesma referência; as cobranças criadas para faturas emitidas depois do backup não têm
 referência local e são tratadas pela conciliação da janela antes de religar o worker
 (`docs/operacao/backup-e-restauracao.md`).
+
+## ADR-059 Autoria das ações por credencial de API decidida por rota
+**Status:** aceita.
+**Contexto:** a ADR-049 define que as colunas de autoria que referenciam `users` ficam nulas nas
+ações feitas por credencial de API, com a autoria completa na auditoria. Parte dos handlers de rotas
+de tenant passava `Principal.User.ID` como autor, e esse valor é `uuid.Nil` para credenciais: a FK
+para `users` era violada (500) na criação de políticas de cobrança, na personalização de templates e
+na criação de endpoints de webhook; na concessão de crédito e no tratamento de dead letters, o
+adaptador convertia o `uuid.Nil` em `NULL` (`uuidOrNil`), uma dependência implícita de um valor
+sentinela, e a gravação de reembolsos, execuções de conciliação e resoluções de divergência (ADR-034
+e ADR-038) repetia a conversão sobre a autoria opcional (`authorOrNil`), embora os handlers já
+passassem `Principal.UserID()`. As rotas de membros, convites e plano da plataforma liam a
+identidade do usuário (`tenancy.Access`, `Principal.UserRef`) e só não eram alcançadas por
+credenciais porque as permissões que exigem não são delegáveis (ADR-047); um escopo concedido por
+engano gravaria autoria falsa (`invited_by`, `revoked_by` e auditoria com usuário `uuid.Nil`).
+**Decisão:** toda rota de tenant decide explicitamente como trata a credencial:
+1. Operação que faz sentido para integração máquina a máquina: aceita a credencial; a autoria vem de
+   `Principal.UserID()` (`*uuid.UUID`, nula para credenciais) até o banco, sem valor sentinela, e a
+   auditoria da mesma transação registra o ator `api_credential` (o critério já adotado em reembolsos
+   e conciliação). O adaptador grava o ponteiro recebido: as conversões de `uuid.Nil` em `NULL`
+   (`uuidOrNil` e `authorOrNil`) foram removidas, e um `uuid.Nil` que chegasse ao banco violaria a
+   FK em vez de virar autoria nula silenciosamente.
+2. Operação que exige uma pessoa identificada por regra de negócio: a rota é declarada com
+   `userSession()` e responde 403 `user_session_required` antes da verificação de escopos, como as
+   rotas de conta e de sessão. No contrato, a operação aceita apenas o esquema `session` e documenta
+   a resposta 403 `UserSessionRequired`.
+
+| Rota | Coluna de autoria | Aceita `NULL` | Decisão |
+|---|---|:-:|---|
+| `POST /api/v1/collection-policies` | `collection_policies.created_by` | sim | credencial aceita; autoria nula (corrigido: respondia 500) |
+| `PUT /api/v1/notification-templates/{key}` | `notification_templates.updated_by` | sim | credencial aceita; autoria nula (corrigido: respondia 500) |
+| `POST /api/v1/webhook-endpoints` | `webhook_endpoints.created_by` | sim | credencial aceita; autoria nula (corrigido: respondia 500) |
+| `POST /api/v1/customers/{id}/credits` | `customer_credit_entries.created_by` | sim | credencial aceita; autoria nula, agora sem valor sentinela |
+| `POST /api/v1/dead-letters/{id}/replay` e `/discard` | `dead_letters.resolved_by` | sim | credencial aceita; autoria nula, sem valor sentinela; auditoria, com a justificativa, movida para a transação da resolução |
+| `POST /api/v1/charges/{id}/refunds` | `refunds.requested_by` | sim | credencial aceita (já usava `UserID()`); sem valor sentinela no adaptador |
+| `POST /api/v1/reconciliation/runs` | `reconciliation_runs.requested_by` | sim | credencial aceita (já usava `UserID()`); sem valor sentinela no adaptador |
+| `POST /api/v1/reconciliation/discrepancies/{id}/resolve` | `reconciliation_discrepancies.resolved_by` | sim | credencial aceita (já usava `UserID()`); sem valor sentinela no adaptador |
+| `POST /api/v1/plans`, `POST /api/v1/plans/{id}/prices` | `plan_price_versions.created_by` | sim | credencial aceita (já usava `UserID()`) |
+| `POST /api/v1/subscriptions/{id}/change-plan` e `/change-quantity` | `subscription_scheduled_changes.created_by` | sim | credencial aceita (já usava `UserID()`) |
+| `POST /api/v1/subscriptions/{id}/price-adjustments` | `subscription_price_adjustments.created_by` | sim | credencial aceita (já usava `UserID()`) |
+| `POST /api/v1/subscriptions/{id}/discounts` | `subscription_discounts.applied_by` | sim | credencial aceita (já usava `UserID()`) |
+| `POST /api/v1/invoices/{id}/payments` | `payments.recorded_by` | sim | credencial aceita (já usava `UserID()`) |
+| `POST /api/v1/invoices/{id}/credit-notes` | `credit_notes.created_by` | sim | credencial aceita (já usava `UserID()`) |
+| `POST /api/v1/customers/{id}/portal-links` | `created_by_user_id` ou `created_by_credential_id` | — | credencial aceita, registrada como autora do link (ADR-050) |
+| `PATCH` e `DELETE /api/v1/members/{user_id}` | regras pelo papel de quem executa; auditoria do membro | — | somente sessão de usuário |
+| `POST /api/v1/invitations`, `DELETE /api/v1/invitations/{id}` | `invitations.invited_by` (`NOT NULL`), `invitations.revoked_by` | não / sim | somente sessão de usuário |
+| `PUT /api/v1/platform/plan` | auditoria do membro (contratação comercial) | — | somente sessão de usuário |
+| `POST /api/v1/platform/addon-orders` | `platform_addon_orders.requested_by` (`NOT NULL`) | não | somente sessão de usuário |
+| `GET`, `POST /api/v1/api-credentials`, `POST /api/v1/api-credentials/{id}/rotate`, `DELETE /api/v1/api-credentials/{id}` | `api_credentials.created_by` (`NOT NULL`), `rotated_by`, `revoked_by` | não / sim | somente sessão de usuário |
+
+As demais rotas de escrita de tenant não têm coluna de autoria: a autoria fica apenas na auditoria,
+pelo ator, e elas aceitam credenciais pelos escopos. `pending_invoice_items.created_by` só é gravado
+pela correção de consumo no worker, sem autor. As leituras de membros, papéis, convites e da
+plataforma aceitam credenciais pelos escopos `members.read` e `platform_billing.read`; a listagem de
+credenciais e as rotas de conta e de sessão (inclusive `GET /api/v1/session`), não. A lista completa
+das rotas restritas à sessão fica em `docs/arquitetura/permissoes.md`, gerada a partir das rotas
+registradas (`go run ./tools/permdoc`, conferida pela CI).
+**Justificativa:** as rotas restritas à sessão coincidem com as permissões não delegáveis
+(`members.manage`, `platform_billing.manage`, `api_credentials.manage`): mudar papéis aplica regras
+pelo papel de quem executa (somente proprietários alteram proprietários); o convite é feito em nome
+de um membro; contratar plano ou serviço adicional é um compromisso comercial com o Recorvia; e uma
+credencial precisa de uma pessoa responsável pelo segredo vigente. Políticas, templates, endpoints,
+créditos e o tratamento de dead letters são configurações e operações que um ERP ou uma ferramenta
+de operação automatizam; o tratamento de dead letters exige justificativa, que fica na nota da
+resolução e nos detalhes da auditoria (`reason`), ao lado do consumidor e do tipo de evento. Como
+a auditoria é a única autoria das ações por credencial, ela precisa ser atômica com a alteração: o
+tratamento de dead letters, que gravava a auditoria em outra transação depois de confirmar a
+resolução, passou a gravá-la na mesma transação.
+**Consequências:** nenhuma mudança de esquema: todas as colunas de autoria das rotas que aceitam
+credencial admitem `NULL`, e as colunas `NOT NULL` pertencem a rotas restritas à sessão (sem
+migration nova). As rotas de membros, do plano da plataforma e de credenciais, que já respondiam 403
+`forbidden` a credenciais pela falta do escopo, passam a responder 403 `user_session_required`.
+Testes impedem a regressão: uma análise de tipos do pacote `httpapi` percorre todas as rotas de
+tenant registradas e falha se uma rota que aceita credencial lê do principal algo além do que também
+vale para a credencial (`TenantID`, `Credential`, `Can`, `Actor`, `UserID`, `ClientID`), o que inclui
+`Principal.User`, `Session` (cujo `UserID` é `uuid.Nil` para credenciais), `Role` (vazio),
+`PlatformStaff`, `UserRef` e qualquer membro acrescentado depois; outro teste exige `userSession()` em
+toda rota com permissão não delegável; o teste de contrato confere o esquema `session` e a resposta
+403 dessas rotas; `permdoc -check` mantém a lista gerada de rotas restritas à sessão; e testes de
+integração exercitam cada rota afetada com uma credencial real pela pilha Bearer (autoria nula e
+auditoria com ator `api_credential` e, nas dead letters, com a justificativa; ou 403 sem efeito) e
+as leituras que continuam disponíveis à credencial.

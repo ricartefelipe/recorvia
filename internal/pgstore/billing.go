@@ -272,8 +272,8 @@ func (tx billingTx) ConsumeCustomerCredit(ctx context.Context, customerID, invoi
 	return tx.addCredit(ctx, customerID, -amount.Amount(), "consumption", &invoiceID, "Aplicado na emissão da fatura", nil)
 }
 
-func (tx billingTx) GrantCustomerCredit(ctx context.Context, customerID uuid.UUID, amount money.Money, reason string, by uuid.UUID, requestKey string) (uuid.UUID, bool, error) {
-	return tx.addCreditKeyed(ctx, customerID, amount.Amount(), "grant", nil, reason, uuidOrNil(by), requestKey)
+func (tx billingTx) GrantCustomerCredit(ctx context.Context, customerID uuid.UUID, amount money.Money, reason string, by *uuid.UUID, requestKey string) (uuid.UUID, bool, error) {
+	return tx.addCreditKeyed(ctx, customerID, amount.Amount(), "grant", nil, reason, by, requestKey)
 }
 
 func (tx billingTx) ReturnCustomerCredit(ctx context.Context, customerID, invoiceID uuid.UUID, amount int64, _ time.Time) error {

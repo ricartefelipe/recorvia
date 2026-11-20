@@ -118,8 +118,7 @@ func (a *API) createWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	uid := p.User.ID
-	e, secret, err := a.Webhooks.CreateEndpoint(r.Context(), p.TenantID, p.Actor(), &uid, body.input(""))
+	e, secret, err := a.Webhooks.CreateEndpoint(r.Context(), p.TenantID, p.Actor(), p.UserID(), body.input(""))
 	if err != nil {
 		a.writeError(w, r, err)
 		return

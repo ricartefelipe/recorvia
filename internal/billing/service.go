@@ -57,7 +57,7 @@ type Tx interface {
 	ReverseLedger(ctx context.Context, originalKey string, description string, at time.Time) error
 	PostLedger(ctx context.Context, t ledger.Transaction) error
 	ReturnCustomerCredit(ctx context.Context, customerID, invoiceID uuid.UUID, amount int64, at time.Time) error
-	GrantCustomerCredit(ctx context.Context, customerID uuid.UUID, amount money.Money, reason string, by uuid.UUID, requestKey string) (uuid.UUID, bool, error)
+	GrantCustomerCredit(ctx context.Context, customerID uuid.UUID, amount money.Money, reason string, by *uuid.UUID, requestKey string) (uuid.UUID, bool, error)
 	Audit(ctx context.Context, e audit.Entry) error
 	Emit(ctx context.Context, e outbox.Event) error
 }
@@ -219,8 +219,10 @@ func (s *Service) MarkUncollectible(ctx context.Context, tenantID uuid.UUID, act
 }
 
 // GrantCredit concede crédito ao cliente para abatimento em faturas futuras.
-// requestKey (derivado do Idempotency-Key) impede concessão duplicada.
-func (s *Service) GrantCredit(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, by, customerID uuid.UUID, amount money.Money, reason, requestKey string) error {
+// requestKey (derivado do Idempotency-Key) impede concessão duplicada. by é o
+// usuário que concede; nil quando a concessão vem de uma credencial de API (a
+// autoria fica na auditoria, pelo ator).
+func (s *Service) GrantCredit(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, by *uuid.UUID, customerID uuid.UUID, amount money.Money, reason, requestKey string) error {
 	if !amount.IsPositive() || amount.CheckBusinessRange() != nil {
 		return apperr.Invalid("invalid_amount", "Valor inválido.", apperr.FieldError{Field: "amount", Message: "Informe um valor positivo em centavos."})
 	}

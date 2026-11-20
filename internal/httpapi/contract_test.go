@@ -74,6 +74,7 @@ func TestRoutesMatchOpenAPIContract(t *testing.T) {
 		if needsIdem != info.Idempotent {
 			problems = append(problems, "Idempotency-Key divergente entre contrato e rota: "+key)
 		}
+		problems = append(problems, userSessionContract(key, info, op)...)
 	}
 	for key := range ops {
 		if _, ok := registered[key]; !ok && !pendingOperations[key] {
@@ -84,6 +85,30 @@ func TestRoutesMatchOpenAPIContract(t *testing.T) {
 	for _, p := range problems {
 		t.Error(p)
 	}
+}
+
+// userSessionContract confere o contrato da autenticação da rota: as rotas
+// restritas à sessão de usuário declaram apenas o esquema session e a resposta
+// 403 user_session_required; as rotas de tenant que aceitam credenciais
+// herdam a segurança global (sessão ou credencial de API).
+func userSessionContract(key string, info RouteInfo, op *openapi3.Operation) []string {
+	var problems []string
+	sessionOnly := op.Security != nil && len(*op.Security) == 1 && len((*op.Security)[0]) == 1
+	if sessionOnly {
+		_, sessionOnly = (*op.Security)[0]["session"]
+	}
+	switch {
+	case info.UserSession:
+		if !sessionOnly {
+			problems = append(problems, "rota restrita à sessão de usuário sem security session exclusivo no contrato: "+key)
+		}
+		if r := op.Responses.Value("403"); r == nil || r.Ref != "#/components/responses/UserSessionRequired" {
+			problems = append(problems, "rota restrita à sessão de usuário sem a resposta 403 UserSessionRequired no contrato: "+key)
+		}
+	case info.Access == TenantScoped && op.Security != nil:
+		problems = append(problems, "rota de tenant que aceita credencial de API com security próprio no contrato: "+key)
+	}
+	return problems
 }
 
 func TestEveryRouteDeclaresAccess(t *testing.T) {

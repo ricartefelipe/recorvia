@@ -111,6 +111,11 @@ type RouteInfo struct {
 	Access     Access
 	Permission tenancy.Permission
 	Idempotent bool
+	// UserSession indica que a rota exige a sessão de um usuário e recusa
+	// credenciais de API (403 user_session_required). Vale para todas as
+	// rotas Authenticated e para as rotas de tenant declaradas com
+	// userSession(), cujo ato depende de uma pessoa identificada (ADR-059).
+	UserSession bool
 }
 
 // Routes retorna as rotas registradas (usado pelos testes de contrato).
@@ -120,8 +125,14 @@ type routeOpt func(*RouteInfo)
 
 func idempotent() routeOpt { return func(r *RouteInfo) { r.Idempotent = true } }
 
+// userSession restringe uma rota de tenant à sessão de um usuário: a
+// operação exige uma pessoa identificada (gestão de membros, do plano da
+// plataforma e de credenciais) e não é aceita por credenciais de API, mesmo
+// que um escopo a conceda.
+func userSession() routeOpt { return func(r *RouteInfo) { r.UserSession = true } }
+
 func (a *API) handle(r chi.Router, method, pattern string, access Access, perm tenancy.Permission, h http.HandlerFunc, opts ...routeOpt) {
-	info := RouteInfo{Method: method, Pattern: pattern, Access: access, Permission: perm}
+	info := RouteInfo{Method: method, Pattern: pattern, Access: access, Permission: perm, UserSession: access == Authenticated}
 	for _, o := range opts {
 		o(&info)
 	}
@@ -133,10 +144,13 @@ func (a *API) handle(r chi.Router, method, pattern string, access Access, perm t
 	switch access {
 	case TenantScoped:
 		handler = a.requireTenant(perm, handler)
-	case Authenticated:
-		handler = a.requireUserSession(handler)
 	case PlatformStaff:
 		handler = a.requireStaff(handler)
+	}
+	// A recusa da credencial vem antes da verificação de escopos, para que a
+	// resposta seja sempre 403 user_session_required.
+	if info.UserSession {
+		handler = a.requireUserSession(handler)
 	}
 	r.Method(method, pattern, handler)
 }

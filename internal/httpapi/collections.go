@@ -144,8 +144,7 @@ func (a *API) createCollectionPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	uid := p.User.ID
-	pol, err := a.Collections.CreatePolicy(r.Context(), p.TenantID, p.Actor(), &uid, in)
+	pol, err := a.Collections.CreatePolicy(r.Context(), p.TenantID, p.Actor(), p.UserID(), in)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -243,8 +242,7 @@ func (a *API) updateNotificationTemplate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	p := mustPrincipal(r)
-	uid := p.User.ID
-	t, err := a.Notifications.UpdateTemplate(r.Context(), p.TenantID, p.Actor(), &uid, chi.URLParam(r, "key"), in.Subject, in.Body)
+	t, err := a.Notifications.UpdateTemplate(r.Context(), p.TenantID, p.Actor(), p.UserID(), chi.URLParam(r, "key"), in.Subject, in.Body)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
