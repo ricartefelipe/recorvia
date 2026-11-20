@@ -158,6 +158,29 @@ func Up(ctx context.Context, ownerURL string) (applied []string, err error) {
 	return applied, nil
 }
 
+// DownTo reverte as migrations aplicadas acima da versão informada, da mais
+// recente para a mais antiga (reversão operacional e testes do Down).
+func DownTo(ctx context.Context, ownerURL string, version int64) (reverted []string, err error) {
+	sqlDB, err := sql.Open("pgx", ownerURL)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = errors.Join(err, sqlDB.Close()) }()
+	p, err := provider(sqlDB)
+	if err != nil {
+		return nil, err
+	}
+	results, err := p.DownTo(ctx, version)
+	reverted = make([]string, 0, len(results))
+	for _, r := range results {
+		reverted = append(reverted, r.Source.Path)
+	}
+	if err != nil {
+		return reverted, fmt.Errorf("migrate: %w", err)
+	}
+	return reverted, nil
+}
+
 // Status descreve cada migration e se foi aplicada.
 func Status(ctx context.Context, ownerURL string) (lines []string, err error) {
 	sqlDB, err := sql.Open("pgx", ownerURL)

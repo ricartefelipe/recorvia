@@ -102,7 +102,10 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 
 	t(get, "/api/v1/charges", tenancy.PermPaymentsRead, a.listCharges)
 	t(get, "/api/v1/charges/{id}", tenancy.PermPaymentsRead, a.getCharge)
+	t(post, "/api/v1/charges/{id}/refunds", tenancy.PermPaymentsRefund, a.refundCharge, idempotent())
+	t(get, "/api/v1/refunds", tenancy.PermPaymentsRead, a.listRefunds)
 	t(get, "/api/v1/payments", tenancy.PermPaymentsRead, a.listPayments)
+	t(get, "/api/v1/disputes", tenancy.PermPaymentsRead, a.listDisputes)
 	t(get, "/api/v1/payment-operations", tenancy.PermPaymentsRead, a.listOperations)
 	t(post, "/api/v1/payment-operations/{id}/retry", tenancy.PermPaymentsCharge, a.retryOperation)
 	t(get, "/api/v1/payment-providers", tenancy.PermIntegrationsRead, a.listProviders)
@@ -130,6 +133,13 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 
 	t(get, "/api/v1/ledger/accounts", tenancy.PermLedgerRead, a.ledgerAccounts)
 	t(get, "/api/v1/ledger/transactions", tenancy.PermLedgerRead, a.ledgerTransactions)
+
+	t(get, "/api/v1/reconciliation/runs", tenancy.PermReconciliationRead, a.listReconciliationRuns)
+	t(post, "/api/v1/reconciliation/runs", tenancy.PermReconciliationRun, a.runReconciliation, idempotent())
+	t(get, "/api/v1/reconciliation/discrepancies", tenancy.PermReconciliationRead, a.listDiscrepancies)
+	t(get, "/api/v1/reconciliation/discrepancies/{id}", tenancy.PermReconciliationRead, a.getDiscrepancy)
+	t(post, "/api/v1/reconciliation/discrepancies/{id}/resolve", tenancy.PermReconciliationResolve, a.resolveDiscrepancy)
+
 	t(get, "/api/v1/audit-events", tenancy.PermAuditRead, a.listAuditEvents)
 	t(get, "/api/v1/dead-letters", tenancy.PermOperationsRead, a.listDeadLetters)
 	t(post, "/api/v1/dead-letters/{id}/replay", tenancy.PermOperationsReprocess, a.resolveDeadLetter(true))

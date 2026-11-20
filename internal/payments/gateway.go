@@ -72,10 +72,14 @@ type ProviderCharge struct {
 	NetAmount          *money.Money
 	Fee                *money.Money
 	RefundedAmount     money.Money
-	CheckoutURL        string
-	PaidAt             *time.Time
-	UpdatedAt          *time.Time
-	Raw                map[string]any
+	// Refunds lista os reembolsos informados pelo provedor (efetivados,
+	// pendentes ou recusados). Provedores sem identificador de reembolso
+	// (Asaas) informam apenas valor e situação.
+	Refunds     []ProviderRefund
+	CheckoutURL string
+	PaidAt      *time.Time
+	UpdatedAt   *time.Time
+	Raw         map[string]any
 }
 
 // FeeOrDerived retorna a taxa informada ou derivada de bruto menos líquido.
@@ -99,11 +103,28 @@ type RefundRequest struct {
 	ExternalReference string
 }
 
-// ProviderRefund é o resultado de um reembolso.
+// RefundState é a situação normalizada de um reembolso no provedor.
+type RefundState string
+
+const (
+	// RefundStateDone: reembolso efetivado.
+	RefundStateDone RefundState = "done"
+	// RefundStatePending: aceito pelo provedor, ainda em processamento.
+	RefundStatePending RefundState = "pending"
+	// RefundStateFailed: recusado ou cancelado pelo provedor.
+	RefundStateFailed RefundState = "failed"
+)
+
+// ProviderRefund é um reembolso na visão do provedor. ExternalReference é o
+// ID local do reembolso quando o provedor o devolve; Charge é o retrato da
+// cobrança após o pedido, quando o provedor o informa na resposta.
 type ProviderRefund struct {
-	ProviderRefundID string
-	Status           string
-	Amount           money.Money
+	ProviderRefundID  string
+	ExternalReference string
+	Status            string
+	State             RefundState
+	Amount            money.Money
+	Charge            *ProviderCharge
 }
 
 // ListRequest filtra cobranças para conciliação.
@@ -127,6 +148,9 @@ type Gateway interface {
 	GetCharge(ctx context.Context, providerChargeID string) (ProviderCharge, error)
 	FindByExternalReference(ctx context.Context, ref string) (*ProviderCharge, error)
 	Refund(ctx context.Context, req RefundRequest) (ProviderRefund, error)
+	// CancelCharge cancela no provedor uma cobrança ainda não paga. Recurso
+	// inexistente é informado com ErrKindNotFound.
+	CancelCharge(ctx context.Context, providerChargeID string) error
 	ListCharges(ctx context.Context, req ListRequest) (ListResult, error)
 	ConfigureWebhook(ctx context.Context, url, secret string) error
 }

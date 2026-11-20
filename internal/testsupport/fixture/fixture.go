@@ -124,7 +124,7 @@ func (e *Env) NewFlatPlan(t testing.TB, tn Tenant, amount int64) catalog.PlanDet
 		t.Fatal(err)
 	}
 	uid := tn.Owner.ID
-	p, err := e.Catalog.CreatePlan(ctx, tn.ID, tn.Actor, &uid, catalog.PlanInput{ProductID: prod.ID, Code: "plano-" + ids.New().String()[:8],
+	p, err := e.Catalog.CreatePlan(ctx, tn.ID, tn.Actor, &uid, catalog.PlanInput{ProductID: prod.ID, Code: "plano-" + uuid.NewString()[:8],
 		Name: "Plano de teste", Interval: calendar.Monthly}, catalog.PriceInput{Model: catalog.Flat, FlatAmount: &amount})
 	if err != nil {
 		t.Fatal(err)

@@ -36,6 +36,17 @@ var statusByKind = map[apperr.Kind]int{
 	apperr.KindLimitExceeded:      http.StatusForbidden,
 }
 
+// transientConflicts são conflitos transitórios: a resposta informa
+// Retry-After (segundos) e não fica registrada na Idempotency-Key, para que a
+// repetição com a mesma chave execute o pedido depois que a condição passar.
+var transientConflicts = map[string]int{
+	// Outra execução da conciliação em andamento (lease de até 15 minutos).
+	"reconciliation_running": 60,
+	// Reembolso anterior da cobrança com resultado desconhecido, até a nova
+	// consulta ao provedor.
+	"refund_outcome_unknown": 60,
+}
+
 var titles = map[int]string{
 	400: "Requisição inválida", 401: "Não autenticado", 403: "Acesso negado", 404: "Não encontrado", 409: "Conflito",
 	412: "Versão desatualizada", 413: "Conteúdo muito grande", 415: "Tipo de conteúdo não suportado", 422: "Dados inválidos",
@@ -70,6 +81,8 @@ func (a *API) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	w.Header().Set("Content-Type", "application/problem+json")
 	if status == http.StatusTooManyRequests {
 		w.Header().Set("Retry-After", "60")
+	} else if retry, ok := transientConflicts[p.Code]; ok && status == http.StatusConflict {
+		w.Header().Set("Retry-After", strconv.Itoa(retry))
 	}
 	w.WriteHeader(status)
 	if encErr := json.NewEncoder(w).Encode(p); encErr != nil {

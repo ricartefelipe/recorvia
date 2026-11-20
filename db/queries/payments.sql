@@ -35,11 +35,11 @@ SELECT * FROM charges WHERE tenant_id = @tenant_id AND invoice_id = @invoice_id 
 
 -- name: InsertCharge :exec
 INSERT INTO charges (id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency,
-                     amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason,
-                     provider_status, provider_status_at, created_at, updated_at, version)
+                     amount_paid, fee_amount, amount_refunded, amount_refund_pending, amount_charged_back, checkout_url, due_date, paid_at,
+                     failure_reason, provider_status, provider_status_at, created_at, updated_at, version)
 VALUES (@id, @tenant_id, @invoice_id, @customer_id, @provider_account_id, @provider, @attempt, sqlc.narg(provider_charge_id), @status, @amount,
-        @currency, @amount_paid, @fee_amount, @amount_refunded, @amount_charged_back, sqlc.narg(checkout_url), @due_date, sqlc.narg(paid_at),
-        sqlc.narg(failure_reason), sqlc.narg(provider_status), sqlc.narg(provider_status_at), @created_at, @created_at, 1);
+        @currency, @amount_paid, @fee_amount, @amount_refunded, @amount_refund_pending, @amount_charged_back, sqlc.narg(checkout_url), @due_date,
+        sqlc.narg(paid_at), sqlc.narg(failure_reason), sqlc.narg(provider_status), sqlc.narg(provider_status_at), @created_at, @created_at, 1);
 
 -- name: GetCharge :one
 SELECT * FROM charges WHERE tenant_id = @tenant_id AND id = @id;
@@ -56,7 +56,8 @@ SELECT * FROM charges WHERE tenant_id = @tenant_id AND provider = @provider AND 
 -- name: UpdateCharge :execrows
 UPDATE charges
    SET provider_charge_id = sqlc.narg(provider_charge_id), status = @status, amount_paid = @amount_paid, fee_amount = @fee_amount,
-       amount_refunded = @amount_refunded, amount_charged_back = @amount_charged_back, checkout_url = sqlc.narg(checkout_url),
+       amount_refunded = @amount_refunded, amount_refund_pending = @amount_refund_pending, amount_charged_back = @amount_charged_back,
+       checkout_url = sqlc.narg(checkout_url),
        paid_at = sqlc.narg(paid_at), failure_reason = sqlc.narg(failure_reason), provider_status = sqlc.narg(provider_status),
        provider_status_at = sqlc.narg(provider_status_at), version = version + 1
  WHERE tenant_id = @tenant_id AND id = @id AND version = @version;

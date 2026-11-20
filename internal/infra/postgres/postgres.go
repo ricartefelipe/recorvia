@@ -173,6 +173,12 @@ func IsCheckViolation(err error) bool {
 	return ok && e.Code == codeCheckViolation
 }
 
+// IsNamedCheckViolation informa se err é violação da constraint CHECK informada.
+func IsNamedCheckViolation(err error, constraint string) bool {
+	e, ok := pgCode(err)
+	return ok && e.Code == codeCheckViolation && e.ConstraintName == constraint
+}
+
 // IsInsufficientPrivilege informa se err decorre de RLS ou falta de GRANT.
 func IsInsufficientPrivilege(err error) bool {
 	e, ok := pgCode(err)

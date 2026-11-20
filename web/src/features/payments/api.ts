@@ -26,3 +26,14 @@ export function refundableAmount(charge: Charge): number {
   if (typeof charge.refundable_amount === 'number') return charge.refundable_amount;
   return Math.max(0, charge.amount_paid - charge.amount_refunded - charge.amount_charged_back);
 }
+
+/**
+ * Situações que aceitam pedido de reembolso (ADR-034). A cobrança em disputa
+ * mantém o valor reembolsável, mas a API recusa o pedido até a decisão.
+ */
+export const REFUNDABLE_STATUSES: readonly ChargeStatus[] = ['paid', 'partially_refunded'];
+
+/** Indica se a cobrança aceita um novo pedido de reembolso. */
+export function canRequestRefund(charge: Charge): boolean {
+  return REFUNDABLE_STATUSES.includes(charge.status) && refundableAmount(charge) > 0;
+}

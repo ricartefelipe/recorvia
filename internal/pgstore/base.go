@@ -267,6 +267,15 @@ func uuidOrNil(id uuid.UUID) *uuid.UUID {
 	return &id
 }
 
+// authorOrNil é uuidOrNil para autoria opcional: ausente ou uuid.Nil grava
+// NULL.
+func authorOrNil(id *uuid.UUID) *uuid.UUID {
+	if id == nil {
+		return nil
+	}
+	return uuidOrNil(*id)
+}
+
 func deref(s *string) string {
 	if s == nil {
 		return ""

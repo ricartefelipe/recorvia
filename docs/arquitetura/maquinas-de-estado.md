@@ -98,17 +98,90 @@ stateDiagram-v2
   partially_refunded --> refunded
   partially_refunded --> disputed
   disputed --> paid: disputa ganha
+  disputed --> partially_refunded: disputa ganha com reembolso anterior
+  disputed --> refunded: disputa ganha com o pago já reembolsado
   disputed --> charged_back: disputa perdida
 ```
 
-Dinheiro recebido nunca é descartado. O cancelamento de cobrança é apenas local (a cobrança continua
-válida no provedor), e a recusa (por exemplo, do cartão) não impede o pagamento posterior por outro
-meio no mesmo checkout. Por isso a confirmação de pagamento pelo provedor é a única transição que
-sai de `failed` e de `canceled`: a cobrança passa a `paid` e o valor segue a aplicação normal (quita
+Dinheiro recebido nunca é descartado. A cobrança cancelada no Recorvia é cancelada também no provedor
+(operação `cancel_charge`, ADR-037), mas o pagamento pode chegar antes do cancelamento ou o cancelamento
+pode falhar; a recusa (por exemplo, do cartão) não impede o pagamento posterior por outro meio no mesmo
+checkout. Por isso a confirmação de pagamento pelo provedor é a única transição que sai de `failed` e de
+`canceled`: a cobrança passa a `paid` e o valor segue a aplicação normal (quita
 o saldo da fatura; o excedente, ou o valor integral quando a fatura já está paga ou cancelada, vira
 crédito do cliente; a taxa do provedor é lançada no ledger). A transição incomum é auditada como
 `charge.paid_after_failure` ou `charge.paid_after_local_cancellation`, com a situação anterior e,
 na recusa, o motivo, que deixa de constar na cobrança paga.
+
+Reembolsos confirmados durante uma disputa ou depois do chargeback somam ao valor reembolsado sem mudar
+a situação da cobrança. O saldo reembolsável é o pago menos o reembolsado, o estornado e o reservado por
+reembolsos em andamento (`amount_refund_pending`). A disputa perdida estorna no máximo esse saldo: o valor
+já reembolsado ou reservado não é estornado de novo, e a confirmação posterior do reembolso reservado
+continua cabendo no saldo.
+
+## Reembolso (`refunds`)
+
+```mermaid
+stateDiagram-v2
+  [*] --> requested: pedido (reserva do valor)
+  [*] --> succeeded: feito diretamente no provedor
+  requested --> succeeded: confirmado (resposta, webhook ou consulta)
+  requested --> failed: recusado pelo provedor
+  requested --> unknown: resposta ambígua
+  unknown --> requested: consulta mostra o pedido em processamento
+  unknown --> succeeded: consulta mostra o reembolso efetivado
+  unknown --> failed: recusa ou ausência confirmada na conciliação
+```
+
+`failed` libera a reserva; `succeeded` a converte em valor reembolsado. Enquanto houver reembolso
+`unknown`, a cobrança não aceita novos pedidos. O reembolso permanece `requested` quando o provedor aceita
+o pedido sem efetivá-lo, quando a chamada falha de forma repetível (operação `pending` com backoff) e
+quando outro reembolso da mesma cobrança ainda está em execução no provedor (operação adiada). Pedido que
+ainda não chegou ao provedor quando a cobrança entra em disputa ou é estornada por chargeback passa a
+`failed` sem ser enviado (o pagador receberia o valor duas vezes). A resposta de
+`POST /api/v1/charges/{id}/refunds` traz a situação alcançada na própria requisição.
+
+## Disputa (`disputes`)
+
+```mermaid
+stateDiagram-v2
+  [*] --> opened: chargeback solicitado (valor retido)
+  opened --> under_review: em análise
+  opened --> won
+  opened --> lost
+  under_review --> won: estorna a retenção
+  under_review --> lost: registra o chargeback
+```
+
+Na disputa perdida, a parte da retenção correspondente ao valor reembolsado (confirmado durante a disputa
+ou ainda reservado) volta aos valores em liquidação (`dispute.hold_released`): `chargebacks` registra
+somente o valor estornado. Reembolso reservado recusado depois da perda passa ao chargeback
+(`dispute.hold_restored`).
+
+Cada transição gera uma entrada imutável em `dispute_events`. Há no máximo uma disputa aberta por
+cobrança.
+
+## Conciliação (`reconciliation_runs`, `reconciliation_discrepancies`)
+
+```mermaid
+stateDiagram-v2
+  [*] --> running
+  running --> completed
+  running --> failed: erro do provedor ou lease expirado
+```
+
+```mermaid
+stateDiagram-v2
+  [*] --> open: constatada
+  open --> open: constatada de novo (ocorrências)
+  open --> resolved: accept_provider, keep_local, adjust_ledger ou auto_resolved
+  open --> dismissed: dismiss
+  resolved --> open: auto_resolved constatada de novo
+```
+
+Na API, a divergência resolvida automaticamente aparece com `status = resolved`,
+`resolution = auto_resolved` e `resolved_by` nulo. Divergência resolvida manualmente não volta a `open`
+com os mesmos valores; valores novos geram outra divergência.
 
 ## Operação externa (`payment_operations`)
 
@@ -126,6 +199,11 @@ stateDiagram-v2
 
 Depois de `MaxOperationAttempts` tentativas, uma operação `unknown` deixa de ser retomada
 automaticamente e exige resolução (reconsulta manual ou conciliação).
+
+Tipos: `create_charge` (criação da cobrança, consulta pela referência externa antes de repetir), `refund`
+(reembolso, consulta da cobrança e dos reembolsos antes de repetir; no máximo um reembolso em execução ou
+desconhecido por cobrança) e `cancel_charge` (cancelamento no provedor, consulta da cobrança antes de
+repetir; um por cobrança).
 
 ## Notificação (`internal/notifications`)
 

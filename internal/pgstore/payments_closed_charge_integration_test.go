@@ -121,14 +121,19 @@ func TestProviderPaymentOfFailedChargeIsApplied(t *testing.T) {
 	}
 }
 
-// Fatura cancelada (invoice.voided) com a cobrança ainda válida no provedor:
-// o pagamento recebido vira crédito integral do cliente e a taxa do provedor
-// é lançada no ledger, que permanece balanceado.
+// Fatura cancelada (invoice.voided) com a cobrança ainda válida no provedor
+// (o cancelamento no provedor falhou e aguarda nova tentativa): o pagamento
+// recebido vira crédito integral do cliente e a taxa do provedor é lançada no
+// ledger, que permanece balanceado. A nova tentativa de cancelamento consulta
+// o provedor, encontra a cobrança paga e encerra a operação sem repetir.
 func TestProviderPaymentOfChargeOfVoidedInvoiceBecomesCredit(t *testing.T) {
 	ctx := context.Background()
 	h := newPayHarness(t, 2*time.Second)
 	inv := h.issueInvoice(t, 10000)
 	c := h.requestAwaitingCharge(t, inv.ID)
+	if err := h.sim.EnqueueScenario(h.apiKey, "cancel_unavailable"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := h.env.Billing.Void(ctx, h.tn.ID, h.tn.Actor, inv.ID, "Emitida por engano", inv.Version); err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +175,17 @@ func TestProviderPaymentOfChargeOfVoidedInvoiceBecomesCredit(t *testing.T) {
 	if net[""] != 0 || net["accounts_receivable"] != 0 || net["billed_revenue"] != 0 || net["customer_credits"] != -10000 ||
 		net["provider_fees"] != fee || net["provider_clearing"] != 10000-fee {
 		t.Fatalf("ledger balanceado: crédito integral e taxa reconhecida: %+v", net)
+	}
+	h.env.Clock.Advance(10 * time.Minute)
+	if _, err := h.pay.RecoverOperations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, h.env, h.tn.ID, `SELECT count(*) FROM payment_operations WHERE tenant_id = $1 AND charge_id = $2
+		AND kind = 'cancel_charge' AND status = 'failed' AND attempts = 2`, h.tn.ID, c.ID); n != 1 {
+		t.Fatalf("cancelamento encerrado ao encontrar a cobrança paga: %d", n)
+	}
+	if n := countRows(t, h.env, h.tn.ID, `SELECT count(*) FROM payments WHERE tenant_id = $1 AND charge_id = $2`, h.tn.ID, c.ID); n != 1 {
+		t.Fatalf("pagamento único após a consulta: %d", n)
 	}
 }
 

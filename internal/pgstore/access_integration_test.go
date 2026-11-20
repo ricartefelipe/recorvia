@@ -718,8 +718,10 @@ func TestPortalAndCredentialsMigrationIsReversible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Migrations posteriores à 00012 (por exemplo, a 00013 de recebíveis)
+	// também são revertidas pelo DownTo e reaplicadas pelo Up.
 	current, err := p.GetDBVersion(ctx)
-	if err != nil || current != 12 {
+	if err != nil || current < 12 {
 		t.Fatalf("versão aplicada: %d %v", current, err)
 	}
 	if _, err := p.DownTo(ctx, 9); err != nil {

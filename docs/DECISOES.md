@@ -201,6 +201,13 @@ por tenant). A chave é `hex(SHA-256(cliente|operação|chave))`, com 64 caracte
 `Idempotency-Key` aceito (8 a 255 caracteres).
 **Justificativa:** cobre a janela entre o commit do efeito e o registro do resultado HTTP e
 continua protegendo após a expiração da chave.
+**Consequências:** respostas 5xx, 401, 403 e 429 e conflitos transitórios, que informam `Retry-After`
+(`reconciliation_running`, `refund_outcome_unknown`), liberam a chave: a repetição com a mesma chave
+executa o pedido de novo, em vez de devolver uma recusa que já não vale. Em todos os envios com
+`Idempotency-Key` (reembolso, conciliação, pagamento manual, nota de crédito, nova cobrança, crédito do
+cliente e faturamento), a interface descarta a chave depois do sucesso e de uma recusa 4xx (o próximo envio
+é outra intenção e não repete a recusa registrada) e a mantém depois de erro de rede, 5xx ou
+`idempotency_in_progress`, para que a repetição não duplique o efeito (`useApiMutation`).
 
 ## ADR-023 Vínculo de webhooks por token opaco no endpoint
 **Decisão:** cada conta de provedor recebe uma URL `/webhooks/providers/{provedor}/{token}`; somente
@@ -269,6 +276,7 @@ proporção. O ajuste positivo não recebe novo desconto; itens pendentes també
 encerramento.
 
 ## ADR-029 Nota de crédito limitada ao saldo em aberto
+**Status:** aceita; a limitação do cancelamento apenas local foi resolvida pela ADR-037.
 **Decisão:** a nota de crédito reduz somente o saldo devedor; valores já pagos são tratados por
 reembolso ou crédito do cliente. Após a nota, a cobrança com valor divergente é cancelada
 localmente e uma nova é solicitada pelo saldo.
@@ -280,6 +288,8 @@ comparação com o saldo vale para qualquer mudança durante a criação (por ex
 parcial), e a solicitação síncrona devolve a cobrança vigente (a substituta).
 
 ## ADR-030 Confirmação do provedor prevalece sobre recusa e cancelamento locais
+**Status:** aceita; com a ADR-037 a cobrança cancelada no Recorvia também é cancelada no provedor, e esta
+decisão continua valendo quando o pagamento chega antes do cancelamento no provedor (ou quando ele falha).
 **Decisão:** dinheiro recebido nunca é descartado. A confirmação de pagamento pelo provedor leva a
 `paid` também a cobrança `failed` ou `canceled` e segue a aplicação normal: quita o saldo da
 fatura, o excedente (ou o valor integral, com a fatura já paga ou cancelada) vira crédito do
@@ -329,6 +339,162 @@ assinatura ainda aponta a versão anterior; validar pela versão anterior aceita
 fechamento não fatura e rejeitaria os que ele fatura.
 **Consequências:** a mudança é lida sem bloqueio dentro da transação da ingestão, que já mantém a
 assinatura em `FOR SHARE`.
+
+## ADR-034 Reembolso como operação externa com reserva do saldo
+**Status:** aceita.
+**Contexto:** o reembolso é uma chamada ao provedor que pode ter resultado ambíguo, e pedidos
+concorrentes (duas abas, repetição do cliente da API) não podem devolver mais que o valor pago.
+**Decisão:** o pedido (`refunds`, situação `requested`) bloqueia a cobrança, verifica a chave de
+negócio (`refunds.request_key`, derivada do `Idempotency-Key` como na ADR-022) e reserva o valor em
+`charges.amount_refund_pending`, na mesma transação da operação `payment_operations` (`kind = 'refund'`,
+referência externa = ID do reembolso). A chamada ao provedor segue o ciclo das demais operações (lease,
+`pending → in_flight → succeeded | failed | unknown`); com resultado ambíguo, o reembolso fica `unknown`, a
+reserva é mantida e a próxima tentativa consulta a cobrança no provedor antes de repetir. A confirmação
+(resposta, webhook ou consulta) move a reserva para `amount_refunded`; a recusa a libera. O banco garante
+`amount_refunded + amount_refund_pending + amount_charged_back <= amount_paid`
+(`charges_refund_reservation_limit`) e `amount_refunded + amount_charged_back <= amount_paid`
+(`charges_refund_limit`). Somente cobranças `paid` ou `partially_refunded` aceitam pedidos, e um pedido é
+recusado enquanto outro reembolso da mesma cobrança estiver com resultado desconhecido. O pedido que ainda
+não chegou ao provedor quando a cobrança entra em disputa ou é estornada por chargeback não é enviado (o
+pagador receberia o valor duas vezes, pelo estorno e pelo reembolso): é encerrado como `failed` e a reserva
+é liberada; com tentativa anterior, o provedor é só consultado e o reembolso é encerrado assim se não
+constar nele.
+**Efeito na fatura:** o reembolso não reabre nem altera os valores da fatura (que continua paga); a devolução
+é registrada no histórico da fatura (`reason = 'refund'`). No ledger, `refund.succeeded` credita os valores em
+liquidação; a parte que devolve crédito do cliente gerado pelo excedente do próprio pagamento (lançamento
+`payment.overpayment`, ainda não devolvido e limitado ao saldo de crédito disponível) debita
+`customer_credits` e consome o crédito; o restante debita `refunds` (redução de receita). A parte do crédito
+fica em `refunds.credit_amount`.
+**Justificativa:** reembolsar um pagamento duplicado sem consumir o crédito gerado por ele deixaria o cliente
+com o crédito e o dinheiro devolvido.
+**Consequências:** a ordem de bloqueio é cobrança, reembolso, fatura e cliente (crédito), compatível com
+a ADR-031 e com a confirmação de pagamento que gera crédito; o crédito do cliente é bloqueado antes da
+leitura do saldo que limita a parte do crédito. Webhook cujo retrato entra em conflito com o estado local
+(por exemplo, o crédito consumido por outra fatura ao mesmo tempo) não grava efeito parcial: a transação é
+desfeita e o webhook fica `ignored` numa transação própria.
+
+## ADR-035 Associação dos reembolsos informados pelo provedor
+**Status:** aceita.
+**Contexto:** o simulador devolve identificador e referência externa por reembolso; a documentação do Asaas
+descreve a lista `refunds` da cobrança apenas com valor e situação (`PENDING`,
+`AWAITING_CRITICAL_ACTION_AUTHORIZATION`, `AWAITING_CUSTOMER_EXTERNAL_AUTHORIZATION`, `CANCELLED`, `DONE`), sem
+identificador, e não descreve chave de idempotência para `POST /v3/payments/{id}/refund`.
+**Decisão:** reembolsos do provedor com referência externa (ID local) ou ID já registrado são associados
+exatamente. Sem identificação, a associação é por valor: do total efetivado no provedor desconta-se o já
+confirmado localmente e o restante é atribuído, em ordem de criação, aos reembolsos locais já enviados e
+ainda abertos; reembolsos nunca enviados ao provedor não recebem atribuição. Para que a atribuição não seja
+ambígua, cada cobrança tem no máximo um reembolso em execução ou com resultado desconhecido no provedor; os
+demais pedidos aguardam (a operação é adiada). Valor efetivado sem reembolso local aberto é um reembolso feito
+diretamente no provedor e é registrado (`origin = 'provider'`), se couber no saldo elegível; caso contrário, a
+divergência aparece na conciliação.
+**Consequências:** a atribuição por valor pode associar a um pedido do Recorvia um reembolso de mesmo valor
+feito ao mesmo tempo no painel do provedor; o efeito financeiro é o mesmo e o registro feito no provedor é
+reconhecido quando aparece. Webhooks de reembolso repetidos ou fora de ordem não duplicam efeitos (dados
+cumulativos e confirmação idempotente).
+
+## ADR-036 Disputas e chargebacks
+**Status:** aceita.
+**Decisão:** a situação de chargeback informada pelo provedor (webhook ou consulta) abre a disputa
+(`disputes`, situação `opened`) pelo saldo ainda não reembolsado nem estornado e lança `dispute.opened`
+(débito em `chargebacks`, crédito nos valores em liquidação): o valor fica retido. A análise passa a
+`under_review`; a disputa ganha (`won`) estorna o lançamento de abertura e devolve a cobrança à situação dos
+reembolsos confirmados (`paid`, `partially_refunded` ou, com reembolso confirmado durante a disputa que
+completa o pago, `refunded`); a perdida (`lost`) registra `amount_charged_back` e a cobrança passa a `charged_back`, sem
+reabrir a fatura (histórico com `reason = 'chargeback'`). O estorno da disputa perdida é limitado ao saldo
+elegível: não inclui o reembolsado durante a disputa nem o reservado por reembolso em andamento (que,
+confirmado depois, cabe no saldo), e o lançamento `dispute.hold_released` (débito nos valores em
+liquidação, crédito em `chargebacks`) libera essa parte da retenção. Se o reembolso reservado for recusado
+depois da perda, o valor passa ao chargeback (`amount_charged_back` e `dispute.hold_restored`, um por
+reembolso), porque o valor contestado foi debitado pelo provedor. Assim, `chargebacks` registra o valor
+estornado e, com `refunds`, nunca soma mais que o pago. O painel financeiro mostra o movimento líquido das
+duas contas no mês (débitos menos créditos): a retenção liberada e a disputa ganha reduzem o chargeback do
+mês em que ocorrem, que fica negativo quando a disputa aberta em mês anterior é ganha. Há no máximo uma
+disputa aberta por cobrança (`disputes_open_key`), e cada transição fica em `dispute_events` (imutável).
+Retratos do provedor anteriores ao último registrado ou ao encerramento da disputa não alteram nem reabrem
+disputas.
+**Consequências:** a decisão por situação explícita vale para o simulador (`chargeback_requested`, `won`,
+`lost`). A documentação do Asaas não descreve situação de chargeback perdido; a decisão ganha corresponde a
+`AWAITING_CHARGEBACK_REVERSAL`, e, num retrato obtido por consulta ao provedor (por exemplo, na resolução da
+conciliação), a cobrança novamente recebida sem chargeback encerra a disputa aberta como ganha; eventos sem
+chargeback não decidem disputas. O chargeback não consome crédito do cliente.
+
+## ADR-037 Cancelamento da cobrança no provedor
+**Status:** aceita (resolve a limitação registrada nas ADR-029 e ADR-030).
+**Decisão:** a cobrança cancelada localmente com vínculo no provedor (fatura cancelada, substituição por nota
+de crédito ou por mudança de saldo durante a criação) gera a operação `cancel_charge` (uma por cobrança,
+`payment_operations_cancel_key`), executada depois do commit e retomada pela recuperação. A porta `Gateway`
+ganhou `CancelCharge`: `DELETE /v1/charges/{id}` no simulador e `DELETE /v3/payments/{id}` no Asaas (resposta
+`{deleted, id}`; resposta sem `deleted = true` é ambígua). Cobrança inexistente no provedor equivale a
+cancelada. Depois de resultado ambíguo, o provedor é consultado antes de repetir; se a cobrança já estiver
+paga, a operação termina como falha e o pagamento segue a ADR-030. Cobrança cancelada enquanto a criação estava
+em andamento é cancelada no provedor quando a criação termina.
+**Consequências:** o pagamento de cobrança cancelada localmente passa a ocorrer só quando o provedor recebe o
+pagamento antes do cancelamento (ou o cancelamento falha); a confirmação continua prevalecendo.
+
+## ADR-038 Conciliação com o provedor
+**Status:** aceita.
+**Decisão:** cada execução (`reconciliation_runs`) cobre uma janela `[início, fim)` da conta padrão do
+provedor: lista as cobranças do provedor (`ListCharges`, paginada), carrega as cobranças locais criadas ou
+atualizadas na janela ou presentes na listagem, consulta individualmente (`GetCharge`) as locais ausentes da
+listagem e compara. As chamadas ao provedor ocorrem sem transação aberta; há no máximo uma execução em
+andamento por conta (índice único parcial), com lease que permite encerrar execuções interrompidas. Tipos de
+divergência: cobrança do provedor sem correspondência local, cobrança local inexistente no provedor, valor
+divergente (cobrado ou pago), taxa divergente, pagamento não refletido (pago em um lado e não no outro),
+reembolso pendente (sem confirmação há mais de uma hora ou totais divergentes), chargeback pendente e operação
+com resultado desconhecido.
+**Deduplicação:** a chave da divergência combina tipo, objeto e valores. Divergência repetida atualiza o
+registro (ocorrências, última execução); divergência aberta não constatada numa execução que verificou o mesmo
+objeto é resolvida automaticamente (`auto_resolved`) e é reaberta se voltar com os mesmos valores; divergência
+resolvida manualmente não é reaberta pelos mesmos valores (valores novos geram nova divergência).
+**Resolução:** exige permissão `reconciliation.resolve`, justificativa de 10 a 2000 caracteres e registra
+responsável, data, histórico (auditoria) e, quando houver, o lançamento `reconciliation.adjustment`. O
+responsável fica sempre na auditoria (usuário da sessão ou credencial de API); `resolved_by` guarda somente
+o usuário e fica nulo com credencial de API e na resolução automática.
+`dismiss` registra como explicada; `keep_local` mantém o registro local; `adjust_ledger` lança o ajuste pela
+diferença de taxa (taxa do provedor menos a local) ou de valor pago (local menos o do provedor);
+`accept_provider` adota o provedor: aceita a taxa (cobrança e ledger), ajusta o valor pago, aplica o
+pagamento não refletido, sincroniza reembolso ou chargeback pela consulta atual (reembolso sem registro no
+provedor é encerrado e a reserva liberada), reconsulta a operação desconhecida ou cancela localmente a cobrança
+em aberto inexistente no provedor. Cobrança do provedor sem correspondência local não é importada.
+**Agendamento:** o job `payments.reconcile` (horário, com lease do agendador) executa a conciliação dos
+tenants cujo plano da plataforma tem `reconciliation_automation`, com provedor padrão ativo e sem execução
+agendada nas últimas 24 horas (janela de 7 dias). A execução manual é sempre permitida (janela padrão de 30
+dias, até 93 dias).
+**Rodízio:** a listagem do Asaas filtra pela data de criação (`dateCreated`), e a leitura local cobre o
+criado ou atualizado na janela; uma cobrança antiga com chargeback, reembolso ou pagamento tardio e webhook
+perdido ficaria fora dos dois lados. Por isso cada execução consulta individualmente até 100 cobranças fora
+da janela, vinculadas ao provedor, criadas nos últimos 180 dias e ainda sujeitas a mudança (aguardando
+pagamento, pagas, parcialmente reembolsadas ou em disputa), a começar pelas nunca verificadas e pelas
+verificadas há mais tempo (`reconciliation_charge_checks`, gravada ao concluir a execução). O rodízio é de
+melhor esforço: não torna a execução parcial nem a faz falhar. A consulta que falha é pulada (a cobrança não
+é comparada nem registrada como verificada e volta primeiro na próxima execução); o prazo da coleta
+esgotado, o cancelamento da execução e três falhas seguidas que indicam provedor indisponível (sem
+resposta, limite de taxa ou erro 5xx; a recusa definitiva, própria da cobrança consultada, não conta)
+interrompem o rodízio. O que não couber ou não for consultado fica para as próximas execuções; as falhas
+ficam no log e na auditoria da execução (`rotation_failures`).
+**Limites e prazo:** a leitura local traz primeiro as cobranças presentes na listagem do provedor e depois
+as da janela, até 5000; as listadas sempre cabem (a listagem tem no máximo 2000 cobranças, e cada uma
+corresponde a no máximo duas locais, pelo ID do provedor e pela referência), de modo que o corte nunca gera
+divergência `missing_local` falsa. A coleta tem prazo próprio: 40 segundos na execução manual, que
+responde na requisição sem depender do prazo nem do cancelamento dela (abaixo do limite de escrita da
+resposta da API, de 60 segundos), e o lease menos 2 minutos na agendada. Esgotado o prazo, a coleta para e a
+comparação usa o que foi obtido.
+**Consequências:** a ordem de bloqueio na resolução é divergência e depois cobrança; a execução bloqueia as
+divergências antes de gravar referências às cobranças. Execuções com limite de páginas, de consultas
+individuais, de cobranças locais ou de operações com resultado desconhecido (500) atingido, ou com o prazo
+da coleta esgotado, terminam concluídas com aviso de execução parcial, que cita os motivos. O que não foi
+comparado não gera divergência nem tem divergência resolvida automaticamente; a divergência de operação que
+ficou fora da leitura limitada só é resolvida quando a operação deixa de ter resultado desconhecido.
+
+## ADR-039 Métricas de recebíveis a partir de totais do banco
+**Status:** aceita.
+**Decisão:** o job `metrics.collect` lê, por funções `SECURITY DEFINER` que devolvem apenas contagens
+agregadas, as divergências abertas por tipo (gauge `recorvia_reconciliation_open_discrepancies{kind}`) e os
+reembolsos por situação: concluídos como contador `recorvia_refunds_total{outcome}` (`succeeded`, `failed`,
+totais monotônicos expostos por um coletor que nunca diminui) e em andamento como gauge
+`recorvia_refunds_in_progress{status}` (`requested`, `unknown`).
+**Justificativa:** reembolsos são concluídos na API e no worker; totais do banco dão o mesmo valor em
+qualquer instância, sem rótulos de tenant, cliente ou fatura.
 
 ## ADR-040 Régua de cobrança pelo passo mais recente, com janela e limite aplicados no envio
 **Status:** aceita.
