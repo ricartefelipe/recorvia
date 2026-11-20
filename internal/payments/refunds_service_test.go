@@ -234,8 +234,8 @@ func TestRefundAmbiguousOutcomeQueriesProviderBeforeRepeating(t *testing.T) {
 	f.gw.getResult = ProviderCharge{ProviderChargeID: c.ProviderChargeID, Status: ProviderPartiallyRefunded, RawStatus: "partially_refunded",
 		Amount: brl(10000), Refunds: []ProviderRefund{{ProviderRefundID: "rf_77", ExternalReference: r.ID.String(), State: RefundStateDone, Amount: brl(4000)}}}
 	f.clock.Advance(time.Hour)
-	if n, err := f.svc.RecoverOperations(context.Background()); err != nil || n != 1 {
-		t.Fatalf("recuperação: %d %v", n, err)
+	if r, err := f.svc.RecoverOperations(context.Background()); err != nil || r.Executed != 1 {
+		t.Fatalf("recuperação: %d %v", r.Executed, err)
 	}
 	if len(f.gw.refundCalls) != 1 || !slices.Equal(f.gw.getCalls, []string{c.ProviderChargeID}) {
 		t.Fatalf("consulta antes de repetir: reembolsos=%d consultas=%v", len(f.gw.refundCalls), f.gw.getCalls)

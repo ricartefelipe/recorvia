@@ -265,3 +265,81 @@ func TestOverpaymentWaitsForSubscriptionWithoutHoldingCustomer(t *testing.T) {
 		t.Fatalf("ledger: %+v", net)
 	}
 }
+
+// Criação que esgotou as tentativas com recusas transitórias do provedor e
+// cuja fatura foi anulada depois: a contagem de esgotadas do banco deixa de
+// incluí-la (o alerta se resolve) e a reexecução manual só consulta o
+// provedor e encerra a operação, sem criar cobrança para a fatura anulada.
+// As tentativas e a contagem são feitas só no tenant do teste: a
+// recuperação agendada percorre todos os tenants do banco compartilhado.
+func TestExhaustedCreationOfVoidedInvoiceIsClosedWithoutCharge(t *testing.T) {
+	ctx := context.Background()
+	h := newPayHarness(t, 2*time.Second)
+	for range payments.MaxOperationAttempts {
+		if err := h.sim.EnqueueScenario(h.apiKey, "unavailable"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inv := h.issueInvoice(t, 6000)
+	c, err := h.pay.RequestCharge(ctx, h.tn.ID, inv.ID, h.tn.Actor)
+	if err != nil || c.Status != payments.ChargePending {
+		t.Fatalf("cobrança aguardando nova tentativa: %+v %v", c, err)
+	}
+	var opID uuid.UUID
+	if err := h.env.DB.InTenantTx(ctx, h.tn.ID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT id FROM payment_operations WHERE tenant_id = $1 AND charge_id = $2`, h.tn.ID, c.ID).Scan(&opID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for range payments.MaxOperationAttempts - 1 {
+		h.env.Clock.Advance(time.Hour)
+		if err := h.pay.ExecuteOperation(ctx, h.tn.ID, opID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.env.Clock.Advance(time.Hour)
+	exhausted := func() map[payments.OperationStatus]int {
+		t.Helper()
+		var out map[payments.OperationStatus]int
+		if err := h.env.Store.Payments().InTenant(ctx, h.tn.ID, func(tx payments.Tx) error {
+			var err error
+			out, err = tx.ExhaustedOperations(ctx, h.env.Clock.Now())
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if got := exhausted(); got[payments.OpPending] != 1 || len(got) != 1 {
+		t.Fatalf("pré-condição: criação pendente esgotada: %v", got)
+	}
+
+	if _, err := h.env.Billing.Void(ctx, h.tn.ID, h.tn.Actor, inv.ID, "Emitida por engano", inv.Version); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.pay.CancelOpenCharges(ctx, h.tn.ID, inv.ID, uuid.New()); err != nil {
+		t.Fatal(err)
+	}
+	if got := exhausted(); len(got) != 0 {
+		t.Fatalf("a criação de cobrança cancelada não conta como esgotada: %v", got)
+	}
+
+	if err := h.pay.RetryOperation(ctx, h.tn.ID, opID); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, h.env, h.tn.ID, `SELECT count(*) FROM payment_operations WHERE tenant_id = $1 AND id = $2
+		AND status = 'failed' AND completed_at IS NOT NULL AND attempts = $3`, h.tn.ID, opID, payments.MaxOperationAttempts+1); n != 1 {
+		t.Fatal("a reexecução encerra a operação")
+	}
+	got, err := h.pay.Charge(ctx, h.tn.ID, c.ID)
+	if err != nil || got.Status != payments.ChargeCanceled || got.ProviderChargeID != "" {
+		t.Fatalf("cobrança cancelada e sem vínculo: %+v %v", got, err)
+	}
+	if charges, _ := h.sim.ListCharges(h.apiKey, c.ID.String(), time.Time{}, time.Time{}, 0, 100); len(charges) != 0 {
+		t.Fatalf("nenhuma cobrança no provedor para a fatura anulada: %d", len(charges))
+	}
+	if n := countRows(t, h.env, h.tn.ID, `SELECT count(*) FROM outbox_events WHERE tenant_id = $1 AND event_type = 'charge.created'`,
+		h.tn.ID); n != 0 {
+		t.Fatalf("charge.created: %d", n)
+	}
+}

@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ricartefelipe/recorvia/api"
 	"github.com/ricartefelipe/recorvia/internal/apicredentials"
@@ -201,6 +203,9 @@ func (a *API) requestID(next http.Handler) http.Handler {
 			id = newRequestID()
 		}
 		w.Header().Set("X-Request-ID", id)
+		// O mesmo identificador no span HTTP permite ir do log ou do corpo de
+		// erro ao rastro correspondente.
+		trace.SpanFromContext(r.Context()).SetAttributes(attribute.String("recorvia.request_id", id))
 		ctx := logging.WithAttrs(r.Context(), slog.String("request_id", id))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -240,8 +245,34 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return s.ResponseWriter.Write(b)
 }
 
+// knownMethods são os métodos HTTP padronizados (RFC 9110 e PATCH); os
+// demais viram otherMethod em métricas, nome de span e log.
+var knownMethods = map[string]bool{
+	http.MethodGet: true, http.MethodHead: true, http.MethodPost: true, http.MethodPut: true, http.MethodPatch: true,
+	http.MethodDelete: true, http.MethodConnect: true, http.MethodOptions: true, http.MethodTrace: true,
+}
+
+// otherMethod é o valor usado para métodos fora da lista (mesma convenção
+// das convenções semânticas do OpenTelemetry).
+const otherMethod = "_OTHER"
+
+// maxOriginalMethod limita o método original guardado no span quando ele não
+// é padronizado: o otelhttp registra em http.request.method_original o valor
+// recebido inteiro (até o limite de cabeçalhos, 64 KiB).
+const maxOriginalMethod = 32
+
+// normalizeMethod limita os valores do método usados como rótulo de métrica
+// e nome de span: o net/http aceita qualquer token como método, e um cliente
+// sem autenticação criaria uma série nova por método inventado.
+func normalizeMethod(m string) string {
+	if knownMethods[m] {
+		return m
+	}
+	return otherMethod
+}
+
 // observe registra log de acesso e métricas por padrão de rota (nunca pela
-// URL concreta, que contém identificadores).
+// URL concreta, que contém identificadores) e pelo método normalizado.
 func (a *API) observe(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -255,14 +286,23 @@ func (a *API) observe(next http.Handler) http.Handler {
 			rec.status = http.StatusOK
 		}
 		d := time.Since(start)
+		method := normalizeMethod(r.Method)
+		// Nome do span pelo padrão de rota (nunca pela URL concreta).
+		span := trace.SpanFromContext(r.Context())
+		span.SetName(method + " " + route)
+		span.SetAttributes(attribute.String("http.route", route))
+		if method == otherMethod {
+			// Métodos válidos são tokens ASCII: o corte não divide caracteres.
+			span.SetAttributes(attribute.String("http.request.method_original", r.Method[:min(len(r.Method), maxOriginalMethod)]))
+		}
 		if a.Metrics != nil {
-			a.Metrics.HTTPRequests.WithLabelValues(route, r.Method, strconv.Itoa(rec.status/100)+"xx").Inc()
-			a.Metrics.HTTPDuration.WithLabelValues(route, r.Method).Observe(d.Seconds())
+			a.Metrics.HTTPRequests.WithLabelValues(route, method, strconv.Itoa(rec.status/100)+"xx").Inc()
+			a.Metrics.HTTPDuration.WithLabelValues(route, method).Observe(d.Seconds())
 		}
 		if route == "/livez" || route == "/readyz" {
 			return
 		}
-		a.log.InfoContext(r.Context(), "requisição", slog.String("method", r.Method), slog.String("route", route),
+		a.log.InfoContext(r.Context(), "requisição", slog.String("method", method), slog.String("route", route),
 			slog.Int("status", rec.status), slog.Duration("duration", d))
 	})
 }

@@ -191,7 +191,7 @@ stateDiagram-v2
   pending --> in_flight: reivindicada (lease)
   unknown --> in_flight: nova consulta
   in_flight --> succeeded
-  in_flight --> failed: recusa definitiva
+  in_flight --> failed: recusa definitiva ou cobrança não mais pendente sem cobrança no provedor
   in_flight --> pending: falha repetível
   in_flight --> unknown: resposta ambígua
   in_flight --> in_flight: lease expirado (outra instância assume)
@@ -204,6 +204,13 @@ Tipos: `create_charge` (criação da cobrança, consulta pela referência extern
 (reembolso, consulta da cobrança e dos reembolsos antes de repetir; no máximo um reembolso em execução ou
 desconhecido por cobrança) e `cancel_charge` (cancelamento no provedor, consulta da cobrança antes de
 repetir; um por cobrança).
+
+Uma criação cuja cobrança deixou de estar pendente (por exemplo, cancelada com a fatura anulada) é
+obsoleta: a execução só consulta o provedor pela referência externa e nunca cria a cobrança. Encontrada
+a cobrança (criada por uma tentativa anterior), ela é vinculada sem `charge.created` e cancelada também
+no provedor por uma operação `cancel_charge`; um pagamento que chegue por ela antes do cancelamento vira
+crédito do cliente. Sem cobrança no provedor, a operação termina em `failed`. Uma criação `pending`
+obsoleta não conta como esgotada.
 
 ## Notificação (`internal/notifications`)
 

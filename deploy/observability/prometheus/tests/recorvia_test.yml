@@ -1,0 +1,537 @@
+# Testes das regras de alerta (promtool test rules). Executados no estágio
+# rules-test da imagem do Prometheus: make obs-check.
+rule_files:
+  - ../rules/recorvia.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Outbox parada: dispara somente após 5 minutos acima de 300 s.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_outbox_oldest_pending_seconds{service="worker", instance="worker:9091", job="recorvia-worker"}'
+        values: '10 400+60x12'
+      - series: 'recorvia_outbox_pending{service="worker", instance="worker:9091", job="recorvia-worker"}'
+        values: '5x12'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RecorviaOutboxStalled
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RecorviaOutboxStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              area: mensageria
+            exp_annotations:
+              summary: "Evento mais antigo da outbox pendente há 11m 40s"
+              description: "A publicação da outbox está parada ou atrasada: cobranças, webhooks e notas de crédito não avançam."
+              runbook: docs/operacao/runbooks/filas-e-dlq.md#outbox-acumulada-ou-parada
+      - eval_time: 12m
+        alertname: RecorviaOutboxBacklog
+        exp_alerts: []
+
+  # Atraso da fila pela mensagem na cabeça; retentativas, DLQ e fila vazia
+  # (NaN) não contam.
+  - interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_head_message_timestamp{queue="recorvia.payments.invoice_issued", vhost="/", job="rabbitmq-queues"}'
+        values: '0+0x10'
+      - series: 'rabbitmq_detailed_queue_head_message_timestamp{queue="recorvia.payments.invoice_issued.retry.3", vhost="/", job="rabbitmq-queues"}'
+        values: '0+0x10'
+      - series: 'rabbitmq_detailed_queue_head_message_timestamp{queue="recorvia.payments.webhooks", vhost="/", job="rabbitmq-queues"}'
+        values: 'NaN+0x10'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: RecorviaQueueLag
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      # Carimbo fixo em 60 s: com o tempo da avaliação, o atraso cresce.
+      - series: 'rabbitmq_detailed_queue_head_message_timestamp{queue="recorvia.payments.invoice_issued", vhost="/", job="rabbitmq-queues"}'
+        values: '60+0x20'
+      - series: 'rabbitmq_detailed_queue_head_message_timestamp{queue="recorvia.payments.invoice_issued.retry.3", vhost="/", job="rabbitmq-queues"}'
+        values: '60+0x20'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: RecorviaQueueLag
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: RecorviaQueueLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: mensageria
+              queue: recorvia.payments.invoice_issued
+            exp_annotations:
+              summary: "Fila recorvia.payments.invoice_issued com atraso de 11m 0s"
+              description: "A mensagem na cabeça da fila ocorreu há mais de 5 minutos (carimbo de tempo do evento)."
+              runbook: docs/operacao/runbooks/filas-e-dlq.md#fila-acumulada-ou-atrasada
+
+  # Fila principal sem consumidor; a DLQ sem consumidor não alerta por esta regra.
+  - interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_consumers{queue="recorvia.payments.webhooks", vhost="/", job="rabbitmq-queues"}'
+        values: '1 1 0x10'
+      - series: 'rabbitmq_detailed_queue_consumers{queue="recorvia.payments.webhooks.retry.1", vhost="/", job="rabbitmq-queues"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: RecorviaQueueWithoutConsumer
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              area: mensageria
+              queue: recorvia.payments.webhooks
+            exp_annotations:
+              summary: "Fila recorvia.payments.webhooks sem consumidor"
+              description: "Nenhum worker consome a fila há 5 minutos; os eventos acumulam sem processamento."
+              runbook: docs/operacao/runbooks/filas-e-dlq.md#processo-ou-broker-indisponivel
+
+  # Mensagens enviadas à DLQ: o contador inicializado em zero permite
+  # detectar já a primeira ocorrência.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_consumer_messages_total{service="worker", consumer="payments.webhooks", outcome="dead_letter", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 0 0 1 1 1'
+      - series: 'recorvia_consumer_messages_total{service="worker", consumer="payments.invoice_issued", outcome="dead_letter", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RecorviaMessagesDeadLettered
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RecorviaMessagesDeadLettered
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: mensageria
+              consumer: payments.webhooks
+            exp_annotations:
+              summary: "Mensagens enviadas à DLQ pelo consumidor payments.webhooks"
+              description: "Mensagens esgotaram as retentativas ou foram rejeitadas como inválidas e aguardam triagem."
+              runbook: docs/operacao/runbooks/filas-e-dlq.md#mensagens-na-dlq
+
+  # Saturação do worker: vagas ocupadas por 15 minutos.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_consumer_in_flight{service="worker", consumer="payments.invoice_issued", instance="worker:9091", job="recorvia-worker"}'
+        values: '4x20'
+      - series: 'recorvia_consumer_concurrency{service="worker", consumer="payments.invoice_issued", instance="worker:9091", job="recorvia-worker"}'
+        values: '4x20'
+      - series: 'recorvia_consumer_in_flight{service="worker", consumer="payments.webhooks", instance="worker:9091", job="recorvia-worker"}'
+        values: '2x20'
+      - series: 'recorvia_consumer_concurrency{service="worker", consumer="payments.webhooks", instance="worker:9091", job="recorvia-worker"}'
+        values: '4x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: RecorviaWorkerSaturated
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: mensageria
+              consumer: payments.invoice_issued
+              instance: worker:9091
+            exp_annotations:
+              summary: "Consumidor payments.invoice_issued saturado em worker:9091"
+              description: "Todas as vagas de processamento ocupadas por 15 minutos: aumentar a concorrência ou investigar lentidão."
+              runbook: docs/operacao/runbooks/filas-e-dlq.md#worker-saturado
+
+  # Recusas do provedor e indisponibilidade.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_charge_failures_total{service="worker", provider="simulator", kind="permanent", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 2 4 6 8 10'
+      - series: 'recorvia_charge_failures_total{service="worker", provider="simulator", kind="ambiguous", instance="worker:9091", job="recorvia-worker"}'
+        values: '0x5'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RecorviaChargesDeclined
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: cobranca
+              provider: simulator
+            exp_annotations:
+              summary: "Provedor simulator recusou cobranças nos últimos 30 minutos"
+              description: "Recusas definitivas na criação de cobranças (validação, credencial ou cadastro do cliente)."
+              runbook: docs/operacao/runbooks/faturamento.md#falhas-de-cobranca
+      - eval_time: 5m
+        alertname: RecorviaPaymentProviderUnavailable
+        exp_alerts: []
+
+  # Operações com resultado desconhecido por 30 minutos.
+  - interval: 5m
+    input_series:
+      - series: 'recorvia_payment_operations{service="worker", status="unknown", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 2x10'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RecorviaPaymentOperationsUnknown
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: RecorviaPaymentOperationsUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: cobranca
+            exp_annotations:
+              summary: "2 operações com resultado desconhecido há 30 minutos"
+              description: "Chamadas ao provedor sem confirmação segura; a recuperação consulta pela referência externa e o restante vai para a conciliação."
+              runbook: docs/operacao/runbooks/conciliacao.md#operacoes-com-resultado-desconhecido
+
+  # Divergências de conciliação: valores repetidos por instância não somam.
+  - interval: 5m
+    input_series:
+      - series: 'recorvia_reconciliation_open_discrepancies{service="worker", kind="amount_mismatch", instance="worker-a:9091", job="recorvia-worker"}'
+        values: '3x70'
+      - series: 'recorvia_reconciliation_open_discrepancies{service="worker", kind="amount_mismatch", instance="worker-b:9091", job="recorvia-worker"}'
+        values: '3x70'
+    alert_rule_test:
+      - eval_time: 5h
+        alertname: RecorviaReconciliationDiscrepanciesOpen
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: conciliacao
+              kind: amount_mismatch
+            exp_annotations:
+              summary: "3 divergências de conciliação abertas (amount_mismatch)"
+              description: "Divergências abertas há mais de 4 horas aguardam análise e resolução com justificativa."
+              runbook: docs/operacao/runbooks/conciliacao.md#divergencias-abertas
+      - eval_time: 5h
+        alertname: RecorviaReconciliationDiscrepanciesHigh
+        exp_alerts: []
+
+  # Motor de faturamento parado: último sucesso fica para trás.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_job_last_success_timestamp_seconds{service="worker", task="billing.run_cycle", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 60 120 180 180x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RecorviaBillingCycleStale
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: RecorviaBillingCycleStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              area: faturamento
+            exp_annotations:
+              summary: "Motor de faturamento sem sucesso há 17m 0s"
+              description: "A tarefa billing.run_cycle (intervalo de 1 minuto) não conclui com sucesso há mais de 15 minutos, ou não concluiu nenhuma vez desde a partida do worker."
+              runbook: docs/operacao/runbooks/faturamento.md#motor-de-faturamento-parado
+
+  # Reinício do worker com o faturamento falhando: a série do último sucesso
+  # some (só existe depois de um sucesso real) e o alerta usa a idade do
+  # processo novo.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_job_last_success_timestamp_seconds{service="worker", task="billing.run_cycle", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 60 120 180 240 300 360 420 480 540 stale'
+      - series: 'process_start_time_seconds{instance="worker:9091", job="recorvia-worker"}'
+        values: '0x9 600x60'
+      - series: 'process_start_time_seconds{instance="api:9091", job="recorvia-api"}'
+        values: '0x70'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RecorviaBillingCycleStale
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: RecorviaBillingCycleStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              area: faturamento
+            exp_annotations:
+              summary: "Motor de faturamento sem sucesso há 20m 0s"
+              description: "A tarefa billing.run_cycle (intervalo de 1 minuto) não conclui com sucesso há mais de 15 minutos, ou não concluiu nenhuma vez desde a partida do worker."
+              runbook: docs/operacao/runbooks/faturamento.md#motor-de-faturamento-parado
+
+  # Reivindicação falhando a cada ciclo desde a partida: nenhuma execução,
+  # nenhum último sucesso; o faturamento e a coleta de métricas alertam pela
+  # idade do processo.
+  - interval: 1m
+    input_series:
+      - series: 'process_start_time_seconds{instance="worker:9091", job="recorvia-worker"}'
+        values: '0x30'
+      - series: 'recorvia_job_runs_total{service="worker", task="billing.run_cycle", outcome="failure", instance="worker:9091", job="recorvia-worker"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RecorviaMetricsCollectionStale
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RecorviaMetricsCollectionStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: faturamento
+            exp_annotations:
+              summary: "Coleta de métricas do worker parada"
+              description: "A tarefa metrics.collect não conclui há mais de 2 minutos, ou não concluiu nenhuma vez desde a partida do worker; as métricas da outbox, das operações e do banco estão desatualizadas."
+              runbook: docs/operacao/runbooks/faturamento.md#tarefas-agendadas-falhando
+      - eval_time: 14m
+        alertname: RecorviaBillingCycleStale
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: RecorviaBillingCycleStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              area: faturamento
+            exp_annotations:
+              summary: "Motor de faturamento sem sucesso há 16m 0s"
+              description: "A tarefa billing.run_cycle (intervalo de 1 minuto) não conclui com sucesso há mais de 15 minutos, ou não concluiu nenhuma vez desde a partida do worker."
+              runbook: docs/operacao/runbooks/faturamento.md#motor-de-faturamento-parado
+      - eval_time: 16m
+        alertname: RecorviaScheduledTaskFailing
+        exp_alerts: []
+
+  # Tarefas horárias falhando: uma falha por hora nunca soma três em 30
+  # minutos; o alerta proporcional ao intervalo dispara depois de três
+  # intervalos sem sucesso, também para a tarefa que não teve sucesso desde
+  # a partida. Tarefas frequentes em dia e o faturamento (alerta próprio)
+  # ficam de fora.
+  - interval: 5m
+    input_series:
+      - series: 'process_start_time_seconds{instance="worker:9091", job="recorvia-worker"}'
+        values: '0x80'
+      - series: 'recorvia_job_interval_seconds{service="worker", task="platform.close_statements", instance="worker:9091", job="recorvia-worker"}'
+        values: '3600x80'
+      - series: 'recorvia_job_interval_seconds{service="worker", task="idempotency.purge", instance="worker:9091", job="recorvia-worker"}'
+        values: '3600x80'
+      - series: 'recorvia_job_interval_seconds{service="worker", task="notifications.dispatch", instance="worker:9091", job="recorvia-worker"}'
+        values: '15x80'
+      - series: 'recorvia_job_interval_seconds{service="worker", task="billing.run_cycle", instance="worker:9091", job="recorvia-worker"}'
+        values: '60x80'
+      - series: 'recorvia_job_last_success_timestamp_seconds{service="worker", task="platform.close_statements", instance="worker:9091", job="recorvia-worker"}'
+        values: '0x80'
+      - series: 'recorvia_job_last_success_timestamp_seconds{service="worker", task="notifications.dispatch", instance="worker:9091", job="recorvia-worker"}'
+        values: '0+300x80'
+      - series: 'recorvia_job_runs_total{service="worker", task="platform.close_statements", outcome="failure", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 1x11 2x11 3x11 4x11 5x11 6x11'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: RecorviaScheduledTaskFailing
+        exp_alerts: []
+      - eval_time: 2h50m
+        alertname: RecorviaScheduledTaskStale
+        exp_alerts: []
+      - eval_time: 3h10m
+        alertname: RecorviaScheduledTaskStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: faturamento
+              task: platform.close_statements
+            exp_annotations:
+              summary: "Tarefa agendada platform.close_statements sem sucesso há 3h 10m 0s"
+              description: "A tarefa não conclui com sucesso há mais de três intervalos (no mínimo 15 minutos): falha a cada execução ou não é executada."
+              runbook: docs/operacao/runbooks/faturamento.md#tarefas-agendadas-falhando
+          - exp_labels:
+              severity: warning
+              area: faturamento
+              task: idempotency.purge
+            exp_annotations:
+              summary: "Tarefa agendada idempotency.purge sem sucesso há 3h 10m 0s"
+              description: "A tarefa não conclui com sucesso há mais de três intervalos (no mínimo 15 minutos): falha a cada execução ou não é executada."
+              runbook: docs/operacao/runbooks/faturamento.md#tarefas-agendadas-falhando
+      - eval_time: 5h
+        alertname: RecorviaScheduledTaskFailing
+        exp_alerts: []
+
+  # Pool de conexões saturado e servidor perto do limite.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_db_pool_connections{service="api", state="acquired", instance="api:9091", job="recorvia-api"}'
+        values: '19x10'
+      - series: 'recorvia_db_pool_connections{service="api", state="idle", instance="api:9091", job="recorvia-api"}'
+        values: '1x10'
+      - series: 'recorvia_db_pool_max_connections{service="api", instance="api:9091", job="recorvia-api"}'
+        values: '20x10'
+      - series: 'recorvia_db_server_connections{service="worker", instance="worker:9091", job="recorvia-worker"}'
+        values: '40x15'
+      - series: 'recorvia_db_server_max_connections{service="worker", instance="worker:9091", job="recorvia-worker"}'
+        values: '97x15'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: RecorviaDBPoolSaturated
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: banco
+              service: api
+              instance: api:9091
+            exp_annotations:
+              summary: "Pool de conexões de api em 95%"
+              description: "Conexões em uso acima de 90% do pool por 5 minutos em api:9091."
+              runbook: docs/operacao/runbooks/faturamento.md#conexoes-do-banco
+      - eval_time: 12m
+        alertname: RecorviaDBServerConnectionsHigh
+        exp_alerts: []
+
+  # Operações esgotadas em pending ou in_flight; as esgotadas em unknown têm
+  # alerta próprio.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_payment_operations_exhausted{service="worker", status="pending", instance="worker:9091", job="recorvia-worker"}'
+        values: '2x30'
+      - series: 'recorvia_payment_operations_exhausted{service="worker", status="in_flight", instance="worker:9091", job="recorvia-worker"}'
+        values: '0x30'
+      - series: 'recorvia_payment_operations_exhausted{service="worker", status="unknown", instance="worker:9091", job="recorvia-worker"}'
+        values: '3x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RecorviaPaymentOperationsExhausted
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: RecorviaPaymentOperationsExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: cobranca
+              status: pending
+            exp_annotations:
+              summary: "2 operações de pagamento esgotadas (pending)"
+              description: "Operações que chegaram ao limite de tentativas automáticas sem confirmação e não são mais retomadas pela recuperação: as faturas ficam sem cobrança."
+              runbook: docs/operacao/runbooks/conciliacao.md#operacoes-esgotadas
+
+  # Webhooks recebidos acima do limite de corpo contam como recusa; corpo
+  # inválido não.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_provider_webhooks_total{service="api", provider="asaas", outcome="too_large", instance="api:9091", job="recorvia-api"}'
+        values: '0+1x15'
+      - series: 'recorvia_provider_webhooks_total{service="api", provider="asaas", outcome="invalid", instance="api:9091", job="recorvia-api"}'
+        values: '0+1x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RecorviaWebhooksRejected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: cobranca
+              provider: asaas
+              outcome: too_large
+            exp_annotations:
+              summary: "Webhooks de asaas recusados (too_large)"
+              description: "Recebimentos recusados por autenticação, endpoint desconhecido, corpo acima do limite ou falha de persistência."
+              runbook: docs/operacao/runbooks/faturamento.md#webhooks-recusados
+
+  # Envio de e-mails parado: tentativas falhando sem nenhum envio aceito.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_notifications_dispatched_total{service="worker", outcome="retried", instance="worker:9091", job="recorvia-worker"}'
+        values: '0+1x60'
+      - series: 'recorvia_notifications_dispatched_total{service="worker", outcome="failed", instance="worker:9091", job="recorvia-worker"}'
+        values: '0x60'
+      - series: 'recorvia_notifications_dispatched_total{service="worker", outcome="sent", instance="worker:9091", job="recorvia-worker"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RecorviaEmailDeliveryStalled
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: RecorviaEmailDeliveryStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: notificacoes
+            exp_annotations:
+              summary: "Envio de e-mails sem sucesso"
+              description: "Tentativas de envio falhando e nenhum e-mail aceito pelo servidor SMTP há pelo menos 15 minutos: servidor indisponível, credencial ou rede."
+              runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#envio-de-e-mails-parado
+      - eval_time: 40m
+        alertname: RecorviaNotificationsFailed
+        exp_alerts: []
+  # Com envios aceitos, retentativas isoladas não alertam; falhas
+  # definitivas acima de 5 em 30 minutos, sim.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_notifications_dispatched_total{service="worker", outcome="retried", instance="worker:9091", job="recorvia-worker"}'
+        values: '0+1x60'
+      - series: 'recorvia_notifications_dispatched_total{service="worker", outcome="failed", instance="worker:9091", job="recorvia-worker"}'
+        values: '0+1x60'
+      - series: 'recorvia_notifications_dispatched_total{service="worker", outcome="sent", instance="worker:9091", job="recorvia-worker"}'
+        values: '0+5x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: RecorviaEmailDeliveryStalled
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: RecorviaNotificationsFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: notificacoes
+            exp_annotations:
+              summary: "Notificações com falha definitiva nos últimos 30 minutos"
+              description: "E-mails encerrados por recusa permanente do servidor SMTP, fim das tentativas ou conteúdo indisponível: o destinatário não foi avisado."
+              runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#notificacoes-com-falha-definitiva
+
+  # Webhooks enviados: nenhum destino recebe; com entregas bem-sucedidas, a
+  # falha de um destino isolado não alerta.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_webhook_deliveries_total{service="worker", outcome="retrying", instance="worker:9091", job="recorvia-worker"}'
+        values: '0+1x60'
+      - series: 'recorvia_webhook_deliveries_total{service="worker", outcome="succeeded", instance="worker:9091", job="recorvia-worker"}'
+        values: '0x60'
+      - series: 'recorvia_webhook_deliveries_total{service="worker", outcome="succeeded", instance="worker-b:9091", job="recorvia-worker"}'
+        values: '0x40 0+3x20'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: RecorviaWebhookDeliveriesFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: notificacoes
+            exp_annotations:
+              summary: "Nenhuma entrega de webhook bem-sucedida em 30 minutos"
+              description: "Entregas de webhooks aos tenants falhando para todos os destinos: saída de rede, DNS ou proteção contra SSRF do worker."
+              runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#webhooks-enviados-sem-sucesso
+      - eval_time: 55m
+        alertname: RecorviaWebhookDeliveriesFailing
+        exp_alerts: []
+
+  # Reembolsos (métricas da etapa 5): resultado desconhecido por 30 minutos e
+  # recusa do provedor.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_refunds_in_progress{service="worker", status="unknown", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 1x40'
+      - series: 'recorvia_refunds_in_progress{service="worker", status="requested", instance="worker:9091", job="recorvia-worker"}'
+        values: '4x40'
+      - series: 'recorvia_refunds_total{service="worker", outcome="failed", instance="worker:9091", job="recorvia-worker"}'
+        values: '0x20 1x20'
+      - series: 'recorvia_refunds_total{service="worker", outcome="succeeded", instance="worker:9091", job="recorvia-worker"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RecorviaRefundsUnknown
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: RecorviaRefundsUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: conciliacao
+            exp_annotations:
+              summary: "1 reembolsos com resultado desconhecido há 30 minutos"
+              description: "Pedidos de reembolso sem confirmação segura do provedor: o cliente pode ter sido reembolsado sem registro local."
+              runbook: docs/operacao/runbooks/conciliacao.md#reembolsos-sem-confirmacao
+      - eval_time: 15m
+        alertname: RecorviaRefundsFailed
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: RecorviaRefundsFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: conciliacao
+            exp_annotations:
+              summary: "Reembolsos recusados pelo provedor na última hora"
+              description: "O valor não foi devolvido ao cliente; o reembolso precisa de nova solicitação ou de devolução por outro meio."
+              runbook: docs/operacao/runbooks/conciliacao.md#reembolsos-sem-confirmacao

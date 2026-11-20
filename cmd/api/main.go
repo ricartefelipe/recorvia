@@ -91,6 +91,19 @@ func run(log *slog.Logger) error {
 	portalSvc := portal.NewService(core.Store.Portal(), portalSessions, sessions, core.Clock, portalPolicy)
 	credentials := apicredentials.NewService(core.Store.APICredentials(), sessions, core.Clock, apicredentials.DefaultPolicy())
 	metrics := telemetry.NewMetrics("api")
+	metrics.RegisterDBPool(app.DBPoolStats(core.DB))
+	core.Resolver.Observe(metrics)
+	metrics.InitChargeFailures(core.Resolver.Providers())
+	metrics.InitProviderWebhooks(core.Resolver.Providers())
+	// Cada dependência é verificada em paralelo e com prazo próprio: um banco
+	// lento não faz o Redis aparecer como indisponível.
+	deps := map[string]telemetry.DependencyCheck{"postgres": core.DB.Ping, "redis": sessions.Ping}
+	ready := func(ctx context.Context) map[string]error {
+		return telemetry.ProbeDependencies(ctx, 2*time.Second, deps)
+	}
+	// recorvia_dependency_up reflete o estado atual a cada coleta, sem
+	// depender de consultas a /readyz.
+	metrics.ObserveDependencies(2*time.Second, deps)
 
 	_, router := httpapi.NewRouter(httpapi.Deps{
 		Log: log, Config: cfg, Clock: core.Clock, Metrics: metrics, Store: core.Store, Sessions: sessions, Identity: ids,
@@ -99,9 +112,7 @@ func run(log *slog.Logger) error {
 		Metering: core.Metering, Payments: core.Payments, Reporting: core.Reporting, Notifications: core.Notifications,
 		Collections: core.Collections, Webhooks: core.Webhooks, Portal: portalSvc, Credentials: credentials,
 		Providers: core.Resolver.Providers(),
-		Ready: func(ctx context.Context) map[string]error {
-			return map[string]error{"postgres": core.DB.Ping(ctx), "redis": sessions.Ping(ctx)}
-		},
+		Ready:     ready,
 	})
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: otelhttp.NewHandler(router, "http"), ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 15 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}

@@ -19,6 +19,7 @@ type Factory struct {
 type Resolver struct {
 	factories map[string]Factory
 	httpc     *http.Client
+	observer  ChargeObserver
 }
 
 // NewResolver registra os provedores disponíveis nesta instalação.
@@ -36,8 +37,16 @@ func (r *Resolver) Gateway(a payments.ProviderAccount) (payments.Gateway, error)
 	if !ok {
 		return nil, fmt.Errorf("gateways: provedor %q indisponível", a.Provider)
 	}
-	return f.Gateway(a, r.httpc)
+	gw, err := f.Gateway(a, r.httpc)
+	if err != nil || r.observer == nil {
+		return gw, err
+	}
+	return observedGateway{Gateway: gw, provider: a.Provider, obs: r.observer}, nil
 }
+
+// Observe registra o observador das falhas de criação de cobrança. Deve ser
+// chamado na composição, antes de o resolvedor ser usado.
+func (r *Resolver) Observe(o ChargeObserver) { r.observer = o }
 
 // Verifier retorna o verificador de webhooks do provedor.
 func (r *Resolver) Verifier(provider string) (payments.WebhookVerifier, error) {

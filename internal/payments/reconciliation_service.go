@@ -1047,6 +1047,6 @@ func (s *Service) reconsultOperation(ctx context.Context, tenantID uuid.UUID, d 
 	if err != nil {
 		return err
 	}
-	_, err = s.executeOperation(ctx, tenantID, *d.OperationID)
+	_, err = s.executeOperation(ctx, tenantID, *d.OperationID, execRecovery)
 	return err
 }

@@ -97,7 +97,7 @@ func (s *Service) RequestRefund(ctx context.Context, tenantID uuid.UUID, actor a
 	if err != nil || existing {
 		return r, err
 	}
-	if _, err := s.executeOperation(ctx, tenantID, opID); err != nil && s.cfg.Log != nil {
+	if _, err := s.executeOperation(ctx, tenantID, opID, execImmediate); err != nil && s.cfg.Log != nil {
 		s.cfg.Log.WarnContext(ctx, "reembolso adiado para a recuperação", slog.String("refund_id", r.ID.String()),
 			slog.String("error", err.Error()))
 	}

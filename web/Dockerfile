@@ -10,6 +10,12 @@ RUN npm run build
 
 # Imagem final: nginx sem privilégios (usuário 101), escutando na porta 8080.
 FROM nginxinc/nginx-unprivileged:1.31.7-alpine3.24
+# A imagem base pode não incorporar correções de segurança já publicadas no
+# branch estável do Alpine 3.24 (verificadas pelo Trivy no job image-scan,
+# ADR-057): os pacotes do sistema são atualizados no build, sem trocar de
+# versão do Alpine.
+USER root
+RUN apk upgrade --no-cache
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 USER 101

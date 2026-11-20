@@ -382,6 +382,106 @@ func TestOperationClaimable(t *testing.T) {
 	}
 }
 
+// Operações que chegaram ao limite de tentativas e não são mais
+// reivindicadas pela recuperação (sem alerta próprio até esta contagem). Uma
+// criação pendente cuja cobrança foi cancelada não conta: nada ficou com
+// resultado incerto e a cobrança não será mais criada.
+func TestOperationExhausted(t *testing.T) {
+	now := chargeNow
+	past, future := now.Add(-time.Second), now.Add(time.Second)
+	limit := MaxOperationAttempts
+	create := func(status OperationStatus, next time.Time, lease *time.Time, attempts int) Operation {
+		return Operation{Kind: OpCreateCharge, Status: status, NextAttemptAt: next, LeaseUntil: lease, Attempts: attempts}
+	}
+	cases := []struct {
+		name   string
+		op     Operation
+		charge ChargeStatus
+		want   bool
+	}{
+		{"pendente no limite e vencida", create(OpPending, past, nil, limit), ChargePending, true},
+		{"pendente no limite antes da próxima tentativa", create(OpPending, future, nil, limit), ChargePending, false},
+		{"pendente abaixo do limite", create(OpPending, past, nil, limit-1), ChargePending, false},
+		{"pendente no limite com a cobrança cancelada", create(OpPending, past, nil, limit), ChargeCanceled, false},
+		{"desconhecida no limite", create(OpUnknown, now, nil, limit), ChargePending, true},
+		{"desconhecida no limite com a cobrança cancelada", create(OpUnknown, now, nil, limit), ChargeCanceled, true},
+		{"em execução no limite com lease vencido", create(OpInFlight, time.Time{}, &past, limit), ChargePending, true},
+		{"em execução no limite com lease vencido e a cobrança cancelada", create(OpInFlight, time.Time{}, &past, limit), ChargeCanceled, true},
+		{"em execução no limite com lease vigente", create(OpInFlight, time.Time{}, &future, limit), ChargePending, false},
+		{"em execução no limite sem lease", create(OpInFlight, time.Time{}, nil, limit), ChargePending, false},
+		{"concluída no limite", create(OpSucceeded, past, nil, limit), ChargeAwaitingPayment, false},
+		{"falhou no limite", create(OpFailed, past, nil, limit), ChargeFailed, false},
+		{"reembolso pendente no limite", Operation{Kind: OpRefund, Status: OpPending, NextAttemptAt: past, Attempts: limit}, ChargePaid, true},
+	}
+	for _, c := range cases {
+		if got := c.op.Exhausted(now, c.charge); got != c.want {
+			t.Errorf("%s: Exhausted=%v, esperado %v", c.name, got, c.want)
+		}
+		if c.want && c.op.Claimable(now) {
+			t.Errorf("%s: operação esgotada não pode ser reivindicável", c.name)
+		}
+	}
+}
+
+// Só a criação de cobrança se torna obsoleta, e só quando a cobrança deixou
+// de estar pendente.
+func TestOperationObsolete(t *testing.T) {
+	cases := []struct {
+		kind   OperationKind
+		charge ChargeStatus
+		want   bool
+	}{
+		{OpCreateCharge, ChargePending, false},
+		{OpCreateCharge, ChargeCanceled, true},
+		{OpCreateCharge, ChargeFailed, true},
+		{OpCreateCharge, ChargeAwaitingPayment, true},
+		{OpRefund, ChargePaid, false},
+		{OpRefund, ChargeCanceled, false},
+	}
+	for _, c := range cases {
+		if got := (Operation{Kind: c.kind}).Obsolete(c.charge); got != c.want {
+			t.Errorf("%s com cobrança %s: Obsolete=%v, esperado %v", c.kind, c.charge, got, c.want)
+		}
+	}
+}
+
+// A reexecução manual antecipa a tentativa (ignora next_attempt_at), mas
+// recusa com conflito o que não pode ser executado.
+func TestOperationCheckManualRetry(t *testing.T) {
+	now := chargeNow
+	past, future := now.Add(-time.Second), now.Add(time.Second)
+	cases := []struct {
+		name string
+		op   Operation
+		code string
+	}{
+		{"pendente antes da próxima tentativa", Operation{Status: OpPending, NextAttemptAt: future, Attempts: 1}, ""},
+		{"desconhecida antes da próxima tentativa", Operation{Status: OpUnknown, NextAttemptAt: future, Attempts: 2}, ""},
+		{"em execução com lease vencido", Operation{Status: OpInFlight, LeaseUntil: &past, Attempts: 1}, ""},
+		{"em execução com lease vigente", Operation{Status: OpInFlight, LeaseUntil: &future, Attempts: 1}, "operation_in_progress"},
+		{"em execução sem lease", Operation{Status: OpInFlight, Attempts: 1}, "operation_in_progress"},
+		{"desconhecida esgotada", Operation{Status: OpUnknown, NextAttemptAt: past, Attempts: MaxOperationAttempts}, "operation_attempts_exhausted"},
+		{"em execução esgotada com lease vencido", Operation{Status: OpInFlight, LeaseUntil: &past, Attempts: MaxOperationAttempts},
+			"operation_attempts_exhausted"},
+		{"pendente esgotada", Operation{Status: OpPending, NextAttemptAt: future, Attempts: MaxOperationAttempts}, ""},
+		{"concluída", Operation{Status: OpSucceeded, Attempts: 1}, "operation_completed"},
+		{"falhou", Operation{Status: OpFailed, Attempts: 1}, "operation_completed"},
+		{"situação desconhecida", Operation{Status: "outra"}, "operation_not_retryable"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.op.CheckManualRetry(now)
+			if c.code == "" {
+				if err != nil {
+					t.Fatalf("reexecução permitida: %v", err)
+				}
+				return
+			}
+			wantAppErr(t, err, apperr.KindConflict, c.code)
+		})
+	}
+}
+
 func TestProviderStatusIsPaid(t *testing.T) {
 	paid := map[ProviderStatus]bool{ProviderConfirmed: true, ProviderReceived: true, ProviderRefundInProgress: true,
 		ProviderPartiallyRefunded: true, ProviderRefunded: true, ProviderChargebackRequested: true, ProviderChargebackDispute: true,

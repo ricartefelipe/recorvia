@@ -512,23 +512,55 @@ func TestProviderCancelAfterAmbiguousOutcomeQueriesFirst(t *testing.T) {
 	}
 }
 
-func TestChargeCanceledDuringCreationIsCanceledAtProvider(t *testing.T) {
-	f := newPayFixture(t)
-	inv, c := pendingCharge(t, f, 1)
-	if err := f.svc.CancelOpenCharges(context.Background(), f.tenantID, inv.ID, uuid.New()); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.gw.cancelCalls) != 0 {
-		t.Fatal("sem vínculo no provedor ainda não há o que cancelar")
-	}
-	f.clock.Advance(time.Hour)
-	if err := f.svc.ExecuteOperation(context.Background(), f.tenantID, f.operationFor(t, c.ID).ID); err != nil {
-		t.Fatal(err)
-	}
-	got := f.store.charges[c.ID]
-	if got.Status != ChargeCanceled || got.ProviderChargeID == "" || !slices.Equal(f.gw.cancelCalls, []string{got.ProviderChargeID}) {
-		t.Fatalf("cancelamento após a criação: %s %q %v", got.Status, got.ProviderChargeID, f.gw.cancelCalls)
-	}
+// Cobrança cancelada localmente antes da criação no provedor: a criação
+// pendente passa a só consultar o provedor pela referência externa
+// (Operation.Obsolete) e nunca cria a cobrança. Se uma tentativa anterior
+// chegou a criá-la, a cobrança encontrada é vinculada e cancelada também no
+// provedor; caso contrário, a operação é encerrada sem chamada de criação.
+func TestChargeCanceledBeforeCreationIsNeverCreatedAtProvider(t *testing.T) {
+	t.Run("sem cobrança no provedor: encerra sem criar", func(t *testing.T) {
+		f := newPayFixture(t)
+		inv, c := pendingCharge(t, f, 1)
+		if err := f.svc.CancelOpenCharges(context.Background(), f.tenantID, inv.ID, uuid.New()); err != nil {
+			t.Fatal(err)
+		}
+		creates := len(f.gw.createCalls) // a primeira tentativa, recusada de forma transitória
+		f.clock.Advance(time.Hour)
+		op := f.operationFor(t, c.ID)
+		if err := f.svc.ExecuteOperation(context.Background(), f.tenantID, op.ID); err != nil {
+			t.Fatal(err)
+		}
+		got := f.store.charges[c.ID]
+		if len(f.gw.createCalls) != creates || len(f.gw.cancelCalls) != 0 || !slices.Equal(f.gw.findCalls, []string{op.ExternalReference}) {
+			t.Fatalf("chamadas: criação %d (antes %d), cancelamento %v, consulta %v", len(f.gw.createCalls), creates, f.gw.cancelCalls, f.gw.findCalls)
+		}
+		if got.Status != ChargeCanceled || got.ProviderChargeID != "" {
+			t.Fatalf("cobrança: %s %q", got.Status, got.ProviderChargeID)
+		}
+		if after := f.store.operations[op.ID]; after.Status != OpFailed || after.LastError != obsoleteOperationError {
+			t.Fatalf("operação: %s %q", after.Status, after.LastError)
+		}
+	})
+	t.Run("cobrança criada por tentativa anterior: vincula e cancela no provedor", func(t *testing.T) {
+		f := newPayFixture(t)
+		inv, c := pendingCharge(t, f, 1)
+		if err := f.svc.CancelOpenCharges(context.Background(), f.tenantID, inv.ID, uuid.New()); err != nil {
+			t.Fatal(err)
+		}
+		creates := len(f.gw.createCalls)
+		f.clock.Advance(time.Hour)
+		f.gw.findResult = &ProviderCharge{ProviderChargeID: "ch_anterior", Status: ProviderPending, RawStatus: "pending", Amount: c.Amount}
+		if err := f.svc.ExecuteOperation(context.Background(), f.tenantID, f.operationFor(t, c.ID).ID); err != nil {
+			t.Fatal(err)
+		}
+		got := f.store.charges[c.ID]
+		if len(f.gw.createCalls) != creates {
+			t.Fatalf("a cobrança cancelada não pode ser criada no provedor: %d chamadas novas", len(f.gw.createCalls)-creates)
+		}
+		if got.Status != ChargeCanceled || got.ProviderChargeID != "ch_anterior" || !slices.Equal(f.gw.cancelCalls, []string{"ch_anterior"}) {
+			t.Fatalf("cancelamento após o vínculo: %s %q %v", got.Status, got.ProviderChargeID, f.gw.cancelCalls)
+		}
+	})
 }
 
 func TestProviderCancelEdgeCases(t *testing.T) {
@@ -579,7 +611,7 @@ func TestProviderCancelEdgeCases(t *testing.T) {
 				var w opWork
 				err := f.store.InTenant(context.Background(), f.tenantID, func(tx Tx) error {
 					var err error
-					w, err = f.svc.claimOperation(context.Background(), tx, op.ID)
+					w, err = f.svc.claimOperation(context.Background(), tx, op.ID, execRecovery)
 					return err
 				})
 				return w, err

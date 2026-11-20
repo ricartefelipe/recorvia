@@ -97,6 +97,20 @@ SELECT id FROM payment_operations
    AND (status IN ('pending', 'unknown') OR (status = 'in_flight' AND lease_until < @now))
  ORDER BY next_attempt_at, id LIMIT @row_limit;
 
+-- name: ExhaustedOperationCounts :many
+-- Operações do tenant paradas depois de esgotar as tentativas automáticas
+-- (mesma condição de app_tenants_with_pending_payment_operations, com
+-- attempts no limite): a recuperação não as reivindica mais. Uma criação
+-- pendente cuja cobrança deixou de estar pendente (cancelada com a fatura)
+-- não conta: a cobrança não será mais criada (payments.Operation.Exhausted).
+SELECT o.status::text AS status, count(*)::bigint AS total
+  FROM payment_operations o
+  JOIN charges c ON c.tenant_id = o.tenant_id AND c.id = o.charge_id
+ WHERE o.tenant_id = @tenant_id AND o.attempts >= @max_attempts AND o.next_attempt_at <= @now
+   AND (o.status IN ('pending', 'unknown') OR (o.status = 'in_flight' AND o.lease_until < @now))
+   AND NOT (o.status = 'pending' AND o.kind = 'create_charge' AND c.status <> 'pending')
+ GROUP BY o.status;
+
 -- name: ListOperations :many
 SELECT * FROM payment_operations WHERE tenant_id = @tenant_id AND (sqlc.narg(status)::text IS NULL OR status = sqlc.narg(status))
  ORDER BY updated_at DESC, id DESC LIMIT 200;

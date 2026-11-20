@@ -374,8 +374,8 @@ func TestChargeCompletionReplacementCreationIsRecovered(t *testing.T) {
 		t.Fatalf("operação da substituta: %+v", op)
 	}
 	f.clock.Advance(time.Minute)
-	if n, err := f.svc.RecoverOperations(context.Background()); err != nil || n != 1 {
-		t.Fatalf("recuperação: %d %v", n, err)
+	if r, err := f.svc.RecoverOperations(context.Background()); err != nil || r.Executed != 1 {
+		t.Fatalf("recuperação: %d %v", r.Executed, err)
 	}
 	if got := f.store.charges[charges[1].ID]; got.Status != ChargeAwaitingPayment {
 		t.Fatalf("substituta criada pela recuperação: %+v", got)

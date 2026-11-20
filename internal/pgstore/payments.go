@@ -332,6 +332,19 @@ func (tx paymentsTx) DueOperationIDs(ctx context.Context, now time.Time, limit i
 		RowLimit: int32(limit)})
 }
 
+func (tx paymentsTx) ExhaustedOperations(ctx context.Context, now time.Time) (map[payments.OperationStatus]int, error) {
+	rows, err := tx.q.ExhaustedOperationCounts(ctx, dbgen.ExhaustedOperationCountsParams{TenantID: tx.tenantID,
+		MaxAttempts: payments.MaxOperationAttempts, Now: now})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[payments.OperationStatus]int, len(rows))
+	for _, r := range rows {
+		out[payments.OperationStatus(r.Status)] = int(r.Total)
+	}
+	return out, nil
+}
+
 func (tx paymentsTx) InsertPayment(ctx context.Context, p payments.Payment) (bool, error) {
 	n, err := tx.q.InsertPayment(ctx, dbgen.InsertPaymentParams{ID: p.ID, TenantID: tx.tenantID, InvoiceID: p.InvoiceID, ChargeID: p.ChargeID,
 		CustomerID: p.CustomerID, Amount: p.Amount.Amount(), FeeAmount: p.Fee.Amount(), Currency: p.Amount.Currency().Code(), Method: p.Method,

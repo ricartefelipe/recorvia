@@ -89,6 +89,9 @@ type Tx interface {
 	Operation(ctx context.Context, id uuid.UUID, forUpdate bool) (Operation, error)
 	UpdateOperation(ctx context.Context, op Operation) error
 	DueOperationIDs(ctx context.Context, now time.Time, limit int) ([]uuid.UUID, error)
+	// ExhaustedOperations conta, por situação, as operações do tenant paradas
+	// depois de esgotar as tentativas automáticas (Operation.Exhausted).
+	ExhaustedOperations(ctx context.Context, now time.Time) (map[OperationStatus]int, error)
 
 	InsertPayment(ctx context.Context, p Payment) (bool, error)
 	PaymentByRequestKey(ctx context.Context, key string) (Payment, error)
@@ -249,7 +252,7 @@ func (s *Service) insertChargeForBalance(ctx context.Context, tx Tx, tenantID uu
 // agendada. Devolve o ID da cobrança vigente: a informada ou, se ela foi
 // substituída na conclusão da criação, a última substituta.
 func (s *Service) executeBestEffort(ctx context.Context, tenantID, chargeID, opID uuid.UUID) uuid.UUID {
-	current, err := s.executeOperation(ctx, tenantID, opID)
+	current, err := s.executeOperation(ctx, tenantID, opID, execImmediate)
 	if err != nil && s.cfg.Log != nil {
 		s.cfg.Log.WarnContext(ctx, "criação da cobrança adiada para a recuperação", slog.String("charge_id", chargeID.String()),
 			slog.String("error", err.Error()))
@@ -277,26 +280,67 @@ const (
 	outcomePermanent
 	outcomeRetryable
 	outcomeAmbiguous
+	// outcomeObsolete: a cobrança deixou de estar pendente e o provedor não
+	// tem cobrança com a referência externa; a criação não se aplica mais.
+	outcomeObsolete
+)
+
+// obsoleteOperationError é o motivo registrado ao encerrar uma criação que
+// deixou de se aplicar.
+const obsoleteOperationError = "A cobrança não está mais pendente (por exemplo, cancelada com a fatura) e não existe no provedor; a criação foi encerrada."
+
+// execMode identifica a origem da execução de uma operação.
+type execMode int
+
+const (
+	// execImmediate é a execução logo após gravar a operação, no mesmo
+	// fluxo: nenhuma chamada ao provedor pode ter ocorrido antes. Só consulta
+	// o provedor pela referência externa a partir da segunda tentativa.
+	execImmediate execMode = iota
+	// execRecovery retoma uma operação gravada antes (recuperação agendada).
+	// A operação pode ter sido executada fora do registro local, por
+	// exemplo num banco restaurado de backup em que a chamada ao provedor
+	// ocorreu depois do instante da cópia: consulta pela referência externa
+	// antes de criar, mesmo na primeira tentativa registrada.
+	execRecovery
+	// execManual é a reexecução solicitada pela operação: além de consultar
+	// antes de criar, antecipa a próxima tentativa (ignora next_attempt_at) e
+	// recusa, com conflito, operações concluídas, esgotadas ou em execução.
+	execManual
 )
 
 // ExecuteOperation executa uma operação externa em três fases: reivindica
 // com lease (transação curta), chama o provedor sem transação aberta e
-// registra o resultado (transação curta). Em tentativas após falha
-// ambígua, consulta o provedor pela referência externa antes de criar.
+// registra o resultado (transação curta). É a execução da recuperação
+// agendada: respeita o horário da próxima tentativa e consulta o provedor
+// pela referência externa antes de criar, para nunca repetir às cegas uma
+// chamada que possa ter ocorrido. Sem nada a fazer, retorna nil.
 func (s *Service) ExecuteOperation(ctx context.Context, tenantID, opID uuid.UUID) error {
-	_, err := s.executeOperation(ctx, tenantID, opID)
+	_, err := s.executeOperation(ctx, tenantID, opID, execRecovery)
 	return err
 }
 
-// executeOperation implementa ExecuteOperation. Quando a cobrança criada é
-// substituída na conclusão (saldo da fatura alterado durante a criação),
-// executa a substituta e devolve o ID da cobrança vigente; caso contrário,
-// devolve uuid.Nil.
-func (s *Service) executeOperation(ctx context.Context, tenantID, opID uuid.UUID) (uuid.UUID, error) {
+// RetryOperation reexecuta a operação por solicitação da operação (API):
+// antecipa a tentativa sem esperar next_attempt_at e consulta o provedor
+// pela referência externa antes de criar. Operação concluída, em execução
+// com lease vigente ou esgotada com resultado desconhecido resulta em erro de
+// conflito, sem executar nada (Operation.CheckManualRetry). Como na
+// recuperação agendada, uma criação obsoleta (cobrança não mais pendente) só
+// consulta o provedor: vincula a cobrança encontrada ou encerra a operação.
+func (s *Service) RetryOperation(ctx context.Context, tenantID, opID uuid.UUID) error {
+	_, err := s.executeOperation(ctx, tenantID, opID, execManual)
+	return err
+}
+
+// executeOperation implementa ExecuteOperation e RetryOperation. Quando a
+// cobrança criada é substituída na conclusão (saldo da fatura alterado
+// durante a criação), executa a substituta e devolve o ID da cobrança
+// vigente; caso contrário, devolve uuid.Nil.
+func (s *Service) executeOperation(ctx context.Context, tenantID, opID uuid.UUID, mode execMode) (uuid.UUID, error) {
 	var w opWork
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		var err error
-		w, err = s.claimOperation(ctx, tx, opID)
+		w, err = s.claimOperation(ctx, tx, opID, mode)
 		return err
 	})
 	if err != nil || w.skip {
@@ -314,7 +358,7 @@ func (s *Service) executeOperation(ctx context.Context, tenantID, opID uuid.UUID
 		return uuid.Nil, err
 	}
 	callCtx, cancel := context.WithTimeout(ctx, s.cfg.CallTimeout)
-	pc, providerCustomer, res, callErr := s.createAtProvider(callCtx, gw, w.op, w.charge, w.cust, w.number)
+	pc, providerCustomer, res, callErr := s.createAtProvider(callCtx, gw, w.op, w.charge, w.cust, w.number, mode != execImmediate, !w.obsolete)
 	cancel()
 	next, err := s.recordOutcome(ctx, tenantID, opID, res, pc, providerCustomer, callErr)
 	if err != nil {
@@ -331,14 +375,17 @@ func (s *Service) executeOperation(ctx context.Context, tenantID, opID uuid.UUID
 
 // opWork reúne o que a execução de uma operação reivindicada precisa.
 type opWork struct {
-	skip    bool
-	op      Operation
-	charge  Charge
-	account ProviderAccount
-	cust    CustomerData
-	number  string
-	refund  Refund
-	refunds []Refund
+	skip bool
+	// obsolete indica a criação de cobrança que deixou de se aplicar
+	// (Operation.Obsolete): a execução só consulta o provedor.
+	obsolete bool
+	op       Operation
+	charge   Charge
+	account  ProviderAccount
+	cust     CustomerData
+	number   string
+	refund   Refund
+	refunds  []Refund
 	// dispatched indica os reembolsos da cobrança já enviados ao provedor.
 	dispatched map[uuid.UUID]bool
 }
@@ -350,13 +397,19 @@ const refundSerializationDelay = 30 * time.Second
 // claimOperation reivindica a operação com lease e carrega os dados da
 // chamada. Operações já resolvidas por outro caminho (por exemplo, reembolso
 // confirmado por webhook) são concluídas aqui sem chamada ao provedor.
-func (s *Service) claimOperation(ctx context.Context, tx Tx, opID uuid.UUID) (opWork, error) {
+func (s *Service) claimOperation(ctx context.Context, tx Tx, opID uuid.UUID, mode execMode) (opWork, error) {
 	op, err := tx.Operation(ctx, opID, true)
 	if err != nil {
 		return opWork{}, err
 	}
 	now := s.clock.Now()
-	if !op.Claimable(now) {
+	if mode == execManual {
+		// A reexecução manual antecipa a tentativa e recusa, com conflito,
+		// operações concluídas, esgotadas ou em execução.
+		if err := op.CheckManualRetry(now); err != nil {
+			return opWork{}, err
+		}
+	} else if !op.Claimable(now) {
 		return opWork{skip: true}, nil
 	}
 	switch op.Kind {
@@ -374,6 +427,10 @@ func (s *Service) claimOperation(ctx context.Context, tx Tx, opID uuid.UUID) (op
 	}
 	switch op.Kind {
 	case OpCreateCharge:
+		// A cobrança pode ter deixado de estar pendente enquanto a criação
+		// aguardava nova tentativa (fatura cancelada, por exemplo): a
+		// execução passa a só consultar o provedor.
+		w.obsolete = op.Obsolete(w.charge.Status)
 		if w.cust, err = tx.CustomerData(ctx, w.charge.CustomerID, w.charge.Provider); err != nil {
 			return opWork{}, err
 		}
@@ -411,7 +468,7 @@ func (s *Service) claimOperation(ctx context.Context, tx Tx, opID uuid.UUID) (op
 // ficam com a recuperação agendada.
 func (s *Service) executeAll(ctx context.Context, tenantID uuid.UUID, opIDs []uuid.UUID) {
 	for _, id := range opIDs {
-		if _, err := s.executeOperation(ctx, tenantID, id); err != nil && s.cfg.Log != nil {
+		if _, err := s.executeOperation(ctx, tenantID, id, execImmediate); err != nil && s.cfg.Log != nil {
 			s.cfg.Log.WarnContext(ctx, "operação externa adiada para a recuperação", slog.String("operation_id", id.String()),
 				slog.String("error", err.Error()))
 		}
@@ -428,8 +485,13 @@ func classify(err error) outcome {
 	return outcomeAmbiguous
 }
 
-func (s *Service) createAtProvider(ctx context.Context, gw Gateway, op Operation, c Charge, cust CustomerData, number string) (*ProviderCharge, string, outcome, error) {
-	if op.Attempts > 1 {
+// createAtProvider cria a cobrança no provedor. Com lookupFirst, ou a partir
+// da segunda tentativa, consulta antes pela referência externa e vincula a
+// cobrança encontrada em vez de criar outra. Sem create (operação obsoleta),
+// só consulta: sem cobrança no provedor, devolve outcomeObsolete.
+func (s *Service) createAtProvider(ctx context.Context, gw Gateway, op Operation, c Charge, cust CustomerData, number string,
+	lookupFirst, create bool) (*ProviderCharge, string, outcome, error) {
+	if lookupFirst || op.Attempts > 1 || !create {
 		found, err := gw.FindByExternalReference(ctx, op.ExternalReference)
 		if err != nil {
 			if GatewayErrorKind(err) == ErrKindPermanent {
@@ -440,6 +502,9 @@ func (s *Service) createAtProvider(ctx context.Context, gw Gateway, op Operation
 		if found != nil {
 			return found, found.ProviderCustomerID, outcomeSucceeded, nil
 		}
+	}
+	if !create {
+		return nil, "", outcomeObsolete, nil
 	}
 	providerCustomer := cust.ProviderCustomerID
 	if providerCustomer == "" {
@@ -497,8 +562,20 @@ func (s *Service) recordOutcome(ctx context.Context, tenantID, opID uuid.UUID, r
 		if callErr != nil {
 			op.LastError = truncate(callErr.Error(), 1000)
 		}
+		// A cobrança pode ter deixado de estar pendente antes ou durante a
+		// chamada (fatura cancelada): o resultado é registrado sem anunciar a
+		// cobrança como criada nem recusá-la.
+		obsolete := op.Obsolete(charge.Status)
+		if obsolete && res == outcomeRetryable {
+			// O provedor recusou a criação de forma transitória: a cobrança
+			// não existe nele e não será mais criada.
+			res = outcomeObsolete
+		}
 		switch res {
 		case outcomeSucceeded:
+			// Numa cobrança cancelada, apenas vincula a cobrança do provedor
+			// (sem transição): um pagamento que chegue por ela é aplicado e
+			// vira crédito do cliente.
 			if err := charge.MarkCreated(pc.ProviderChargeID, pc.CheckoutURL, now); err != nil {
 				return err
 			}
@@ -514,7 +591,16 @@ func (s *Service) recordOutcome(ctx context.Context, tenantID, opID uuid.UUID, r
 			if err := tx.UpdateCharge(ctx, &charge); err != nil {
 				return err
 			}
-			if !replaced {
+			switch {
+			case obsolete:
+				// A cobrança continua aberta no provedor para uma cobrança
+				// cancelada localmente: registrada para a conciliação, sem
+				// charge.created (o link não deve chegar ao cliente).
+				if err := tx.Audit(ctx, audit.New(tenantID, now, systemActor, "charge.linked_after_local_cancellation", "charge", charge.ID.String(),
+					map[string]any{"invoice_id": charge.InvoiceID, "provider_charge_id": charge.ProviderChargeID, "status": string(charge.Status)})); err != nil {
+					return err
+				}
+			case !replaced:
 				if err := tx.Emit(ctx, outbox.New(tenantID, outbox.EventChargeCreated, "charge", charge.ID,
 					map[string]any{"charge_id": charge.ID, "invoice_id": charge.InvoiceID, "checkout_url": charge.CheckoutURL, "amount": charge.Amount.Amount()}, now)); err != nil {
 					return err
@@ -546,10 +632,13 @@ func (s *Service) recordOutcome(ctx context.Context, tenantID, opID uuid.UUID, r
 				}
 			}
 		case outcomePermanent:
+			op.Status, op.CompletedAt = OpFailed, &now
+			if obsolete {
+				break // a cobrança já foi encerrada localmente
+			}
 			if err := charge.MarkFailed(op.LastError, now); err != nil {
 				return err
 			}
-			op.Status, op.CompletedAt = OpFailed, &now
 			if err := tx.UpdateCharge(ctx, &charge); err != nil {
 				return err
 			}
@@ -557,6 +646,8 @@ func (s *Service) recordOutcome(ctx context.Context, tenantID, opID uuid.UUID, r
 				map[string]any{"charge_id": charge.ID, "invoice_id": charge.InvoiceID}, now)); err != nil {
 				return err
 			}
+		case outcomeObsolete:
+			op.Status, op.CompletedAt, op.LastError = OpFailed, &now, obsoleteOperationError
 		case outcomeRetryable:
 			op.Status, op.NextAttemptAt = OpPending, now.Add(Backoff(op.Attempts))
 		default:
@@ -624,39 +715,69 @@ func (s *Service) replaceIfBalanceChanged(ctx context.Context, tx Tx, tenantID u
 	return true, next, nil
 }
 
+// RecoveryResult resume uma execução da recuperação de operações.
+type RecoveryResult struct {
+	// Executed conta as operações executadas sem erro.
+	Executed int
+	// Exhausted conta, por situação, as operações paradas depois de esgotar
+	// as tentativas automáticas (Operation.Exhausted) nos tenants
+	// consultados.
+	Exhausted map[OperationStatus]int
+	// Complete indica que todos os tenants com operações vencidas foram
+	// consultados sem erro; caso contrário, Exhausted é parcial e não deve
+	// substituir uma contagem anterior.
+	Complete bool
+}
+
 // RecoverOperations retoma operações pendentes, com lease expirado ou com
-// resultado desconhecido elegível a nova consulta.
-func (s *Service) RecoverOperations(ctx context.Context) (int, error) {
+// resultado desconhecido elegível a nova consulta, e conta as que
+// esgotaram as tentativas automáticas, que a recuperação não reivindica
+// mais. A descoberta de tenants inclui as operações esgotadas (a função
+// do banco não filtra tentativas), de modo que a contagem cobre todos os
+// tenants afetados.
+func (s *Service) RecoverOperations(ctx context.Context) (RecoveryResult, error) {
 	now := s.clock.Now()
+	res := RecoveryResult{Exhausted: map[OperationStatus]int{}}
 	tenants, err := s.store.TenantsWithPendingOperations(ctx, now)
 	if err != nil {
-		return 0, err
+		return res, err
 	}
-	n := 0
+	complete := true
 	var errs []error
 	for _, t := range tenants {
-		var opIDs []uuid.UUID
+		var (
+			opIDs     []uuid.UUID
+			exhausted map[OperationStatus]int
+		)
 		err := s.store.InTenant(ctx, t, func(tx Tx) error {
 			var err error
-			opIDs, err = tx.DueOperationIDs(ctx, now, 50)
+			if opIDs, err = tx.DueOperationIDs(ctx, now, 50); err != nil {
+				return err
+			}
+			exhausted, err = tx.ExhaustedOperations(ctx, now)
 			return err
 		})
 		if err != nil {
+			complete = false
 			errs = append(errs, err)
 			continue
 		}
+		for status, n := range exhausted {
+			res.Exhausted[status] += n
+		}
 		for _, id := range opIDs {
 			if err := ctx.Err(); err != nil {
-				return n, err
+				return res, err
 			}
 			if err := s.ExecuteOperation(ctx, t, id); err != nil {
 				errs = append(errs, err)
 				continue
 			}
-			n++
+			res.Executed++
 		}
 	}
-	return n, errors.Join(errs...)
+	res.Complete = complete
+	return res, errors.Join(errs...)
 }
 
 // HashEndpointToken calcula o hash do token opaco do endpoint de webhook.

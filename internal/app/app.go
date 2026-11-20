@@ -205,5 +205,16 @@ func Assemble(cfg *config.Config, log *slog.Logger, db *postgres.DB, keyring *se
 // Close libera recursos.
 func (c *Core) Close() { c.DB.Close() }
 
+// DBPoolStats adapta as estatísticas do pool pgx às métricas do pool de
+// conexões (lidas a cada coleta do Prometheus).
+func DBPoolStats(db *postgres.DB) func() telemetry.DBPoolStats {
+	return func() telemetry.DBPoolStats {
+		s := db.Pool().Stat()
+		return telemetry.DBPoolStats{Acquired: s.AcquiredConns(), Idle: s.IdleConns(), Constructing: s.ConstructingConns(), Max: s.MaxConns(),
+			Acquires: s.AcquireCount(), EmptyAcquires: s.EmptyAcquireCount(), CanceledAcquires: s.CanceledAcquireCount(),
+			EmptyAcquireWait: s.EmptyAcquireWaitTime()}
+	}
+}
+
 // ErrShutdown sinaliza encerramento solicitado.
 var ErrShutdown = errors.New("encerramento solicitado")

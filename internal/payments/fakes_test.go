@@ -158,12 +158,27 @@ func (s *payStore) TenantsWithPendingOperations(_ context.Context, now time.Time
 	if s.tenantsErr != nil {
 		return nil, s.tenantsErr
 	}
+	// Como a função do banco, não filtra tentativas nem consulta a
+	// cobrança: inclui os tenants com operações esgotadas.
 	seen := map[uuid.UUID]bool{}
 	var out []uuid.UUID
 	for _, op := range s.sortedOperations() {
-		if op.Claimable(now) && !seen[op.TenantID] {
+		if (op.Claimable(now) || op.Exhausted(now, ChargePending)) && !seen[op.TenantID] {
 			seen[op.TenantID] = true
 			out = append(out, op.TenantID)
+		}
+	}
+	return out, nil
+}
+
+func (s *payStore) ExhaustedOperations(_ context.Context, now time.Time) (map[OperationStatus]int, error) {
+	if err := s.fail("ExhaustedOperations"); err != nil {
+		return nil, err
+	}
+	out := map[OperationStatus]int{}
+	for _, op := range s.operations {
+		if op.TenantID == s.current && op.Exhausted(now, s.charges[op.ChargeID].Status) {
+			out[op.Status]++
 		}
 	}
 	return out, nil
