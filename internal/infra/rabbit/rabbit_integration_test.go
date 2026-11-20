@@ -88,6 +88,9 @@ func TestConsumerRetriesDeadLettersAndDeduplicates(t *testing.T) {
 		})
 	})
 	<-ready
+	// ready fecha dentro de onConnect, antes de Run registrar a conexão para
+	// publicação: publicar logo em seguida pode receber ErrNotConnected.
+	waitFor(t, 10*time.Second, conn.Connected)
 	pub := rabbit.NewPublisher(conn)
 
 	var effects atomic.Int32

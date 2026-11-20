@@ -10,12 +10,15 @@ resultado real) e as pendências.
 | 1 | Fundação: núcleo de dinheiro/calendário, infraestrutura, bootstrap do banco, CI | `feature/fundacao-do-projeto` | integrada em `develop` (PR #1) |
 | 2 | Fatia vertical: autenticação, tenant, cliente, plano, assinatura, fatura, cobrança simulada, webhook, ledger, outbox, worker | `feature/fatia-vertical-cobranca` | integrada em `develop` (PR #2) |
 | 3 | Interface web (React) e E2E | `feature/interface-web` | integrada em `develop` (PR #3) |
-| 4 | Consumo medido, cupons, prorrata, troca de plano/quantidade, reajustes, notas de crédito | `feature/faturamento-avancado` | em revisão |
-| 5 | Reembolsos, disputas, conciliação, validação no sandbox do Asaas | `feature/recebiveis-conciliacao` | pendente |
-| 6 | Inadimplência, notificações por e-mail, webhooks enviados com proteção SSRF | `feature/cobranca-e-notificacoes` | pendente |
-| 7 | Portal do cliente, credenciais de API com escopos | `feature/portal-e-credenciais` | pendente |
-| 8 | Observabilidade (perfil opcional), runbooks, backup/restauração, análise de imagens | `feature/operacao` | pendente |
-| 9 | Release `0.1.0` | `release/0.1.0` | pendente |
+| 4 | Consumo medido, cupons, prorrata, troca de plano/quantidade, reajustes, notas de crédito | `feature/faturamento-avancado` | integrada em `develop` (PR #4) |
+| 5 | Reembolsos, disputas, cancelamento no provedor, conciliação | `feature/recebiveis-conciliacao` | integrada em `develop` (PR #7) |
+| 6 | Régua de cobrança, notificações por e-mail, webhooks enviados com proteção SSRF | `feature/cobranca-e-notificacoes` | integrada em `develop` (PR #6) |
+| 7 | Portal do cliente, credenciais de API com escopos | `feature/portal-e-credenciais` | integrada em `develop` (PR #5) |
+| 8 | Observabilidade (perfil opcional), alertas, runbooks, backup/restauração, análise de imagens | `feature/operacao` | integrada em `develop` (PR #8) |
+| 9 | Release `0.1.0` | `release/0.1.0` | integrada em `main` com a tag `v0.1.0` |
+
+A autoria das operações feitas por credencial de API foi corrigida depois das etapas 6 e 7
+(`feature/autoria-credenciais-api`, PR #9).
 
 ## Concluído
 
@@ -67,6 +70,44 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
 - **Notas de crédito** limitadas ao saldo em aberto, com ledger e ajuste da cobrança.
 - **API**: 93 das 127 operações do contrato implementadas.
 
+### Etapa 5: reembolsos, disputas e conciliação
+- **Reembolsos** totais e parciais como operação externa persistida, com reserva do valor sob
+  bloqueio da cobrança (nunca acima do pago, mesmo com pedidos concorrentes), consulta ao provedor
+  antes de repetir e conclusão por webhook ou consulta; a fatura não é reaberta (ADR-034).
+- **Disputas e chargebacks** com retenção no ledger; na disputa perdida, o chargeback fica limitado
+  ao saldo elegível e a diferença retida volta (ADR-036).
+- **Cancelamento no provedor** da cobrança cancelada localmente; uma criação obsoleta só consulta o
+  provedor e nunca cria a cobrança (ADR-037 e ADR-058).
+- **Conciliação** manual e agendada com oito tipos de divergência, deduplicação, resolução auditada
+  com ajuste no ledger e rodízio de cobranças fora da janela (ADR-038).
+- Migration `00013` (a numeração 00010 foi abandonada para seguir as migrations das etapas 6 e 7).
+
+### Etapa 6: régua de cobrança, notificações e webhooks enviados
+- **Políticas de cobrança** com passos relativos ao vencimento, janela de horário no fuso do tenant,
+  limite de frequência, parada após a resolução, suspensão por atraso e reativação (ADR-040, ADR-041).
+- **Notificações por e-mail** com identidade de negócio deduplicada, templates de lista fechada de
+  variáveis e envio SMTP com retentativas (ADR-042 a ADR-044).
+- **Webhooks enviados** no formato Standard Webhooks, com rotação de segredo, retentativas com
+  backoff e jitter, isolamento entre tenants e proteção SSRF validada também na conexão (ADR-045).
+
+### Etapa 7: portal do cliente e credenciais de API
+- **Portal do cliente** por link de uso único (somente o hash guardado) trocado por sessão restrita
+  no Redis, com cookie próprio e CSRF (ADR-050, ADR-051).
+- **Credenciais de API** `rcv_<id>_<segredo>` com escopos limitados a quem as emite, rotação com
+  janela de 24 horas, revogação imediata e autenticação Bearer na mesma pilha da sessão (ADR-046 a
+  ADR-049). Operações que exigem uma pessoa recusam credenciais com 403 `user_session_required`, e as
+  demais gravam autoria nula com o ator `api_credential` na auditoria (ADR-059).
+- **API**: todas as 127 operações do contrato implementadas.
+
+### Etapa 8: operação
+- **Perfil `observability`** com OpenTelemetry Collector, Jaeger, Prometheus e Grafana, dashboards
+  provisionados e 34 regras de alerta testadas (ADR-052, ADR-053); liveness e readiness distintos
+  (ADR-054).
+- **Backup e restauração** com manifesto e conferência num banco novo (ADR-055); **retenção**
+  limitada aos expurgos técnicos existentes (ADR-056); **análise de imagens** com Trivy na CI e
+  ESLint 10 (ADR-057).
+- **Runbooks** em `docs/operacao/runbooks/`.
+
 ## Verificações executadas
 
 | Data | Comando | Resultado |
@@ -91,20 +132,35 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
 | 2026-11-17 | `make lint test coverage fuzz test-integration` (final da etapa 4) | sem achados; todos aprovados; 97,1% de cobertura |
 | 2026-11-17 | `make reset && make up` + `make web-e2e` (etapa 4) | 9 migrations aplicadas em banco novo; 4 roteiros E2E aprovados |
 | 2026-11-17 | Stack local (`docker compose up`) + roteiro automatizado via API | login real no Keycloak com PKCE, cliente, plano, assinatura, fatura `ACME-2026-000001`, cobrança no simulador, pagamento pelo checkout, webhook HMAC, fatura paga, ledger (receita 99.000; liquidação 95.991; taxa 3.009), reenvio sem duplicidade, auditoria, dashboard e isolamento entre tenants |
+| 2026-11-18 | Revisão independente da etapa 6 (2 lentes, 1 verificador por achado) | 19 defeitos confirmados; 17 corrigidos com teste e, nos 2 restantes, adotada a correção principal sugerida |
+| 2026-11-18 | Revisão independente da etapa 7 (2 lentes, 1 verificador por achado) | 4 confirmados e 1 refutado; os 4 corrigidos com teste |
+| 2026-11-18 | `make lint test coverage` + `npm run verify` (etapas 6 e 7) | sem achados; 97,0% e 97,4% de cobertura; 103 e 105 testes de componente aprovados |
+| 2026-11-18 | CI dos PRs #5 e #6 | todos os checks aprovados, inclusive `e2e` com o roteiro `05-portal`; o #6 de novo depois de integrar `develop` |
+| 2026-11-20 | Revisão independente das etapas 5 e 8 (2 lentes, 1 verificador por achado) | etapa 5: 10 defeitos distintos confirmados; etapa 8: 10 confirmados e 1 refutado; todos corrigidos com teste; a revisão das correções apontou 4 e 3 problemas, também corrigidos |
+| 2026-11-20 | `make test-integration` (etapa 5) | 42 pacotes aprovados; uma execução anterior, com outra suíte em paralelo, falhou em `TestConsumerRetriesDeadLettersAndDeduplicates` por corrida no próprio teste (corrigida na release) |
+| 2026-11-20 | `make obs-check` (etapa 8) | Collector e Jaeger válidos; `promtool check config`, 34 regras e `promtool test rules` aprovados; dashboards válidos |
+| 2026-11-20 | `make test-integration` (etapa 8 integrada com a etapa 5) | 43 pacotes aprovados |
+| 2026-11-20 | CI dos PRs #7, #8 e #9 | todos os checks aprovados; no #8 e no #9 também `backup-restore`, `observability-check`, `observability-stack` e Trivy nas 7 imagens; no #7, a primeira execução de `web-quality` falhou por notificação que vazava entre testes (corrigido) |
+| 2026-11-20 | Correção da autoria por credencial (PR #9) | o teste estático apontou 17 violações nos handlers originais; 43 pacotes de integração aprovados |
+| 2026-11-20 | Release: testes de integração com dependência de tempo | `internal/infra/rabbit` e `TestEndToEndDunningNotificationsAndWebhooks` corrigidos e aprovados |
 
 ## Pendências reais
 
-- Etapas 5 a 9.
-- **Telas que dependem de etapas futuras**: conciliação, reembolsos e disputas (etapa 5), políticas
-  de cobrança, templates e webhooks enviados (etapa 6), portal do cliente e credenciais de API
-  (etapa 7) já consomem o contrato, mas as rotas ainda não existem; até lá a tela mostra o estado de
-  erro com nova tentativa.
-- **ESLint 9.39.5** está fora do período de suporte do projeto; a migração para a versão 10 fica
-  para uma atualização dedicada de dependências do frontend.
-- **Asaas**: o adaptador segue a documentação oficial (criação de cliente e cobrança com
-  `billingType=UNDEFINED`, consulta por id e por `externalReference`, reembolso, criação de webhook
-  com `authToken`, autenticação por `asaas-access-token`), mas **não foi exercitado no sandbox**:
-  exige chave de API do sandbox e URL pública para receber webhooks.
+- **Asaas**: o adaptador segue a documentação oficial e é coberto por testes de contrato, mas **não
+  foi exercitado no sandbox**: exige chave de API do sandbox e URL pública para receber webhooks. O
+  passo a passo está em `docs/integracoes/asaas.md`.
+- **Conciliação manual** executa dentro da requisição, como o contrato define; em contas grandes, a
+  execução é encerrada como parcial quando o prazo acaba.
+- **Chargeback** não consome o crédito do cliente gerado por pagamento excedente (ADR-036).
+- **Observabilidade**: não há Alertmanager, gauge global de dead letters abertas nem métricas de fila
+  acumulada de notificações e entregas; os limites dos alertas são pontos de partida a calibrar
+  (ADR-053).
+- **Retenção**: anonimização e expurgo de inbox, dead letters, eventos de webhook, auditoria e
+  consumo não são automatizados; o procedimento manual está documentado (ADR-056).
+- **Recuperação de desastre**: a troca da API e do worker para o banco restaurado e o uso das chaves
+  de cifragem guardadas à parte são descritos, mas não exercitados.
+- **Portal do cliente**: não há rota de revogação explícita de links (gerar um novo link revoga o
+  anterior); a lista de faturas devolve as 100 mais recentes, sem paginação.
 - **Revisão independente**: o repositório tem um único mantenedor; a proteção de branches exige os
   checks da CI e PR, com 0 aprovações obrigatórias. Recomenda-se exigir ao menos uma aprovação quando
   houver outro revisor.
@@ -118,9 +174,17 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
   usa bind mounts (ADR-020).
 - Portas 6379 e 8081 do host já estavam ocupadas por outros projetos: Redis publicado em
   `127.0.0.1:6380` e API em `127.0.0.1:18081`.
+- O Docker Desktop guarda o disco virtual no disco interno da máquina: builds de imagens e
+  Testcontainers em paralelo chegaram a encher esse disco, e o daemon só voltou a responder depois
+  de reiniciado. As worktrees de desenvolvimento ficam fora do checkout, num sistema de arquivos com
+  permissão de execução.
+- O BuildKit do Docker Desktop chegou a falhar ao obter o token do Docker Hub pelo proxy interno
+  (TLS handshake timeout) com a rede do host funcionando; baixar antes as imagens-base com
+  `docker pull` contornou o problema.
+- Duas suítes de integração em paralelo na mesma máquina expuseram testes com dependência de tempo,
+  corrigidos na release.
 
 ## Ponto de retomada
 
-Integrar a interface web (PR da etapa 3) e concluir a etapa 4 (`feature/faturamento-avancado`:
-código de cupons, mudanças agendadas, prorrata, reajustes, correção de consumo, notas de crédito e
-ingestão de consumo commitado; faltam testes unitários e de integração e o PR).
+Versão `0.1.0` publicada (tag `v0.1.0` em `main`). Próximo passo sugerido: validar o adaptador do
+Asaas no sandbox (`docs/integracoes/asaas.md`) e tratar os itens de **Pendências reais**.
