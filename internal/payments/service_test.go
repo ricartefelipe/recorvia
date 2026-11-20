@@ -522,13 +522,13 @@ func TestRecordOutcomeFailureIsRecoveredWithoutDuplicateCreation(t *testing.T) {
 	delete(f.store.errs, "SaveProviderCustomer")
 	f.gw.findResult = &ProviderCharge{ProviderChargeID: "pay_1", ExternalReference: c.ID.String(), ProviderCustomerID: "cus_1",
 		Status: ProviderPending, RawStatus: "PENDING", Amount: brl(10000), CheckoutURL: "https://sandbox.exemplo/c/pay_1"}
-	if n, err := f.svc.RecoverOperations(context.Background()); err != nil || n != 0 {
-		t.Fatalf("lease vigente: nada a recuperar: %d %v", n, err)
+	if r, err := f.svc.RecoverOperations(context.Background()); err != nil || r.Executed != 0 {
+		t.Fatalf("lease vigente: nada a recuperar: %d %v", r.Executed, err)
 	}
 	f.clock.Advance(61 * time.Second)
-	n, err := f.svc.RecoverOperations(context.Background())
-	if err != nil || n != 1 {
-		t.Fatalf("recuperação: %d %v", n, err)
+	r, err := f.svc.RecoverOperations(context.Background())
+	if err != nil || r.Executed != 1 {
+		t.Fatalf("recuperação: %d %v", r.Executed, err)
 	}
 	if len(f.gw.createCalls) != 1 || len(f.gw.findCalls) != 1 {
 		t.Fatalf("a recuperação consulta e não cria de novo: create=%d find=%d", len(f.gw.createCalls), len(f.gw.findCalls))
@@ -556,9 +556,9 @@ func TestRecoverOperations(t *testing.T) {
 	}
 
 	f.clock.Advance(Backoff(1))
-	n, err := f.svc.RecoverOperations(context.Background())
-	if err != nil || n != 2 {
-		t.Fatalf("operações dos dois tenants: %d %v", n, err)
+	r, err := f.svc.RecoverOperations(context.Background())
+	if err != nil || r.Executed != 2 || !r.Complete {
+		t.Fatalf("operações dos dois tenants: %+v %v", r, err)
 	}
 	if f.store.dueLimit != 50 {
 		t.Fatalf("lote por tenant: %d", f.store.dueLimit)
@@ -583,9 +583,12 @@ func TestRecoverOperationsCollectsErrors(t *testing.T) {
 	f.store.operations[orphan.ID] = orphan
 
 	f.clock.Advance(time.Minute)
-	n, err := f.svc.RecoverOperations(context.Background())
-	if n != 1 {
-		t.Fatalf("a operação válida deve ser recuperada mesmo com falhas em outras: %d", n)
+	r, err := f.svc.RecoverOperations(context.Background())
+	if r.Executed != 1 {
+		t.Fatalf("a operação válida deve ser recuperada mesmo com falhas em outras: %d", r.Executed)
+	}
+	if r.Complete {
+		t.Fatal("com um tenant sem consulta, a contagem de operações esgotadas é parcial")
 	}
 	if !errors.Is(err, boom) || !apperr.IsKind(err, apperr.KindNotFound) {
 		t.Fatalf("erros devem ser agregados: %v", err)
@@ -605,9 +608,9 @@ func TestRecoverOperationsHonorsCancellation(t *testing.T) {
 	f.clock.Advance(time.Minute)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	n, err := f.svc.RecoverOperations(ctx)
-	if n != 0 || !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelamento: %d %v", n, err)
+	r, err := f.svc.RecoverOperations(ctx)
+	if r.Executed != 0 || r.Complete || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelamento: %+v %v", r, err)
 	}
 	if len(f.gw.createCalls) != 1 {
 		t.Fatal("nenhuma chamada após cancelamento")

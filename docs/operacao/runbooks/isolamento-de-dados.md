@@ -41,24 +41,41 @@ Não existe alerta que detecte vazamento entre tenants: as métricas não têm r
 - Não apague nem altere registros: a trilha de auditoria é imutável e é a principal evidência.
 
 ### 2. Conferir o banco (superusuário, somente leitura)
+Cada consulta vem depois do comentário com o resultado esperado num banco íntegro. As consultas
+marcadas com "Esperado: nenhuma linha" são executadas contra o esquema real por
+`TestOperationsDocsSQLRunsAgainstSchema` (`internal/pgstore`, tag `integration`), que confere o
+resultado vazio; `TestIsolationRunbookQueriesDetectViolations` confere que elas apontam uma tabela
+sem RLS e uma política sem contexto de tenant.
 ```sql
 -- Papéis: nenhum papel da aplicação pode ser superusuário ou ignorar RLS.
+-- Esperado: recorvia_app e recorvia_owner com rolsuper = f e rolbypassrls = f.
 SELECT rolname, rolsuper, rolbypassrls, rolinherit, rolcreaterole, rolcreatedb
   FROM pg_roles WHERE rolname LIKE 'recorvia_%';
--- Esperado: recorvia_app e recorvia_owner com rolsuper = f e rolbypassrls = f.
+
+-- Papéis da aplicação herdando privilégios de outro papel.
+-- Esperado: nenhuma linha.
 SELECT r.rolname AS membro, g.rolname AS grupo FROM pg_auth_members m
   JOIN pg_roles r ON r.oid = m.member JOIN pg_roles g ON g.oid = m.roleid
  WHERE r.rolname LIKE 'recorvia_%';
--- Esperado: nenhuma linha (recorvia_app não herda privilégios de outro papel).
 
--- Tabelas com tenant_id sem RLS. Esperado: nenhuma linha.
+-- Tabelas com tenant_id sem RLS.
+-- Esperado: nenhuma linha.
 SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
  WHERE n.nspname = 'public' AND c.relkind = 'r' AND NOT c.relrowsecurity
    AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped);
 
--- Políticas que não usam o contexto de tenant. Esperado: somente a política de tenants (por id).
+-- Políticas que não usam o contexto de tenant (no USING ou no WITH CHECK; sem WITH CHECK, vale o
+-- USING). Todas as políticas usam app_current_tenant(), inclusive tenants_isolation, que compara
+-- o id da própria organização (id = app_current_tenant()).
+-- Esperado: nenhuma linha.
 SELECT tablename, policyname, qual, with_check FROM pg_policies
- WHERE schemaname = 'public' AND (qual NOT LIKE '%app_current_tenant()%' OR with_check NOT LIKE '%app_current_tenant()%');
+ WHERE schemaname = 'public'
+   AND (coalesce(qual, with_check) NOT LIKE '%app_current_tenant()%'
+     OR coalesce(with_check, qual) NOT LIKE '%app_current_tenant()%');
+
+-- Política da tabela tenants (referência: a única que filtra por id, não por tenant_id).
+-- Esperado: tenants_isolation com (id = app_current_tenant()) no USING e no WITH CHECK.
+SELECT policyname, qual, with_check FROM pg_policies WHERE schemaname = 'public' AND tablename = 'tenants';
 
 -- Conexões da aplicação: API e worker precisam usar recorvia_app.
 SELECT usename, application_name, count(*) FROM pg_stat_activity
@@ -66,8 +83,12 @@ SELECT usename, application_name, count(*) FROM pg_stat_activity
 
 -- Valor de sessão (fora de transação) do contexto de tenant: deve ser vazio.
 SELECT name, setting FROM pg_settings WHERE name = 'app.tenant_id';
-SELECT rolname, setconfig FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole;
--- Esperado: nenhum app.tenant_id definido por papel ou banco (ADR-004 proíbe SET de sessão).
+
+-- app.tenant_id definido por papel ou banco (ADR-004 proíbe SET de sessão).
+-- Esperado: nenhuma linha.
+SELECT r.rolname, d.datname, s.setconfig FROM pg_db_role_setting s
+  LEFT JOIN pg_roles r ON r.oid = s.setrole LEFT JOIN pg_database d ON d.oid = s.setdatabase
+ WHERE array_to_string(s.setconfig, ',') LIKE '%app.tenant_id%';
 ```
 
 ### 3. Reconstituir o acesso

@@ -7,9 +7,10 @@ verificação.
 
 | Runbook | Alertas |
 |---|---|
-| [Faturamento e cobrança](faturamento.md) | `RecorviaBillingCycleStale`, `RecorviaScheduledTaskFailing`, `RecorviaMetricsCollectionStale`, `RecorviaChargesDeclined`, `RecorviaPaymentProviderUnavailable`, `RecorviaPaymentOperationsPending`, `RecorviaWebhooksRejected`, `RecorviaDBPoolSaturated`, `RecorviaDBPoolWaiting`, `RecorviaDBServerConnectionsHigh`, `RecorviaHTTPErrorRate` |
+| [Faturamento e cobrança](faturamento.md) | `RecorviaBillingCycleStale`, `RecorviaScheduledTaskFailing`, `RecorviaScheduledTaskStale`, `RecorviaMetricsCollectionStale`, `RecorviaChargesDeclined`, `RecorviaPaymentProviderUnavailable`, `RecorviaPaymentOperationsPending`, `RecorviaWebhooksRejected`, `RecorviaDBPoolSaturated`, `RecorviaDBPoolWaiting`, `RecorviaDBServerConnectionsHigh`, `RecorviaHTTPErrorRate` |
 | [Filas e DLQ](filas-e-dlq.md) | `RecorviaTargetDown`, `RecorviaOutboxBacklog`, `RecorviaOutboxStalled`, `RecorviaOutboxPublishFailures`, `RecorviaQueueBacklog`, `RecorviaQueueLag`, `RecorviaQueueWithoutConsumer`, `RecorviaDeadLetterQueueNotDrained`, `RecorviaMessagesDeadLettered`, `RecorviaConsumerRetryRate`, `RecorviaMessagesRequeued`, `RecorviaWorkerSaturated`, `RecorviaDependencyUnavailable` |
-| [Conciliação](conciliacao.md) | `RecorviaPaymentOperationsUnknown`, `RecorviaReconciliationDiscrepanciesOpen`, `RecorviaReconciliationDiscrepanciesHigh` |
+| [Conciliação](conciliacao.md) | `RecorviaPaymentOperationsUnknown`, `RecorviaPaymentOperationsExhausted`, `RecorviaRefundsUnknown`, `RecorviaRefundsFailed`, `RecorviaReconciliationDiscrepanciesOpen`, `RecorviaReconciliationDiscrepanciesHigh` |
+| [Notificações e webhooks enviados](notificacoes-e-webhooks.md) | `RecorviaEmailDeliveryStalled`, `RecorviaNotificationsFailed`, `RecorviaWebhookDeliveriesFailing` |
 | [Isolamento de dados](isolamento-de-dados.md) | sem alerta automático (incidente aberto por suspeita ou relato) |
 
 ## Convenções dos comandos

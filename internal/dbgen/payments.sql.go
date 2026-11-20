@@ -66,6 +66,52 @@ func (q *Queries) DueOperationIDs(ctx context.Context, arg DueOperationIDsParams
 	return items, nil
 }
 
+const exhaustedOperationCounts = `-- name: ExhaustedOperationCounts :many
+SELECT o.status::text AS status, count(*)::bigint AS total
+  FROM payment_operations o
+  JOIN charges c ON c.tenant_id = o.tenant_id AND c.id = o.charge_id
+ WHERE o.tenant_id = $1 AND o.attempts >= $2 AND o.next_attempt_at <= $3
+   AND (o.status IN ('pending', 'unknown') OR (o.status = 'in_flight' AND o.lease_until < $3))
+   AND NOT (o.status = 'pending' AND o.kind = 'create_charge' AND c.status <> 'pending')
+ GROUP BY o.status
+`
+
+type ExhaustedOperationCountsParams struct {
+	TenantID    uuid.UUID
+	MaxAttempts int32
+	Now         time.Time
+}
+
+type ExhaustedOperationCountsRow struct {
+	Status string
+	Total  int64
+}
+
+// Operações do tenant paradas depois de esgotar as tentativas automáticas
+// (mesma condição de app_tenants_with_pending_payment_operations, com
+// attempts no limite): a recuperação não as reivindica mais. Uma criação
+// pendente cuja cobrança deixou de estar pendente (cancelada com a fatura)
+// não conta: a cobrança não será mais criada (payments.Operation.Exhausted).
+func (q *Queries) ExhaustedOperationCounts(ctx context.Context, arg ExhaustedOperationCountsParams) ([]ExhaustedOperationCountsRow, error) {
+	rows, err := q.db.Query(ctx, exhaustedOperationCounts, arg.TenantID, arg.MaxAttempts, arg.Now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ExhaustedOperationCountsRow
+	for rows.Next() {
+		var i ExhaustedOperationCountsRow
+		if err := rows.Scan(&i.Status, &i.Total); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getCharge = `-- name: GetCharge :one
 SELECT id, tenant_id, invoice_id, customer_id, provider_account_id, provider, attempt, provider_charge_id, status, amount, currency, amount_paid, fee_amount, amount_refunded, amount_charged_back, checkout_url, due_date, paid_at, failure_reason, provider_status, provider_status_at, created_at, updated_at, version FROM charges WHERE tenant_id = $1 AND id = $2
 `

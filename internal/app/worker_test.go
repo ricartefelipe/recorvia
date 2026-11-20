@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/ricartefelipe/recorvia/internal/collections"
@@ -14,6 +15,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/infra/telemetry"
 	"github.com/ricartefelipe/recorvia/internal/notifications"
 	"github.com/ricartefelipe/recorvia/internal/outbox"
+	"github.com/ricartefelipe/recorvia/internal/payments"
 	"github.com/ricartefelipe/recorvia/internal/webhooks"
 )
 
@@ -137,5 +139,93 @@ func TestJobsIncludeCollectionsNotificationsAndWebhooks(t *testing.T) {
 	}
 	if byName[JobNotifications] > time.Minute || byName[JobWebhooks] > time.Minute {
 		t.Errorf("envios devem ser frequentes: %v", byName)
+	}
+}
+
+// Toda tarefa agendada exporta o intervalo configurado: os alertas de tarefa
+// sem sucesso são proporcionais a ele (as tarefas horárias e a diária não
+// chegam a três falhas em 30 minutos).
+func TestWorkerMetricsExportEveryJobInterval(t *testing.T) {
+	m := telemetry.NewMetrics("teste")
+	w := &Worker{Core: &Core{}, Metrics: m}
+	jobs := w.Jobs()
+	w.initMetrics(jobs)
+	if got := testutil.CollectAndCount(m.JobInterval); got != len(jobs) {
+		t.Fatalf("séries de intervalo: %d, tarefas: %d", got, len(jobs))
+	}
+	for _, j := range jobs {
+		if got := testutil.ToFloat64(m.JobInterval.WithLabelValues(j.Name)); got != j.Interval.Seconds() {
+			t.Errorf("%s: intervalo %v, esperado %v", j.Name, got, j.Interval.Seconds())
+		}
+	}
+	for name, want := range map[string]time.Duration{"platform.close_statements": time.Hour, "idempotency.purge": time.Hour,
+		"outbox.purge": 24 * time.Hour} {
+		if got := testutil.ToFloat64(m.JobInterval.WithLabelValues(name)); got != want.Seconds() {
+			t.Errorf("%s: intervalo %v", name, got)
+		}
+	}
+	if got := testutil.CollectAndCount(m.NotificationsDispatched); got != len(telemetry.NotificationOutcomes) {
+		t.Fatalf("resultados de envio criados com zero: %d", got)
+	}
+}
+
+// Os rótulos gravados pelas tarefas são exatamente os declarados (e
+// documentados no catálogo) em telemetry.
+func TestJobResultLabelsAreDeclared(t *testing.T) {
+	m := telemetry.NewMetrics("teste")
+	recordDispatch(m, notifications.DispatchResult{Sent: 1, Retried: 1, Failed: 1, Deferred: 1, Skipped: 1, LostLease: 1})
+	recordDeliveries(m, webhooks.DeliverResult{Succeeded: 1, Retrying: 1, Exhausted: 1, LostLease: 1, Deferred: 1})
+	recordCollections(m, collections.RunResult{Reminders: 1, Overdue: 1, Suspended: 1, Reactivated: 1})
+	cases := []struct {
+		name string
+		vec  interface {
+			WithLabelValues(...string) prometheus.Counter
+		}
+		values []string
+		total  int
+	}{
+		{"notificações", m.NotificationsDispatched, telemetry.NotificationOutcomes, testutil.CollectAndCount(m.NotificationsDispatched)},
+		{"entregas", m.WebhookDeliveries, telemetry.WebhookDeliveryOutcomes, testutil.CollectAndCount(m.WebhookDeliveries)},
+		{"régua", m.CollectionActions, telemetry.CollectionActionKinds, testutil.CollectAndCount(m.CollectionActions)},
+	}
+	for _, c := range cases {
+		if c.total != len(c.values) {
+			t.Errorf("%s: %d séries, %d valores declarados", c.name, c.total, len(c.values))
+		}
+		for _, v := range c.values {
+			if got := testutil.ToFloat64(c.vec.WithLabelValues(v)); got != 1 {
+				t.Errorf("%s: %s = %v", c.name, v, got)
+			}
+		}
+	}
+}
+
+// A contagem de operações esgotadas só é substituída por uma execução
+// completa da recuperação.
+func TestRecoveryFeedsExhaustedOperations(t *testing.T) {
+	m := telemetry.NewMetrics("teste")
+	gauge := func(s payments.OperationStatus) float64 {
+		return testutil.ToFloat64(m.PaymentOperationsExhausted.WithLabelValues(string(s)))
+	}
+	steps := []struct {
+		name string
+		res  payments.RecoveryResult
+		want map[payments.OperationStatus]float64
+	}{
+		{"execução completa", payments.RecoveryResult{Complete: true,
+			Exhausted: map[payments.OperationStatus]int{payments.OpPending: 2, payments.OpInFlight: 1}},
+			map[payments.OperationStatus]float64{payments.OpPending: 2, payments.OpInFlight: 1, payments.OpUnknown: 0}},
+		{"execução parcial mantém a contagem", payments.RecoveryResult{Executed: 3, Exhausted: map[payments.OperationStatus]int{}},
+			map[payments.OperationStatus]float64{payments.OpPending: 2, payments.OpInFlight: 1, payments.OpUnknown: 0}},
+		{"nenhuma esgotada", payments.RecoveryResult{Complete: true},
+			map[payments.OperationStatus]float64{payments.OpPending: 0, payments.OpInFlight: 0, payments.OpUnknown: 0}},
+	}
+	for _, st := range steps {
+		recordRecovery(m, st.res)
+		for s, want := range st.want {
+			if got := gauge(s); got != want {
+				t.Errorf("%s: %s = %v, esperado %v", st.name, s, got, want)
+			}
+		}
 	}
 }

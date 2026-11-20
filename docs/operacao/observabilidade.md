@@ -41,7 +41,7 @@ As sondas têm semânticas distintas (RNF-09, ADR-054) e respondem JSON com `Cac
 
 | Processo | Porta | `/livez` | `/readyz` |
 |---|---|---|---|
-| API | HTTP (`RECORVIA_HTTP_ADDR`, 8081 no compose) | 200 enquanto o processo atende; não consulta dependências | 200 com PostgreSQL e Redis acessíveis; 503 caso contrário, com `checks` por dependência; atualiza `recorvia_dependency_up` |
+| API | HTTP (`RECORVIA_HTTP_ADDR`, 8081 no compose) | 200 enquanto o processo atende; não consulta dependências | 200 com PostgreSQL e Redis acessíveis; 503 caso contrário, com `checks` por dependência |
 | Worker | métricas (`RECORVIA_METRICS_ADDR`, 9091 no compose) | 200 enquanto o processo atende | 200 com PostgreSQL acessível e conexão ativa com o RabbitMQ; 503 caso contrário, com `checks` |
 
 ```bash
@@ -57,36 +57,77 @@ sonda de vida e `/readyz` como sonda de prontidão. Testes: `TestLivenessAndRead
 (`internal/httpapi`), `TestWorkerHealthMuxSeparatesLivenessFromReadiness` e
 `TestHealthcheckQueriesLiveness` (`internal/app`).
 
+Como nada consulta `/readyz` da API no compose, `recorvia_dependency_up` da API não depende dele:
+as mesmas verificações de PostgreSQL e Redis rodam a cada coleta do Prometheus e o valor acompanha
+o estado atual, inclusive na recuperação (`TestDependencyUpIsProbedOnEachGather`,
+`internal/infra/telemetry`). As verificações rodam em paralelo, cada uma com prazo próprio de 2 s:
+um PostgreSQL lento não faz o Redis aparecer como indisponível
+(`TestDependencyChecksHaveIndependentDeadlines`). `/readyz` também atualiza o valor.
+
 ## Métricas
 
 Todas as métricas da aplicação têm o prefixo `recorvia_` e o rótulo constante `service` (`api` ou
 `worker`). Nenhuma tem rótulo de tenant, cliente, fatura, usuário ou mensagem (RNF-08); o teste
 `TestMetricsHaveNoHighCardinalityLabels` falha se um rótulo proibido ou reservado (`job`,
-`instance`) for declarado. Os contadores de consumidores, tarefas e falhas de cobrança são criados
-com zero na partida, para que `increase()` detecte a primeira ocorrência.
+`instance`) for declarado, e os rótulos alimentados por dados externos têm conjunto fechado: o
+método HTTP fora da lista padronizada vira `_OTHER` e o provedor de webhook fora da lista vira
+`other` (`TestArbitraryHTTPMethodsDoNotCreateSeries`). Os contadores de consumidores, tarefas,
+falhas de cobrança, webhooks recebidos, envios de notificações, entregas de webhooks e ações da
+régua são criados com zero na partida, para que `increase()` detecte a primeira ocorrência.
+`TestMetricsCatalogDocumentsEveryMetricAndLabelValue` confere que toda métrica declarada está na
+tabela abaixo, com os valores dos rótulos de conjunto fechado.
 
 | Métrica | Tipo | Rótulos | Origem |
 |---|---|---|---|
-| `recorvia_http_requests_total` | contador | `route`, `method`, `status_class` | API, padrão de rota (nunca a URL concreta) |
-| `recorvia_http_request_duration_seconds` | histograma | `route`, `method` | API |
-| `recorvia_provider_webhooks_total` | contador | `provider`, `outcome` | API, recebimento de webhooks (`accepted`, `duplicate`, `unauthenticated`, `unknown_endpoint`, `invalid`, `error`) |
-| `recorvia_dependency_up` | gauge | `dependency` | API (`postgres`, `redis`, a cada `/readyz`) e worker (`rabbitmq`) |
+| `recorvia_http_requests_total` | contador | `route`, `method`, `status_class` | API, padrão de rota (nunca a URL concreta); `method` é `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `CONNECT`, `OPTIONS`, `TRACE` ou `_OTHER` (qualquer outro token, também no nome do span e no log de acesso) |
+| `recorvia_http_request_duration_seconds` | histograma | `route`, `method` | API, mesmo método normalizado |
+| `recorvia_provider_webhooks_total` | contador | `provider`, `outcome` | API, recebimento de webhooks: `accepted`, `duplicate`, `unauthenticated`, `unknown_endpoint`, `invalid` (corpo malformado ou recusado na validação), `too_large` (corpo acima de 256 KiB) e `error` (falha de persistência); `provider` é `simulator`, `asaas` ou `other` (nome fora da lista, vindo da URL) |
+| `recorvia_dependency_up` | gauge | `dependency` | API: `postgres` e `redis`, verificados em paralelo a cada coleta do Prometheus (prazo de 2 s para cada um) e a cada `/readyz`; worker: `rabbitmq`, a cada `metrics.collect` |
 | `recorvia_consumer_messages_total` | contador | `consumer`, `outcome` | worker (`ack`, `retry`, `dead_letter`, `requeue`) |
 | `recorvia_consumer_processing_seconds` | histograma | `consumer` | worker |
 | `recorvia_consumer_in_flight` / `recorvia_consumer_concurrency` | gauge | `consumer` | worker (saturação) |
 | `recorvia_outbox_published_total` / `recorvia_outbox_publish_failures_total` | contador | — | worker, relay da outbox |
 | `recorvia_outbox_pending` / `recorvia_outbox_oldest_pending_seconds` | gauge | — | worker, tarefa `metrics.collect` (15 s) |
-| `recorvia_job_runs_total` | contador | `task`, `outcome` | worker, agendador (`success`, `failure`) |
+| `recorvia_job_runs_total` | contador | `task`, `outcome` | worker, agendador (`success`, `failure`); a falha da reivindicação (banco) não conta: aparece no log `reivindicação de tarefa falhou` e nos alertas de tarefa sem sucesso |
 | `recorvia_job_duration_seconds` | histograma | `task` | worker |
-| `recorvia_job_last_success_timestamp_seconds` | gauge | `task` | worker; só existe depois de um sucesso real |
+| `recorvia_job_last_success_timestamp_seconds` | gauge | `task` | worker; só existe depois de um sucesso real (os alertas tratam a ausência pela idade do processo, `process_start_time_seconds`) |
+| `recorvia_job_interval_seconds` | gauge | `task` | worker, intervalo configurado de cada tarefa (alerta proporcional `RecorviaScheduledTaskStale`) |
 | `recorvia_invoices_issued_total` | contador | — | worker, motor de faturamento |
 | `recorvia_charge_failures_total` | contador | `provider`, `kind` | API e worker, falhas de cadastro do cliente e criação de cobrança no provedor (`permanent`, `retryable`, `ambiguous`, `not_found`) |
-| `recorvia_payment_operations` | gauge | `status` | worker, `metrics.collect` (`pending`, `in_flight`, `unknown`) |
-| `recorvia_reconciliation_open_discrepancies` | gauge | `kind` | declarada no catálogo; alimentada pelo módulo de conciliação |
+| `recorvia_payment_operations` | gauge | `status` | worker, `metrics.collect` (`pending`, `in_flight`, `unknown`), inclusive as esgotadas |
+| `recorvia_payment_operations_exhausted` | gauge | `status` | worker, tarefa `payments.recover_operations` (a cada minuto): operações paradas no limite de 6 tentativas, que a recuperação não retoma mais (`pending` e `unknown` depois do horário da próxima tentativa, `in_flight` com lease vencido), sem as criações `pending` cuja cobrança deixou de estar pendente (fatura anulada); uma execução parcial (tenant sem consulta) mantém o valor anterior |
+| `recorvia_notifications_dispatched_total` | contador | `outcome` | worker, tarefa `notifications.dispatch`: `sent` (aceita pelo SMTP), `retried` (falha transitória, nova tentativa agendada), `failed` (encerrada sem envio: recusa permanente, fim das tentativas ou conteúdo indisponível), `deferred` (fora da janela de envio ou do limite de frequência), `skipped` (cancelada ou suprimida antes do envio) e `lost_lease` (outra execução assumiu a tentativa) |
+| `recorvia_webhook_deliveries_total` | contador | `outcome` | worker, tarefa `webhooks.deliver`: `succeeded` (resposta 2xx), `retrying` (falha, nova tentativa agendada), `exhausted` (tentativas esgotadas ou destino bloqueado pela proteção SSRF), `lost_lease` e `deferred` (devolvida à fila sem consumir tentativa: orçamento da execução ou endpoint sem resposta) |
+| `recorvia_collection_actions_total` | contador | `action` | worker, tarefa `collections.run`: `reminder_scheduled`, `invoice_overdue`, `subscription_suspended` e `subscription_reactivated` |
+| `recorvia_reconciliation_open_discrepancies` | gauge | `kind` | declarada nesta etapa; alimentada pela tarefa `metrics.collect` da etapa 5 (recebíveis e conciliação) |
 | `recorvia_db_pool_connections` | gauge | `state` | API e worker, pool pgx lido a cada coleta (`acquired`, `idle`, `constructing`) |
 | `recorvia_db_pool_max_connections` | gauge | — | API e worker |
-| `recorvia_db_pool_acquires_total`, `_empty_acquires_total`, `_canceled_acquires_total`, `_empty_acquire_wait_seconds_total` | contador | — | API e worker |
+| `recorvia_db_pool_acquires_total`, `recorvia_db_pool_empty_acquires_total`, `recorvia_db_pool_canceled_acquires_total`, `recorvia_db_pool_empty_acquire_wait_seconds_total` | contador | — | API e worker |
 | `recorvia_db_server_connections` / `recorvia_db_server_max_connections` | gauge | — | worker, `metrics.collect`: sessões de clientes de todo o servidor e limite para papéis comuns (`max_connections` menos as reservadas) |
+
+Métricas da etapa 5 (recebíveis e conciliação, ainda não integrada nesta branch): as regras de
+alerta `RecorviaRefundsUnknown` e `RecorviaRefundsFailed` já as usam e ficam sem dados até a
+integração; nenhum painel as consulta ainda.
+
+| Métrica | Tipo | Rótulos | Origem |
+|---|---|---|---|
+| `recorvia_refunds_total` | contador | `outcome` | worker, `metrics.collect` da etapa 5: reembolsos concluídos (`succeeded`, `failed`), com totais mantidos no banco |
+| `recorvia_refunds_in_progress` | gauge | `status` | worker, `metrics.collect` da etapa 5: reembolsos sem conclusão (`requested`, `unknown`) |
+
+Avaliação das métricas da régua de cobrança, das notificações e dos webhooks enviados (etapa 6):
+
+- `recorvia_notifications_dispatched_total`: alertas `RecorviaEmailDeliveryStalled` (tentativas
+  falhando sem nenhum envio aceito, sinal de SMTP indisponível) e `RecorviaNotificationsFailed`
+  (mais de 5 falhas definitivas em 30 minutos); painel "Notificações por resultado".
+- `recorvia_webhook_deliveries_total`: alerta `RecorviaWebhookDeliveriesFailing` somente quando
+  nenhum destino recebe (falha da saída do worker); a falha de um endpoint de tenant isolado não
+  alerta a plataforma, porque as métricas não distinguem tenants e o reenvio é responsabilidade do
+  tenant (histórico em `GET /api/v1/webhook-endpoints/{id}/deliveries`); painel "Entregas de
+  webhooks por resultado".
+- `recorvia_collection_actions_total`: sem alerta. Lembretes, vencimentos, suspensões e
+  reativações dependem da carteira de cada tenant e não têm limite que indique falha; a falha da
+  tarefa `collections.run` é coberta por `RecorviaScheduledTaskFailing`. Painel "Ações da régua de
+  cobrança".
 
 O tipo de falha de cobrança vem da classificação do adaptador (`payments.GatewayErrorKind`): erro
 não classificado conta como `ambiguous`. A contagem é feita por um decorador do adaptador na
@@ -140,18 +181,34 @@ anotação `runbook` de cada regra aponta para uma seção existente (conferido 
 | `RecorviaChargesDeclined` | mais de 5 recusas definitivas de cobrança em 30 min | warning |
 | `RecorviaPaymentProviderUnavailable` | mais de 3 falhas repetíveis ou ambíguas em 10 min, por 5 min | critical |
 | `RecorviaPaymentOperationsUnknown` | operação com resultado desconhecido por 30 min | warning |
+| `RecorviaPaymentOperationsExhausted` | operação `pending` ou `in_flight` parada no limite de tentativas por 15 min | warning |
 | `RecorviaPaymentOperationsPending` | mais de 50 operações pendentes por 15 min | warning |
-| `RecorviaWebhooksRejected` | mais de 5 webhooks recusados em 15 min | warning |
+| `RecorviaWebhooksRejected` | mais de 5 webhooks recusados (`unauthenticated`, `unknown_endpoint`, `too_large` ou `error`) em 15 min | warning |
 | `RecorviaReconciliationDiscrepanciesOpen` | divergência aberta por 4 h | warning |
 | `RecorviaReconciliationDiscrepanciesHigh` | mais de 25 divergências abertas por 30 min | critical |
-| `RecorviaBillingCycleStale` | `billing.run_cycle` sem sucesso há mais de 15 min | critical |
-| `RecorviaScheduledTaskFailing` | 3 ou mais falhas de uma tarefa em 30 min | warning |
-| `RecorviaMetricsCollectionStale` | `metrics.collect` sem sucesso há mais de 2 min | warning |
+| `RecorviaRefundsUnknown` | reembolso com resultado desconhecido por 30 min (métrica da etapa 5) | warning |
+| `RecorviaRefundsFailed` | reembolso recusado pelo provedor na última hora (métrica da etapa 5) | warning |
+| `RecorviaBillingCycleStale` | `billing.run_cycle` sem sucesso há mais de 15 min, ou sem nenhum sucesso desde a partida do worker (há mais de 15 min) | critical |
+| `RecorviaScheduledTaskFailing` | 3 ou mais falhas de uma tarefa em 30 min (tarefas frequentes) | warning |
+| `RecorviaScheduledTaskStale` | tarefa sem sucesso há mais de três intervalos (mínimo de 15 min), inclusive desde a partida do worker; cobre as tarefas horárias e a diária | warning |
+| `RecorviaMetricsCollectionStale` | `metrics.collect` sem sucesso há mais de 2 min, ou sem nenhum sucesso desde a partida do worker | warning |
+| `RecorviaEmailDeliveryStalled` | tentativas de envio falhando e nenhum e-mail aceito em 15 min, por 15 min | warning |
+| `RecorviaNotificationsFailed` | mais de 5 notificações com falha definitiva em 30 min | warning |
+| `RecorviaWebhookDeliveriesFailing` | 10 ou mais tentativas de entrega falhando e nenhuma bem-sucedida em 30 min, por 15 min | warning |
 | `RecorviaDBPoolSaturated` | pool de um processo com 90% ou mais em uso por 5 min | warning |
 | `RecorviaDBPoolWaiting` | espera por conexão acima de 0,2 s por segundo, por 10 min | warning |
 | `RecorviaDBServerConnectionsHigh` | servidor com mais de 80% das conexões para papéis comuns, por 10 min | critical |
-| `RecorviaDependencyUnavailable` | dependência indisponível por 2 min | critical |
+| `RecorviaDependencyUnavailable` | dependência indisponível por 2 min (estado verificado a cada coleta) | critical |
 | `RecorviaHTTPErrorRate` | mais de 5% de respostas 5xx por 10 min | warning |
+
+O último sucesso de uma tarefa só existe depois de um sucesso real; num reinício do worker com a
+tarefa falhando, ou com a reivindicação falhando a cada ciclo (sem execução registrada), a série
+não existe. `RecorviaBillingCycleStale`, `RecorviaMetricsCollectionStale` e
+`RecorviaScheduledTaskStale` cobrem esse caso pela idade do processo mais antigo do worker
+(`process_start_time_seconds`), que é o mínimo do tempo sem sucesso. A próxima execução de uma
+tarefa é agendada um intervalo depois, mesmo após falha: `RecorviaScheduledTaskFailing` só alcança
+tarefas de até 10 minutos de intervalo, e as horárias (`platform.close_statements`,
+`idempotency.purge`) e a diária (`outbox.purge`) ficam com o alerta proporcional ao intervalo.
 
 A quantidade de dead letters registradas e ainda não resolvidas por tenant é consultada pela API
 (`GET /api/v1/dead-letters`); não há métrica global para ela (ADR-053).
@@ -164,7 +221,7 @@ são salvas; edite o JSON e reconstrua a imagem). A fonte de dados é o Promethe
 
 | Dashboard | Conteúdo |
 |---|---|
-| Recorvia: visão geral (página inicial) | indicadores dos alertas (outbox, operações desconhecidas, divergências, faturamento, DLQs), API, faturamento e cobrança, conciliação e dependências |
+| Recorvia: visão geral (página inicial) | indicadores dos alertas (outbox, operações desconhecidas, divergências, faturamento, DLQs), API, faturamento e cobrança (inclusive operações esgotadas), conciliação e dependências, régua de cobrança, notificações e entregas de webhooks |
 | Recorvia: mensageria | filas principais (prontas, atraso, não confirmadas, consumidores), retentativas, DLQs, resultado e duração por consumidor, saturação e outbox |
 | Recorvia: banco e processos | pool de conexões por processo, conexões do servidor, tarefas agendadas (resultado, duração, último sucesso) e recursos dos processos |
 
@@ -173,9 +230,11 @@ HTTP v1, que o Jaeger 2.23 não expõe mais.
 
 ## Rastreamento
 
-- **API**: span de servidor por requisição (`otelhttp`), nomeado pelo padrão de rota
-  (`GET /api/v1/customers/{id}`) e com os atributos `http.route` e `recorvia.request_id` (o mesmo
-  `X-Request-ID` devolvido na resposta e registrado nos logs).
+- **API**: span de servidor por requisição (`otelhttp`), nomeado pelo método normalizado e pelo
+  padrão de rota (`GET /api/v1/customers/{id}`; método fora da lista vira `_OTHER`, e o valor
+  recebido fica em `http.request.method_original`, limitado a 32 bytes) e com os atributos
+  `http.route` e `recorvia.request_id` (o mesmo `X-Request-ID` devolvido na resposta e registrado
+  nos logs).
 - **Eventos**: o contexto de rastreamento viaja nos headers da outbox e das mensagens; o worker
   abre um span de consumo (`consume <consumidor>`) filho do contexto propagado, com fila,
   identificador da mensagem, tipo do evento e tentativa.
@@ -228,9 +287,12 @@ confere, com prazo por verificação:
 - Prometheus: os seis alvos (`recorvia-api`, `recorvia-worker`, `rabbitmq`, `rabbitmq-queues`,
   `otel-collector`, `prometheus`) com `health=up`; todas as regras do arquivo de regras carregadas
   e avaliadas com `health=ok`; e as séries das quais os alertas dependem (pool e conexões do
-  banco, outbox, operações de pagamento, dead letters, concorrência dos consumidores, falhas de
-  cobrança, requisições HTTP por padrão de rota, último sucesso de `billing.run_cycle` e as séries
-  por fila do plugin do RabbitMQ, inclusive consumidores conectados à fila principal).
+  banco, outbox, operações de pagamento, inclusive as esgotadas, dead letters, concorrência dos
+  consumidores, falhas de cobrança, requisições HTTP por padrão de rota, último sucesso de
+  `billing.run_cycle`, intervalo das tarefas, idade do processo do worker, disponibilidade do
+  PostgreSQL e do Redis vista pela API sem consulta a `/readyz`, webhooks recebidos, envios de
+  notificações, entregas de webhooks, ações da régua e as séries por fila do plugin do RabbitMQ,
+  inclusive consumidores conectados à fila principal).
 - Grafana: banco interno saudável, fonte de dados `prometheus` consultando o Prometheus
   (`/api/datasources/uid/prometheus/health`) e os três dashboards na pasta *Recorvia*.
 - Jaeger: rastros dos serviços `recorvia-api` e `recorvia-worker` recebidos pelo Collector
@@ -241,25 +303,34 @@ usado localmente depois de `make up-obs`.
 
 ### Verificação local nesta etapa
 
-No ambiente de desenvolvimento desta etapa o Docker não estava disponível, portanto nem as
-ferramentas oficiais (que rodam nas imagens) nem o perfil `observability` foram executados
-localmente; o resultado de referência é o dos jobs `observability-check`, `observability-stack` e
-`go-integration` da CI. Localmente, sem containers, foram conferidos:
+Na revisão desta etapa, com Docker disponível, foram executados localmente:
 
-- JSON dos dashboards com `python3 -m json.tool deploy/observability/grafana/dashboards/*.json`;
-- YAML das configurações, regras, testes das regras, provisionamento, `compose.yaml` e
-  `.github/workflows/ci.yml` com um parser YAML (`yaml.safe_load`);
-- sintaxe dos scripts com `bash -n`;
-- os testes Go de dashboards, métricas declaradas, rótulos proibidos e links de runbook
-  (`make test`).
+- `promtool check rules` e `promtool test rules` (Prometheus 3.16.0, imagem
+  `recorvia-prometheus:local`), com as regras e os testes enviados ao container pela entrada
+  padrão, sem bind mount;
+- `make test` (dashboards, métricas declaradas, catálogo, rótulos e links de runbook);
+- `make test-integration`, que constrói as imagens de `deploy/observability` e executa
+  `TestCollectorRedactsSensitiveSpanAttributes`, `TestGrafanaProvisionsDatasourceAndDashboards`,
+  `TestPrometheusLoadsAlertRulesAndScrapeTargets` e
+  `TestPrometheusPluginExposesQueueSeriesUsedByAlerts`.
+
+O perfil `observability` do compose (`make up-obs` seguido de `make obs-stack-check`) não foi
+iniciado localmente, porque as portas publicadas são compartilhadas com outros projetos; a
+referência para ele é o job `observability-stack` da CI.
 
 ## Limitações
 
-- O perfil `observability` não foi iniciado localmente nesta etapa (Docker indisponível no
-  ambiente de desenvolvimento): as imagens, as configurações e o perfil do compose são
-  exercitados pelos jobs `observability-check`, `observability-stack` e `go-integration` da CI.
-- `recorvia_reconciliation_open_discrepancies` é alimentada pelo módulo de conciliação; enquanto
-  ele não publicar a métrica, os painéis e alertas de divergências ficam sem dados.
+- O perfil `observability` do compose não foi iniciado localmente nesta etapa (portas
+  compartilhadas com outros projetos): o perfil completo é exercitado pelo job
+  `observability-stack` da CI; as imagens e as regras, também localmente
+  (`make test-integration` e `promtool`).
+- `recorvia_reconciliation_open_discrepancies`, `recorvia_refunds_total` e
+  `recorvia_refunds_in_progress` são alimentadas pela etapa 5 (recebíveis e conciliação); até a
+  integração, os painéis e alertas de divergências e de reembolsos ficam sem dados.
+- As contagens globais (`recorvia_payment_operations`, `recorvia_payment_operations_exhausted`,
+  outbox) são gravadas pela instância do worker que executou a tarefa; com várias instâncias, os
+  alertas usam `max` e o valor de uma instância que deixou de executar a tarefa só muda na próxima
+  execução dela.
 - Rastros ficam apenas em memória no Jaeger (até 50.000 rastros); métricas ficam 7 dias no volume
   do Prometheus. Não há encaminhamento de alertas (e-mail, plantão).
 - A taxa de amostragem dos rastros é de 100% quando a exportação está habilitada.

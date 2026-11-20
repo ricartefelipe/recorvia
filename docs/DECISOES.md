@@ -659,19 +659,38 @@ do worker) precisam de séries existentes, sem rótulos de tenant, cliente ou fa
    e falhas de criação de cobrança por provedor e tipo
    (`recorvia_charge_failures_total`, até então declarada sem uso), contadas por um decorador do
    adaptador na composição (`gateways.Resolver.Observe`), sem tocar nos casos de uso.
-3. Contadores de consumidores, tarefas e falhas de cobrança são criados com zero na partida, para
-   que `increase()` detecte a primeira ocorrência; o último sucesso de uma tarefa não é
-   inicializado, para não mascarar o alerta de faturamento parado.
+3. Contadores de consumidores, tarefas, falhas de cobrança, webhooks recebidos, envios de
+   notificações, entregas de webhooks e ações da régua são criados com zero na partida, para que
+   `increase()` detecte a primeira ocorrência; o último sucesso de uma tarefa não é inicializado,
+   para não mascarar o alerta de faturamento parado. A ausência dessa série (nenhum sucesso desde
+   a partida, inclusive com a reivindicação falhando a cada ciclo) é tratada nas regras pela idade
+   do processo do worker (`process_start_time_seconds`), e o intervalo de cada tarefa é exportado
+   (`recorvia_job_interval_seconds`) para o alerta proporcional `RecorviaScheduledTaskStale`: a
+   próxima execução é agendada um intervalo depois mesmo após falha, e três falhas em 30 minutos
+   só são possíveis para tarefas de até 10 minutos.
 4. O nome da tarefa agendada passa a usar o rótulo `task`: `job` é o rótulo do alvo de coleta no
-   Prometheus e seria renomeado para `exported_job`.
+   Prometheus e seria renomeado para `exported_job`. Rótulos alimentados por dados externos têm
+   conjunto fechado: o método HTTP fora da lista padronizada vira `_OTHER` (também no nome do span
+   e no log de acesso), como nas convenções semânticas do OpenTelemetry, e o provedor de webhook
+   fora da lista vira `other`.
 5. Regras em `deploy/observability/prometheus/rules/recorvia.yml` com testes `promtool test rules`;
    testes Go garantem que regras e dashboards só referenciam métricas declaradas, que nenhuma
    métrica tem rótulo proibido e que a anotação `runbook` de cada alerta aponta para uma seção
    existente. As séries do plugin do RabbitMQ usadas nos alertas são conferidas contra o broker
    real (`TestPrometheusPluginExposesQueueSeriesUsedByAlerts`).
+6. As operações de pagamento paradas no limite de tentativas são contadas pela própria tarefa
+   `payments.recover_operations`, nos tenants que ela já percorre (a descoberta não filtra
+   tentativas), numa consulta com o contexto de cada tenant: `recorvia_payment_operations_exhausted`
+   sem nova função `SECURITY DEFINER`. Uma execução parcial não substitui a contagem anterior.
+7. Métricas da régua de cobrança, das notificações e dos webhooks enviados (etapa 6): alertas só
+   para falhas da plataforma (SMTP sem nenhum envio aceito, falhas definitivas em volume, nenhuma
+   entrega de webhook bem-sucedida); a régua tem só painel. As regras de reembolso usam as
+   métricas da etapa 5, ainda sem dados nesta branch.
 **Consequências:** a contagem de dead letters abertas por tenant continua visível apenas pela API
 (`GET /api/v1/dead-letters`); um gauge global exigiria nova função `SECURITY DEFINER` (migration),
-fora do escopo. Os limites dos alertas são pontos de partida a calibrar com volume real.
+fora do escopo. Os limites dos alertas são pontos de partida a calibrar com volume real. A falha
+do endpoint de um único tenant não gera alerta da plataforma (as métricas não distinguem
+tenants).
 
 ## ADR-054 Liveness e readiness com semânticas distintas na API e no worker
 **Status:** aceita (registra e testa o comportamento existente).
@@ -687,7 +706,14 @@ processos (`TestLivenessAndReadinessHaveDistinctSemantics`,
 reinícios em cascata; o worker e a API já reconectam sozinhos. A prontidão serve para retirar a
 instância do balanceamento ou adiar o tráfego.
 **Consequências:** em orquestradores, `/livez` deve ser a sonda de vida e `/readyz` a de
-prontidão. `recorvia_dependency_up` da API só muda quando `/readyz` é consultado.
+prontidão. `recorvia_dependency_up` da API é recalculado a cada coleta do Prometheus (as mesmas
+verificações de `/readyz`), e não apenas quando `/readyz` é consultado: a sonda dos containers usa
+`/livez`, e um valor gravado por uma consulta antiga manteria o alerta disparado depois da
+recuperação (`TestDependencyUpIsProbedOnEachGather`). As verificações rodam em paralelo, cada uma
+com prazo próprio de 2 s (`telemetry.ProbeDependencies`): com um prazo único para verificações em
+sequência, um PostgreSQL lento (pool esgotado, rede descartando pacotes) consumiria o prazo e o
+Redis saudável apareceria como indisponível, mandando o operador para a dependência errada
+(`TestDependencyChecksHaveIndependentDeadlines`).
 
 ## ADR-055 Backup lógico com manifesto no mesmo snapshot e verificação por restauração
 **Status:** aceita.
@@ -706,6 +732,9 @@ servidor vazio com bootstrap, `pg_restore`, `migrate up`, manifesto idêntico ao
 `make restore-check`) e pelo teste de integração `TestBackupAndRestoreCheckScripts` (job
 `go-integration`, com escrita concorrente contínua durante o dump e manifesto adulterado). O que é
 exercitado e o que é recomendação estão separados em `docs/operacao/backup-e-restauracao.md`.
+O manifesto só é publicado quando a sessão do snapshot devolve a sentinela de fim (prazo por linha
+configurável em `RECORVIA_BACKUP_MANIFEST_TIMEOUT`, padrão 30 minutos) e traz todas as linhas
+obrigatórias; caso contrário, o backup falha sem publicar arquivos.
 **Justificativa:** o snapshot torna o manifesto comparável mesmo com escrita concorrente na origem;
 restaurar de fato é a única prova de que o backup serve. O formato custom permite restauração
 seletiva e `--single-transaction`.
@@ -713,7 +742,9 @@ seletiva e `--single-transaction`.
 o bootstrap (`cmd/migrate bootstrap`) vem antes do `pg_restore`. O backup lógico não oferece
 recuperação para um instante arbitrário; arquivamento contínuo de WAL é recomendação para
 produção (`docs/operacao/backup-e-restauracao.md`). Os arquivos contêm dados pessoais e
-financeiros e credenciais cifradas cuja chave não está no banco.
+financeiros e credenciais cifradas cuja chave não está no banco. Inbox e outbox voltam ao mesmo
+instante: o inbox não deduplica o que foi processado depois do backup. A recuperação de desastre
+mantém o worker parado até conciliar a janela perdida com o provedor (ADR-058).
 
 ## ADR-056 Retenção limitada aos expurgos técnicos existentes
 **Status:** aceita.
@@ -753,3 +784,39 @@ exceções obriga a reavaliação.
 atualização da versão fixada. O `apk upgrade` torna a camada final dependente do dia do build
 (pacotes do mesmo branch estável). O ESLint 10 exige Node.js 22.13 ou superior (`engines`
 ajustado).
+
+## ADR-058 Operações retomadas sempre consultam o provedor; reexecução manual antecipa a tentativa
+**Status:** aceita (complementa a ADR-008).
+**Contexto:** a consulta pela referência externa só acontecia a partir da segunda tentativa
+registrada. Uma operação gravada e nunca reivindicada (processo interrompido entre o commit e a
+reivindicação, ou banco restaurado de backup cuja chamada ao provedor aconteceu depois da cópia)
+seria criada de novo sem consulta. O endpoint `POST /api/v1/payment-operations/{id}/retry`
+respondia 200 sem executar nada antes de `next_attempt_at`, embora os runbooks o apresentassem como
+antecipação da tentativa.
+**Decisão:** somente a execução imediata, logo após gravar a operação no mesmo fluxo, cria sem
+consultar; a recuperação agendada e a reexecução manual consultam o provedor pela referência
+externa antes de criar em qualquer tentativa. A reexecução manual (`Service.RetryOperation`)
+ignora `next_attempt_at`, respeita o lease de uma execução em andamento e responde `409`
+(`operation_completed`, `operation_in_progress` ou `operation_attempts_exhausted`) quando nada pode
+ser executado. O limite de 6 tentativas vale para `unknown` e `in_flight`, que seguem para a
+conciliação; uma operação `pending` esgotada (recusas transitórias do provedor, com consulta antes
+de cada nova criação) pode ser reexecutada manualmente depois de corrigida a causa. As operações
+paradas no limite são contadas em `recorvia_payment_operations_exhausted` (alerta
+`RecorviaPaymentOperationsExhausted`). Uma criação cuja cobrança deixou de estar pendente (fatura
+anulada enquanto a operação aguardava nova tentativa ou durante a chamada) é obsoleta
+(`Operation.Obsolete`): a recuperação e a reexecução manual só consultam o provedor pela
+referência externa, vinculam a cobrança encontrada sem emitir `charge.created` (auditoria
+`charge.linked_after_local_cancellation`; um pagamento por ela vira crédito do cliente) ou, sem
+cobrança no provedor, encerram a operação como `failed`; uma recusa transitória com a cobrança já
+cancelada também encerra a operação, e uma recusa definitiva não marca a cobrança cancelada como
+recusada. A criação `pending` obsoleta não conta como esgotada, para que o alerta não fique
+disparado por uma fatura anulada; em `unknown` e `in_flight` ela continua contando, porque a
+cobrança pode existir no provedor
+(`TestExhaustedCreationOfCanceledChargeIsNotCountedNorCreated`,
+`TestObsoleteCreationOnlyLooksUpProvider`, `TestChargeCanceledDuringCreationCall` e
+`TestExhaustedCreationOfVoidedInvoiceIsClosedWithoutCharge`).
+**Consequências:** uma chamada a mais ao provedor nas retomadas sem tentativa registrada, que são
+raras. Na recuperação de desastre, as operações restauradas vinculam as cobranças criadas na janela
+perdida com a mesma referência; as cobranças criadas para faturas emitidas depois do backup não têm
+referência local e são tratadas pela conciliação da janela antes de religar o worker
+(`docs/operacao/backup-e-restauracao.md`).

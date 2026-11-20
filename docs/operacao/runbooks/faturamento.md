@@ -13,7 +13,13 @@ webhook).
 - Dashboard *Recorvia: visão geral*, painel "Tempo desde o último faturamento" acima de 15 minutos.
 
 ### Métricas e alertas
-- `RecorviaBillingCycleStale` (crítico): `time() - max(recorvia_job_last_success_timestamp_seconds{task="billing.run_cycle"}) > 900`.
+- `RecorviaBillingCycleStale` (crítico): `time() - max(recorvia_job_last_success_timestamp_seconds{task="billing.run_cycle"}) > 900`
+  ou, sem nenhum sucesso desde a partida do worker (a série do último sucesso só existe depois de
+  um sucesso real), worker em execução há mais de 15 minutos (`process_start_time_seconds`). O
+  segundo caso acontece num reinício com a tarefa falhando e quando a reivindicação da tarefa
+  falha a cada ciclo (log `reivindicação de tarefa falhou`, sem execução registrada em
+  `recorvia_job_runs_total`); o valor do alerta é então a idade do worker, mínimo do tempo sem
+  faturar.
 - `recorvia_job_runs_total{task="billing.run_cycle", outcome="failure"}` e
   `recorvia_job_duration_seconds` (dashboard *banco e processos*).
 - Sem nenhuma série do worker: `RecorviaTargetDown` (o worker está parado).
@@ -31,6 +37,9 @@ SELECT name, next_run_at, locked_by, locked_until, last_started_at, last_finishe
 SELECT tenant_id, count(*), min(next_billing_at) AS vencida_desde
   FROM subscriptions WHERE next_billing_at <= now() GROUP BY 1 ORDER BY 3;
 ```
+- `run_count` parado e `last_started_at` antigo com o worker em execução, mais o log
+  `reivindicação de tarefa falhou`: o agendador não consegue reivindicar tarefas (banco
+  indisponível ou sem conexões livres); ver [Conexões do banco](#conexoes-do-banco).
 - `locked_until` no futuro com `last_finished_at` antigo: uma instância reivindicou e está presa
   (ou caiu; o lease expira sozinho em até 11 minutos, o maior timeout das tarefas mais 1 minuto).
 - `last_error` preenchido: a execução falha. A mensagem (também no log `tarefa falhou` do worker,
@@ -70,9 +79,19 @@ SELECT tenant_id, count(*), min(next_billing_at) AS vencida_desde
   sem efeito; métricas da outbox e do banco congeladas.
 
 ### Métricas e alertas
-- `RecorviaScheduledTaskFailing`: três ou mais falhas de uma tarefa (`task`) em 30 minutos.
-- `RecorviaMetricsCollectionStale`: `metrics.collect` sem sucesso há 2 minutos (os gauges da
-  outbox, das operações e das conexões do servidor ficam desatualizados).
+- `RecorviaScheduledTaskFailing`: três ou mais falhas de uma tarefa (`task`) em 30 minutos. Só
+  alcança tarefas de até 10 minutos de intervalo: depois de uma falha, a próxima execução é
+  agendada um intervalo depois.
+- `RecorviaScheduledTaskStale`: tarefa sem sucesso há mais de três intervalos
+  (`recorvia_job_interval_seconds`, no mínimo 15 minutos), inclusive sem nenhum sucesso desde a
+  partida do worker. É o alerta das tarefas horárias (`platform.close_statements`,
+  `idempotency.purge`, após 3 horas) e da diária (`outbox.purge`, após 3 dias); o motor de
+  faturamento e a coleta de métricas têm alertas próprios.
+- `RecorviaMetricsCollectionStale`: `metrics.collect` sem sucesso há 2 minutos, ou sem nenhum
+  sucesso desde a partida do worker (os gauges da outbox, das operações e das conexões do
+  servidor ficam desatualizados).
+- Dashboard *banco e processos*, painéis "Execuções por resultado" e "Tempo desde o último
+  sucesso".
 
 ### Diagnóstico
 ```sql
@@ -90,7 +109,8 @@ docker compose logs --since 30m worker | grep -E '"job"|tarefa'
 
 ### Verificação
 `increase(recorvia_job_runs_total{outcome="failure"}[30m])` volta a zero e
-`recorvia_job_last_success_timestamp_seconds` avança para a tarefa.
+`recorvia_job_last_success_timestamp_seconds` avança para a tarefa (nas tarefas horárias e na
+diária, na próxima execução agendada: `next_run_at` em `scheduled_jobs`).
 
 <a id="falhas-de-cobranca"></a>
 
@@ -106,6 +126,8 @@ docker compose logs --since 30m worker | grep -E '"job"|tarefa'
 - `RecorviaPaymentProviderUnavailable` (crítico): falhas `retryable` ou `ambiguous` repetidas em
   10 minutos.
 - `RecorviaPaymentOperationsPending`: mais de 50 operações aguardando nova tentativa.
+- `RecorviaPaymentOperationsExhausted`: operações `pending` ou `in_flight` paradas no limite de
+  tentativas ([conciliação](conciliacao.md#operacoes-esgotadas)).
 - `recorvia_charge_failures_total{provider, kind}` e `recorvia_payment_operations{status}`
   (dashboard *visão geral*).
 
@@ -134,9 +156,16 @@ SELECT tenant_id, provider, count(*) FROM charges
    (`PUT /api/v1/payment-providers/{provider}`, permissão `integrations.write`); depois, nova
    tentativa por fatura com `POST /api/v1/invoices/{id}/charges` (permissão `payments.charge`,
    com `Idempotency-Key`).
-3. Operação específica dentro do limite de tentativas: `POST /api/v1/payment-operations/{id}/retry`.
-   Operações que esgotaram as tentativas não são reexecutadas por esse endpoint: seguem para a
-   conciliação ([runbook](conciliacao.md#operacoes-com-resultado-desconhecido)).
+3. Operação específica, sem esperar o backoff: `POST /api/v1/payment-operations/{id}/retry`
+   (`payments.charge`) executa agora, ignorando `next_attempt_at`, e consulta o provedor pela
+   referência externa antes de criar. Responde `409` sem executar nada quando a operação está
+   concluída (`operation_completed`), em execução com lease vigente (`operation_in_progress`) ou
+   esgotada em `unknown` ou `in_flight` (`operation_attempts_exhausted`, que segue para a
+   [conciliação](conciliacao.md#operacoes-com-resultado-desconhecido)). Uma operação `pending`
+   esgotada pode ser reexecutada assim depois de corrigida a causa
+   ([operações esgotadas](conciliacao.md#operacoes-esgotadas)). Quando a cobrança já não está
+   pendente (fatura anulada), a recuperação e a reexecução nunca criam a cobrança: só consultam o
+   provedor e vinculam a encontrada, sem `charge.created`, ou encerram a operação como `failed`.
 4. Nunca recrie uma cobrança diretamente no provedor nem altere `payment_operations` à mão: uma
    cobrança duplicada é o risco que o fluxo evita.
 
@@ -152,13 +181,20 @@ SELECT tenant_id, provider, count(*) FROM charges
 - Pagamentos confirmados no provedor sem reflexo na fatura.
 
 ### Métricas e alertas
-- `RecorviaWebhooksRejected`: mais de 5 recusas (`unauthenticated`, `unknown_endpoint` ou
-  `error`) por provedor e resultado em 15 minutos.
+- `RecorviaWebhooksRejected`: mais de 5 recusas (`unauthenticated`, `unknown_endpoint`,
+  `too_large` ou `error`) por provedor e resultado em 15 minutos. `invalid` (corpo malformado)
+  fica fora do alerta: é recusa definitiva de um envio isolado e aparece no painel "Webhooks
+  recebidos por resultado".
+- `provider="other"`: o nome do provedor na URL não é `simulator` nem `asaas` (o endpoint não
+  existe); junto com `unknown_endpoint`, indica varredura.
 
 ### Diagnóstico
 - `unauthenticated`: token (Asaas) ou HMAC (simulador) divergente; segredo rotacionado no
   provedor sem reconfigurar o Recorvia, ou tentativa de envio falso.
 - `unknown_endpoint`: URL com token antigo (conta reconfigurada) ou varredura.
+- `too_large`: corpo acima de 256 KiB (`payments.MaxWebhookBody`), respondido com 413. Com um
+  provedor real, o evento se perde em todas as reentregas; sem provedor real (`other` ou volume
+  sem relação com cobranças), é abuso do endpoint público.
 - `error`: falha ao persistir o evento (banco): ver [Conexões do banco](#conexoes-do-banco).
 ```bash
 docker compose logs --since 1h api | grep -E 'webhook' | tail -50
@@ -168,7 +204,10 @@ docker compose logs --since 1h api | grep -E 'webhook' | tail -50
 - Reconfigure a conta do provedor pela API (gera novo token de endpoint e registra o webhook). O
   provedor reenvia os eventos pendentes conforme a política dele; a conciliação cobre os que não
   forem reenviados.
-- Recusas por varredura não exigem ação além de acompanhar o volume.
+- Recusas por varredura não exigem ação além de acompanhar o volume; volume alto vindo de poucas
+  origens pode ser bloqueado na borda (o limite por IP da rota é 1200 requisições por minuto).
+- `too_large` de um provedor real: registre o caso com o provedor (eventos acima do limite não são
+  aceitos) e execute a conciliação da janela para refletir os pagamentos não recebidos.
 
 ### Verificação
 `recorvia_provider_webhooks_total{outcome="accepted"}` volta a crescer e as faturas afetadas são

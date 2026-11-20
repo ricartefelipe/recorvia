@@ -142,6 +142,9 @@ func TestPrometheusPluginExposesQueueSeriesUsedByAlerts(t *testing.T) {
 		})
 	})
 	<-ready
+	// ready fecha dentro de onConnect, antes de Run registrar a conexão para
+	// publicação: publicar logo em seguida pode receber ErrNotConnected.
+	waitFor(t, 10*time.Second, conn.Connected)
 	pub := rabbit.NewPublisher(conn)
 	occurred := time.Now().Add(-10 * time.Minute).Truncate(time.Second).UTC()
 	const published = 3

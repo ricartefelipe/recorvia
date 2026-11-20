@@ -243,7 +243,7 @@ export function PaymentOperationsPage() {
   const onRetry = async (op: PaymentOperation) => {
     const ok = await confirmAction({
       title: 'Reconsultar provedor',
-      message: `Consultar o provedor pela referência ${op.external_reference} para descobrir o resultado real da operação? Nenhuma nova cobrança ou reembolso é criado.`,
+      message: `Consultar agora o provedor pela referência ${op.external_reference}, sem esperar a próxima tentativa? Se a operação já tiver sido executada no provedor, o resultado é vinculado; se não tiver, é executada uma única vez com esta referência, desde que a cobrança ainda esteja pendente (cobrança cancelada não é criada no provedor).`,
       confirmLabel: 'Reconsultar',
     });
     if (ok) retry.mutate(op);

@@ -10,6 +10,11 @@
 # o que o torna comparável com o banco restaurado mesmo com escrita
 # concorrente na origem. Os arquivos contêm dados pessoais e financeiros:
 # permissões 0600, fora do repositório (backups/ está no .gitignore).
+#
+# RECORVIA_BACKUP_MANIFEST_TIMEOUT (segundos, padrão 1800) limita a espera
+# por cada linha do manifesto; as somas do ledger percorrem todas as
+# partidas e crescem com o banco. O backup só é publicado se o manifesto
+# terminar (sentinela lida) e tiver todas as linhas obrigatórias.
 set -euo pipefail
 umask 077
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -39,18 +44,30 @@ read -r -t 60 snapshot <&"$snap_out" || die "não foi possível exportar o snaps
 log "pg_dump -Fc --snapshot=$snapshot"
 docker exec "$PG" pg_dump -U "$RECORVIA_PG_SUPERUSER" -d "$RECORVIA_PG_DATABASE" -Fc --snapshot="$snapshot" >"$tmp_dump"
 
+manifest_timeout=${RECORVIA_BACKUP_MANIFEST_TIMEOUT:-1800}
+[[ $manifest_timeout =~ ^[1-9][0-9]*$ ]] || die "RECORVIA_BACKUP_MANIFEST_TIMEOUT inválido: $manifest_timeout"
 log "calculando o manifesto no mesmo snapshot"
 {
   manifest_sql
   echo "SELECT 'end-of-manifest';"
 } >&"$snap_in"
-while read -r -t 300 line <&"$snap_out"; do
-  [[ $line == end-of-manifest ]] && break
+# O laço termina sem erro tanto pela sentinela quanto por fim do prazo ou da
+# saída da sessão: só a sentinela indica manifesto completo.
+manifest_done=0
+while read -r -t "$manifest_timeout" line <&"$snap_out"; do
+  if [[ $line == end-of-manifest ]]; then
+    manifest_done=1
+    break
+  fi
   echo "$line"
 done >"$tmp_manifest"
+if ((manifest_done == 0)); then
+  kill "$snap_pid" 2>/dev/null || true
+  die "manifesto incompleto: a sessão do snapshot não concluiu as consultas em ${manifest_timeout} s por linha (RECORVIA_BACKUP_MANIFEST_TIMEOUT) ou terminou antes"
+fi
 printf '%s\n' "COMMIT;" '\q' >&"$snap_in"
 wait "$snap_pid" || die "a sessão do snapshot terminou com erro"
-grep -q '^goose_version ' "$tmp_manifest" || die "manifesto incompleto"
+require_manifest_lines "$tmp_manifest"
 
 # Confere que o arquivo é legível pelo pg_restore antes de publicá-lo.
 docker exec -i "$PG" pg_restore --list <"$tmp_dump" >/dev/null || die "arquivo de dump ilegível"

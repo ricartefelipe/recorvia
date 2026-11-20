@@ -1166,7 +1166,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Reconsulta o provedor para resolver operação com resultado desconhecido */
+        /**
+         * Reconsulta o provedor para resolver operação com resultado desconhecido
+         * @description Reexecuta agora uma operação pendente, com resultado desconhecido ou com lease vencido, sem esperar next_attempt_at: consulta o provedor pela referência externa e só cria a cobrança se ela não existir. O limite de tentativas automáticas vale para operações com resultado desconhecido ou em execução; uma operação pendente que esgotou as tentativas pode ser reexecutada. Se a cobrança não está mais pendente (por exemplo, cancelada com a fatura), nunca cria: vincula a cobrança encontrada no provedor ou encerra a operação como failed.
+         */
         post: operations["retryPaymentOperation"];
         delete?: never;
         options?: never;
@@ -5524,13 +5527,23 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Operação reprocessada */
+            /** @description Operação executada; a situação devolvida é o resultado da tentativa */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["PaymentOperation"];
+                };
+            };
+            404: components["responses"]["Problem"];
+            /** @description Nada executado: operação concluída (operation_completed), esgotada (operation_attempts_exhausted) ou em execução (operation_in_progress) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
         };

@@ -49,6 +49,17 @@ valid_identifier() {
   [[ $1 =~ ^[a-z_][a-z0-9_]{0,62}$ ]] || die "nome de banco inválido: $1"
 }
 
+# require_manifest_lines ARQUIVO: encerra com erro se faltar alguma linha
+# que o manifest_sql sempre produz (ledger_balance e ledger_sample só existem
+# com lançamentos no ledger).
+require_manifest_lines() {
+  local key
+  grep -q '^table ' "$1" || die "manifesto incompleto: sem contagens de tabelas"
+  for key in goose_version rls_tables policies triggers ledger_transactions_md5 ledger_entries_md5; do
+    grep -q "^$key " "$1" || die "manifesto incompleto: sem a linha $key"
+  done
+}
+
 # manifest_sql: consultas do manifesto. Executadas na origem (no mesmo
 # snapshot do pg_dump) e no banco restaurado; as saídas precisam ser iguais.
 #   table <tabela> <linhas>          contagem exata de cada tabela do schema public

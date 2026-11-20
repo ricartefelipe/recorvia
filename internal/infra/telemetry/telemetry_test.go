@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -193,8 +194,11 @@ func TestObserversRecordWithoutIdentifiers(t *testing.T) {
 func TestInitSeriesStartAtZero(t *testing.T) {
 	m := NewMetrics("worker")
 	m.InitConsumer("payments.webhooks")
-	m.InitJob("billing.run_cycle")
+	m.InitJob("billing.run_cycle", time.Minute)
+	m.InitJob("platform.close_statements", time.Hour)
 	m.InitChargeFailures([]string{"simulator"})
+	m.InitProviderWebhooks([]string{"simulator", "asaas"})
+	m.InitDispatchResults()
 	got := gather(t, m)
 	for _, outcome := range ConsumerOutcomes {
 		if v := value(t, got["recorvia_consumer_messages_total"], map[string]string{"consumer": "payments.webhooks", "outcome": outcome}); v != 0 {
@@ -213,6 +217,163 @@ func TestInitSeriesStartAtZero(t *testing.T) {
 	}
 	if _, ok := got["recorvia_job_last_success_timestamp_seconds"]; ok {
 		t.Fatal("o último sucesso não pode ser inicializado: o alerta de faturamento parado dependeria de um valor falso")
+	}
+	// O intervalo de cada tarefa permite alertas proporcionais (tarefas
+	// horárias e diárias não alcançam três falhas em 30 minutos).
+	for task, want := range map[string]float64{"billing.run_cycle": 60, "platform.close_statements": 3600} {
+		if v := value(t, got["recorvia_job_interval_seconds"], map[string]string{"task": task}); v != want {
+			t.Errorf("intervalo de %s: %v, esperado %v", task, v, want)
+		}
+	}
+	// Webhooks recebidos, inclusive de provedor desconhecido (other), e
+	// resultados das tarefas de envio e da régua.
+	for _, p := range []string{"simulator", "asaas", OtherProvider} {
+		for _, o := range ProviderWebhookOutcomes {
+			if v := value(t, got["recorvia_provider_webhooks_total"], map[string]string{"provider": p, "outcome": o}); v != 0 {
+				t.Errorf("webhook %s/%s: %v", p, o, v)
+			}
+		}
+	}
+	for name, values := range map[string][]string{
+		"recorvia_notifications_dispatched_total": NotificationOutcomes,
+		"recorvia_webhook_deliveries_total":       WebhookDeliveryOutcomes,
+	} {
+		for _, o := range values {
+			if v := value(t, got[name], map[string]string{"outcome": o}); v != 0 {
+				t.Errorf("%s{outcome=%q}: %v", name, o, v)
+			}
+		}
+	}
+	for _, a := range CollectionActionKinds {
+		if v := value(t, got["recorvia_collection_actions_total"], map[string]string{"action": a}); v != 0 {
+			t.Errorf("régua %s: %v", a, v)
+		}
+	}
+}
+
+// recorvia_dependency_up acompanha o estado atual das dependências a cada
+// coleta, sem depender de consultas a /readyz: a queda aparece sem nenhuma
+// requisição e a recuperação zera o alerta.
+func TestDependencyUpIsProbedOnEachGather(t *testing.T) {
+	m := NewMetrics("api")
+	down := errors.New("conexão recusada")
+	var (
+		mu        sync.Mutex
+		state     map[string]error
+		deadlines []time.Duration
+	)
+	check := func(dep string) DependencyCheck {
+		return func(ctx context.Context) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if dl, ok := ctx.Deadline(); ok {
+				deadlines = append(deadlines, time.Until(dl))
+			}
+			return state[dep]
+		}
+	}
+	m.ObserveDependencies(2*time.Second, map[string]DependencyCheck{"postgres": check("postgres"), "redis": check("redis")})
+	steps := []struct {
+		name  string
+		state map[string]error
+		want  map[string]float64
+	}{
+		{"redis fora", map[string]error{"postgres": nil, "redis": down}, map[string]float64{"postgres": 1, "redis": 0}},
+		{"redis recuperado", map[string]error{"postgres": nil, "redis": nil}, map[string]float64{"postgres": 1, "redis": 1}},
+		{"banco fora", map[string]error{"postgres": down, "redis": nil}, map[string]float64{"postgres": 0, "redis": 1}},
+	}
+	for _, st := range steps {
+		mu.Lock()
+		state = st.state
+		mu.Unlock()
+		got := gather(t, m)
+		for dep, want := range st.want {
+			if v := value(t, got["recorvia_dependency_up"], map[string]string{"dependency": dep, "service": "api"}); v != want {
+				t.Errorf("%s: recorvia_dependency_up{dependency=%q} = %v, esperado %v", st.name, dep, v, want)
+			}
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deadlines) != 2*len(steps) {
+		t.Fatalf("uma verificação por dependência a cada coleta: %d", len(deadlines))
+	}
+	for _, d := range deadlines {
+		if d <= 0 || d > 2*time.Second {
+			t.Fatalf("as verificações têm prazo de 2 s: %v", d)
+		}
+	}
+}
+
+// Cada dependência tem prazo próprio: um banco lento (pool esgotado, rede
+// descartando pacotes) consome só o próprio prazo, sem que o Redis saudável
+// apareça como indisponível, e uma verificação que ignora o cancelamento
+// não trava a coleta.
+func TestDependencyChecksHaveIndependentDeadlines(t *testing.T) {
+	const timeout = 500 * time.Millisecond
+	cases := []struct {
+		name string
+		slow func(started chan<- struct{}, release <-chan struct{}) DependencyCheck
+	}{
+		{"banco lento até o prazo", func(started chan<- struct{}, _ <-chan struct{}) DependencyCheck {
+			return func(ctx context.Context) error {
+				close(started)
+				<-ctx.Done()
+				return ctx.Err()
+			}
+		}},
+		{"banco que ignora o cancelamento", func(started chan<- struct{}, release <-chan struct{}) DependencyCheck {
+			return func(context.Context) error {
+				close(started)
+				<-release
+				return nil
+			}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			started, release := make(chan struct{}), make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			// Como o go-redis, o Redis devolve o erro do contexto se o prazo
+			// já venceu. Ele só responde depois que a verificação do banco
+			// começou: verificações em sequência com prazo único falham em
+			// qualquer ordem.
+			redis := func(ctx context.Context) error {
+				select {
+				case <-started:
+				case <-ctx.Done():
+				}
+				return ctx.Err()
+			}
+			m := NewMetrics("api")
+			m.ObserveDependencies(timeout, map[string]DependencyCheck{"postgres": c.slow(started, release), "redis": redis})
+			var families []*dto.MetricFamily
+			done := make(chan error, 1)
+			go func() {
+				var err error
+				families, err = m.Registry.Gather()
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(10 * timeout):
+				t.Fatal("a coleta não respeitou o prazo das verificações")
+			}
+			var up *dto.MetricFamily
+			for _, f := range families {
+				if f.GetName() == "recorvia_dependency_up" {
+					up = f
+				}
+			}
+			for dep, want := range map[string]float64{"postgres": 0, "redis": 1} {
+				if v := value(t, up, map[string]string{"dependency": dep, "service": "api"}); v != want {
+					t.Errorf("recorvia_dependency_up{dependency=%q} = %v, esperado %v", dep, v, want)
+				}
+			}
+		})
 	}
 }
 
@@ -241,6 +402,14 @@ func referencedMetrics(t *testing.T, path string) []string {
 	return out
 }
 
+// pendingStageMetrics são métricas referenciadas por regras e pelo catálogo
+// que chegam com a etapa 5 (recebíveis e conciliação), ainda não integrada.
+// Na integração, a declaração em NewMetrics torna a entrada desnecessária.
+var pendingStageMetrics = map[string]string{
+	"recorvia_refunds_total":       "etapa 5",
+	"recorvia_refunds_in_progress": "etapa 5",
+}
+
 func TestAlertRulesAndDashboardsUseDeclaredMetrics(t *testing.T) {
 	known := declared(t)
 	files, err := filepath.Glob(filepath.Join(observabilityDir, "prometheus", "rules", "*.yml"))
@@ -258,17 +427,78 @@ func TestAlertRulesAndDashboardsUseDeclaredMetrics(t *testing.T) {
 	for _, f := range append(files, dashboards...) {
 		for _, ref := range referencedMetrics(t, f) {
 			used[ref] = true
-			if _, ok := known[ref]; !ok {
+			_, ok := known[ref]
+			_, pending := pendingStageMetrics[ref]
+			if !ok && !pending {
 				t.Errorf("%s referencia a métrica inexistente %s", filepath.Base(f), ref)
+			}
+			if pending && strings.HasSuffix(f, ".json") {
+				t.Errorf("%s: painel com a métrica %s da %s, ainda não integrada", filepath.Base(f), ref, pendingStageMetrics[ref])
 			}
 		}
 	}
 	// Métricas de alerta exigidas pela operação precisam estar cobertas.
 	for _, required := range []string{"recorvia_outbox_pending", "recorvia_outbox_oldest_pending_seconds", "recorvia_consumer_messages_total",
-		"recorvia_charge_failures_total", "recorvia_payment_operations", "recorvia_reconciliation_open_discrepancies",
-		"recorvia_db_pool_connections", "recorvia_db_server_connections", "recorvia_consumer_in_flight"} {
+		"recorvia_charge_failures_total", "recorvia_payment_operations", "recorvia_payment_operations_exhausted",
+		"recorvia_reconciliation_open_discrepancies", "recorvia_db_pool_connections", "recorvia_db_server_connections",
+		"recorvia_consumer_in_flight", "recorvia_job_interval_seconds", "recorvia_job_last_success_timestamp_seconds",
+		"recorvia_notifications_dispatched_total", "recorvia_webhook_deliveries_total", "recorvia_collection_actions_total",
+		"recorvia_provider_webhooks_total", "recorvia_dependency_up"} {
 		if !used[required] {
 			t.Errorf("métrica %s sem alerta ou painel", required)
+		}
+	}
+}
+
+// O catálogo de docs/operacao/observabilidade.md lista toda métrica
+// declarada e, na linha da métrica, cada valor dos rótulos de conjunto
+// fechado: quem monta consultas e alertas pelo catálogo não deixa de ver
+// resultados como too_large ou o provedor other.
+func TestMetricsCatalogDocumentsEveryMetricAndLabelValue(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(observabilityDir, "..", "..", "docs", "operacao", "observabilidade.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(b)
+	rows := map[string]string{}
+	for line := range strings.SplitSeq(doc, "\n") {
+		if !strings.HasPrefix(line, "| `recorvia_") {
+			continue
+		}
+		cells := strings.Split(line, "|")
+		for _, name := range metricRef.FindAllString(cells[1], -1) {
+			rows[name] += line
+		}
+	}
+	for name := range declared(t) {
+		if _, ok := rows[name]; !ok {
+			t.Errorf("métrica %s ausente do catálogo (tabela de métricas)", name)
+		}
+	}
+	for name := range pendingStageMetrics {
+		if _, ok := rows[name]; !ok {
+			t.Errorf("métrica %s (%s) ausente do catálogo", name, pendingStageMetrics[name])
+		}
+	}
+	values := map[string][]string{
+		"recorvia_consumer_messages_total":        ConsumerOutcomes,
+		"recorvia_charge_failures_total":          ChargeFailureKinds,
+		"recorvia_provider_webhooks_total":        append(slices.Clone(ProviderWebhookOutcomes), OtherProvider),
+		"recorvia_notifications_dispatched_total": NotificationOutcomes,
+		"recorvia_webhook_deliveries_total":       WebhookDeliveryOutcomes,
+		"recorvia_collection_actions_total":       CollectionActionKinds,
+		"recorvia_payment_operations":             {"pending", "in_flight", "unknown"},
+		"recorvia_payment_operations_exhausted":   {"pending", "in_flight", "unknown"},
+		"recorvia_http_requests_total":            {"_OTHER"},
+		"recorvia_dependency_up":                  {"postgres", "redis", "rabbitmq"},
+		"recorvia_refunds_total":                  {"succeeded", "failed"},
+		"recorvia_refunds_in_progress":            {"requested", "unknown"},
+	}
+	for name, want := range values {
+		for _, v := range want {
+			if !strings.Contains(rows[name], "`"+v+"`") {
+				t.Errorf("catálogo: %s sem o valor `%s`", name, v)
+			}
 		}
 	}
 }

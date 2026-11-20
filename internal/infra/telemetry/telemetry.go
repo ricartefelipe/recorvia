@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -40,14 +41,21 @@ type Metrics struct {
 	JobRuns             *prometheus.CounterVec
 	JobDuration         *prometheus.HistogramVec
 	JobLastSuccess      *prometheus.GaugeVec
-	ChargeFailures      *prometheus.CounterVec
-	PaymentOperations   *prometheus.GaugeVec
-	Discrepancies       *prometheus.GaugeVec
-	WebhooksReceived    *prometheus.CounterVec
-	InvoicesIssued      prometheus.Counter
-	DependencyUp        *prometheus.GaugeVec
-	DBServerConnections prometheus.Gauge
-	DBServerMaxConns    prometheus.Gauge
+	// JobInterval é o intervalo configurado de cada tarefa, para alertas
+	// proporcionais ao intervalo (tarefa sem sucesso há vários intervalos).
+	JobInterval       *prometheus.GaugeVec
+	ChargeFailures    *prometheus.CounterVec
+	PaymentOperations *prometheus.GaugeVec
+	// PaymentOperationsExhausted conta as operações paradas depois de
+	// esgotar as tentativas automáticas (pending, in_flight, unknown),
+	// atualizada pela tarefa payments.recover_operations.
+	PaymentOperationsExhausted *prometheus.GaugeVec
+	Discrepancies              *prometheus.GaugeVec
+	WebhooksReceived           *prometheus.CounterVec
+	InvoicesIssued             prometheus.Counter
+	DependencyUp               *prometheus.GaugeVec
+	DBServerConnections        prometheus.Gauge
+	DBServerMaxConns           prometheus.Gauge
 	// NotificationsDispatched conta os resultados do envio de notificações
 	// (sent, retried, failed, deferred, skipped, lost_lease).
 	NotificationsDispatched *prometheus.CounterVec
@@ -90,9 +98,14 @@ func NewMetrics(service string) *Metrics {
 			Buckets: []float64{.1, .5, 1, 5, 15, 30, 60, 300}}, []string{"task"}),
 		JobLastSuccess: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_job_last_success_timestamp_seconds", Help: "Último sucesso de cada tarefa.", ConstLabels: cl},
 			[]string{"task"}),
+		JobInterval: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_job_interval_seconds", Help: "Intervalo configurado de cada tarefa agendada.", ConstLabels: cl},
+			[]string{"task"}),
 		ChargeFailures: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "recorvia_charge_failures_total", Help: "Falhas de criação de cobrança por provedor e tipo.", ConstLabels: cl},
 			[]string{"provider", "kind"}),
 		PaymentOperations: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_payment_operations", Help: "Operações externas por situação (pending, in_flight, unknown).", ConstLabels: cl},
+			[]string{"status"}),
+		PaymentOperationsExhausted: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_payment_operations_exhausted",
+			Help: "Operações externas paradas depois de esgotar as tentativas automáticas, por situação (pending, in_flight, unknown).", ConstLabels: cl},
 			[]string{"status"}),
 		Discrepancies: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_reconciliation_open_discrepancies", Help: "Divergências de conciliação abertas por tipo.", ConstLabels: cl},
 			[]string{"kind"}),
@@ -115,7 +128,7 @@ func NewMetrics(service string) *Metrics {
 	}
 	reg.MustRegister(m.HTTPRequests, m.HTTPDuration, m.ConsumerProcessed, m.ConsumerDuration, m.ConsumerInFlight, m.ConsumerConcurrency,
 		m.OutboxPublished, m.OutboxPublishFailed, m.OutboxPending, m.OutboxOldestSeconds, m.JobRuns, m.JobDuration, m.JobLastSuccess,
-		m.ChargeFailures, m.PaymentOperations, m.Discrepancies, m.WebhooksReceived, m.InvoicesIssued, m.DependencyUp,
+		m.JobInterval, m.ChargeFailures, m.PaymentOperations, m.PaymentOperationsExhausted, m.Discrepancies, m.WebhooksReceived, m.InvoicesIssued, m.DependencyUp,
 		m.DBServerConnections, m.DBServerMaxConns,
 		m.NotificationsDispatched, m.WebhookDeliveries, m.CollectionActions)
 	return m
@@ -162,6 +175,74 @@ func newDBPoolCollector(service string, stats func() DBPoolStats) *dbPoolCollect
 // stats a cada coleta.
 func (m *Metrics) RegisterDBPool(stats func() DBPoolStats) {
 	m.Registry.MustRegister(newDBPoolCollector(m.service, stats))
+}
+
+// DependencyCheck verifica uma dependência; nil indica disponível.
+type DependencyCheck func(ctx context.Context) error
+
+// ProbeDependencies executa as verificações em paralelo, cada uma com prazo
+// próprio (timeout a partir da chamada, limitado pelo prazo de ctx), e
+// devolve o resultado por dependência. A demora de uma dependência (por
+// exemplo, o pool do banco esgotado) não consome o prazo das outras, que
+// assim não aparecem como indisponíveis sem estar. Uma verificação que não
+// retorna no prazo conta como indisponível, com o erro do contexto, mesmo
+// que ignore o cancelamento.
+func ProbeDependencies(ctx context.Context, timeout time.Duration, checks map[string]DependencyCheck) map[string]error {
+	type result struct {
+		name string
+		err  error
+	}
+	results := make(chan result, len(checks))
+	for name, check := range checks {
+		go func() {
+			cctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- check(cctx) }()
+			select {
+			case err := <-done:
+				results <- result{name, err}
+			case <-cctx.Done():
+				results <- result{name, cctx.Err()}
+			}
+		}()
+	}
+	out := make(map[string]error, len(checks))
+	for range len(checks) {
+		r := <-results
+		out[r.name] = r.err
+	}
+	return out
+}
+
+// dependencyCollector verifica as dependências a cada coleta, para que
+// recorvia_dependency_up reflita o estado atual mesmo sem consultas a
+// /readyz (a sonda dos containers usa /livez).
+type dependencyCollector struct {
+	gauge   *prometheus.GaugeVec
+	timeout time.Duration
+	checks  map[string]DependencyCheck
+}
+
+// ObserveDependencies passa a atualizar recorvia_dependency_up a cada coleta
+// com o resultado das verificações (ProbeDependencies, com prazo timeout
+// para cada uma). Deve ser chamada uma vez, antes de expor as métricas.
+func (m *Metrics) ObserveDependencies(timeout time.Duration, checks map[string]DependencyCheck) {
+	m.Registry.Unregister(m.DependencyUp)
+	m.Registry.MustRegister(&dependencyCollector{gauge: m.DependencyUp, timeout: timeout, checks: checks})
+}
+
+func (c *dependencyCollector) Describe(ch chan<- *prometheus.Desc) { c.gauge.Describe(ch) }
+
+func (c *dependencyCollector) Collect(ch chan<- prometheus.Metric) {
+	for name, err := range ProbeDependencies(context.Background(), c.timeout, c.checks) {
+		up := 1.0
+		if err != nil {
+			up = 0
+		}
+		c.gauge.WithLabelValues(name).Set(up)
+	}
+	c.gauge.Collect(ch)
 }
 
 func (c *dbPoolCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -218,11 +299,55 @@ func (m *Metrics) InitConsumer(consumer string) {
 	}
 }
 
-// InitJob cria as séries de execução da tarefa com zero. O último sucesso não
-// é inicializado: só existe depois de um sucesso real.
-func (m *Metrics) InitJob(name string) {
+// InitJob cria as séries de execução da tarefa com zero e registra o
+// intervalo configurado. O último sucesso não é inicializado: só existe
+// depois de um sucesso real (os alertas tratam a ausência pela idade do
+// processo).
+func (m *Metrics) InitJob(name string, interval time.Duration) {
 	for _, o := range []string{"success", "failure"} {
 		m.JobRuns.WithLabelValues(name, o)
+	}
+	m.JobInterval.WithLabelValues(name).Set(interval.Seconds())
+}
+
+// ProviderWebhookOutcomes são os resultados do recebimento de webhooks de
+// provedores (rótulo outcome de recorvia_provider_webhooks_total).
+var ProviderWebhookOutcomes = []string{"accepted", "duplicate", "unauthenticated", "unknown_endpoint", "invalid", "too_large", "error"}
+
+// OtherProvider substitui, no rótulo provider, os provedores fora da lista
+// conhecida (o nome vem da URL e não pode criar séries novas).
+const OtherProvider = "other"
+
+// InitProviderWebhooks cria com zero as séries de recebimento de webhooks
+// dos provedores conhecidos e de OtherProvider.
+func (m *Metrics) InitProviderWebhooks(providers []string) {
+	for _, p := range append(slices.Clone(providers), OtherProvider) {
+		for _, o := range ProviderWebhookOutcomes {
+			m.WebhooksReceived.WithLabelValues(p, o)
+		}
+	}
+}
+
+// Resultados das tarefas de envio e da régua de cobrança (rótulos de
+// recorvia_notifications_dispatched_total, recorvia_webhook_deliveries_total
+// e recorvia_collection_actions_total).
+var (
+	NotificationOutcomes    = []string{"sent", "retried", "failed", "deferred", "skipped", "lost_lease"}
+	WebhookDeliveryOutcomes = []string{"succeeded", "retrying", "exhausted", "lost_lease", "deferred"}
+	CollectionActionKinds   = []string{"reminder_scheduled", "invoice_overdue", "subscription_suspended", "subscription_reactivated"}
+)
+
+// InitDispatchResults cria com zero as séries de resultados do envio de
+// notificações, das entregas de webhooks e das ações da régua.
+func (m *Metrics) InitDispatchResults() {
+	for _, o := range NotificationOutcomes {
+		m.NotificationsDispatched.WithLabelValues(o)
+	}
+	for _, o := range WebhookDeliveryOutcomes {
+		m.WebhookDeliveries.WithLabelValues(o)
+	}
+	for _, a := range CollectionActionKinds {
+		m.CollectionActions.WithLabelValues(a)
 	}
 }
 

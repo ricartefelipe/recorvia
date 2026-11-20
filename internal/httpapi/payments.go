@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/ricartefelipe/recorvia/internal/infra/telemetry"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/payments"
 )
@@ -113,8 +114,11 @@ func (a *API) listOperations(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, r, http.StatusOK, list(out))
 }
 
-// retryOperation reconsulta o provedor para resolver uma operação pendente
-// ou com resultado desconhecido (nunca repete a criação sem consulta).
+// retryOperation reexecuta agora uma operação pendente, com resultado
+// desconhecido ou com lease vencido: antecipa a próxima tentativa agendada,
+// consulta o provedor pela referência externa antes de criar e respeita o
+// limite de tentativas. Operação concluída, esgotada ou em execução responde
+// 409 (nada é executado).
 func (a *API) retryOperation(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
 	if err != nil {
@@ -126,7 +130,7 @@ func (a *API) retryOperation(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	if err := a.Payments.ExecuteOperation(r.Context(), p.TenantID, id); err != nil {
+	if err := a.Payments.RetryOperation(r.Context(), p.TenantID, id); err != nil {
 		a.writeError(w, r, err)
 		return
 	}
@@ -236,7 +240,7 @@ func (a *API) observeWebhook(provider, outcome string) {
 	switch provider {
 	case "simulator", "asaas":
 	default:
-		provider = "other" // evita cardinalidade a partir da URL
+		provider = telemetry.OtherProvider // evita cardinalidade a partir da URL
 	}
 	a.Metrics.WebhooksReceived.WithLabelValues(provider, outcome).Inc()
 }

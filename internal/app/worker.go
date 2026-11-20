@@ -270,7 +270,8 @@ func (w *Worker) Jobs() []scheduler.Job {
 			return err
 		}},
 		{Name: "payments.recover_operations", Interval: time.Minute, Timeout: 5 * time.Minute, Run: func(ctx context.Context) error {
-			_, err := c.Payments.RecoverOperations(ctx)
+			res, err := c.Payments.RecoverOperations(ctx)
+			recordRecovery(w.Metrics, res)
 			return err
 		}},
 		{Name: JobCollections, Interval: 5 * time.Minute, Timeout: 10 * time.Minute, Run: func(ctx context.Context) error {
@@ -327,6 +328,23 @@ func recordCollections(m *telemetry.Metrics, r collections.RunResult) {
 	addCount(m.CollectionActions, "subscription_reactivated", r.Reactivated)
 }
 
+// exhaustedStatuses são as situações exportadas em
+// recorvia_payment_operations_exhausted.
+var exhaustedStatuses = []payments.OperationStatus{payments.OpPending, payments.OpInFlight, payments.OpUnknown}
+
+// recordRecovery atualiza a contagem de operações esgotadas. Uma execução
+// parcial (tenant sem consulta ou cancelamento) mantém a contagem anterior:
+// zerar com dados incompletos resolveria o alerta sem a causa ter sido
+// tratada.
+func recordRecovery(m *telemetry.Metrics, r payments.RecoveryResult) {
+	if !r.Complete {
+		return
+	}
+	for _, s := range exhaustedStatuses {
+		m.PaymentOperationsExhausted.WithLabelValues(string(s)).Set(float64(r.Exhausted[s]))
+	}
+}
+
 // recordDispatch registra os resultados de uma execução do envio.
 func recordDispatch(m *telemetry.Metrics, r notifications.DispatchResult) {
 	addCount(m.NotificationsDispatched, "sent", r.Sent)
@@ -374,6 +392,16 @@ func (w *Worker) collectMetrics(ctx context.Context) error {
 	return nil
 }
 
+// initMetrics cria com zero as séries das tarefas (execuções e intervalo) e
+// dos resultados de envio e da régua, para que increase() detecte a primeira
+// ocorrência e os alertas proporcionais ao intervalo tenham referência.
+func (w *Worker) initMetrics(jobs []scheduler.Job) {
+	for _, j := range jobs {
+		w.Metrics.InitJob(j.Name, j.Interval)
+	}
+	w.Metrics.InitDispatchResults()
+}
+
 // Run inicia conexão, relay, consumidores e agendador até ctx terminar.
 func (w *Worker) Run(ctx context.Context) error {
 	cfg := w.Core.Config
@@ -394,9 +422,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	pub := rabbit.NewPublisher(w.Conn)
 	relay := outbox.NewRelay(relayStore{w.Core.Store}, eventPublisher{pub}, cfg.WorkerID, cfg.OutboxBatchSize, cfg.OutboxLease, 500*time.Millisecond, log, w.Metrics)
 	jobs := traceJobs(w.Jobs())
-	for _, j := range jobs {
-		w.Metrics.InitJob(j.Name)
-	}
+	w.initMetrics(jobs)
 	sched, err := scheduler.New(schedulerStore{w.Core.Store}, cfg.WorkerID, cfg.SchedulerTick, w.Core.Clock, log, w.Metrics, jobs...)
 	if err != nil {
 		return err

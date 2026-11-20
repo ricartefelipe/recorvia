@@ -22,6 +22,7 @@ fi
 [[ -f $dump ]] || die "arquivo não encontrado: $dump"
 manifest=${dump%.dump}.manifest
 [[ -f $manifest ]] || die "manifesto ausente: $manifest"
+require_manifest_lines "$manifest"
 checksum=${dump%.dump}.sha256
 if [[ -f $checksum ]]; then
   (cd "$(dirname "$dump")" && sha256sum --quiet -c "$(basename "$checksum")") || die "soma SHA-256 divergente: $dump"

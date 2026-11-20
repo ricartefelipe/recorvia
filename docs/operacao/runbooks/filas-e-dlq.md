@@ -99,8 +99,12 @@ fica abaixo de alguns segundos.
 - `RecorviaTargetDown` (crítico): coleta falhando para `recorvia-api`, `recorvia-worker` ou
   `rabbitmq`.
 - `RecorviaQueueWithoutConsumer` (crítico): fila principal sem consumidor por 5 minutos.
-- `RecorviaDependencyUnavailable` (crítico): `recorvia_dependency_up == 0` (RabbitMQ no worker;
-  PostgreSQL e Redis na API, atualizado a cada `/readyz`).
+- `RecorviaDependencyUnavailable` (crítico): `recorvia_dependency_up == 0` por 2 minutos (RabbitMQ
+  no worker, a cada `metrics.collect`; PostgreSQL e Redis na API, verificados em paralelo a cada
+  coleta do Prometheus, cada um com prazo próprio de 2 s, sem depender de consultas a `/readyz`).
+  A lentidão de uma dependência não marca a outra como indisponível: com o pool do banco esgotado
+  (`RecorviaDBPoolSaturated`), só `postgres` pode cair para 0. O alerta acompanha o estado atual:
+  resolve-se sozinho quando a dependência volta.
 
 ### Diagnóstico
 ```bash

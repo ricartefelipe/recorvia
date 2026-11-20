@@ -1,6 +1,8 @@
 # Regras de alerta do Recorvia. Somente métricas existentes no código
-# (internal/infra/telemetry), no plugin rabbitmq_prometheus e o "up" das
-# coletas; nenhum rótulo identifica tenant, cliente ou fatura. Os limites são
+# (internal/infra/telemetry), no plugin rabbitmq_prometheus, o "up" e o
+# process_start_time_seconds das coletas; nenhum rótulo identifica tenant,
+# cliente ou fatura. As regras de reembolso usam métricas que chegam com a
+# etapa 5 (recebíveis e conciliação) e ficam sem dados até a integração. Os limites são
 # pontos de partida para o ambiente local e devem ser calibrados com o
 # volume real. Catálogo e justificativas: docs/operacao/observabilidade.md.
 #
@@ -168,6 +170,18 @@ groups:
           summary: "{{ $value }} operações com resultado desconhecido há 30 minutos"
           description: "Chamadas ao provedor sem confirmação segura; a recuperação consulta pela referência externa e o restante vai para a conciliação."
           runbook: docs/operacao/runbooks/conciliacao.md#operacoes-com-resultado-desconhecido
+      - alert: RecorviaPaymentOperationsExhausted
+        # As esgotadas em "unknown" já são cobertas por
+        # RecorviaPaymentOperationsUnknown (seguem para a conciliação).
+        expr: max by (status) (recorvia_payment_operations_exhausted{status=~"pending|in_flight"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+          area: cobranca
+        annotations:
+          summary: "{{ $value }} operações de pagamento esgotadas ({{ $labels.status }})"
+          description: "Operações que chegaram ao limite de tentativas automáticas sem confirmação e não são mais retomadas pela recuperação: as faturas ficam sem cobrança."
+          runbook: docs/operacao/runbooks/conciliacao.md#operacoes-esgotadas
       - alert: RecorviaPaymentOperationsPending
         expr: max(recorvia_payment_operations{status="pending"}) > 50
         for: 15m
@@ -179,13 +193,16 @@ groups:
           description: "Operações aguardando nova tentativa acima de 50 por 15 minutos."
           runbook: docs/operacao/runbooks/faturamento.md#falhas-de-cobranca
       - alert: RecorviaWebhooksRejected
-        expr: sum by (provider, outcome) (increase(recorvia_provider_webhooks_total{outcome=~"unauthenticated|unknown_endpoint|error"}[15m])) > 5
+        # invalid (corpo malformado) fica de fora: é recusa definitiva de um
+        # envio isolado, contada no painel. too_large entra: um provedor real
+        # com corpo acima do limite perde o evento em todas as reentregas.
+        expr: sum by (provider, outcome) (increase(recorvia_provider_webhooks_total{outcome=~"unauthenticated|unknown_endpoint|too_large|error"}[15m])) > 5
         labels:
           severity: warning
           area: cobranca
         annotations:
           summary: "Webhooks de {{ $labels.provider }} recusados ({{ $labels.outcome }})"
-          description: "Recebimentos recusados por autenticação, endpoint desconhecido ou falha de persistência."
+          description: "Recebimentos recusados por autenticação, endpoint desconhecido, corpo acima do limite ou falha de persistência."
           runbook: docs/operacao/runbooks/faturamento.md#webhooks-recusados
 
   - name: recorvia-conciliacao
@@ -210,17 +227,47 @@ groups:
           summary: "{{ $value }} divergências de conciliação abertas"
           description: "Volume de divergências indica falha sistêmica (webhooks não processados, provedor ou relatório de liquidação)."
           runbook: docs/operacao/runbooks/conciliacao.md#divergencias-abertas
+      # recorvia_refunds_in_progress e recorvia_refunds_total são exportadas
+      # pela etapa 5 (recebíveis e conciliação), ainda não integrada.
+      - alert: RecorviaRefundsUnknown
+        expr: max(recorvia_refunds_in_progress{status="unknown"}) > 0
+        for: 30m
+        labels:
+          severity: warning
+          area: conciliacao
+        annotations:
+          summary: "{{ $value }} reembolsos com resultado desconhecido há 30 minutos"
+          description: "Pedidos de reembolso sem confirmação segura do provedor: o cliente pode ter sido reembolsado sem registro local."
+          runbook: docs/operacao/runbooks/conciliacao.md#reembolsos-sem-confirmacao
+      - alert: RecorviaRefundsFailed
+        expr: sum(increase(recorvia_refunds_total{outcome="failed"}[1h])) > 0
+        labels:
+          severity: warning
+          area: conciliacao
+        annotations:
+          summary: "Reembolsos recusados pelo provedor na última hora"
+          description: "O valor não foi devolvido ao cliente; o reembolso precisa de nova solicitação ou de devolução por outro meio."
+          runbook: docs/operacao/runbooks/conciliacao.md#reembolsos-sem-confirmacao
 
   - name: recorvia-faturamento
     rules:
+      # O último sucesso só existe depois de um sucesso real: sem nenhum
+      # sucesso desde a partida do worker (reinício com a tarefa falhando ou
+      # reivindicação falhando a cada ciclo), a série não existe e a segunda
+      # parte usa a idade do processo mais antigo, que é o mínimo do tempo
+      # sem sucesso.
       - alert: RecorviaBillingCycleStale
-        expr: time() - max(recorvia_job_last_success_timestamp_seconds{task="billing.run_cycle"}) > 900
+        expr: |
+          time() - max(recorvia_job_last_success_timestamp_seconds{task="billing.run_cycle"}) > 900
+            or
+          (time() - min(process_start_time_seconds{job="recorvia-worker"}) > 900
+            and on () absent(recorvia_job_last_success_timestamp_seconds{task="billing.run_cycle"}))
         labels:
           severity: critical
           area: faturamento
         annotations:
           summary: "Motor de faturamento sem sucesso há {{ $value | humanizeDuration }}"
-          description: "A tarefa billing.run_cycle (intervalo de 1 minuto) não conclui com sucesso há mais de 15 minutos."
+          description: "A tarefa billing.run_cycle (intervalo de 1 minuto) não conclui com sucesso há mais de 15 minutos, ou não concluiu nenhuma vez desde a partida do worker."
           runbook: docs/operacao/runbooks/faturamento.md#motor-de-faturamento-parado
       - alert: RecorviaScheduledTaskFailing
         expr: sum by (task) (increase(recorvia_job_runs_total{outcome="failure"}[30m])) >= 3
@@ -231,15 +278,82 @@ groups:
           summary: "Tarefa agendada {{ $labels.task }} falhando"
           description: "Três ou mais falhas da tarefa nos últimos 30 minutos."
           runbook: docs/operacao/runbooks/faturamento.md#tarefas-agendadas-falhando
+      # Proporcional ao intervalo de cada tarefa: as horárias e a diária
+      # nunca chegam a três falhas em 30 minutos (a próxima execução é
+      # agendada um intervalo depois, mesmo após falha). Três intervalos, no
+      # mínimo 15 minutos. O motor de faturamento e a coleta de métricas têm
+      # alertas próprios.
+      - alert: RecorviaScheduledTaskStale
+        expr: |
+          (
+            time() - max by (task) (recorvia_job_last_success_timestamp_seconds{task!~"billing\\.run_cycle|metrics\\.collect"})
+              > on (task) clamp_min(3 * max by (task) (recorvia_job_interval_seconds), 900)
+          )
+          or
+          (
+            max by (task) (recorvia_job_interval_seconds{task!~"billing\\.run_cycle|metrics\\.collect"}) * 0
+              + on () group_left () (time() - min(process_start_time_seconds{job="recorvia-worker"}))
+              > on (task) clamp_min(3 * max by (task) (recorvia_job_interval_seconds), 900)
+            unless on (task) max by (task) (recorvia_job_last_success_timestamp_seconds)
+          )
+        labels:
+          severity: warning
+          area: faturamento
+        annotations:
+          summary: "Tarefa agendada {{ $labels.task }} sem sucesso há {{ $value | humanizeDuration }}"
+          description: "A tarefa não conclui com sucesso há mais de três intervalos (no mínimo 15 minutos): falha a cada execução ou não é executada."
+          runbook: docs/operacao/runbooks/faturamento.md#tarefas-agendadas-falhando
       - alert: RecorviaMetricsCollectionStale
-        expr: time() - max(recorvia_job_last_success_timestamp_seconds{task="metrics.collect"}) > 120
+        expr: |
+          time() - max(recorvia_job_last_success_timestamp_seconds{task="metrics.collect"}) > 120
+            or
+          (time() - min(process_start_time_seconds{job="recorvia-worker"}) > 120
+            and on () absent(recorvia_job_last_success_timestamp_seconds{task="metrics.collect"}))
         labels:
           severity: warning
           area: faturamento
         annotations:
           summary: "Coleta de métricas do worker parada"
-          description: "A tarefa metrics.collect não conclui há mais de 2 minutos; as métricas da outbox, das operações e do banco estão desatualizadas."
+          description: "A tarefa metrics.collect não conclui há mais de 2 minutos, ou não concluiu nenhuma vez desde a partida do worker; as métricas da outbox, das operações e do banco estão desatualizadas."
           runbook: docs/operacao/runbooks/faturamento.md#tarefas-agendadas-falhando
+
+  - name: recorvia-notificacoes
+    rules:
+      - alert: RecorviaEmailDeliveryStalled
+        expr: |
+          sum(increase(recorvia_notifications_dispatched_total{outcome=~"retried|failed"}[15m])) > 0
+            and on () sum(increase(recorvia_notifications_dispatched_total{outcome="sent"}[15m])) == 0
+        for: 15m
+        labels:
+          severity: warning
+          area: notificacoes
+        annotations:
+          summary: "Envio de e-mails sem sucesso"
+          description: "Tentativas de envio falhando e nenhum e-mail aceito pelo servidor SMTP há pelo menos 15 minutos: servidor indisponível, credencial ou rede."
+          runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#envio-de-e-mails-parado
+      - alert: RecorviaNotificationsFailed
+        expr: sum(increase(recorvia_notifications_dispatched_total{outcome="failed"}[30m])) > 5
+        labels:
+          severity: warning
+          area: notificacoes
+        annotations:
+          summary: "Notificações com falha definitiva nos últimos 30 minutos"
+          description: "E-mails encerrados por recusa permanente do servidor SMTP, fim das tentativas ou conteúdo indisponível: o destinatário não foi avisado."
+          runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#notificacoes-com-falha-definitiva
+      - alert: RecorviaWebhookDeliveriesFailing
+        # Falhas de um destino isolado (endpoint do tenant fora do ar) não
+        # disparam enquanto outros destinos recebem.
+        expr: |
+          sum(increase(recorvia_webhook_deliveries_total{outcome=~"retrying|exhausted"}[30m])) >= 10
+            and on () sum(increase(recorvia_webhook_deliveries_total{outcome="succeeded"}[30m])) == 0
+        for: 15m
+        labels:
+          severity: warning
+          area: notificacoes
+        annotations:
+          summary: "Nenhuma entrega de webhook bem-sucedida em 30 minutos"
+          description: "Entregas de webhooks aos tenants falhando para todos os destinos: saída de rede, DNS ou proteção contra SSRF do worker."
+          runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#webhooks-enviados-sem-sucesso
 
   - name: recorvia-banco
     rules:

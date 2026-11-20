@@ -292,3 +292,64 @@ func (o Operation) Claimable(now time.Time) bool {
 	}
 	return false
 }
+
+// Obsolete informa se a criação de cobrança deixou de se aplicar porque a
+// cobrança não está mais pendente (por exemplo, cancelada com a fatura
+// enquanto a criação aguardava nova tentativa). A execução de uma operação
+// obsoleta só consulta o provedor pela referência externa: vincula a
+// cobrança encontrada, sem anunciá-la como criada, ou encerra a operação
+// como falha; nunca cria a cobrança no provedor.
+func (o Operation) Obsolete(charge ChargeStatus) bool {
+	return o.Kind == OpCreateCharge && charge != ChargePending
+}
+
+// Exhausted informa se a operação esgotou as tentativas automáticas e ficou
+// parada: pendente ou com resultado desconhecido depois do horário da
+// próxima tentativa, ou em execução com o lease vencido. A recuperação não a
+// reivindica mais; "unknown" segue para a conciliação, enquanto "pending" e
+// "in_flight" deixam a cobrança sem confirmação até a intervenção da
+// operação. charge é a situação da cobrança da operação: uma criação
+// "pending" obsoleta (Obsolete) não conta, porque nenhuma chamada ficou com
+// resultado incerto (o provedor recusou a última de forma transitória) e a
+// cobrança não será mais criada; a reexecução manual apenas a encerra. Em
+// "unknown" e "in_flight", a cobrança pode existir no provedor mesmo
+// cancelada localmente, e a operação continua contando.
+func (o Operation) Exhausted(now time.Time, charge ChargeStatus) bool {
+	if o.Attempts < MaxOperationAttempts {
+		return false
+	}
+	switch o.Status {
+	case OpPending:
+		return !o.NextAttemptAt.After(now) && !o.Obsolete(charge)
+	case OpUnknown:
+		return !o.NextAttemptAt.After(now)
+	case OpInFlight:
+		return o.LeaseUntil != nil && o.LeaseUntil.Before(now)
+	}
+	return false
+}
+
+// CheckManualRetry valida a reexecução manual da operação agora. Ao
+// contrário da recuperação agendada, ela antecipa a próxima tentativa
+// (ignora next_attempt_at) e sempre consulta o provedor antes de criar. O
+// limite de tentativas vale para "unknown" e "in_flight", cujo resultado
+// segue para a conciliação; uma operação "pending" esgotada pode ser
+// reexecutada depois de corrigida a causa, porque o provedor recusou a
+// última criação de forma transitória e a cobrança não existe (cada nova
+// tentativa consulta antes). O lease de uma execução em andamento é
+// respeitado. A reexecução de uma operação obsoleta (Obsolete) só consulta o
+// provedor e nunca cria a cobrança.
+func (o Operation) CheckManualRetry(now time.Time) error {
+	switch {
+	case o.Status == OpSucceeded || o.Status == OpFailed:
+		return apperr.Conflict("operation_completed", "A operação já foi concluída.")
+	case o.Status != OpPending && o.Status != OpUnknown && o.Status != OpInFlight:
+		return apperr.Conflict("operation_not_retryable", "A operação não pode ser reexecutada.")
+	case o.Attempts >= MaxOperationAttempts && o.Status != OpPending:
+		return apperr.Conflict("operation_attempts_exhausted",
+			"A operação esgotou as tentativas automáticas; o resultado é resolvido pela conciliação.")
+	case o.Status == OpInFlight && (o.LeaseUntil == nil || !o.LeaseUntil.Before(now)):
+		return apperr.Conflict("operation_in_progress", "A operação está em execução; aguarde o resultado.")
+	}
+	return nil
+}

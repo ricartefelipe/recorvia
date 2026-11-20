@@ -118,7 +118,7 @@ stateDiagram-v2
   pending --> in_flight: reivindicada (lease)
   unknown --> in_flight: nova consulta
   in_flight --> succeeded
-  in_flight --> failed: recusa definitiva
+  in_flight --> failed: recusa definitiva ou cobrança não mais pendente sem cobrança no provedor
   in_flight --> pending: falha repetível
   in_flight --> unknown: resposta ambígua
   in_flight --> in_flight: lease expirado (outra instância assume)
@@ -126,6 +126,12 @@ stateDiagram-v2
 
 Depois de `MaxOperationAttempts` tentativas, uma operação `unknown` deixa de ser retomada
 automaticamente e exige resolução (reconsulta manual ou conciliação).
+
+Uma criação cuja cobrança deixou de estar pendente (por exemplo, cancelada com a fatura anulada) é
+obsoleta: a execução só consulta o provedor pela referência externa. Encontrada a cobrança, ela é
+vinculada sem `charge.created` (a cobrança local continua cancelada e um pagamento por ela vira
+crédito do cliente); sem cobrança no provedor, a operação termina em `failed`. Uma criação
+`pending` obsoleta não conta como esgotada.
 
 ## Notificação (`internal/notifications`)
 

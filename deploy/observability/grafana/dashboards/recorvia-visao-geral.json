@@ -1,7 +1,7 @@
 {
   "uid": "recorvia-visao-geral",
   "title": "Recorvia: visão geral",
-  "description": "Saúde operacional: outbox, cobranças, conciliação, faturamento, API e dependências. Alertas e runbooks em docs/operacao.",
+  "description": "Saúde operacional: outbox, cobranças, conciliação, faturamento, régua, notificações, webhooks enviados, API e dependências. Alertas e runbooks em docs/operacao.",
   "tags": [
     "recorvia"
   ],
@@ -721,7 +721,7 @@
       "id": 14,
       "type": "timeseries",
       "title": "Operações de pagamento por situação",
-      "description": "Operações externas pendentes, em andamento e com resultado desconhecido.",
+      "description": "Operações externas pendentes, em andamento e com resultado desconhecido; as esgotadas não são mais retomadas pela recuperação (alerta RecorviaPaymentOperationsExhausted).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -741,6 +741,16 @@
           },
           "expr": "max by (status) (recorvia_payment_operations)",
           "legendFormat": "{{status}}",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (status) (recorvia_payment_operations_exhausted)",
+          "legendFormat": "esgotadas {{status}}",
           "range": true
         }
       ],
@@ -970,6 +980,190 @@
       }
     },
     {
+      "id": 20,
+      "type": "row",
+      "title": "Régua de cobrança, notificações e webhooks enviados",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Ações da régua de cobrança",
+      "description": "Lembretes agendados, faturas vencidas, suspensões e reativações por hora (tarefa collections.run).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 41
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (action) (increase(recorvia_collection_actions_total[1h]))",
+          "legendFormat": "{{action}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "sem dados",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Notificações por resultado",
+      "description": "Resultado do envio de e-mails em 15 minutos (alertas RecorviaEmailDeliveryStalled e RecorviaNotificationsFailed).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 41
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (outcome) (increase(recorvia_notifications_dispatched_total[15m]))",
+          "legendFormat": "{{outcome}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "sem dados",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Entregas de webhooks por resultado",
+      "description": "Resultado das tentativas de entrega aos endpoints dos tenants em 15 minutos (alerta RecorviaWebhookDeliveriesFailing).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 41
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (outcome) (increase(recorvia_webhook_deliveries_total[15m]))",
+          "legendFormat": "{{outcome}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "sem dados",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
       "id": 19,
       "type": "text",
       "title": "Rastreamento e procedimentos",
@@ -977,11 +1171,11 @@
         "h": 4,
         "w": 24,
         "x": 0,
-        "y": 40
+        "y": 49
       },
       "options": {
         "mode": "markdown",
-        "content": "Rastros: interface do Jaeger em [http://localhost:16686](http://localhost:16686) (serviços `recorvia-api` e `recorvia-worker`; busque pela tag `recorvia.request_id`, o mesmo `request_id` dos logs e do corpo de erro).\n\nAlertas: **Alerting → Alert rules** (regras do Prometheus) ou a página *Alerts* do Prometheus.\n\nProcedimentos: `docs/operacao/runbooks/` (faturamento, filas e DLQ, conciliação, isolamento de dados)."
+        "content": "Rastros: interface do Jaeger em [http://localhost:16686](http://localhost:16686) (serviços `recorvia-api` e `recorvia-worker`; busque pela tag `recorvia.request_id`, o mesmo `request_id` dos logs e do corpo de erro).\n\nAlertas: **Alerting → Alert rules** (regras do Prometheus) ou a página *Alerts* do Prometheus.\n\nProcedimentos: `docs/operacao/runbooks/` (faturamento, filas e DLQ, conciliação, notificações e webhooks, isolamento de dados)."
       }
     }
   ]

@@ -101,6 +101,15 @@ for q in \
   'recorvia_charge_failures_total{kind="permanent"}' \
   'recorvia_http_requests_total{route="/livez"}' \
   'recorvia_job_last_success_timestamp_seconds{task="billing.run_cycle"}' \
+  'recorvia_job_interval_seconds{task="platform.close_statements"}' \
+  'process_start_time_seconds{job="recorvia-worker"}' \
+  'recorvia_payment_operations_exhausted{status="pending"}' \
+  'recorvia_dependency_up{service="api", dependency="postgres"} == 1' \
+  'recorvia_dependency_up{service="api", dependency="redis"} == 1' \
+  'recorvia_provider_webhooks_total{outcome="too_large"}' \
+  'recorvia_notifications_dispatched_total{outcome="sent"}' \
+  'recorvia_webhook_deliveries_total{outcome="succeeded"}' \
+  'recorvia_collection_actions_total{action="reminder_scheduled"}' \
   'rabbitmq_detailed_queue_consumers{queue="recorvia.payments.invoice_issued"} > 0' \
   'rabbitmq_detailed_queue_messages{queue=~"recorvia\\..+\\.dlq"}'; do
   eventually "Prometheus: série $q" has_series "$q"

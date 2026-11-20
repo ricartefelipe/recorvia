@@ -266,7 +266,9 @@ func TestPrometheusLoadsAlertRulesAndScrapeTargets(t *testing.T) {
 		}
 	}
 	for _, required := range []string{"RecorviaOutboxStalled", "RecorviaQueueLag", "RecorviaMessagesDeadLettered", "RecorviaChargesDeclined",
-		"RecorviaPaymentOperationsUnknown", "RecorviaReconciliationDiscrepanciesOpen", "RecorviaDBServerConnectionsHigh", "RecorviaWorkerSaturated"} {
+		"RecorviaPaymentOperationsUnknown", "RecorviaReconciliationDiscrepanciesOpen", "RecorviaDBServerConnectionsHigh", "RecorviaWorkerSaturated",
+		"RecorviaBillingCycleStale", "RecorviaScheduledTaskStale", "RecorviaPaymentOperationsExhausted", "RecorviaEmailDeliveryStalled",
+		"RecorviaWebhookDeliveriesFailing", "RecorviaRefundsUnknown"} {
 		if !slices.Contains(alerts, required) {
 			t.Errorf("alerta %s não carregado", required)
 		}

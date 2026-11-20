@@ -89,7 +89,8 @@ Dashboards provisionados: *visão geral* (página inicial), *mensageria* (filas,
 consumidores e outbox) e *banco e processos* (pools de conexão, conexões do servidor e tarefas
 agendadas). Cada alerta do Prometheus aponta para a seção do runbook correspondente:
 [faturamento e cobrança](docs/operacao/runbooks/faturamento.md),
-[filas e DLQ](docs/operacao/runbooks/filas-e-dlq.md), [conciliação](docs/operacao/runbooks/conciliacao.md)
+[filas e DLQ](docs/operacao/runbooks/filas-e-dlq.md), [conciliação](docs/operacao/runbooks/conciliacao.md),
+[notificações e webhooks enviados](docs/operacao/runbooks/notificacoes-e-webhooks.md)
 e [isolamento de dados](docs/operacao/runbooks/isolamento-de-dados.md).
 
 Sondas: `/livez` indica que o processo responde, sem consultar dependências; `/readyz` exige
