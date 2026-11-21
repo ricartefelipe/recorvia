@@ -54,6 +54,9 @@ func (e *env) endpoint(t *testing.T, types ...string) (Endpoint, string) {
 	return ep, secret
 }
 
+// version devolve a versão atual do endpoint, a do If-Match das alterações.
+func (e *env) version(id uuid.UUID) int { return e.store.state.endpoints[id].Version }
+
 func (e *env) publish(t *testing.T, eventType string) uuid.UUID {
 	t.Helper()
 	id := ids.New()
@@ -133,7 +136,7 @@ func TestUpdateAndDeleteEndpoint(t *testing.T) {
 	if _, err := e.svc.UpdateEndpoint(ctx, e.tenant, e.actor, ep.ID, Input{URL: "x"}, "active", 0); !apperr.IsKind(err, apperr.KindInvalid) {
 		t.Fatalf("dados inválidos: %v", err)
 	}
-	if err := e.svc.DeleteEndpoint(ctx, e.tenant, e.actor, ep.ID); err != nil {
+	if err := e.svc.DeleteEndpoint(ctx, e.tenant, e.actor, ep.ID, e.version(ep.ID)); err != nil {
 		t.Fatal(err)
 	}
 	list, _ := e.svc.Endpoints(ctx, e.tenant)
@@ -141,12 +144,15 @@ func TestUpdateAndDeleteEndpoint(t *testing.T) {
 		t.Fatal("removido sai da listagem")
 	}
 	for name, fn := range map[string]func() error{
-		"remoção repetida": func() error { return e.svc.DeleteEndpoint(ctx, e.tenant, e.actor, ep.ID) },
+		"remoção repetida": func() error { return e.svc.DeleteEndpoint(ctx, e.tenant, e.actor, ep.ID, e.version(ep.ID)) },
 		"alteração": func() error {
 			_, err := e.svc.UpdateEndpoint(ctx, e.tenant, e.actor, ep.ID, in, "active", 0)
 			return err
 		},
-		"rotação":  func() error { _, _, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, nil); return err },
+		"rotação": func() error {
+			_, _, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, nil, e.version(ep.ID))
+			return err
+		},
 		"entregas": func() error { _, err := e.svc.Deliveries(ctx, e.tenant, ep.ID, 10, ""); return err },
 		"consulta": func() error { _, err := e.svc.Endpoint(ctx, e.tenant, ep.ID); return err },
 	} {
@@ -156,12 +162,40 @@ func TestUpdateAndDeleteEndpoint(t *testing.T) {
 	}
 }
 
+// A rotação e a remoção alteram o endpoint: a versão do If-Match vai na
+// condição da gravação e, divergente, nada muda (nem os segredos). A rotação
+// gera a versão seguinte.
+func TestRotateAndDeleteRequireCurrentVersion(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	ep, _ := e.endpoint(t)
+	if _, _, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, nil, ep.Version+1); !apperr.IsKind(err, apperr.KindPreconditionFailed) {
+		t.Fatalf("rotação com versão divergente: %v", err)
+	}
+	if n := len(e.store.state.secrets); n != 1 || e.version(ep.ID) != ep.Version {
+		t.Fatalf("rotação recusada não pode gravar: %d segredos, versão %d", n, e.version(ep.ID))
+	}
+	rotated, _, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, nil, ep.Version)
+	if err != nil || rotated.Version != ep.Version+1 || e.version(ep.ID) != ep.Version+1 {
+		t.Fatalf("rotação deve gerar a versão seguinte: %+v %v", rotated, err)
+	}
+	if err := e.svc.DeleteEndpoint(ctx, e.tenant, e.actor, ep.ID, ep.Version); !apperr.IsKind(err, apperr.KindPreconditionFailed) {
+		t.Fatalf("remoção com a versão anterior à rotação: %v", err)
+	}
+	if list, _ := e.svc.Endpoints(ctx, e.tenant); len(list) != 1 {
+		t.Fatal("remoção recusada não pode retirar o endpoint")
+	}
+	if err := e.svc.DeleteEndpoint(ctx, e.tenant, e.actor, ep.ID, rotated.Version); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRotateSecretKeepsPreviousDuringWindow(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 	ep, first := e.endpoint(t)
 	hours := 2
-	rotated, second, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, &hours)
+	rotated, second, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, &hours, e.version(ep.ID))
 	if err != nil || second == first || len(rotated.Secrets) != 2 {
 		t.Fatalf("rotação: %+v %v", rotated, err)
 	}
@@ -188,7 +222,7 @@ func TestRotateSecretKeepsPreviousDuringWindow(t *testing.T) {
 		t.Fatal("segredo antigo expirado não deve conferir")
 	}
 	zero := 0
-	_, third, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, &zero)
+	_, third, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, &zero, e.version(ep.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,10 +231,10 @@ func TestRotateSecretKeepsPreviousDuringWindow(t *testing.T) {
 		t.Fatalf("janela zero encerra o segredo anterior: %+v", now[0].Secrets)
 	}
 	bad := 169
-	if _, _, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, &bad); !apperr.IsKind(err, apperr.KindInvalid) {
+	if _, _, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, &bad, e.version(ep.ID)); !apperr.IsKind(err, apperr.KindInvalid) {
 		t.Fatalf("janela acima do limite: %v", err)
 	}
-	if _, _, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, nil); err != nil {
+	if _, _, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, nil, e.version(ep.ID)); err != nil {
 		t.Fatalf("janela padrão: %v", err)
 	}
 }
@@ -230,7 +264,7 @@ func TestFanoutCreatesOneDeliveryPerSubscribedEndpoint(t *testing.T) {
 	if err := e.svc.HandleEvent(ctx, e.tenant, ids.New(), outbox.EventCustomerCreated, time.Time{}, []byte("não json")); err != nil || len(e.store.deliveries()) != 2 {
 		t.Fatal("evento sem assinantes não gera entregas")
 	}
-	_ = e.svc.DeleteEndpoint(ctx, e.tenant, e.actor, a.ID)
+	_ = e.svc.DeleteEndpoint(ctx, e.tenant, e.actor, a.ID, e.version(a.ID))
 	e.publish(t, outbox.EventInvoicePaid)
 	if len(e.store.deliveries()) != 3 {
 		t.Fatal("endpoint removido não recebe novos eventos")
@@ -437,11 +471,11 @@ func TestServiceErrorsPropagate(t *testing.T) {
 			t.Fatalf("criação com erro em %s: %v", op, err)
 		}
 	}
-	for _, op := range []string{"ExpireSecrets", "InsertSecret", "PlatformPlan"} {
+	for _, op := range []string{"UpdateEndpoint", "ExpireSecrets", "InsertSecret", "PlatformPlan"} {
 		e := newEnv(t)
 		ep, _ := e.endpoint(t)
 		e.store.fail[op] = errInjected
-		if _, _, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, nil); !errors.Is(err, errInjected) {
+		if _, _, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, nil, e.version(ep.ID)); !errors.Is(err, errInjected) {
 			t.Fatalf("rotação com erro em %s: %v", op, err)
 		}
 	}
@@ -449,7 +483,7 @@ func TestServiceErrorsPropagate(t *testing.T) {
 		e := newEnv(t)
 		ep, _ := e.endpoint(t)
 		e.store.fail[op] = errInjected
-		if err := e.svc.DeleteEndpoint(ctx, e.tenant, e.actor, ep.ID); !errors.Is(err, errInjected) {
+		if err := e.svc.DeleteEndpoint(ctx, e.tenant, e.actor, ep.ID, e.version(ep.ID)); !errors.Is(err, errInjected) {
 			t.Fatalf("remoção com erro em %s: %v", op, err)
 		}
 		if _, err := e.svc.UpdateEndpoint(ctx, e.tenant, e.actor, ep.ID, Input{URL: ep.URL, EventTypes: ep.EventTypes}, "active", 0); !errors.Is(err, errInjected) {
@@ -533,7 +567,7 @@ func TestRotateSecretRejectsWindowsOutsideTheLimit(t *testing.T) {
 	e := newEnv(t)
 	ep, _ := e.endpoint(t)
 	for _, h := range []int{-1, 169, 5124096, math.MaxInt} {
-		if _, _, err := e.svc.RotateSecret(context.Background(), e.tenant, e.actor, ep.ID, &h); !apperr.IsKind(err, apperr.KindInvalid) {
+		if _, _, err := e.svc.RotateSecret(context.Background(), e.tenant, e.actor, ep.ID, &h, e.version(ep.ID)); !apperr.IsKind(err, apperr.KindInvalid) {
 			t.Errorf("janela de %d h deve ser recusada: %v", h, err)
 		}
 	}
@@ -554,7 +588,7 @@ func TestRotateSecretKeepsAtMostMaxSignatures(t *testing.T) {
 		e.clock.Advance(time.Minute)
 		var v string
 		var err error
-		if listed, v, err = e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, nil); err != nil {
+		if listed, v, err = e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, nil, e.version(ep.ID)); err != nil {
 			t.Fatal(err)
 		}
 		values = append(values, v)
@@ -575,7 +609,7 @@ func TestRotateSecretKeepsAtMostMaxSignatures(t *testing.T) {
 		}
 	}
 	e.store.fail["RetainSecrets"] = errInjected
-	if _, _, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, nil); !errors.Is(err, errInjected) {
+	if _, _, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, ep.ID, nil, e.version(ep.ID)); !errors.Is(err, errInjected) {
 		t.Fatalf("erro ao encerrar segredos excedentes: %v", err)
 	}
 }
@@ -644,7 +678,7 @@ func TestDeliverIsolatesUnreadableSecrets(t *testing.T) {
 	partial, _ := create("https://parcial.cliente.test/hook")
 	healthy, healthySecret := create("https://saudavel.cliente.test/hook")
 	e.clock.Advance(time.Minute)
-	_, current, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, partial.ID, nil)
+	_, current, err := e.svc.RotateSecret(ctx, e.tenant, e.actor, partial.ID, nil, e.version(partial.ID))
 	if err != nil {
 		t.Fatal(err)
 	}

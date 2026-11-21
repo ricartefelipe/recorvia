@@ -493,7 +493,8 @@ func TestSessionRevocationOverHTTP(t *testing.T) {
 		}
 		inA, inB, none := a.login(m, &tnA.ID), a.login(m, &tnB.ID), a.login(m, nil)
 		owner := a.login(tnA.Owner, &tnA.ID)
-		if status, body, _ := owner.do(http.MethodDelete, "/api/v1/members/"+m.ID.String(), nil); status != http.StatusNoContent {
+		if status, body, _ := owner.do(http.MethodDelete, "/api/v1/members/"+m.ID.String(), nil,
+			matchVersion(owner.versionIn("/api/v1/members", "user_id", m.ID.String()))...); status != http.StatusNoContent {
 			t.Fatalf("remoção: %d %v", status, body)
 		}
 		if sessionExists(t, a, inA.cookie) {

@@ -136,7 +136,7 @@ func TestRecoverySettlementWithSimulator(t *testing.T) {
 		list[0].EffectiveDate != received.EffectiveDate || list[1].Justification != lost.Justification {
 		t.Fatalf("baixas listadas: %+v %v", list, err)
 	}
-	listed, err := h.env.Store.ListDisputes(ctx, h.tn.ID, &d.ChargeID, 10)
+	listed, _, err := h.env.Store.ListDisputes(ctx, h.tn.ID, &d.ChargeID, 10, "")
 	if err != nil || len(listed) != 1 || listed[0].RecoveryWrittenOff.Amount() != 800 {
 		t.Fatalf("disputa listada: %+v %v", listed, err)
 	}

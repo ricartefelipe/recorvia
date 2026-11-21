@@ -75,12 +75,23 @@ func TestTemplatesMergeDefaultsAndCustom(t *testing.T) {
 	ctx := context.Background()
 	actor := audit.System("teste")
 	got, err := e.svc.UpdateTemplate(ctx, e.tenant, actor, nil, "reminder_after_due", "Cobrança {{invoice_number}}",
-		"Olá {{customer_name}}, a fatura venceu há {{days_overdue}} dias.")
+		"Olá {{customer_name}}, a fatura venceu há {{days_overdue}} dias.", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Version != 1 || got.IsDefault {
 		t.Fatalf("template gravado inesperado: %+v", got)
+	}
+	// A versão 0 é a do template padrão: depois da personalização, só a
+	// versão atual altera o template.
+	for _, stale := range []int{0, 2} {
+		_, err := e.svc.UpdateTemplate(ctx, e.tenant, actor, nil, "reminder_after_due", "Outro assunto", "Outro corpo suficiente.", stale)
+		if !apperr.IsKind(err, apperr.KindPreconditionFailed) {
+			t.Fatalf("versão %d divergente: %v", stale, err)
+		}
+	}
+	if cur := e.store.state.templates[KeyReminderAfterDue]; cur.Version != 1 || cur.Subject != "Cobrança {{invoice_number}}" {
+		t.Fatalf("template com versão divergente não pode mudar: %+v", cur)
 	}
 	list, err := e.svc.Templates(ctx, e.tenant)
 	if err != nil {
@@ -97,10 +108,14 @@ func TestTemplatesMergeDefaultsAndCustom(t *testing.T) {
 	if len(e.store.state.audits) != 1 || e.store.state.audits[0].Action != "notification_template.updated" {
 		t.Fatalf("auditoria ausente: %+v", e.store.state.audits)
 	}
-	if _, err := e.svc.UpdateTemplate(ctx, e.tenant, actor, nil, "member_invitation", "Assunto", "Corpo suficiente."); !apperr.IsKind(err, apperr.KindNotFound) {
+	if again, err := e.svc.UpdateTemplate(ctx, e.tenant, actor, nil, "reminder_after_due", "Outro assunto", "Outro corpo suficiente.", 1); err != nil ||
+		again.Version != 2 {
+		t.Fatalf("alteração na versão atual: %+v %v", again, err)
+	}
+	if _, err := e.svc.UpdateTemplate(ctx, e.tenant, actor, nil, "member_invitation", "Assunto", "Corpo suficiente.", 0); !apperr.IsKind(err, apperr.KindNotFound) {
 		t.Fatalf("convite não é personalizável: %v", err)
 	}
-	if _, err := e.svc.UpdateTemplate(ctx, e.tenant, actor, nil, "invoice_issued", "Assunto", "{{accept_url}} no corpo"); !apperr.IsKind(err, apperr.KindInvalid) {
+	if _, err := e.svc.UpdateTemplate(ctx, e.tenant, actor, nil, "invoice_issued", "Assunto", "{{accept_url}} no corpo", 0); !apperr.IsKind(err, apperr.KindInvalid) {
 		t.Fatalf("variável não permitida deveria falhar: %v", err)
 	}
 	e.store.fail["CustomTemplates"] = errInjected

@@ -243,9 +243,11 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
+        /** @description Remove o membro na versão da associação informada no If-Match (`version` do membro). */
         delete: operations["removeMember"];
         options?: never;
         head?: never;
+        /** @description Altera o papel do membro na versão da associação informada no If-Match (`version` do membro). */
         patch: operations["updateMemberRole"];
         trace?: never;
     };
@@ -256,6 +258,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Convites, dos mais recentes para os mais antigos, em páginas por cursor. */
         get: operations["listInvitations"];
         put?: never;
         post: operations["createInvitation"];
@@ -526,6 +529,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Arquiva o cliente na versão informada no If-Match. Arquivar um cliente já arquivado, na versão atual, não tem efeito. */
         post: operations["archiveCustomer"];
         delete?: never;
         options?: never;
@@ -623,7 +627,7 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** @description Grava o endereço de cobrança do cliente. Sem mudança, nada é gravado. O histórico do cliente registra `customer.address_updated` com os nomes dos campos alterados (`fields`) e se o endereço foi cadastrado agora (`created`), nunca os valores. Responde 409 `customer_anonymized` para cliente anonimizado, que não volta a receber dados pessoais. */
+        /** @description Grava o endereço de cobrança do cliente. Sem mudança, nada é gravado. O histórico do cliente registra `customer.address_updated` com os nomes dos campos alterados (`fields`) e se o endereço foi cadastrado agora (`created`), nunca os valores. Responde 409 `customer_anonymized` para cliente anonimizado, que não volta a receber dados pessoais. O endereço faz parte da ficha do cliente: o If-Match é a versão do cliente (`version` de CustomerDetails) e a gravação gera a versão seguinte, devolvida no ETag; sem mudança, a versão não muda. */
         put: operations["setCustomerAddress"];
         post?: never;
         delete?: never;
@@ -656,6 +660,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Saldo de crédito do cliente e os movimentos, dos mais recentes para os mais antigos, em páginas por cursor (`entries` é a página; `next_cursor` pede a seguinte). */
         get: operations["getCustomerCredits"];
         put?: never;
         post: operations["grantCustomerCredit"];
@@ -799,7 +804,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Cria nova versão de preço (não altera assinaturas existentes) */
+        /**
+         * Cria nova versão de preço (não altera assinaturas existentes)
+         * @description A nova versão passa a ser o preço vigente do plano, o que altera o plano: o If-Match é a versão do plano (`version` de PlanDetails) e o ETag da resposta é a versão seguinte do plano.
+         */
         post: operations["addPriceVersion"];
         delete?: never;
         options?: never;
@@ -832,6 +840,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Arquiva o cupom na versão informada no If-Match. Arquivar um cupom já arquivado, na versão atual, não tem efeito. */
         post: operations["archiveCoupon"];
         delete?: never;
         options?: never;
@@ -1328,6 +1337,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Disputas, das abertas mais recentemente para as mais antigas, em páginas por cursor. */
         get: operations["listDisputes"];
         put?: never;
         post?: never;
@@ -1388,6 +1398,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Operações externas, das criadas mais recentemente para as mais antigas, em páginas por cursor. */
         get: operations["listPaymentOperations"];
         put?: never;
         post?: never;
@@ -1441,6 +1452,7 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
+        /** @description Configura o provedor na versão da conta informada no If-Match (`version` de ProviderAccount); `"0"` para o provedor ainda não configurado (presente apenas em `available`). Versão divergente responde 412 antes de chamar o provedor. */
         put: operations["configurePaymentProvider"];
         post?: never;
         delete?: never;
@@ -1488,6 +1500,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Execuções, das mais recentes para as mais antigas, em páginas por cursor. */
         get: operations["listReconciliationRuns"];
         put?: never;
         /**
@@ -1528,6 +1541,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Divergências, das detectadas mais recentemente para as mais antigas, em páginas por cursor. */
         get: operations["listDiscrepancies"];
         put?: never;
         post?: never;
@@ -1562,6 +1576,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Resolve a divergência aberta na versão informada no If-Match (`version` da divergência). Uma nova detecção da divergência gera outra versão: quem resolve com a versão anterior recebe 412 e precisa consultá-la de novo. */
         post: operations["resolveDiscrepancy"];
         delete?: never;
         options?: never;
@@ -1630,6 +1645,7 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
+        /** @description Grava a personalização do template na versão informada no If-Match (`version` do template): `"0"` para o template padrão, ainda não personalizado. */
         put: operations["updateNotificationTemplate"];
         post?: never;
         delete?: never;
@@ -1733,6 +1749,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Gera um novo segredo. Os segredos fazem parte do endpoint: a rotação exige a versão do endpoint no If-Match e gera a versão seguinte, devolvida no ETag. */
         post: operations["rotateWebhookSecret"];
         delete?: never;
         options?: never;
@@ -1796,6 +1813,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Credenciais em páginas por cursor: as ativas primeiro, depois revogadas e expiradas, das mais recentes para as mais antigas. A situação que define a ordem é a do instante da primeira página, levado no cursor. */
         get: operations["listApiCredentials"];
         put?: never;
         post: operations["createApiCredential"];
@@ -1831,6 +1849,7 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
+        /** @description Revoga a credencial na versão informada no If-Match. Revogar uma credencial já revogada, na versão atual, não tem efeito. */
         delete: operations["revokeApiCredential"];
         options?: never;
         head?: never;
@@ -1844,6 +1863,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Mensagens não processadas, das falhas mais recentes para as mais antigas, em páginas por cursor. */
         get: operations["listDeadLetters"];
         put?: never;
         post?: never;
@@ -2377,6 +2397,8 @@ export interface components {
             /** Format: int64 */
             balance: number;
             currency: string;
+            /** @description Página seguinte dos movimentos; nulo na última */
+            next_cursor: string | null;
             entries: {
                 /** Format: uuid */
                 id: string;
@@ -3102,6 +3124,8 @@ export interface components {
             api_key_hint?: string;
             /** Format: date-time */
             created_at: string;
+            /** @description Versão da configuração (If-Match da próxima configuração) */
+            version: number;
         };
         ProviderAccountConfigured: {
             account: components["schemas"]["ProviderAccount"];
@@ -3203,6 +3227,8 @@ export interface components {
             resolved_at?: string | null;
             /** Format: date-time */
             created_at: string;
+            /** @description Muda a cada nova detecção e na resolução */
+            version: number;
             history?: components["schemas"]["AuditEvent"][];
         };
         /** @enum {string} */
@@ -3235,6 +3261,8 @@ export interface components {
             variables: string[];
             /** Format: date-time */
             updated_at?: string | null;
+            /** @description Versão da personalização; 0 no template padrão */
+            version: number;
         };
         Notification: {
             /** Format: uuid */
@@ -3350,6 +3378,7 @@ export interface components {
             last_used_at?: string | null;
             /** Format: date-time */
             revoked_at?: string | null;
+            version: number;
         };
         ApiCredentialWithSecret: {
             credential: components["schemas"]["ApiCredential"];
@@ -3647,7 +3676,7 @@ export interface components {
         Tenant: string;
         /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
         CSRF: string;
-        /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+        /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
         IfMatch: string;
         /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
         IdempotencyKey: string;
@@ -3658,7 +3687,10 @@ export interface components {
         Cursor: string;
     };
     requestBodies: never;
-    headers: never;
+    headers: {
+        /** @description Versão do recurso entre aspas (ex. "3"), a ser enviada no If-Match da próxima alteração. */
+        ETag: string;
+    };
     pathItems: never;
 }
 export type $defs = Record<string, never>;
@@ -3912,7 +3944,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
                 "If-Match": components["parameters"]["IfMatch"];
             };
             path?: never;
@@ -3927,6 +3959,7 @@ export interface operations {
             /** @description Atualizada */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -3935,6 +3968,7 @@ export interface operations {
             };
             412: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     listRoles: {
@@ -3960,6 +3994,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     listMembers: {
@@ -3985,16 +4020,19 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     removeMember: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 user_id: string;
@@ -4012,16 +4050,20 @@ export interface operations {
             };
             403: components["responses"]["UserSessionRequired"];
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     updateMemberRole: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 user_id: string;
@@ -4039,6 +4081,7 @@ export interface operations {
             /** @description Papel alterado */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -4047,11 +4090,16 @@ export interface operations {
             };
             403: components["responses"]["UserSessionRequired"];
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     listInvitations: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
@@ -4069,9 +4117,11 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["Invitation"][];
+                        next_cursor: string | null;
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     createInvitation: {
@@ -4181,6 +4231,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     changePlatformPlan: {
@@ -4239,6 +4290,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     listAddonOrders: {
@@ -4264,6 +4316,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     createAddonOrder: {
@@ -4326,6 +4379,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     adminListTenants: {
@@ -4349,6 +4403,7 @@ export interface operations {
                 };
             };
             403: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
         };
     };
     adminListAddonOrders: {
@@ -4585,7 +4640,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
                 "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
@@ -4602,6 +4657,7 @@ export interface operations {
             /** @description Atualizado */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -4610,16 +4666,19 @@ export interface operations {
             };
             412: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     archiveCustomer: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 id: components["parameters"]["ID"];
@@ -4631,6 +4690,7 @@ export interface operations {
             /** @description Arquivado */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -4638,6 +4698,8 @@ export interface operations {
                 };
             };
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     anonymizeCustomer: {
@@ -4777,11 +4839,13 @@ export interface operations {
     setCustomerAddress: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 id: components["parameters"]["ID"];
@@ -4794,9 +4858,10 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Endereço gravado */
+            /** @description Endereço gravado; o ETag é a versão do cliente */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -4804,7 +4869,9 @@ export interface operations {
                 };
             };
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     getCustomerHistory: {
@@ -4842,7 +4909,10 @@ export interface operations {
     };
     getCustomerCredits: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
@@ -4863,6 +4933,8 @@ export interface operations {
                     "application/json": components["schemas"]["CreditBalance"];
                 };
             };
+            404: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
         };
     };
     grantCustomerCredit: {
@@ -5020,6 +5092,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     createProduct: {
@@ -5060,7 +5133,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
                 "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
@@ -5080,6 +5153,7 @@ export interface operations {
             /** @description Atualizado */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -5087,6 +5161,7 @@ export interface operations {
                 };
             };
             412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     listMetrics: {
@@ -5112,6 +5187,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     createMetric: {
@@ -5170,6 +5246,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     createPlan: {
@@ -5235,7 +5312,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
                 "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
@@ -5252,6 +5329,7 @@ export interface operations {
             /** @description Atualizado */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -5259,16 +5337,19 @@ export interface operations {
                 };
             };
             412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     addPriceVersion: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 id: components["parameters"]["ID"];
@@ -5281,16 +5362,19 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Versão criada */
+            /** @description Versão criada; o ETag é a versão do plano */
             201: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["PriceVersion"];
                 };
             };
+            412: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     listCoupons: {
@@ -5316,6 +5400,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     createCoupon: {
@@ -5351,11 +5436,13 @@ export interface operations {
     archiveCoupon: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 id: components["parameters"]["ID"];
@@ -5367,12 +5454,16 @@ export interface operations {
             /** @description Arquivado */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["Coupon"];
                 };
             };
+            404: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     listSubscriptions: {
@@ -5403,6 +5494,7 @@ export interface operations {
                     "application/json": components["schemas"]["SubscriptionPage"];
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     createSubscription: {
@@ -5492,6 +5584,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     cancelSubscription: {
@@ -5502,7 +5595,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
                 "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
@@ -5523,6 +5616,7 @@ export interface operations {
             /** @description Cancelada ou agendada */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -5530,6 +5624,8 @@ export interface operations {
                 };
             };
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     resumeSubscriptionRenewal: {
@@ -5540,7 +5636,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
                 "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
@@ -5553,12 +5649,15 @@ export interface operations {
             /** @description Cancelamento agendado desfeito */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["Subscription"];
                 };
             };
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     suspendSubscription: {
@@ -5569,7 +5668,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
                 "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
@@ -5588,6 +5687,7 @@ export interface operations {
             /** @description Suspensa */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -5595,6 +5695,8 @@ export interface operations {
                 };
             };
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     reactivateSubscription: {
@@ -5605,7 +5707,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
                 "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
@@ -5618,6 +5720,7 @@ export interface operations {
             /** @description Reativada */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -5625,6 +5728,8 @@ export interface operations {
                 };
             };
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     changeSubscriptionPlan: {
@@ -5635,7 +5740,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
                 "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
@@ -5657,6 +5762,7 @@ export interface operations {
             /** @description Alteração aplicada ou agendada */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -5664,7 +5770,9 @@ export interface operations {
                 };
             };
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     changeSubscriptionQuantity: {
@@ -5675,7 +5783,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
                 "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
@@ -5695,13 +5803,16 @@ export interface operations {
             /** @description Alteração aplicada ou agendada */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["Subscription"];
                 };
             };
+            412: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     listPriceAdjustments: {
@@ -5729,6 +5840,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     schedulePriceAdjustment: {
@@ -5906,6 +6018,7 @@ export interface operations {
                     "application/json": components["schemas"]["UsageEventPage"];
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     ingestUsageEvents: {
@@ -5972,6 +6085,7 @@ export interface operations {
                     "application/json": components["schemas"]["InvoicePage"];
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     exportInvoices: {
@@ -6074,7 +6188,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
                 "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
@@ -6091,6 +6205,7 @@ export interface operations {
             /** @description Cancelada */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -6098,6 +6213,8 @@ export interface operations {
                 };
             };
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     markInvoiceUncollectible: {
@@ -6108,7 +6225,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
                 "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
@@ -6125,6 +6242,7 @@ export interface operations {
             /** @description Baixada */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -6132,6 +6250,8 @@ export interface operations {
                 };
             };
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     createCreditNote: {
@@ -6290,6 +6410,7 @@ export interface operations {
                     "application/json": components["schemas"]["ChargePage"];
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     getCharge: {
@@ -6383,6 +6504,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     listPayments: {
@@ -6413,11 +6535,15 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     listDisputes: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
@@ -6435,9 +6561,11 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["Dispute"][];
+                        next_cursor: string | null;
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     getDispute: {
@@ -6492,6 +6620,7 @@ export interface operations {
                 };
             };
             404: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
         };
     };
     settleRecovery: {
@@ -6541,6 +6670,8 @@ export interface operations {
     listPaymentOperations: {
         parameters: {
             query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
                 status?: "pending" | "in_flight" | "succeeded" | "failed" | "unknown";
             };
             header?: {
@@ -6560,9 +6691,11 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["PaymentOperation"][];
+                        next_cursor: string | null;
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     retryPaymentOperation: {
@@ -6626,16 +6759,19 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     configurePaymentProvider: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 provider: "simulator" | "asaas";
@@ -6651,6 +6787,7 @@ export interface operations {
             /** @description Configurado; webhook_endpoint_url é exibida uma única vez */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -6658,7 +6795,9 @@ export interface operations {
                 };
             };
             403: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     listLedgerAccounts: {
@@ -6684,6 +6823,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     listLedgerTransactions: {
@@ -6715,11 +6855,15 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     listReconciliationRuns: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
@@ -6737,9 +6881,11 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["ReconciliationRun"][];
+                        next_cursor: string | null;
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     runReconciliation: {
@@ -6822,6 +6968,8 @@ export interface operations {
     listDiscrepancies: {
         parameters: {
             query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
                 status?: "open" | "resolved" | "dismissed";
                 kind?: components["schemas"]["DiscrepancyKind"];
             };
@@ -6842,9 +6990,11 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["Discrepancy"][];
+                        next_cursor: string | null;
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     getDiscrepancy: {
@@ -6864,6 +7014,7 @@ export interface operations {
             /** @description Divergência com histórico */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -6875,11 +7026,13 @@ export interface operations {
     resolveDiscrepancy: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 id: components["parameters"]["ID"];
@@ -6899,6 +7052,7 @@ export interface operations {
             /** @description Resolvida */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -6906,6 +7060,8 @@ export interface operations {
                 };
             };
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     listCollectionPolicies: {
@@ -6931,6 +7087,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     createCollectionPolicy: {
@@ -6971,7 +7128,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
                 "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
@@ -6988,6 +7145,7 @@ export interface operations {
             /** @description Atualizada */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -6995,6 +7153,7 @@ export interface operations {
                 };
             };
             412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     listNotificationTemplates: {
@@ -7020,16 +7179,19 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     updateNotificationTemplate: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 key: components["schemas"]["TemplateKey"];
@@ -7048,13 +7210,17 @@ export interface operations {
             /** @description Template gravado */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["NotificationTemplate"];
                 };
             };
+            404: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     listNotifications: {
@@ -7086,6 +7252,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     listNotificationEvents: {
@@ -7114,6 +7281,7 @@ export interface operations {
                 };
             };
             404: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
         };
     };
     listWebhookEventTypes: {
@@ -7139,6 +7307,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     listWebhookEndpoints: {
@@ -7164,6 +7333,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     createWebhookEndpoint: {
@@ -7199,11 +7369,13 @@ export interface operations {
     deleteWebhookEndpoint: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 id: components["parameters"]["ID"];
@@ -7219,6 +7391,9 @@ export interface operations {
                 };
                 content?: never;
             };
+            404: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     updateWebhookEndpoint: {
@@ -7229,7 +7404,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
                 "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
@@ -7249,22 +7424,28 @@ export interface operations {
             /** @description Atualizado */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["WebhookEndpoint"];
                 };
             };
+            412: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     rotateWebhookSecret: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 id: components["parameters"]["ID"];
@@ -7282,12 +7463,17 @@ export interface operations {
             /** @description Novo segredo (exibido uma única vez) */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["WebhookEndpointWithSecret"];
                 };
             };
+            404: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     listWebhookDeliveries: {
@@ -7319,6 +7505,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     listWebhookDeliveryAttempts: {
@@ -7347,6 +7534,7 @@ export interface operations {
                 };
             };
             404: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
         };
     };
     retryWebhookDelivery: {
@@ -7378,7 +7566,10 @@ export interface operations {
     };
     listApiCredentials: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
@@ -7396,10 +7587,12 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["ApiCredential"][];
+                        next_cursor: string | null;
                     };
                 };
             };
             403: components["responses"]["UserSessionRequired"];
+            422: components["responses"]["Problem"];
         };
     };
     createApiCredential: {
@@ -7440,11 +7633,13 @@ export interface operations {
     rotateApiCredential: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 id: components["parameters"]["ID"];
@@ -7456,6 +7651,7 @@ export interface operations {
             /** @description Nova credencial; a anterior permanece válida por 24 horas */
             201: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -7463,16 +7659,22 @@ export interface operations {
                 };
             };
             403: components["responses"]["UserSessionRequired"];
+            404: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     revokeApiCredential: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 id: components["parameters"]["ID"];
@@ -7489,11 +7691,16 @@ export interface operations {
                 content?: never;
             };
             403: components["responses"]["UserSessionRequired"];
+            404: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     listDeadLetters: {
         parameters: {
             query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
                 status?: "open" | "replayed" | "discarded";
             };
             header?: {
@@ -7513,9 +7720,11 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["DeadLetter"][];
+                        next_cursor: string | null;
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     replayDeadLetter: {
@@ -7614,6 +7823,7 @@ export interface operations {
                     };
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     getDashboard: {

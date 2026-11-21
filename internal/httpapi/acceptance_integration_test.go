@@ -117,8 +117,12 @@ func TestAcceptanceNewPriceVersionKeepsExistingContracts(t *testing.T) {
 	}
 	_, subH := c.expect(http.StatusOK, http.MethodGet, subPath, nil)
 
-	pv, _ := c.expect(http.StatusCreated, http.MethodPost, "/api/v1/plans/"+plan.ID.String()+"/prices",
-		map[string]any{"pricing_model": "flat", "flat_amount": 15000})
+	planVersion := c.versionOf("/api/v1/plans/" + plan.ID.String())
+	pv, pvH := c.expect(http.StatusCreated, http.MethodPost, "/api/v1/plans/"+plan.ID.String()+"/prices",
+		map[string]any{"pricing_model": "flat", "flat_amount": 15000}, matchVersion(planVersion)...)
+	if pvH.Get("ETag") != fmt.Sprintf(`"%v"`, planVersion.(float64)+1) {
+		t.Fatalf("a nova versão de preço gera a versão seguinte do plano: ETag %q", pvH.Get("ETag"))
+	}
 	v2, _ := pv["id"].(string)
 	if pv["version"] != float64(2) || pv["flat_amount"] != float64(15000) || v2 == "" || v2 == v1 {
 		t.Fatalf("nova versão de preço: %v", pv)

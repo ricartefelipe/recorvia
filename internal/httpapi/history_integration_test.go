@@ -139,6 +139,7 @@ func TestWebhooksAPIDeliveryAttempts(t *testing.T) {
 	a.login(other.Owner, &other.ID).expectProblem(404, "webhook_delivery_not_found", http.MethodGet, path, nil)
 
 	// Endpoint removido: as entregas deixam de ser consultáveis.
-	owner.expect(http.StatusNoContent, http.MethodDelete, "/api/v1/webhook-endpoints/"+endpointID, nil)
+	owner.expect(http.StatusNoContent, http.MethodDelete, "/api/v1/webhook-endpoints/"+endpointID, nil,
+		matchVersion(owner.versionIn("/api/v1/webhook-endpoints", "id", endpointID))...)
 	owner.expectProblem(404, "webhook_delivery_not_found", http.MethodGet, path, nil)
 }

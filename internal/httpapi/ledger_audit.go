@@ -124,7 +124,12 @@ func (a *API) listDeadLetters(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, invalidField("status", "Situação desconhecida."))
 		return
 	}
-	items, err := a.Store.DeadLetters(r.Context(), mustPrincipal(r).TenantID, status)
+	limit, cursor, err := pageParams(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	items, next, err := a.Store.DeadLetters(r.Context(), mustPrincipal(r).TenantID, status, limit, cursor)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -133,7 +138,7 @@ func (a *API) listDeadLetters(w http.ResponseWriter, r *http.Request) {
 	for _, d := range items {
 		out = append(out, deadLetterDTO(d))
 	}
-	a.writeJSON(w, r, http.StatusOK, list(out))
+	a.writeJSON(w, r, http.StatusOK, newPage(out, next))
 }
 
 // resolveDeadLetter reprocessa (reentrega direcionada à fila do consumidor

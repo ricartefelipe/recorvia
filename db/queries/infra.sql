@@ -125,9 +125,12 @@ ON CONFLICT (consumer, message_id) DO NOTHING;
 SELECT app_dead_letter_record_untenanted(@id, @consumer, @message_id, @event_type, @headers, @error, @attempts);
 
 -- name: ListDeadLetters :many
+-- Paginação por keyset em (failed_at, id), gravados no registro da falha.
 SELECT * FROM dead_letters
  WHERE tenant_id = @tenant_id AND (sqlc.narg(status)::text IS NULL OR status = sqlc.narg(status))
- ORDER BY failed_at DESC, id DESC LIMIT 200;
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (failed_at, id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY failed_at DESC, id DESC
+ LIMIT @row_limit;
 
 -- name: GetDeadLetterForUpdate :one
 SELECT * FROM dead_letters WHERE tenant_id = @tenant_id AND id = @id FOR UPDATE;

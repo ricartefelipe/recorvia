@@ -54,7 +54,7 @@ func TestDeliveryAttemptsListsEachAttemptInOrder(t *testing.T) {
 		}
 	})
 	t.Run("endpoint removido", func(t *testing.T) {
-		if err := e.svc.DeleteEndpoint(ctx, e.tenant, e.actor, ep.ID); err != nil {
+		if err := e.svc.DeleteEndpoint(ctx, e.tenant, e.actor, ep.ID, e.version(ep.ID)); err != nil {
 			t.Fatal(err)
 		}
 		_, err := e.svc.DeliveryAttempts(ctx, e.tenant, d.ID)

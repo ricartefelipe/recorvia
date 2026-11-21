@@ -85,13 +85,24 @@ func (tx notificationsTx) CustomTemplates(ctx context.Context) ([]notifications.
 	return out, nil
 }
 
-func (tx notificationsTx) UpsertTemplate(ctx context.Context, t notifications.Template, updatedBy *uuid.UUID, now time.Time) (notifications.Template, error) {
-	r, err := tx.q.UpsertNotificationTemplate(ctx, dbgen.UpsertNotificationTemplateParams{TenantID: tx.tenantID, TemplateKey: string(t.Key),
-		Subject: t.Subject, Body: t.Body, UpdatedBy: updatedBy, Now: now})
+func (tx notificationsTx) SaveTemplate(ctx context.Context, t notifications.Template, updatedBy *uuid.UUID, now time.Time,
+	expectedVersion int) (notifications.Template, error) {
+	var rows []dbgen.NotificationTemplate
+	var err error
+	if expectedVersion == 0 {
+		rows, err = tx.q.InsertNotificationTemplate(ctx, dbgen.InsertNotificationTemplateParams{TenantID: tx.tenantID, TemplateKey: string(t.Key),
+			Subject: t.Subject, Body: t.Body, UpdatedBy: updatedBy, Now: now})
+	} else {
+		rows, err = tx.q.UpdateNotificationTemplate(ctx, dbgen.UpdateNotificationTemplateParams{TenantID: tx.tenantID, TemplateKey: string(t.Key),
+			Subject: t.Subject, Body: t.Body, UpdatedBy: updatedBy, Now: now, Version: int32(expectedVersion)})
+	}
 	if err != nil {
 		return notifications.Template{}, err
 	}
-	return templateFromRow(r), nil
+	if err := versionConflict(int64(len(rows)), "O template foi alterado por outra pessoa."); err != nil {
+		return notifications.Template{}, err
+	}
+	return templateFromRow(rows[0]), nil
 }
 
 // --- notificações ---

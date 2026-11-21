@@ -87,7 +87,7 @@ SELECT * FROM coupons WHERE tenant_id = @tenant_id AND code = @code FOR UPDATE;
 SELECT * FROM coupons WHERE tenant_id = @tenant_id ORDER BY created_at DESC, id DESC LIMIT 500;
 
 -- name: ArchiveCoupon :execrows
-UPDATE coupons SET status = 'archived', version = version + 1 WHERE tenant_id = @tenant_id AND id = @id;
+UPDATE coupons SET status = 'archived', version = version + 1 WHERE tenant_id = @tenant_id AND id = @id AND version = @version;
 
 -- name: RedeemCoupon :execrows
 -- O limite de resgates é garantido pela condição e pela constraint do banco.

@@ -142,7 +142,7 @@ func (a *API) handle(r chi.Router, method, pattern string, access Access, perm t
 		o(&info)
 	}
 	a.routes = append(a.routes, info)
-	var handler http.Handler = h
+	handler := a.requestRules(method, pattern, h)
 	if info.Idempotent {
 		handler = a.idempotency(info, handler)
 	}

@@ -63,10 +63,13 @@ A associação dos reembolsos do Asaas por valor (ADR-035), que não recebem ide
 2. Entre com um usuário proprietário (por exemplo, `ana.owner@acme.test`) e, se necessário, mude o
    plano da organização em *Plano Recorvia* para Profissional ou Escala.
 3. Em *Integrações → Provedores de pagamento → Asaas → Configurar*, informe o ambiente `sandbox`, a
-   chave de API e o token do webhook e marque como provedor padrão. Pela API:
+   chave de API e o token do webhook e marque como provedor padrão. Pela API, com a versão atual da
+   conta no `If-Match` (`version` em `GET /api/v1/payment-providers`, ou `"0"` se o Asaas ainda não
+   foi configurado):
    ```bash
    curl -X PUT http://localhost:8080/api/v1/payment-providers/asaas \
      -H 'Content-Type: application/json' -H 'X-Recorvia-Tenant: <tenant_id>' -H 'X-CSRF-Token: <csrf>' \
+     -H 'If-Match: "0"' \
      -b 'recorvia_session=<sessao>' \
      -d '{"environment":"sandbox","api_key":"<chave_do_sandbox>","webhook_secret":"<token>","make_default":true}'
    ```

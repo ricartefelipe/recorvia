@@ -298,7 +298,7 @@ func TestUpdateRejected(t *testing.T) {
 func TestArchive(t *testing.T) {
 	e := newSvcEnv()
 	c := e.seed(t, companyInput())
-	got, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, c.ID)
+	got, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, c.ID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,9 +310,24 @@ func TestArchive(t *testing.T) {
 	}
 
 	// Arquivar novamente não tem efeito.
-	again, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, c.ID)
+	again, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, c.ID, 2)
 	if err != nil || again.Version != 2 || len(e.st().audits) != 1 || e.store.calls["HasOpenObligations"] != 1 {
 		t.Fatalf("segundo arquivamento deveria ser neutro: %+v, %v", again, err)
+	}
+	// Já arquivado, a versão do If-Match ainda é conferida.
+	_, err = e.svc.Archive(context.Background(), e.tenantID, e.actor, c.ID, 1)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+}
+
+// A versão do If-Match vai na condição da gravação: divergente, o cliente
+// não é arquivado nem auditado.
+func TestArchiveVersionMismatch(t *testing.T) {
+	e := newSvcEnv()
+	c := e.seed(t, companyInput())
+	_, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, c.ID, 5)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	if e.store.calls["Update"] != 1 || e.st().customers[c.ID].Status != Active || len(e.st().audits) != 0 {
+		t.Fatal("cliente com versão divergente não pode ser arquivado")
 	}
 }
 
@@ -320,7 +335,7 @@ func TestArchiveWithOpenObligations(t *testing.T) {
 	e := newSvcEnv()
 	c := e.seed(t, companyInput())
 	e.st().obligations[c.ID] = true
-	_, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, c.ID)
+	_, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, c.ID, 1)
 	assertAppErr(t, err, apperr.KindConflict, "customer_has_obligations")
 	if e.st().customers[c.ID].Status != Active || len(e.st().audits) != 0 {
 		t.Fatal("cliente com obrigações em aberto não pode ser arquivado")
@@ -333,7 +348,7 @@ func TestArchiveErrors(t *testing.T) {
 			e := newSvcEnv()
 			c := e.seed(t, companyInput())
 			e.store.fail[op] = errBoom
-			if _, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, c.ID); !errors.Is(err, errBoom) {
+			if _, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, c.ID, 1); !errors.Is(err, errBoom) {
 				t.Fatalf("esperado erro propagado, obtido %v", err)
 			}
 			if e.st().customers[c.ID].Status != Active {
@@ -445,12 +460,16 @@ func TestSetAddress(t *testing.T) {
 	in := validAddress()
 	in.PostalCode, in.State = "01310-100", "sp"
 
-	got, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, c.ID, in)
+	got, version, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, c.ID, in, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.PostalCode != "01310100" || got.State != "SP" || got.Country != "BR" {
 		t.Fatalf("endereço não normalizado: %+v", got)
+	}
+	// O endereço faz parte da ficha: a gravação gera a versão seguinte do cliente.
+	if version != 2 || e.st().customers[c.ID].Version != 2 {
+		t.Fatalf("versão do cliente depois do endereço: devolvida %d, gravada %d", version, e.st().customers[c.ID].Version)
 	}
 	if stored := e.st().addresses[c.ID]; stored != got {
 		t.Fatalf("endereço persistido difere do devolvido: %+v", stored)
@@ -463,7 +482,7 @@ func TestSetAddress(t *testing.T) {
 
 	// Alteração: somente os nomes dos campos que mudaram, nunca os valores.
 	in.City, in.Complement = "Campinas", "Sala 5"
-	if _, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, c.ID, in); err != nil {
+	if _, _, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, c.ID, in, 2); err != nil {
 		t.Fatal(err)
 	}
 	a = e.st().audits[1]
@@ -477,11 +496,26 @@ func TestSetAddress(t *testing.T) {
 	// Sem mudança (inclusive depois da normalização), nada é gravado nem auditado.
 	upserts := e.store.calls["UpsertAddress"]
 	in.PostalCode = "01310100"
-	if _, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, c.ID, in); err != nil {
-		t.Fatal(err)
+	if _, version, err = e.svc.SetAddress(context.Background(), e.tenantID, e.actor, c.ID, in, 3); err != nil || version != 3 {
+		t.Fatalf("endereço igual: versão %d, %v", version, err)
 	}
-	if len(e.st().audits) != 2 || e.store.calls["UpsertAddress"] != upserts {
+	if len(e.st().audits) != 2 || e.store.calls["UpsertAddress"] != upserts || e.st().customers[c.ID].Version != 3 {
 		t.Fatalf("endereço igual não deveria ser regravado nem auditado: %d auditorias", len(e.st().audits))
+	}
+	// Mesmo sem mudança, a versão do If-Match é conferida.
+	_, _, err = e.svc.SetAddress(context.Background(), e.tenantID, e.actor, c.ID, in, 2)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+}
+
+// A versão do If-Match vai na condição da gravação da nova versão do cliente:
+// divergente, o endereço não é gravado nem auditado.
+func TestSetAddressVersionMismatch(t *testing.T) {
+	e := newSvcEnv()
+	c := e.seed(t, companyInput())
+	_, _, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, c.ID, validAddress(), 4)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	if _, ok := e.st().addresses[c.ID]; ok || e.store.calls["BumpVersion"] != 1 || len(e.st().audits) != 0 {
+		t.Fatal("endereço com versão divergente não pode ser gravado")
 	}
 }
 
@@ -642,7 +676,7 @@ func TestSetAddressRejected(t *testing.T) {
 	t.Run("endereço inválido", func(t *testing.T) {
 		e := newSvcEnv()
 		c := e.seed(t, companyInput())
-		_, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, c.ID, Address{})
+		_, _, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, c.ID, Address{}, 1)
 		assertAppErr(t, err, apperr.KindInvalid, "invalid_address")
 		if e.store.calls["InTenant"] != 0 {
 			t.Fatal("validação deve ocorrer antes da transação")
@@ -650,15 +684,15 @@ func TestSetAddressRejected(t *testing.T) {
 	})
 	t.Run("cliente inexistente", func(t *testing.T) {
 		e := newSvcEnv()
-		_, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, uuid.New(), validAddress())
+		_, _, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, uuid.New(), validAddress(), 1)
 		assertAppErr(t, err, apperr.KindNotFound, "customer_not_found")
 	})
-	for _, op := range []string{"Address", "UpsertAddress", "Audit"} {
+	for _, op := range []string{"Address", "BumpVersion", "UpsertAddress", "Audit"} {
 		t.Run("falha em "+op, func(t *testing.T) {
 			e := newSvcEnv()
 			c := e.seed(t, companyInput())
 			e.store.fail[op] = errBoom
-			if _, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, c.ID, validAddress()); !errors.Is(err, errBoom) {
+			if _, _, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, c.ID, validAddress(), 1); !errors.Is(err, errBoom) {
 				t.Fatalf("esperado erro propagado, obtido %v", err)
 			}
 			if _, ok := e.st().addresses[c.ID]; ok {

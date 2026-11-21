@@ -198,13 +198,23 @@ func (tx tenancyTx) UpdateInvitation(ctx context.Context, inv tenancy.Invitation
 		AcceptedBy: inv.AcceptedBy, RevokedAt: inv.RevokedAt, RevokedBy: inv.RevokedBy})
 }
 
-func (tx tenancyTx) Invitations(ctx context.Context) ([]tenancy.Invitation, error) {
-	rows, err := tx.q.ListInvitations(ctx, tx.tenantID)
-	out := make([]tenancy.Invitation, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, invitationFromRow(r))
+func (tx tenancyTx) Invitations(ctx context.Context, limit int, cursor string) (tenancy.InvitationPage, error) {
+	cts, cid, err := parseTimeCursor(cursor)
+	if err != nil {
+		return tenancy.InvitationPage{}, err
 	}
-	return out, err
+	limit = pageLimit(limit)
+	rows, err := tx.q.ListInvitations(ctx, dbgen.ListInvitationsParams{TenantID: tx.tenantID, CursorTs: cts, CursorID: cid, RowLimit: int32(limit + 1)})
+	if err != nil {
+		return tenancy.InvitationPage{}, err
+	}
+	var p tenancy.InvitationPage
+	rows, p.NextCursor = keysetPage(rows, limit, func(r dbgen.Invitation) (time.Time, uuid.UUID) { return r.CreatedAt, r.ID })
+	p.Items = make([]tenancy.Invitation, 0, len(rows))
+	for _, r := range rows {
+		p.Items = append(p.Items, invitationFromRow(r))
+	}
+	return p, nil
 }
 
 func (tx tenancyTx) PendingInvitations(ctx context.Context, now time.Time) (int, error) {

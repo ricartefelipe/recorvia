@@ -40,8 +40,12 @@ type Tx interface {
 	InsertCredential(ctx context.Context, c Credential) error
 	Credential(ctx context.Context, id uuid.UUID, forUpdate bool) (Credential, error)
 	// Credentials lista as credenciais com as ativas em now sempre primeiro.
-	Credentials(ctx context.Context, now time.Time) ([]Credential, error)
-	// RotateCredential grava o novo segredo com controle de versão.
+	// Credentials devolve uma página da listagem. A situação das credenciais
+	// que define a ordem é a do instante da primeira página (now), levado no
+	// cursor das seguintes.
+	Credentials(ctx context.Context, now time.Time, limit int, cursor string) (Page, error)
+	// RotateCredential e RevokeCredential gravam condicionados à versão de c
+	// (412 version_mismatch se a linha tiver outra versão).
 	RotateCredential(ctx context.Context, c Credential) error
 	RevokeCredential(ctx context.Context, c Credential) error
 	AuthContext(ctx context.Context, id uuid.UUID) (AuthContext, error)
@@ -232,12 +236,12 @@ func (s *Service) Create(ctx context.Context, tenantID uuid.UUID, g Grantor, in 
 
 // List lista as credenciais da organização (sem segredos). As ativas vêm
 // sempre primeiro, para que nenhuma fique fora do limite da listagem.
-func (s *Service) List(ctx context.Context, tenantID uuid.UUID) ([]Credential, error) {
+func (s *Service) List(ctx context.Context, tenantID uuid.UUID, limit int, cursor string) (Page, error) {
 	now := s.clock.Now()
-	var out []Credential
+	var out Page
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		var err error
-		out, err = tx.Credentials(ctx, now)
+		out, err = tx.Credentials(ctx, now, limit, cursor)
 		return err
 	})
 	return out, err
@@ -248,8 +252,9 @@ func (s *Service) List(ctx context.Context, tenantID uuid.UUID) ([]Credential, e
 // RotationGrace (sem ultrapassar a validade da credencial); uma segunda
 // rotação descarta imediatamente o segredo de antes da primeira. Quem
 // rotaciona passa a ser o responsável pelo segredo e precisa ter todas as
-// permissões dos escopos.
-func (s *Service) Rotate(ctx context.Context, tenantID uuid.UUID, g Grantor, id uuid.UUID) (Issued, error) {
+// permissões dos escopos. A gravação é condicionada à versão esperada
+// (If-Match): divergente, nada é alterado (412).
+func (s *Service) Rotate(ctx context.Context, tenantID uuid.UUID, g Grantor, id uuid.UUID, expectedVersion int) (Issued, error) {
 	now := s.clock.Now()
 	var out Issued
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
@@ -277,6 +282,7 @@ func (s *Service) Rotate(ctx context.Context, tenantID uuid.UUID, g Grantor, id 
 		c.PreviousSecretHash, c.PreviousSecretExpiresAt = c.SecretHash, &graceEnd
 		c.SecretHash = HashSecret(secret)
 		c.RotatedAt, c.RotatedBy = &now, &g.UserID
+		c.Version = expectedVersion
 		if err := tx.RotateCredential(ctx, c); err != nil {
 			return err
 		}
@@ -291,9 +297,10 @@ func (s *Service) Rotate(ctx context.Context, tenantID uuid.UUID, g Grantor, id 
 	return out, nil
 }
 
-// Revoke invalida a credencial imediatamente (segredo vigente e anterior).
-// Revogar uma credencial já revogada não tem efeito.
-func (s *Service) Revoke(ctx context.Context, tenantID uuid.UUID, g Grantor, id uuid.UUID) error {
+// Revoke invalida a credencial imediatamente (segredo vigente e anterior),
+// condicionada à versão esperada (If-Match). Revogar uma credencial já
+// revogada, na versão informada, não tem efeito.
+func (s *Service) Revoke(ctx context.Context, tenantID uuid.UUID, g Grantor, id uuid.UUID, expectedVersion int) error {
 	now := s.clock.Now()
 	return s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		c, err := tx.Credential(ctx, id, true)
@@ -301,9 +308,12 @@ func (s *Service) Revoke(ctx context.Context, tenantID uuid.UUID, g Grantor, id 
 			return err
 		}
 		if c.RevokedAt != nil {
+			if c.Version != expectedVersion {
+				return errVersionMismatch
+			}
 			return nil
 		}
-		c.RevokedAt, c.RevokedBy = &now, &g.UserID
+		c.RevokedAt, c.RevokedBy, c.Version = &now, &g.UserID, expectedVersion
 		if err := tx.RevokeCredential(ctx, c); err != nil {
 			return err
 		}
@@ -311,6 +321,10 @@ func (s *Service) Revoke(ctx context.Context, tenantID uuid.UUID, g Grantor, id 
 			map[string]any{"prefix": c.Prefix()}))
 	})
 }
+
+// errVersionMismatch recusa a alteração de uma credencial cuja versão difere
+// da informada no If-Match.
+var errVersionMismatch = apperr.PreconditionFailed("version_mismatch", "A credencial foi alterada por outra pessoa. Recarregue e tente novamente.")
 
 var errInvalidCredential = apperr.Unauthenticated("api_credential_invalid", "Credencial de API inválida, expirada ou revogada.")
 

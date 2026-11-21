@@ -36,11 +36,13 @@ export const catalogApi = {
   createPlan: (input: PlanInput) => api.post<PlanDetails>('/api/v1/plans', input),
   updatePlan: (id: string, version: number, input: PlanUpdate) =>
     api.patch<PlanDetails>(`/api/v1/plans/${enc(id)}`, input, { ifMatch: version }),
-  addPriceVersion: (id: string, input: PriceInput) => api.post<PriceVersion>(`/api/v1/plans/${enc(id)}/prices`, input),
+  /** A nova versão de preço altera o plano: If-Match é a versão do plano. */
+  addPriceVersion: (id: string, version: number, input: PriceInput) =>
+    api.post<PriceVersion>(`/api/v1/plans/${enc(id)}/prices`, input, { ifMatch: version }),
 
   listCoupons: (signal?: AbortSignal) => api.get<DataList<Coupon>>('/api/v1/coupons', { signal }),
   createCoupon: (input: CouponInput) => api.post<Coupon>('/api/v1/coupons', input),
-  archiveCoupon: (id: string) => api.post<Coupon>(`/api/v1/coupons/${enc(id)}/archive`),
+  archiveCoupon: (id: string, version: number) => api.post<Coupon>(`/api/v1/coupons/${enc(id)}/archive`, undefined, { ifMatch: version }),
 };
 
 export function useMetrics() {

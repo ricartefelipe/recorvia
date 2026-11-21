@@ -11,14 +11,19 @@ SELECT * FROM api_credentials WHERE tenant_id = @tenant_id AND id = @id;
 SELECT * FROM api_credentials WHERE tenant_id = @tenant_id AND id = @id FOR UPDATE;
 
 -- name: ListAPICredentials :many
--- As credenciais ativas (no máximo 50 por organização) vêm sempre primeiro,
--- para que nenhuma fique fora do limite da listagem e deixe de poder ser
--- revogada pela interface; revogadas e expiradas, que nunca são excluídas,
--- completam a lista a partir das mais recentes.
+-- As credenciais ativas (no máximo 50 por organização) vêm sempre primeiro;
+-- revogadas e expiradas, que nunca são excluídas, vêm depois, das mais
+-- recentes para as mais antigas. A situação é avaliada no instante da
+-- primeira página (@now, levado no cursor), para que uma credencial que
+-- expira durante a navegação não mude de posição entre as páginas. O cursor é
+-- a posição (ativa, criação, id) da última credencial da página.
 SELECT * FROM api_credentials
  WHERE tenant_id = @tenant_id
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR
+        ((revoked_at IS NULL AND (expires_at IS NULL OR expires_at > @now))::int, created_at, id)
+          < (sqlc.narg(cursor_active)::int, sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
  ORDER BY (revoked_at IS NULL AND (expires_at IS NULL OR expires_at > @now)) DESC, created_at DESC, id DESC
- LIMIT 200;
+ LIMIT @row_limit;
 
 -- name: LockTenantForAPICredentialIssuance :one
 -- Serializa a emissão de credenciais da organização, para que a contagem de
@@ -40,7 +45,7 @@ UPDATE api_credentials
 -- name: RevokeAPICredential :execrows
 UPDATE api_credentials
    SET revoked_at = @revoked_at, revoked_by = @revoked_by, version = version + 1
- WHERE tenant_id = @tenant_id AND id = @id AND revoked_at IS NULL;
+ WHERE tenant_id = @tenant_id AND id = @id AND version = @version AND revoked_at IS NULL;
 
 -- name: TouchAPICredential :exec
 -- Registra o último uso com resolução limitada (no máximo uma escrita por

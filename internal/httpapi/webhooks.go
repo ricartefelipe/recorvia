@@ -175,8 +175,13 @@ func (a *API) deleteWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	version, err := ifMatch(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	p := mustPrincipal(r)
-	if err := a.Webhooks.DeleteEndpoint(r.Context(), p.TenantID, p.Actor(), id); err != nil {
+	if err := a.Webhooks.DeleteEndpoint(r.Context(), p.TenantID, p.Actor(), id, version); err != nil {
 		a.writeError(w, r, err)
 		return
 	}
@@ -189,6 +194,11 @@ func (a *API) rotateWebhookSecret(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	version, err := ifMatch(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	var body struct {
 		PreviousSecretValidHours *int `json:"previous_secret_valid_hours"`
 	}
@@ -197,7 +207,7 @@ func (a *API) rotateWebhookSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	e, secret, err := a.Webhooks.RotateSecret(r.Context(), p.TenantID, p.Actor(), id, body.PreviousSecretValidHours)
+	e, secret, err := a.Webhooks.RotateSecret(r.Context(), p.TenantID, p.Actor(), id, body.PreviousSecretValidHours, version)
 	if err != nil {
 		a.writeError(w, r, err)
 		return

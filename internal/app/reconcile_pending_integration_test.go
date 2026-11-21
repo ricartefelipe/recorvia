@@ -50,7 +50,7 @@ func TestReconcilePendingCommandExecutesRegisteredRuns(t *testing.T) {
 	err = env.Store.Payments().InTenant(ctx, tn.ID, func(tx payments.Tx) error {
 		return tx.SaveAccount(ctx, payments.ProviderAccount{ID: ids.New(), TenantID: tn.ID, Provider: "simulator", Environment: "local",
 			Status: "active", IsDefault: true, APIKey: "sim_janela_0001", APIKeyHint: "0001", Secret: strings.Repeat("s", 40),
-			CreatedAt: start, UpdatedAt: start, Version: 1}, []byte("hash-do-token-janela"))
+			CreatedAt: start, UpdatedAt: start, Version: 1}, []byte("hash-do-token-janela"), 0)
 	})
 	if err != nil {
 		t.Fatal(err)

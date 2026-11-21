@@ -49,8 +49,11 @@ type fakeStore struct {
 	calls   map[string]int
 	// order registra as operações na sequência em que foram chamadas.
 	order []string
-	// listedAt é o instante recebido pela última listagem.
-	listedAt time.Time
+	// listedAt, listedLimit e listedCursor são os argumentos recebidos pela
+	// última listagem.
+	listedAt     time.Time
+	listedLimit  int
+	listedCursor string
 }
 
 func newFakeStore() *fakeStore {
@@ -139,8 +142,8 @@ func (tx *fakeTx) Credential(_ context.Context, id uuid.UUID, _ bool) (Credentia
 	return c, nil
 }
 
-func (tx *fakeTx) Credentials(_ context.Context, now time.Time) ([]Credential, error) {
-	tx.store.listedAt = now
+func (tx *fakeTx) Credentials(_ context.Context, now time.Time, limit int, cursor string) (Page, error) {
+	tx.store.listedAt, tx.store.listedLimit, tx.store.listedCursor = now, limit, cursor
 	out := slices.Collect(maps.Values(tx.d.credentials))
 	sort.Slice(out, func(i, j int) bool {
 		if ai, aj := out[i].State(now) == StateActive, out[j].State(now) == StateActive; ai != aj {
@@ -148,7 +151,7 @@ func (tx *fakeTx) Credentials(_ context.Context, now time.Time) ([]Credential, e
 		}
 		return out[i].CreatedAt.After(out[j].CreatedAt)
 	})
-	return out, tx.store.hit("Credentials")
+	return Page{Items: out}, tx.store.hit("Credentials")
 }
 
 func (tx *fakeTx) RotateCredential(_ context.Context, c Credential) error {
@@ -167,6 +170,10 @@ func (tx *fakeTx) RotateCredential(_ context.Context, c Credential) error {
 func (tx *fakeTx) RevokeCredential(_ context.Context, c Credential) error {
 	if err := tx.store.hit("RevokeCredential"); err != nil {
 		return err
+	}
+	cur := tx.d.credentials[c.ID]
+	if cur.Version != c.Version || cur.RevokedAt != nil {
+		return apperr.PreconditionFailed("version_mismatch", "A credencial foi alterada por outra pessoa.")
 	}
 	c.Version++
 	tx.d.credentials[c.ID] = c

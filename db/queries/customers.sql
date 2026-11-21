@@ -19,6 +19,11 @@ UPDATE customers
        payment_terms_days = sqlc.narg(payment_terms_days), version = version + 1
  WHERE tenant_id = @tenant_id AND id = @id AND version = @version;
 
+-- name: BumpCustomerVersion :execrows
+-- Nova versão do cliente por alteração de parte da ficha gravada em outra
+-- tabela (endereço de cobrança), condicionada à versão esperada (If-Match).
+UPDATE customers SET version = version + 1 WHERE tenant_id = @tenant_id AND id = @id AND version = @version;
+
 -- name: ListCustomers :many
 -- Ordenação por allowlist; desempate por id garante ordem determinística.
 -- O cursor é um deslocamento opaco (limite máximo de 100 por página).
@@ -119,7 +124,11 @@ VALUES (@id, @tenant_id, @customer_id, @amount, @currency, @kind, sqlc.narg(invo
 ON CONFLICT (tenant_id, request_key) DO NOTHING;
 
 -- name: ListCreditEntries :many
-SELECT * FROM customer_credit_entries WHERE tenant_id = @tenant_id AND customer_id = @customer_id ORDER BY created_at DESC, id DESC LIMIT 200;
+SELECT * FROM customer_credit_entries
+ WHERE tenant_id = @tenant_id AND customer_id = @customer_id
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (created_at, id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT @row_limit;
 
 -- name: AnonymizeCustomer :one
 -- Substitui os dados pessoais por valores neutros, arquiva e marca a

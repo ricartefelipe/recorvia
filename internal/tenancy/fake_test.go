@@ -260,13 +260,13 @@ func (t *fakeTx) UpdateInvitation(_ context.Context, inv Invitation) error {
 	return nil
 }
 
-func (t *fakeTx) Invitations(context.Context) ([]Invitation, error) {
+func (t *fakeTx) Invitations(context.Context, int, string) (InvitationPage, error) {
 	if err := t.store.hit("Invitations"); err != nil {
-		return nil, err
+		return InvitationPage{}, err
 	}
 	out := slices.Collect(maps.Values(t.d.invitations))
 	sort.Slice(out, func(i, j int) bool { return out[i].Email < out[j].Email })
-	return out, nil
+	return InvitationPage{Items: out}, nil
 }
 
 func (t *fakeTx) PendingInvitations(_ context.Context, now time.Time) (int, error) {

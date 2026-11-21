@@ -45,7 +45,7 @@ export function AddressPanel({ customer }: { customer: CustomerDetails }) {
     },
   });
   const mutation = useApiMutation<Address, Address, AddressForm>({
-    mutationFn: (address) => customersApi.setAddress(customer.id, address),
+    mutationFn: (address) => customersApi.setAddress(customer.id, customer.version, address),
     invalidate: ['customers'],
     successMessage: 'Endereço de cobrança gravado.',
     form,

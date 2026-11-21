@@ -284,7 +284,7 @@ func TestChargebackLifecycleWithSimulator(t *testing.T) {
 	if d := h.dashboard(t, "2026-03"); d.Chargebacks != 6000 || d.Refunds != 0 {
 		t.Fatalf("painel: chargebacks=%d reembolsos=%d", d.Chargebacks, d.Refunds)
 	}
-	disputes, err := h.env.Store.ListDisputes(ctx, h.tn.ID, nil, 10)
+	disputes, _, err := h.env.Store.ListDisputes(ctx, h.tn.ID, nil, 10, "")
 	if err != nil || len(disputes) != 2 {
 		t.Fatalf("disputas: %d %v", len(disputes), err)
 	}
@@ -399,12 +399,13 @@ func TestDisputeLostWithPendingRefundKeepsLedgerConsistent(t *testing.T) {
 			if err != nil || run.Status != payments.RunCompleted {
 				t.Fatalf("conciliação: %+v %v", run, err)
 			}
-			list, err := h.env.Store.ListDiscrepancies(ctx, h.tn.ID, "open", string(payments.DiscrepancyRefundPending), 10)
+			list, _, err := h.env.Store.ListDiscrepancies(ctx, h.tn.ID, "open", string(payments.DiscrepancyRefundPending), 10, "")
 			if err != nil || len(list) != 1 || list[0].RefundID == nil || *list[0].RefundID != r.ID {
 				t.Fatalf("reembolso pendente na conciliação: %+v %v", list, err)
 			}
 			if _, err := h.pay.ResolveDiscrepancy(ctx, h.tn.ID, h.tn.Actor, &h.tn.Owner.ID, payments.ResolveInput{ID: list[0].ID,
-				Resolution: payments.ResolutionAcceptProvider, Justification: "Resultado do reembolso conferido no extrato do provedor."}); err != nil {
+				Resolution: payments.ResolutionAcceptProvider, Justification: "Resultado do reembolso conferido no extrato do provedor.",
+				ExpectedVersion: discrepancyVersion(t, h.pay, h.tn.ID, list[0].ID)}); err != nil {
 				t.Fatalf("adoção do provedor: %v", err)
 			}
 			got = h.charge(t, c.InvoiceID)
@@ -654,7 +655,7 @@ func TestReconciliationWithSimulator(t *testing.T) {
 	if err != nil || run.Status != payments.RunCompleted || run.DiscrepancyCount != 2 {
 		t.Fatalf("execução: %+v %v", run, err)
 	}
-	list, err := h.env.Store.ListDiscrepancies(ctx, h.tn.ID, "open", "", 50)
+	list, _, err := h.env.Store.ListDiscrepancies(ctx, h.tn.ID, "open", "", 50, "")
 	if err != nil || len(list) != 2 {
 		t.Fatalf("divergências: %d %v", len(list), err)
 	}
@@ -687,7 +688,8 @@ func TestReconciliationWithSimulator(t *testing.T) {
 	// Resoluções: pagamento aplicado e taxa aceita com ajuste no ledger.
 	just := "Conferido com o extrato do simulador."
 	if _, err := h.pay.ResolveDiscrepancy(ctx, h.tn.ID, h.tn.Actor, &h.tn.Owner.ID, payments.ResolveInput{ID: payD.ID,
-		Resolution: payments.ResolutionAcceptProvider, Justification: just}); err != nil {
+		Resolution: payments.ResolutionAcceptProvider, Justification: just,
+		ExpectedVersion: discrepancyVersion(t, h.pay, h.tn.ID, payD.ID)}); err != nil {
 		t.Fatal(err)
 	}
 	if d := h.dashboard(t, ""); d.OpenDiscrepancies != 1 {
@@ -698,7 +700,8 @@ func TestReconciliationWithSimulator(t *testing.T) {
 		t.Fatalf("pagamento não refletido aplicado: %s %v", paidInv.Status, err)
 	}
 	resolved, err := h.pay.ResolveDiscrepancy(ctx, h.tn.ID, h.tn.Actor, &h.tn.Owner.ID, payments.ResolveInput{ID: feeD.ID,
-		Resolution: payments.ResolutionAcceptProvider, Justification: just})
+		Resolution: payments.ResolutionAcceptProvider, Justification: just,
+		ExpectedVersion: discrepancyVersion(t, h.pay, h.tn.ID, feeD.ID)})
 	if err != nil || resolved.LedgerTransactionID == nil || resolved.ResolvedBy == nil || *resolved.ResolvedBy != h.tn.Owner.ID {
 		t.Fatalf("taxa aceita: %+v %v", resolved, err)
 	}
@@ -715,13 +718,13 @@ func TestReconciliationWithSimulator(t *testing.T) {
 	if err != nil || len(history) < 2 {
 		t.Fatalf("histórico da divergência: %d %v", len(history), err)
 	}
-	runs, err := h.env.Store.ListReconciliationRuns(ctx, h.tn.ID, 10)
+	runs, _, err := h.env.Store.ListReconciliationRuns(ctx, h.tn.ID, 10, "")
 	if err != nil || len(runs) != 3 {
 		t.Fatalf("execuções: %d %v", len(runs), err)
 	}
 	// Outro tenant não vê as divergências (RLS e filtro explícito).
 	other := h.env.NewTenant(t, "outro")
-	if l, err := h.env.Store.ListDiscrepancies(ctx, other.ID, "", "", 50); err != nil || len(l) != 0 {
+	if l, _, err := h.env.Store.ListDiscrepancies(ctx, other.ID, "", "", 50, ""); err != nil || len(l) != 0 {
 		t.Fatalf("isolamento: %d %v", len(l), err)
 	}
 	if _, err := h.pay.Discrepancy(ctx, other.ID, feeD.ID); !apperr.IsKind(err, apperr.KindNotFound) {

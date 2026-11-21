@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { FieldValues } from 'react-hook-form';
 import { useSearchParams } from 'react-router';
 import type { QueryDomain } from '../api/queryKeys';
@@ -23,6 +23,25 @@ export function useCursorPagination(filterKey: string) {
     next: (cursor: string) => setState({ key: filterKey, cursors: [...current.cursors, cursor] }),
     previous: () => setState({ key: filterKey, cursors: current.cursors.slice(0, -1) }),
   };
+}
+
+/**
+ * Volta à página anterior quando uma página depois da primeira fica vazia,
+ * por exemplo quando uma ação na própria lista tira dela os últimos itens da
+ * página. Sem isso, a tela mostraria o estado de lista vazia e esconderia o
+ * paginador, embora as páginas anteriores ainda tenham itens. Enquanto a
+ * página nova carrega (dados da página anterior em exibição), nada muda.
+ */
+export function useReturnFromEmptyPage(
+  pagination: { hasPrevious: boolean; previous: () => void },
+  items: readonly unknown[] | undefined,
+  isPlaceholderData = false,
+) {
+  const empty = pagination.hasPrevious && !isPlaceholderData && items?.length === 0;
+  const { previous } = pagination;
+  useEffect(() => {
+    if (empty) previous();
+  }, [empty, previous]);
 }
 
 /** Filtros de lista guardados na URL (permitem voltar e compartilhar o link). */
@@ -55,6 +74,13 @@ export interface ApiMutationOptions<TVars, TData, TForm extends FieldValues> {
   successMessage?: string | ((data: TData, vars: TVars) => string);
   onSuccess?: (data: TData, vars: TVars) => void;
   onError?: (error: unknown) => void;
+  /**
+   * Executado quando, depois de um 412, a pessoa escolhe recarregar os dados.
+   * Os modais de edição que guardam o recurso aberto fecham aqui: a lista
+   * recarregada mostra a versão atual, e a alteração é refeita sobre ela, sem
+   * que uma recarga automática troque a versão por baixo do formulário.
+   */
+  onConcurrentReload?: () => void;
   form?: FormErrorTarget<TForm>;
   fieldMap?: Record<string, string>;
   /**
@@ -95,7 +121,10 @@ export function useApiMutation<TVars = void, TData = unknown, TForm extends Fiel
       handleMutationError(error, {
         form: options.form,
         fieldMap: options.fieldMap,
-        onConcurrentChange: () => void invalidateAll(),
+        onConcurrentChange: () => {
+          void invalidateAll();
+          options.onConcurrentReload?.();
+        },
       });
       options.onError?.(error);
     },

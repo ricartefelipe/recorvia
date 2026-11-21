@@ -1,7 +1,7 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Anchor, Button, Group, Modal, Paper, Stack, Table, Text, Textarea } from '@mantine/core';
 import { IconPlus } from '@tabler/icons-react';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { Link } from 'react-router';
@@ -10,8 +10,8 @@ import type { CreditBalance, CustomerDetails } from '../../api/types';
 import { DateTime, Money, StatusBadge } from '../../components/format';
 import { MoneyInput } from '../../components/inputs';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
-import { confirmAction } from '../../components/ui';
-import { useApiMutation } from '../../lib/hooks';
+import { confirmAction, CursorPager } from '../../components/ui';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
 import { useIdempotencyKey } from '../../lib/idempotency';
 import { creditKindLabels } from '../../lib/labels';
 import { formatMoney } from '../../lib/money';
@@ -68,10 +68,13 @@ function GrantCreditModal({ customer, currency, opened, onClose }: { customer: C
 export function CreditsPanel({ customer }: { customer: CustomerDetails }) {
   const { keys } = useTenant();
   const [granting, setGranting] = useState(false);
+  const pagination = useCursorPagination(`credits:${customer.id}`);
   const query = useQuery({
-    queryKey: keys('customers', 'credits', customer.id),
-    queryFn: ({ signal }) => customersApi.credits(customer.id, signal),
+    queryKey: keys('customers', 'credits', customer.id, pagination.cursor),
+    queryFn: ({ signal }) => customersApi.credits(customer.id, { cursor: pagination.cursor, limit: 25 }, signal),
+    placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.entries, query.isPlaceholderData);
   return (
     <QueryContent query={query} loading={<LoadingState />}>
       {(credits) => (
@@ -96,44 +99,54 @@ export function CreditsPanel({ customer }: { customer: CustomerDetails }) {
           {credits.entries.length === 0 ? (
             <EmptyState title="Nenhum movimento de crédito" description="Concessões e usos de crédito em faturas aparecerão aqui." />
           ) : (
-            <Table.ScrollContainer minWidth={640}>
-              <Table aria-label="Movimentos de crédito">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Data</Table.Th>
-                    <Table.Th>Tipo</Table.Th>
-                    <Table.Th ta="right">Valor</Table.Th>
-                    <Table.Th>Motivo</Table.Th>
-                    <Table.Th>Fatura</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {credits.entries.map((e) => (
-                    <Table.Tr key={e.id}>
-                      <Table.Td>
-                        <DateTime value={e.created_at} />
-                      </Table.Td>
-                      <Table.Td>
-                        <StatusBadge status={e.kind} labels={creditKindLabels} />
-                      </Table.Td>
-                      <Table.Td ta="right">
-                        <Money value={e.amount} currency={credits.currency} />
-                      </Table.Td>
-                      <Table.Td>{e.reason}</Table.Td>
-                      <Table.Td>
-                        {e.invoice_id ? (
-                          <Anchor component={Link} to={`/faturas/${e.invoice_id}`}>
-                            Ver fatura
-                          </Anchor>
-                        ) : (
-                          '—'
-                        )}
-                      </Table.Td>
+            <>
+              <Table.ScrollContainer minWidth={640}>
+                <Table aria-label="Movimentos de crédito">
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Data</Table.Th>
+                      <Table.Th>Tipo</Table.Th>
+                      <Table.Th ta="right">Valor</Table.Th>
+                      <Table.Th>Motivo</Table.Th>
+                      <Table.Th>Fatura</Table.Th>
                     </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            </Table.ScrollContainer>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {credits.entries.map((e) => (
+                      <Table.Tr key={e.id}>
+                        <Table.Td>
+                          <DateTime value={e.created_at} />
+                        </Table.Td>
+                        <Table.Td>
+                          <StatusBadge status={e.kind} labels={creditKindLabels} />
+                        </Table.Td>
+                        <Table.Td ta="right">
+                          <Money value={e.amount} currency={credits.currency} />
+                        </Table.Td>
+                        <Table.Td>{e.reason}</Table.Td>
+                        <Table.Td>
+                          {e.invoice_id ? (
+                            <Anchor component={Link} to={`/faturas/${e.invoice_id}`}>
+                              Ver fatura
+                            </Anchor>
+                          ) : (
+                            '—'
+                          )}
+                        </Table.Td>
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
+              <CursorPager
+                page={pagination.page}
+                hasPrevious={pagination.hasPrevious}
+                hasNext={!!credits.next_cursor}
+                onPrevious={pagination.previous}
+                onNext={() => credits.next_cursor && pagination.next(credits.next_cursor)}
+                loading={query.isFetching}
+              />
+            </>
           )}
           <GrantCreditModal customer={customer} currency={credits.currency} opened={granting} onClose={() => setGranting(false)} />
         </Stack>

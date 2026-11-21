@@ -67,7 +67,11 @@ UPDATE invitations SET accepted_at = sqlc.narg(accepted_at), accepted_by = sqlc.
  WHERE tenant_id = @tenant_id AND id = @id;
 
 -- name: ListInvitations :many
-SELECT * FROM invitations WHERE tenant_id = @tenant_id ORDER BY created_at DESC, id DESC LIMIT 200;
+SELECT * FROM invitations
+ WHERE tenant_id = @tenant_id
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (created_at, id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT @row_limit;
 
 -- name: CountPendingInvitations :one
 SELECT count(*)::int FROM invitations

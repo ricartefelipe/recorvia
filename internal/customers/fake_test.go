@@ -211,6 +211,20 @@ func (t *memTx) UpsertAddress(_ context.Context, customerID uuid.UUID, a Address
 	return nil
 }
 
+// BumpVersion reproduz o UPDATE condicionado à versão.
+func (t *memTx) BumpVersion(_ context.Context, customerID uuid.UUID, version int) error {
+	if err := t.s.hit("BumpVersion"); err != nil {
+		return err
+	}
+	cur, ok := t.st.customers[customerID]
+	if !ok || cur.Version != version {
+		return apperr.PreconditionFailed("version_mismatch", "O cliente foi alterado por outra pessoa.")
+	}
+	cur.Version++
+	t.st.customers[customerID] = cur
+	return nil
+}
+
 func (t *memTx) HasOpenObligations(_ context.Context, customerID uuid.UUID) (bool, error) {
 	if err := t.s.hit("HasOpenObligations"); err != nil {
 		return false, err

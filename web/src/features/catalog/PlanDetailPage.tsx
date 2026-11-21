@@ -119,7 +119,7 @@ function NewPriceVersionModal({ plan, opened, onClose }: { plan: PlanDetails; op
     values: { price: priceToForm(plan.current_price) },
   });
   const mutation = useApiMutation<PriceInput, PriceVersion, NewPriceForm>({
-    mutationFn: (input) => catalogApi.addPriceVersion(plan.id, input),
+    mutationFn: (input) => catalogApi.addPriceVersion(plan.id, plan.version, input),
     invalidate: ['plans'],
     successMessage: (v) => `Versão ${v.version} do preço criada.`,
     form,

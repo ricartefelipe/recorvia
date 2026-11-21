@@ -26,7 +26,7 @@ import type { WebhookDelivery, WebhookEndpoint, WebhookEndpointInput, WebhookEnd
 import { DateTime, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { confirmAction, CursorPager, PageHeader, SecretRevealModal } from '../../components/ui';
-import { useApiMutation, useCursorPagination } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
 import { deliveryStatusLabels, webhookStatusLabels } from '../../lib/labels';
 import { optionalText } from '../../lib/validation';
 import { Can, usePermission, useTenant } from '../../session/SessionContext';
@@ -84,6 +84,7 @@ function EndpointModal({
       onClose();
       if (!endpoint && 'secret' in result) onCreated(result);
     },
+    onConcurrentReload: onClose,
   });
   return (
     <Modal opened onClose={onClose} title={endpoint ? 'Editar endpoint' : 'Novo endpoint de webhook'} size="lg">
@@ -146,13 +147,14 @@ function RotateSecretModal({ endpoint, onClose, onRotated }: { endpoint: Webhook
   const [hours, setHours] = useState<number | string>(24);
   const valid = typeof hours === 'number' && Number.isInteger(hours) && hours >= 0 && hours <= 168;
   const mutation = useApiMutation<number, WebhookEndpointWithSecret>({
-    mutationFn: (h) => integrationsApi.rotateSecret(endpoint.id, h),
+    mutationFn: (h) => integrationsApi.rotateSecret(endpoint, h),
     invalidate: ['webhooks'],
     successMessage: 'Segredo rotacionado.',
     onSuccess: (r) => {
       onClose();
       onRotated(r);
     },
+    onConcurrentReload: onClose,
   });
   return (
     <Modal opened onClose={onClose} title="Rotacionar segredo">
@@ -188,7 +190,7 @@ export function WebhooksTab() {
   const [secret, setSecret] = useState<WebhookEndpointWithSecret | null>(null);
   const query = useQuery({ queryKey: keys('webhooks', 'endpoints'), queryFn: ({ signal }) => integrationsApi.endpoints(signal) });
   const remove = useApiMutation<WebhookEndpoint, unknown>({
-    mutationFn: (e) => integrationsApi.deleteEndpoint(e.id),
+    mutationFn: (e) => integrationsApi.deleteEndpoint(e),
     invalidate: ['webhooks'],
     successMessage: 'Endpoint removido.',
   });
@@ -392,6 +394,7 @@ export function WebhookDeliveriesPage() {
     queryFn: ({ signal }) => integrationsApi.deliveries(id, { cursor: pagination.cursor, limit: 25 }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   const retry = useApiMutation<WebhookDelivery, WebhookDelivery>({
     mutationFn: (d) => integrationsApi.retryDelivery(d.id),
     invalidate: ['webhooks'],
