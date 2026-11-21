@@ -121,7 +121,7 @@ func (a *API) invoiceFilter(r *http.Request, p Principal) (billing.ListFilter, *
 	}
 	q := r.URL.Query()
 	return billing.ListFilter{Status: billing.Status(q.Get("status")), CustomerID: customerID, SubscriptionID: subID, IssuedFrom: from,
-		IssuedTo: to, Overdue: q.Get("overdue") == "true", Limit: limit, Cursor: q.Get("cursor")}, loc, nil
+		IssuedTo: to, Overdue: q.Get("overdue") == "true", OpenBalance: q.Get("open_balance") == "true", Limit: limit, Cursor: q.Get("cursor")}, loc, nil
 }
 
 func itemDTO(it billing.Item) map[string]any {
