@@ -1,6 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { ActionIcon, Alert, Badge, Button, Checkbox, Group, Modal, SimpleGrid, Stack, Table, TextInput, Tooltip } from '@mantine/core';
-import { IconInfoCircle, IconPlus, IconTrash } from '@tabler/icons-react';
+import { IconInfoCircle, IconPencil, IconPlus, IconTrash } from '@tabler/icons-react';
 import { useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
@@ -22,15 +22,19 @@ const contactSchema = z.object({
 
 type ContactForm = z.input<typeof contactSchema>;
 
-function AddContactModal({ customerId, opened, onClose }: { customerId: string; opened: boolean; onClose: () => void }) {
+/** Inclusão (sem contact) ou edição de um contato do cliente. */
+function ContactModal({ customerId, contact, onClose }: { customerId: string; contact?: Contact; onClose: () => void }) {
+  const editing = !!contact;
   const form = useForm<ContactForm, unknown, ContactInput>({
     resolver: zodResolver(contactSchema),
-    defaultValues: { name: '', email: '', phone: '', role: '', receives_billing_email: true },
+    defaultValues: contact
+      ? { name: contact.name, email: contact.email, phone: contact.phone ?? '', role: contact.role, receives_billing_email: contact.receives_billing_email }
+      : { name: '', email: '', phone: '', role: '', receives_billing_email: true },
   });
   const mutation = useApiMutation<ContactInput, Contact, ContactForm>({
-    mutationFn: (input) => customersApi.addContact(customerId, input),
+    mutationFn: (input) => (contact ? customersApi.updateContact(customerId, contact.id, input) : customersApi.addContact(customerId, input)),
     invalidate: ['customers'],
-    successMessage: 'Contato adicionado.',
+    successMessage: editing ? 'Contato alterado.' : 'Contato adicionado.',
     form,
     onSuccess: () => {
       form.reset();
@@ -39,7 +43,7 @@ function AddContactModal({ customerId, opened, onClose }: { customerId: string; 
   });
   const { register, control, formState } = form;
   return (
-    <Modal opened={opened} onClose={onClose} title="Adicionar contato" size="lg">
+    <Modal opened onClose={onClose} title={editing ? 'Editar contato' : 'Adicionar contato'} size="lg">
       <form onSubmit={form.handleSubmit((input) => mutation.mutate(input))} noValidate>
         <Stack>
           <SimpleGrid cols={{ base: 1, sm: 2 }}>
@@ -64,7 +68,7 @@ function AddContactModal({ customerId, opened, onClose }: { customerId: string; 
               Cancelar
             </Button>
             <Button type="submit" loading={mutation.isPending}>
-              Adicionar
+              {editing ? 'Salvar contato' : 'Adicionar'}
             </Button>
           </Group>
         </Stack>
@@ -74,7 +78,8 @@ function AddContactModal({ customerId, opened, onClose }: { customerId: string; 
 }
 
 export function ContactsPanel({ customer }: { customer: CustomerDetails }) {
-  const [adding, setAdding] = useState(false);
+  // null: nenhum modal; 'new': inclusão; Contact: edição desse contato.
+  const [editing, setEditing] = useState<Contact | 'new' | null>(null);
   const canWrite = usePermission('customers.write');
   const remove = useApiMutation<Contact, unknown>({
     mutationFn: (contact) => customersApi.removeContact(customer.id, contact.id),
@@ -96,11 +101,10 @@ export function ContactsPanel({ customer }: { customer: CustomerDetails }) {
     <Stack>
       <Group justify="space-between">
         <Alert variant="light" icon={<IconInfoCircle />} p="xs" style={{ flex: 1 }}>
-          A preferência de e-mail de cobrança é definida ao adicionar o contato. O próprio cliente pode alterá-la pelo
-          portal; aqui, remova e adicione o contato novamente.
+          A preferência de e-mail de cobrança pode ser alterada aqui, editando o contato, ou pelo próprio cliente no portal.
         </Alert>
         <Can permission="customers.write">
-          <Button leftSection={<IconPlus size={16} />} onClick={() => setAdding(true)} disabled={customer.status !== 'active'}>
+          <Button leftSection={<IconPlus size={16} />} onClick={() => setEditing('new')} disabled={customer.status !== 'active'}>
             Adicionar contato
           </Button>
         </Can>
@@ -137,17 +141,29 @@ export function ContactsPanel({ customer }: { customer: CustomerDetails }) {
                   </Table.Td>
                   {canWrite && (
                     <Table.Td>
-                      <Tooltip label="Remover contato">
-                        <ActionIcon
-                          variant="subtle"
-                          color="red"
-                          aria-label={`Remover contato ${c.name}`}
-                          onClick={() => void onRemove(c)}
-                          loading={remove.isPending && remove.variables?.id === c.id}
-                        >
-                          <IconTrash size={16} />
-                        </ActionIcon>
-                      </Tooltip>
+                      <Group gap={4} wrap="nowrap">
+                        <Tooltip label="Editar contato">
+                          <ActionIcon
+                            variant="subtle"
+                            aria-label={`Editar contato ${c.name}`}
+                            onClick={() => setEditing(c)}
+                            disabled={!!customer.anonymized_at}
+                          >
+                            <IconPencil size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                        <Tooltip label="Remover contato">
+                          <ActionIcon
+                            variant="subtle"
+                            color="red"
+                            aria-label={`Remover contato ${c.name}`}
+                            onClick={() => void onRemove(c)}
+                            loading={remove.isPending && remove.variables?.id === c.id}
+                          >
+                            <IconTrash size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                      </Group>
                     </Table.Td>
                   )}
                 </Table.Tr>
@@ -156,7 +172,14 @@ export function ContactsPanel({ customer }: { customer: CustomerDetails }) {
           </Table>
         </Table.ScrollContainer>
       )}
-      <AddContactModal customerId={customer.id} opened={adding} onClose={() => setAdding(false)} />
+      {editing && (
+        <ContactModal
+          key={editing === 'new' ? 'new' : editing.id}
+          customerId={customer.id}
+          contact={editing === 'new' ? undefined : editing}
+          onClose={() => setEditing(null)}
+        />
+      )}
     </Stack>
   );
 }

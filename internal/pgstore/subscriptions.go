@@ -42,7 +42,7 @@ func subscriptionFromRow(r dbgen.Subscription) (subscriptions.Subscription, erro
 		NextBillingAt: r.NextBillingAt, CancelAtPeriodEnd: r.CancelAtPeriodEnd, CanceledAt: r.CanceledAt, CancelReason: deref(r.CancelReason),
 		EndedAt: r.EndedAt, SuspendedAt: r.SuspendedAt, SuspensionReason: deref(r.SuspensionReason), PaymentTermsDays: intFromPtr32(r.PaymentTermsDays),
 		PriceOverride: override, PriceOverrideAdjustmentID: r.PriceOverrideAdjustmentID, PendingUsageStarts: pendingUsageFromPg(r.PendingUsageStarts),
-		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: int(r.Version)}, nil
+		RequestKey: deref(r.RequestKey), RequestFingerprint: r.RequestFingerprint, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: int(r.Version)}, nil
 }
 
 // pendingUsageFromPg normaliza a lista lida do banco: vazia vira nula e os
@@ -66,14 +66,15 @@ func pendingUsageToPg(starts []time.Time) []time.Time {
 	return starts
 }
 
-func (b base) insertSubscription(ctx context.Context, s subscriptions.Subscription) error {
-	return b.q.InsertSubscription(ctx, dbgen.InsertSubscriptionParams{ID: s.ID, TenantID: b.tenantID, CustomerID: s.CustomerID, PlanID: s.PlanID,
+func (b base) insertSubscription(ctx context.Context, s subscriptions.Subscription) (bool, error) {
+	n, err := b.q.InsertSubscription(ctx, dbgen.InsertSubscriptionParams{ID: s.ID, TenantID: b.tenantID, CustomerID: s.CustomerID, PlanID: s.PlanID,
 		PriceVersionID: s.PriceVersionID, Status: string(s.Status), Quantity: int32(s.Quantity), BillingInterval: string(s.Interval),
 		Timezone: s.Timezone, AnchorDate: dateToPg(s.Anchor), TrialEndsAt: s.TrialEndsAt, StartedAt: s.StartedAt,
 		CurrentPeriodStart: s.CurrentPeriod.Start, CurrentPeriodEnd: s.CurrentPeriod.End, NextBillingIndex: int32(s.NextBillingIndex),
 		NextBillingAt: s.NextBillingAt, CancelAtPeriodEnd: s.CancelAtPeriodEnd, CanceledAt: s.CanceledAt, CancelReason: strPtr(s.CancelReason),
 		EndedAt: s.EndedAt, SuspendedAt: s.SuspendedAt, SuspensionReason: strPtr(s.SuspensionReason), PaymentTermsDays: intPtr32(s.PaymentTermsDays),
-		CreatedAt: s.CreatedAt})
+		RequestKey: strPtr(s.RequestKey), RequestFingerprint: s.RequestFingerprint, CreatedAt: s.CreatedAt})
+	return n == 1, err
 }
 
 func (b base) updateSubscription(ctx context.Context, s subscriptions.Subscription) error {
@@ -134,16 +135,24 @@ func (tx subscriptionsTx) PriceVersion(ctx context.Context, id uuid.UUID) (catal
 	return tx.priceVersion(ctx, id)
 }
 
-func (tx subscriptionsTx) PlatformPlan(ctx context.Context) (platformbilling.Plan, error) {
-	return tx.platformPlan(ctx)
+func (tx subscriptionsTx) LockPlatformPlan(ctx context.Context) (platformbilling.Plan, error) {
+	return tx.lockedPlatformPlan(ctx)
 }
 
 func (tx subscriptionsTx) PlatformUsage(ctx context.Context) (platformbilling.Usage, error) {
 	return tx.platformUsage(ctx)
 }
 
-func (tx subscriptionsTx) Insert(ctx context.Context, s subscriptions.Subscription) error {
+func (tx subscriptionsTx) Insert(ctx context.Context, s subscriptions.Subscription) (bool, error) {
 	return tx.insertSubscription(ctx, s)
+}
+
+func (tx subscriptionsTx) ByRequestKey(ctx context.Context, key string) (subscriptions.Subscription, error) {
+	r, err := tx.q.GetSubscriptionByRequestKey(ctx, dbgen.GetSubscriptionByRequestKeyParams{TenantID: tx.tenantID, RequestKey: &key})
+	if err != nil {
+		return subscriptions.Subscription{}, notFound(err, "subscription_not_found", "Assinatura não encontrada.")
+	}
+	return subscriptionFromRow(r)
 }
 
 func (tx subscriptionsTx) Get(ctx context.Context, id uuid.UUID, forUpdate bool) (subscriptions.Subscription, error) {
@@ -175,7 +184,7 @@ func (tx subscriptionsTx) List(ctx context.Context, f subscriptions.ListFilter) 
 	}
 	limit := pageLimit(f.Limit)
 	rows, err := tx.q.ListSubscriptions(ctx, dbgen.ListSubscriptionsParams{TenantID: tx.tenantID, Status: strPtr(string(f.Status)),
-		CustomerID: f.CustomerID, CursorTs: cts, CursorID: cid, RowLimit: int32(limit + 1)})
+		OnlyInForce: f.InForce, CustomerID: f.CustomerID, CursorTs: cts, CursorID: cid, RowLimit: int32(limit + 1)})
 	if err != nil {
 		return subscriptions.Page{}, err
 	}

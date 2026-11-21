@@ -6,12 +6,19 @@ SELECT * FROM notification_templates WHERE tenant_id = @tenant_id ORDER BY templ
 -- name: GetNotificationTemplate :one
 SELECT * FROM notification_templates WHERE tenant_id = @tenant_id AND template_key = @template_key;
 
--- name: UpsertNotificationTemplate :one
+-- name: InsertNotificationTemplate :many
+-- Primeira personalização (versão esperada 0, a do template padrão): sem
+-- linha se outra pessoa personalizou antes.
 INSERT INTO notification_templates (tenant_id, template_key, subject, body, updated_by, created_at, updated_at, version)
 VALUES (@tenant_id, @template_key, @subject, @body, sqlc.narg(updated_by), @now, @now, 1)
-ON CONFLICT (tenant_id, template_key) DO UPDATE
-   SET subject = EXCLUDED.subject, body = EXCLUDED.body, updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at,
-       version = notification_templates.version + 1
+ON CONFLICT (tenant_id, template_key) DO NOTHING
+RETURNING *;
+
+-- name: UpdateNotificationTemplate :many
+-- Alteração do template personalizado, condicionada à versão esperada.
+UPDATE notification_templates
+   SET subject = @subject, body = @body, updated_by = sqlc.narg(updated_by), updated_at = @now, version = version + 1
+ WHERE tenant_id = @tenant_id AND template_key = @template_key AND version = @version
 RETURNING *;
 
 -- name: NotificationKeyExists :one
@@ -85,6 +92,18 @@ SELECT count(*)::int FROM notifications
 -- name: GetReminderRules :one
 SELECT send_window_start_hour, send_window_end_hour, max_messages_per_day
   FROM collection_policies WHERE tenant_id = @tenant_id AND id = @id;
+
+-- name: GetSuspensionSendWindow :one
+-- Janela de envio da política que aplicou a suspensão (aviso de suspensão).
+SELECT p.send_window_start_hour, p.send_window_end_hour
+  FROM collection_suspensions s
+  JOIN collection_policies p ON p.tenant_id = s.tenant_id AND p.id = s.policy_id
+ WHERE s.tenant_id = @tenant_id AND s.id = @id;
+
+-- name: GetSuspensionActive :one
+-- Situação da suspensão do aviso de suspensão: o aviso só sai enquanto a
+-- própria suspensão estiver ativa.
+SELECT (status = 'active')::boolean AS active FROM collection_suspensions WHERE tenant_id = @tenant_id AND id = @id;
 
 -- name: CancelScheduledReminders :many
 UPDATE notifications

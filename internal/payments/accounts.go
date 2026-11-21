@@ -23,6 +23,10 @@ type AccountInput struct {
 	// no simulador; authToken no Asaas (enviado no header asaas-access-token).
 	WebhookSecret string
 	MakeDefault   bool
+	// ExpectedVersion é a versão da conta vista por quem configura
+	// (If-Match): 0 para o provedor ainda não configurado. Divergente, nada é
+	// alterado (412 version_mismatch).
+	ExpectedVersion int
 }
 
 // ConfiguredAccount é o resultado da configuração. EndpointURL contém o
@@ -81,14 +85,22 @@ func (s *Service) ConfigureAccount(ctx context.Context, tenantID uuid.UUID, acto
 			}
 		}
 		a, err := tx.AccountByProvider(ctx, in.Provider)
-		if err == nil {
+		switch {
+		case err == nil:
 			existing = &a
-			return nil
+		case !apperr.IsKind(err, apperr.KindNotFound):
+			return err
 		}
-		if apperr.IsKind(err, apperr.KindNotFound) {
-			return nil
+		// Recusa antecipada da versão divergente, antes de chamar o
+		// provedor; a condição da gravação, adiante, é a que decide.
+		current := 0
+		if existing != nil {
+			current = existing.Version
 		}
-		return err
+		if current != in.ExpectedVersion {
+			return errAccountVersion
+		}
+		return nil
 	})
 	if err != nil {
 		return ConfiguredAccount{}, err
@@ -114,9 +126,10 @@ func (s *Service) ConfigureAccount(ctx context.Context, tenantID uuid.UUID, acto
 			"O provedor recusou a configuração. Verifique a chave de API e o ambiente.").Wrap(err)
 	}
 	err = s.store.InTenant(ctx, tenantID, func(tx Tx) error {
-		if err := tx.SaveAccount(ctx, account, tokenHash); err != nil {
+		if err := tx.SaveAccount(ctx, account, tokenHash, in.ExpectedVersion); err != nil {
 			return err
 		}
+		account.Version = in.ExpectedVersion + 1
 		return tx.Audit(ctx, audit.New(tenantID, now, actor, "integration.provider_configured", "payment_provider_account", account.ID.String(),
 			map[string]any{"provider": in.Provider, "environment": in.Environment, "default": account.IsDefault}))
 	})
@@ -125,6 +138,11 @@ func (s *Service) ConfigureAccount(ctx context.Context, tenantID uuid.UUID, acto
 	}
 	return ConfiguredAccount{Account: account, EndpointURL: endpoint}, nil
 }
+
+// errAccountVersion recusa a configuração com versão diferente da informada
+// no If-Match.
+var errAccountVersion = apperr.PreconditionFailed("version_mismatch",
+	"A configuração do provedor foi alterada por outra pessoa. Recarregue e tente novamente.")
 
 func hint(key string) string {
 	if len(key) <= 4 {

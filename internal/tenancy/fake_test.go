@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ricartefelipe/recorvia/internal/audit"
+	"github.com/ricartefelipe/recorvia/internal/kernel/address"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/outbox"
 	"github.com/ricartefelipe/recorvia/internal/platformbilling"
@@ -160,8 +161,21 @@ func (t *fakeTx) UpdateTenant(_ context.Context, tn Tenant) error {
 	if t.d.tenant == nil || t.d.tenant.Version != tn.Version {
 		return apperr.PreconditionFailed("version_mismatch", "A organização foi alterada por outra pessoa.")
 	}
+	// Como no banco, o endereço fica em outra tabela e não é gravado aqui.
 	tn.Version++
+	tn.Address = t.d.tenant.Address
 	t.d.tenant = &tn
+	return nil
+}
+
+func (t *fakeTx) UpsertTenantAddress(_ context.Context, a address.Address, _ time.Time) error {
+	if err := t.store.hit("UpsertTenantAddress"); err != nil {
+		return err
+	}
+	if t.d.tenant == nil {
+		return apperr.NotFound("organization_not_found", "Organização não encontrada.")
+	}
+	t.d.tenant.Address = &a
 	return nil
 }
 
@@ -260,13 +274,13 @@ func (t *fakeTx) UpdateInvitation(_ context.Context, inv Invitation) error {
 	return nil
 }
 
-func (t *fakeTx) Invitations(context.Context) ([]Invitation, error) {
+func (t *fakeTx) Invitations(context.Context, int, string) (InvitationPage, error) {
 	if err := t.store.hit("Invitations"); err != nil {
-		return nil, err
+		return InvitationPage{}, err
 	}
 	out := slices.Collect(maps.Values(t.d.invitations))
 	sort.Slice(out, func(i, j int) bool { return out[i].Email < out[j].Email })
-	return out, nil
+	return InvitationPage{Items: out}, nil
 }
 
 func (t *fakeTx) PendingInvitations(_ context.Context, now time.Time) (int, error) {
@@ -289,8 +303,8 @@ func (t *fakeTx) DefaultPlatformPlan(context.Context) (platformbilling.Plan, err
 	return t.store.defaultPlan, nil
 }
 
-func (t *fakeTx) PlatformPlan(context.Context) (platformbilling.Plan, error) {
-	if err := t.store.hit("PlatformPlan"); err != nil {
+func (t *fakeTx) LockPlatformPlan(context.Context) (platformbilling.Plan, error) {
+	if err := t.store.hit("LockPlatformPlan"); err != nil {
 		return platformbilling.Plan{}, err
 	}
 	return t.d.plan, nil

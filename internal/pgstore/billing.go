@@ -60,7 +60,12 @@ func (b base) tenantSettings(ctx context.Context) (billing.TenantSettings, error
 	if err != nil {
 		return billing.TenantSettings{}, err
 	}
-	return billing.TenantSettings{Location: loc, InvoicePrefix: t.InvoicePrefix, PaymentTermsDays: int(t.PaymentTermsDays)}, nil
+	addr, err := b.tenantAddress(ctx)
+	if err != nil {
+		return billing.TenantSettings{}, err
+	}
+	return billing.TenantSettings{Location: loc, InvoicePrefix: t.InvoicePrefix, PaymentTermsDays: int(t.PaymentTermsDays),
+		Issuer: billing.Issuer{Name: t.Name, LegalName: deref(t.LegalName), DocumentNumber: deref(t.DocumentNumber), Address: addr}}, nil
 }
 
 func (tx billingTx) TenantSettings(ctx context.Context) (billing.TenantSettings, error) {
@@ -301,6 +306,12 @@ func (tx billingTx) InsertInvoice(ctx context.Context, inv *billing.Invoice) err
 	if err != nil {
 		return err
 	}
+	var issuer []byte
+	if inv.Issuer != nil {
+		if issuer, err = json.Marshal(inv.Issuer); err != nil {
+			return err
+		}
+	}
 	var ps, pe *time.Time
 	if inv.BillingPeriod != nil {
 		ps, pe = &inv.BillingPeriod.Start, &inv.BillingPeriod.End
@@ -310,7 +321,7 @@ func (tx billingTx) InsertInvoice(ctx context.Context, inv *billing.Invoice) err
 		BillingPeriodEnd: pe, IssuedAt: inv.IssuedAt, DueAt: inv.DueAt, Subtotal: inv.Subtotal.Amount(), DiscountTotal: inv.DiscountTotal.Amount(),
 		Total: inv.Total.Amount(), CreditApplied: inv.CreditApplied.Amount(), AmountPaid: inv.AmountPaid.Amount(),
 		AmountCredited: inv.AmountCredited.Amount(), AmountWrittenOff: inv.AmountWrittenOff.Amount(), AmountDue: inv.AmountDue.Amount(),
-		CustomerSnapshot: snap, Memo: inv.Memo, PaidAt: inv.PaidAt, CreatedAt: inv.CreatedAt})
+		CustomerSnapshot: snap, IssuerSnapshot: issuer, Memo: inv.Memo, PaidAt: inv.PaidAt, CreatedAt: inv.CreatedAt})
 	if postgres.IsUniqueViolation(err, "invoices_subscription_period_key") {
 		return apperr.Conflict("invoice_already_issued", "A fatura deste período já foi emitida.")
 	}
@@ -386,6 +397,13 @@ func invoiceFromRow(r dbgen.Invoice) (billing.Invoice, error) {
 		UncollectibleAt: r.UncollectibleAt, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: int(r.Version)}
 	if r.BillingPeriodStart != nil && r.BillingPeriodEnd != nil {
 		inv.BillingPeriod = &calendar.Period{Start: *r.BillingPeriodStart, End: *r.BillingPeriodEnd}
+	}
+	if len(r.IssuerSnapshot) > 0 {
+		var issuer billing.Issuer
+		if err := json.Unmarshal(r.IssuerSnapshot, &issuer); err != nil {
+			return billing.Invoice{}, err
+		}
+		inv.Issuer = &issuer
 	}
 	return inv, nil
 }
@@ -473,7 +491,7 @@ func (tx billingTx) List(ctx context.Context, f billing.ListFilter) (billing.Pag
 	}
 	limit := pageLimit(f.Limit)
 	rows, err := tx.q.ListInvoices(ctx, dbgen.ListInvoicesParams{TenantID: tx.tenantID, Status: strPtr(string(f.Status)), CustomerID: f.CustomerID,
-		SubscriptionID: f.SubscriptionID, IssuedFrom: f.IssuedFrom, IssuedTo: f.IssuedTo, OnlyOverdue: f.Overdue, Now: &f.Now,
+		SubscriptionID: f.SubscriptionID, IssuedFrom: f.IssuedFrom, IssuedTo: f.IssuedTo, OnlyOverdue: f.Overdue, OnlyOpenBalance: f.OpenBalance, Now: &f.Now,
 		CursorTs: cts, CursorID: cid, RowLimit: int32(limit + 1)})
 	if err != nil {
 		return billing.Page{}, err
@@ -489,7 +507,7 @@ func (tx billingTx) List(ctx context.Context, f billing.ListFilter) (billing.Pag
 			Number: r.Number, Status: r.Status, Kind: r.Kind, Currency: r.Currency, BillingPeriodStart: r.BillingPeriodStart,
 			BillingPeriodEnd: r.BillingPeriodEnd, IssuedAt: r.IssuedAt, DueAt: r.DueAt, Subtotal: r.Subtotal, DiscountTotal: r.DiscountTotal,
 			Total: r.Total, CreditApplied: r.CreditApplied, AmountPaid: r.AmountPaid, AmountCredited: r.AmountCredited,
-			AmountWrittenOff: r.AmountWrittenOff, AmountDue: r.AmountDue, CustomerSnapshot: r.CustomerSnapshot, Memo: r.Memo, PaidAt: r.PaidAt,
+			AmountWrittenOff: r.AmountWrittenOff, AmountDue: r.AmountDue, CustomerSnapshot: r.CustomerSnapshot, IssuerSnapshot: r.IssuerSnapshot, Memo: r.Memo, PaidAt: r.PaidAt,
 			VoidedAt: r.VoidedAt, VoidReason: r.VoidReason, UncollectibleAt: r.UncollectibleAt, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 			Version: r.Version})
 		if err != nil {
@@ -498,6 +516,24 @@ func (tx billingTx) List(ctx context.Context, f billing.ListFilter) (billing.Pag
 		p.Items = append(p.Items, inv)
 	}
 	return p, nil
+}
+
+func (tx billingTx) ListCutoff(ctx context.Context, f billing.ListFilter, maxRows int) (*billing.Cutoff, error) {
+	cts, cid, err := parseTimeCursor(f.Cursor)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.q.InvoiceListPosition(ctx, dbgen.InvoiceListPositionParams{TenantID: tx.tenantID, Status: strPtr(string(f.Status)),
+		CustomerID: f.CustomerID, SubscriptionID: f.SubscriptionID, IssuedFrom: f.IssuedFrom, IssuedTo: f.IssuedTo, OnlyOverdue: f.Overdue,
+		Now: &f.Now, CursorTs: cts, CursorID: cid, RowOffset: int32(maxRows - 1)})
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) < 2 {
+		return nil, nil
+	}
+	last := rows[0]
+	return &billing.Cutoff{CreatedAt: last.CreatedAt, ID: last.ID, NextCursor: timeCursor(last.CreatedAt, last.ID)}, nil
 }
 
 func (tx billingTx) StatusHistory(ctx context.Context, invoiceID uuid.UUID) ([]billing.HistoryEntry, error) {

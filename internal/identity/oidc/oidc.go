@@ -4,6 +4,11 @@
 // A validação do ID token verifica assinatura (somente RS256), emissor,
 // audiência (client_id), expiração e nonce.
 //
+// No logout, o refresh token é revogado pelo servidor no endpoint de
+// revogação (RFC 7009) e o navegador vai ao endpoint de encerramento com
+// client_id e post_logout_redirect_uri: nenhum token do provedor sai do
+// servidor.
+//
 // Em ambientes onde o navegador e o backend acessam o provedor por endereços
 // diferentes (por exemplo, Docker Compose), DiscoveryURL aponta para o
 // endereço interno enquanto Issuer permanece o emissor público presente nos
@@ -14,8 +19,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
@@ -39,6 +46,7 @@ type Provider struct {
 	oauth      oauth2.Config
 	verifier   *gooidc.IDTokenVerifier
 	endSession string
+	revocation string
 	client     *http.Client
 }
 
@@ -61,6 +69,7 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	}
 	var meta struct {
 		EndSession string `json:"end_session_endpoint"`
+		Revocation string `json:"revocation_endpoint"`
 	}
 	if err := p.Claims(&meta); err != nil {
 		return nil, fmt.Errorf("oidc: metadados: %w", err)
@@ -70,6 +79,7 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 			Endpoint: p.Endpoint(), Scopes: []string{gooidc.ScopeOpenID, "profile", "email"}},
 		verifier:   p.Verifier(&gooidc.Config{ClientID: cfg.ClientID, SupportedSigningAlgs: []string{gooidc.RS256}}),
 		endSession: meta.EndSession,
+		revocation: meta.Revocation,
 		client:     client,
 	}, nil
 }
@@ -139,8 +149,11 @@ func (p *Provider) Refresh(ctx context.Context, refreshToken string) (identity.T
 	return identity.Tokens{IDToken: raw, AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken, Expiry: tok.Expiry}, nil
 }
 
-// EndSessionURL monta a URL de logout no provedor (RP-initiated logout).
-func (p *Provider) EndSessionURL(idTokenHint, postLogoutRedirect string) string {
+// EndSessionURL monta a URL de logout no provedor (RP-Initiated Logout 1.0)
+// com client_id e post_logout_redirect_uri. O ID token não é enviado como
+// id_token_hint: a URL vai para o navegador, e os tokens do provedor ficam no
+// servidor. Sem a dica, o provedor pode pedir confirmação ao usuário.
+func (p *Provider) EndSessionURL(postLogoutRedirect string) string {
 	if p.endSession == "" {
 		return postLogoutRedirect
 	}
@@ -151,9 +164,32 @@ func (p *Provider) EndSessionURL(idTokenHint, postLogoutRedirect string) string 
 	q := u.Query()
 	q.Set("client_id", p.oauth.ClientID)
 	q.Set("post_logout_redirect_uri", postLogoutRedirect)
-	if idTokenHint != "" {
-		q.Set("id_token_hint", idTokenHint)
-	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// RevokeTokens revoga o refresh token no endpoint de revogação do provedor
+// (RFC 7009), autenticando o cliente confidencial. Sem refresh token ou sem
+// endpoint anunciado na descoberta, não faz nada.
+func (p *Provider) RevokeTokens(ctx context.Context, tokens identity.Tokens) error {
+	if tokens.RefreshToken == "" || p.revocation == "" {
+		return nil
+	}
+	form := url.Values{"token": {tokens.RefreshToken}, "token_type_hint": {"refresh_token"}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.revocation, strings.NewReader(form.Encode()))
+	if err != nil {
+		return fmt.Errorf("oidc: revogação: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(url.QueryEscape(p.oauth.ClientID), url.QueryEscape(p.oauth.ClientSecret))
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("oidc: revogação: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("oidc: revogação recusada pelo provedor (HTTP %d)", resp.StatusCode)
+	}
+	return nil
 }

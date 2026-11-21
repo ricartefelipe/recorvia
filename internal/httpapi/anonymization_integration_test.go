@@ -34,7 +34,7 @@ func personalCustomer(t *testing.T, c *client, name, cpf, email string) string {
 	c.expect(http.StatusCreated, http.MethodPost, "/api/v1/customers/"+id+"/contacts", map[string]any{"name": "Contato de " + name,
 		"email": "contato." + email, "receives_billing_email": true})
 	c.expect(http.StatusOK, http.MethodPut, "/api/v1/customers/"+id+"/billing-address", map[string]any{"street": "Rua das Acácias", "number": "120",
-		"district": "Centro", "city": "São Paulo", "state": "SP", "postal_code": "01001-000"})
+		"district": "Centro", "city": "São Paulo", "state": "SP", "postal_code": "01001-000"}, matchVersion(c.versionOf("/api/v1/customers/"+id))...)
 	return id
 }
 
@@ -355,9 +355,10 @@ func TestCustomerAnonymizationOverHTTP(t *testing.T) {
 	owner.expectProblem(http.StatusConflict, "customer_anonymized", http.MethodPost, "/api/v1/customers/"+custID+"/contacts",
 		map[string]any{"name": name, "email": email})
 	owner.expectProblem(http.StatusConflict, "customer_anonymized", http.MethodPut, "/api/v1/customers/"+custID+"/billing-address",
-		map[string]any{"street": "Rua A", "number": "1", "district": "Centro", "city": "Recife", "state": "PE", "postal_code": "50000000"})
+		map[string]any{"street": "Rua A", "number": "1", "district": "Centro", "city": "Recife", "state": "PE", "postal_code": "50000000"},
+		"If-Match", version)
 	owner.expectProblem(http.StatusConflict, "customer_archived", http.MethodPost, "/api/v1/subscriptions",
-		map[string]any{"customer_id": custID, "plan_id": plan.ID})
+		map[string]any{"customer_id": custID, "plan_id": plan.ID}, "Idempotency-Key", idemKey())
 	// No banco, nem o dono das tabelas altera o cliente anonimizado, e uma
 	// assinatura gravada diretamente é recusada.
 	if _, err := ownerPool.Exec(ctx, `UPDATE customers SET name = $2, anonymized_at = NULL WHERE id = $1`, custID, name); !postgres.IsRaisedException(err) {
@@ -389,7 +390,7 @@ func TestCustomerAnonymizationOfArchivedCustomerWithoutTraces(t *testing.T) {
 	owner := a.login(tn.Owner, &tn.ID)
 	cust := a.env.NewCustomer(t, tn)
 	id := cust.ID.String()
-	owner.expect(http.StatusOK, http.MethodPost, "/api/v1/customers/"+id+"/archive", nil)
+	owner.expect(http.StatusOK, http.MethodPost, "/api/v1/customers/"+id+"/archive", nil, matchVersion(owner.versionOf("/api/v1/customers/"+id))...)
 	res, _ := owner.expect(http.StatusOK, http.MethodPost, "/api/v1/customers/"+id+"/anonymize", map[string]any{"reason": anonymizationReason},
 		"Idempotency-Key", "anon-"+uuid.NewString())
 	c := res["customer"].(map[string]any)

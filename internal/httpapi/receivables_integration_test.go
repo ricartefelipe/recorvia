@@ -33,6 +33,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/paysim"
 	"github.com/ricartefelipe/recorvia/internal/reporting"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
+	"github.com/ricartefelipe/recorvia/internal/testsupport/contract"
 	"github.com/ricartefelipe/recorvia/internal/testsupport/fixture"
 )
 
@@ -63,10 +64,10 @@ func newReceivablesAPI(t *testing.T) *recvAPI {
 	// (destino dos webhooks), criado antes do roteador.
 	var router http.Handler
 	ready := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(contract.Wrap(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-ready
 		router.ServeHTTP(w, r)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 	resolver := gateways.NewResolver(2*time.Second, gateways.Factory{Provider: "simulator", Verifier: simulator.Verifier{},
 		Gateway: func(acc payments.ProviderAccount, hc *http.Client) (payments.Gateway, error) {
@@ -109,7 +110,7 @@ func (r *recvAPI) conforms(t *testing.T, schema string, v any) {
 func (r *recvAPI) newTenant(t *testing.T, slug string) fixture.Tenant {
 	t.Helper()
 	tn := r.env.NewTenant(t, slug)
-	if _, err := r.env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "escala"); err != nil {
+	if _, err := r.env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "escala", r.env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.pay.ConfigureAccount(context.Background(), tn.ID, tn.Actor, payments.AccountInput{Provider: "simulator", Environment: "local",
@@ -502,6 +503,15 @@ func TestReceivablesAPIDisputes(t *testing.T) {
 	if len(disputes) != 2 {
 		t.Fatalf("disputas abertas: %v", body)
 	}
+	// Disputas e operações seguem o next_cursor, sem repetir nem pular itens.
+	if paged := pageAll(t, operator, "/api/v1/disputes", pageData(t)); len(paged) != 2 {
+		t.Fatalf("disputas paginadas: %v", paged)
+	}
+	if ops := pageAll(t, owner, "/api/v1/payment-operations", pageData(t)); len(ops) < 2 {
+		t.Fatalf("operações paginadas: %v", ops)
+	}
+	operator.expectProblem(http.StatusUnprocessableEntity, "invalid_sort", http.MethodGet, "/api/v1/disputes?sort=opened_at", nil)
+	owner.expectProblem(http.StatusUnprocessableEntity, "invalid_cursor", http.MethodGet, "/api/v1/payment-operations?cursor=abc", nil)
 	for _, d := range disputes {
 		r.conforms(t, "Dispute", d)
 		if d["status"] != "opened" || d["closed_at"] != nil {
@@ -546,6 +556,10 @@ func TestReceivablesAPIDisputes(t *testing.T) {
 	r.conforms(t, "Dashboard", dash)
 	if dash["chargebacks"] != float64(6000) || dash["refunds"] != float64(0) {
 		t.Fatalf("painel: chargebacks=%v reembolsos=%v", dash["chargebacks"], dash["refunds"])
+	}
+	// Mês futuro não tem fluxo nem posição: 422 com o campo do erro.
+	if p, _ := owner.expect(http.StatusUnprocessableEntity, http.MethodGet, "/api/v1/dashboard?month=2099-01", nil); p["code"] != "future_month" {
+		t.Fatalf("painel de mês futuro: %v", p)
 	}
 
 	// Reenvio dos eventos não reabre nem duplica disputas.
@@ -705,36 +719,51 @@ func TestReceivablesAPIReconciliation(t *testing.T) {
 
 	resolvePath := "/api/v1/reconciliation/discrepancies/" + feeID + "/resolve"
 	justification := "Taxa conferida no extrato do simulador de pagamentos."
+	feeVersion := matchVersion(detail["version"])
+	payVersion := matchVersion(finance.versionOf("/api/v1/reconciliation/discrepancies/" + payID))
 	auditor.expectProblem(http.StatusForbidden, "forbidden", http.MethodPost, resolvePath,
-		map[string]any{"resolution": "adjust_ledger", "justification": justification})
+		map[string]any{"resolution": "adjust_ledger", "justification": justification}, feeVersion...)
 	finance.expectProblem(http.StatusUnprocessableEntity, "invalid_resolution", http.MethodPost, resolvePath,
-		map[string]any{"resolution": "adjust_ledger", "justification": "curta"})
+		map[string]any{"resolution": "adjust_ledger", "justification": "curta"}, feeVersion...)
 	finance.expectProblem(http.StatusUnprocessableEntity, "invalid_resolution", http.MethodPost, resolvePath,
-		map[string]any{"resolution": "auto_resolved", "justification": justification})
+		map[string]any{"resolution": "auto_resolved", "justification": justification}, feeVersion...)
 	finance.expectProblem(http.StatusConflict, "resolution_not_applicable", http.MethodPost, "/api/v1/reconciliation/discrepancies/"+payID+"/resolve",
-		map[string]any{"resolution": "adjust_ledger", "justification": justification})
+		map[string]any{"resolution": "adjust_ledger", "justification": justification}, payVersion...)
 
-	resolved, _ := finance.expect(http.StatusOK, http.MethodPost, resolvePath, map[string]any{"resolution": "adjust_ledger", "justification": justification})
+	finance.expectProblem(http.StatusPreconditionRequired, "if_match_required", http.MethodPost, resolvePath,
+		map[string]any{"resolution": "adjust_ledger", "justification": justification})
+	finance.expectProblem(http.StatusPreconditionFailed, "version_mismatch", http.MethodPost, resolvePath,
+		map[string]any{"resolution": "adjust_ledger", "justification": justification}, matchVersion(detail["version"].(float64)+1)...)
+	resolved, h := finance.expect(http.StatusOK, http.MethodPost, resolvePath, map[string]any{"resolution": "adjust_ledger", "justification": justification},
+		feeVersion...)
 	r.conforms(t, "Discrepancy", resolved)
+	if h.Get("ETag") != fmt.Sprintf(`"%v"`, resolved["version"]) {
+		t.Fatalf("ETag da resolução: %q, versão %v", h.Get("ETag"), resolved["version"])
+	}
 	if resolved["status"] != "resolved" || resolved["resolution"] != "adjust_ledger" || resolved["justification"] != justification ||
 		resolved["resolved_by"] != financeUser.ID.String() || resolved["resolved_at"] == nil || !hasAction(t, resolved, "reconciliation.discrepancy_resolved") {
 		t.Fatalf("divergência resolvida: %v", resolved)
 	}
 	finance.expectProblem(http.StatusConflict, "discrepancy_not_open", http.MethodPost, resolvePath,
-		map[string]any{"resolution": "dismiss", "justification": justification})
+		map[string]any{"resolution": "dismiss", "justification": justification}, matchVersion(resolved["version"])...)
 	// O ajuste lança a diferença de taxa (provedor menos local) e mantém o ledger balanceado.
 	adj := ledgerByAccount(t, owner)["reconciliation_adjustments"]
 	if adj["debits"].(float64)-adj["credits"].(float64) != float64(500-paysim.Fee(10000)) {
 		t.Fatalf("ajuste de conciliação: %v", adj)
 	}
+	// O ajuste e a sua liquidação no disponível referenciam a divergência.
 	txs, _ := owner.expect(http.StatusOK, http.MethodGet, "/api/v1/ledger/transactions?reference_type=reconciliation_discrepancy&reference_id="+feeID, nil)
-	if len(objects(t, txs["data"])) != 1 {
-		t.Fatalf("lançamento do ajuste: %v", txs)
+	kinds := map[string]bool{}
+	for _, tx := range objects(t, txs["data"]) {
+		kinds[tx["kind"].(string)] = true
+	}
+	if len(kinds) != 2 || !kinds["reconciliation.adjustment"] || !kinds["settlement.debited"] {
+		t.Fatalf("lançamentos do ajuste: %v", txs)
 	}
 
 	// Pagamento não refletido: aceitar o provedor aplica o pagamento.
 	finance.expect(http.StatusOK, http.MethodPost, "/api/v1/reconciliation/discrepancies/"+payID+"/resolve",
-		map[string]any{"resolution": "accept_provider", "justification": "Pagamento confirmado no painel do provedor."})
+		map[string]any{"resolution": "accept_provider", "justification": "Pagamento confirmado no painel do provedor."}, payVersion...)
 	inv, _ := owner.expect(http.StatusOK, http.MethodGet, "/api/v1/invoices/"+silentInv.ID.String(), nil)
 	if inv["status"] != "paid" {
 		t.Fatalf("fatura do pagamento não refletido: %v", inv["status"])
@@ -747,6 +776,14 @@ func TestReceivablesAPIReconciliation(t *testing.T) {
 	if again["status"] != "completed" || again["discrepancy_count"] != float64(0) {
 		t.Fatalf("execução após as resoluções: %v", again)
 	}
+	// Execuções e divergências seguem o next_cursor, sem repetir nem pular itens.
+	if runs := pageAll(t, owner, "/api/v1/reconciliation/runs", pageData(t)); len(runs) < 2 || runs[0]["id"] != again["id"] {
+		t.Fatalf("execuções paginadas, da mais recente: %v", runs)
+	}
+	if ds := pageAll(t, owner, "/api/v1/reconciliation/discrepancies", pageData(t)); len(ds) != 2 {
+		t.Fatalf("divergências paginadas: %v", ds)
+	}
+	owner.expectProblem(http.StatusUnprocessableEntity, "invalid_sort", http.MethodGet, "/api/v1/reconciliation/runs?sort=started_at", nil)
 	open, _ := owner.expect(http.StatusOK, http.MethodGet, "/api/v1/reconciliation/discrepancies?status=open", nil)
 	if len(jsonArray(t, open["data"])) != 0 {
 		t.Fatalf("divergências abertas: %v", open)
@@ -757,7 +794,7 @@ func TestReceivablesAPIReconciliation(t *testing.T) {
 	outsider := r.login(other.Owner, &other.ID)
 	outsider.expectProblem(http.StatusNotFound, "discrepancy_not_found", http.MethodGet, "/api/v1/reconciliation/discrepancies/"+feeID, nil)
 	outsider.expectProblem(http.StatusNotFound, "discrepancy_not_found", http.MethodPost, "/api/v1/reconciliation/discrepancies/"+payID+"/resolve",
-		map[string]any{"resolution": "dismiss", "justification": justification})
+		map[string]any{"resolution": "dismiss", "justification": justification}, matchVersion(1)...)
 	list, _ := outsider.expect(http.StatusOK, http.MethodGet, "/api/v1/reconciliation/discrepancies", nil)
 	if len(jsonArray(t, list["data"])) != 0 {
 		t.Fatalf("divergências de outra organização: %v", list)
@@ -848,7 +885,7 @@ func TestReceivablesAPIWithAPICredential(t *testing.T) {
 		t.Fatalf("divergências: %d %v", open.status, open.body)
 	}
 	resolved := r.raw(http.MethodPost, "/api/v1/reconciliation/discrepancies/"+items[0]["id"].(string)+"/resolve",
-		map[string]any{"resolution": "keep_local", "justification": "Taxa conferida pelo ERP no contrato."}, bearer(secret))
+		map[string]any{"resolution": "keep_local", "justification": "Taxa conferida pelo ERP no contrato."}, bearer(secret, matchVersion(items[0]["version"])...))
 	if resolved.status != http.StatusOK || resolved.body["status"] != "resolved" || resolved.body["resolved_by"] != nil {
 		t.Fatalf("resolução por credencial: %d %v", resolved.status, resolved.body)
 	}

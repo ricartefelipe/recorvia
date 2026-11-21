@@ -51,7 +51,10 @@ type Page struct {
 type Tx interface {
 	TemplateSource
 	CustomTemplates(ctx context.Context) ([]Template, error)
-	UpsertTemplate(ctx context.Context, t Template, updatedBy *uuid.UUID, now time.Time) (Template, error)
+	// SaveTemplate grava o template personalizado na versão esperada: 0 é o
+	// template padrão (cria a personalização); acima de 0, altera a
+	// personalização com essa versão. Versão divergente: 412 version_mismatch.
+	SaveTemplate(ctx context.Context, t Template, updatedBy *uuid.UUID, now time.Time, expectedVersion int) (Template, error)
 
 	// InsertNotification grava a notificação e seu histórico; false indica
 	// que a identidade de negócio já existia (nada é gravado).
@@ -64,6 +67,9 @@ type Tx interface {
 	// outra execução reivindicou a notificação.
 	UpdateNotification(ctx context.Context, n *Notification, expectedAttempts int) (bool, error)
 	ListNotifications(ctx context.Context, f ListFilter) (Page, error)
+	// NotificationEvents devolve o histórico da notificação em ordem
+	// cronológica.
+	NotificationEvents(ctx context.Context, id uuid.UUID) ([]Event, error)
 	NewerReminderExists(ctx context.Context, invoiceID uuid.UUID, offsetDays int) (bool, error)
 	// TryLockCustomer serializa a contagem do limite de frequência por
 	// cliente; false indica que outra transação detém o bloqueio.
@@ -72,6 +78,9 @@ type Tx interface {
 	// em envio, sem contar a notificação excludeID (a que está sendo avaliada).
 	RemindersSent(ctx context.Context, customerID, excludeID uuid.UUID, from, to time.Time) (int, error)
 	ReminderRules(ctx context.Context, policyID uuid.UUID) (ReminderRules, error)
+	// SuspensionWindow devolve a janela de envio da política que aplicou a
+	// suspensão; false quando a suspensão não existe.
+	SuspensionWindow(ctx context.Context, suspensionID uuid.UUID) (Window, bool, error)
 
 	Organization(ctx context.Context) (Organization, error)
 	CustomerRecipients(ctx context.Context, customerID uuid.UUID) ([]string, error)
@@ -79,6 +88,9 @@ type Tx interface {
 	Payment(ctx context.Context, id uuid.UUID) (PaymentInfo, error)
 	Invitation(ctx context.Context, id uuid.UUID, now time.Time) (InvitationInfo, error)
 	SubscriptionSuspended(ctx context.Context, id uuid.UUID) (bool, error)
+	// SuspensionActive informa se a suspensão está ativa; found=false quando
+	// a suspensão não existe.
+	SuspensionActive(ctx context.Context, suspensionID uuid.UUID) (active, found bool, err error)
 	PlatformPlan(ctx context.Context) (platformbilling.Plan, error)
 
 	MarkInbox(ctx context.Context, consumer string, messageID uuid.UUID) (bool, error)
@@ -209,8 +221,10 @@ func (s *Service) Templates(ctx context.Context, tenantID uuid.UUID) ([]Template
 	return out, nil
 }
 
-// UpdateTemplate grava o template personalizado do tenant.
-func (s *Service) UpdateTemplate(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, userID *uuid.UUID, key, subject, body string) (Template, error) {
+// UpdateTemplate grava o template personalizado do tenant na versão esperada
+// (If-Match): 0 para o template padrão, ainda não personalizado.
+func (s *Service) UpdateTemplate(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, userID *uuid.UUID, key, subject, body string,
+	expectedVersion int) (Template, error) {
 	k, err := ParseCustomizableKey(key)
 	if err != nil {
 		return Template{}, err
@@ -223,7 +237,7 @@ func (s *Service) UpdateTemplate(ctx context.Context, tenantID uuid.UUID, actor 
 	var out Template
 	err = s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		var err error
-		if out, err = tx.UpsertTemplate(ctx, t, userID, now); err != nil {
+		if out, err = tx.SaveTemplate(ctx, t, userID, now, expectedVersion); err != nil {
 			return err
 		}
 		return tx.Audit(ctx, audit.New(tenantID, now, actor, "notification_template.updated", "notification_template", string(k),
@@ -246,6 +260,21 @@ func (s *Service) List(ctx context.Context, tenantID uuid.UUID, f ListFilter) (P
 		return err
 	})
 	return p, err
+}
+
+// Events devolve a linha do tempo de uma notificação (agendamento,
+// adiamentos, tentativas, envio, falha, cancelamento ou supressão).
+func (s *Service) Events(ctx context.Context, tenantID, id uuid.UUID) ([]Event, error) {
+	var out []Event
+	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		if _, err := tx.Notification(ctx, id, false); err != nil {
+			return err
+		}
+		var err error
+		out, err = tx.NotificationEvents(ctx, id)
+		return err
+	})
+	return out, err
 }
 
 // --- consumidores ---
@@ -535,6 +564,18 @@ func (s *Service) prepare(ctx context.Context, tx Tx, n *Notification, org Organ
 			slog.String("error", n.ContentError))
 		return actionClose, n.Fail(now, ReasonContentUnavailable, "Conteúdo cifrado indisponível: "+n.ContentError)
 	}
+	if n.TemplateKey == KeySubscriptionSuspended {
+		// O aviso de suspensão faz parte da régua: respeita a janela de
+		// horário da política que suspendeu, no fuso do tenant (ADR-081). O
+		// limite diário de frequência vale só para os lembretes.
+		w, ok, err := s.suspensionWindow(ctx, tx, *n)
+		if err != nil {
+			return 0, err
+		}
+		if ok && !w.Contains(now, org.Location) {
+			return actionDefer, n.Defer(now, w.Next(now, org.Location), ReasonOutsideWindow)
+		}
+	}
 	if n.IsReminder() {
 		r, ok := rules[*n.PolicyID]
 		if !ok {
@@ -567,6 +608,22 @@ func (s *Service) prepare(ctx context.Context, tx Tx, n *Notification, org Organ
 	return actionSend, n.Claim(now, now.Add(s.cfg.Lease))
 }
 
+// suspensionWindow devolve a janela de envio do aviso de suspensão: a da
+// política que aplicou a suspensão identificada pela chave de negócio.
+// Aviso sem suspensão identificável (chave fora do padrão ou suspensão
+// inexistente) não tem janela.
+func (s *Service) suspensionWindow(ctx context.Context, tx Tx, n Notification) (Window, bool, error) {
+	id, ok := suspensionIDFromKey(n.BusinessKey)
+	if !ok {
+		return Window{}, false, nil
+	}
+	w, found, err := tx.SuspensionWindow(ctx, id)
+	if err != nil || !found || !w.Valid() {
+		return Window{}, false, err
+	}
+	return w, true, nil
+}
+
 // stopReason devolve o motivo para não enviar mais a notificação, ou vazio.
 func (s *Service) stopReason(ctx context.Context, tx Tx, n *Notification, plan platformbilling.Plan, now time.Time) (string, error) {
 	if n.IsReminder() && !plan.HasFeature(platformbilling.FeatureEmailDunning) {
@@ -597,10 +654,21 @@ func (s *Service) stopReason(ctx context.Context, tx Tx, n *Notification, plan p
 			return ReasonSuperseded, err
 		}
 	}
-	if n.TemplateKey == KeySubscriptionSuspended && n.SubscriptionID != nil {
-		suspended, err := tx.SubscriptionSuspended(ctx, *n.SubscriptionID)
-		if err != nil || !suspended {
-			return ReasonSubscriptionNotActive, err
+	if n.TemplateKey == KeySubscriptionSuspended {
+		// O aviso é da suspensão da chave: encerrada essa suspensão, ele não
+		// sai mais, ainda que a assinatura tenha sido suspensa de novo (a nova
+		// suspensão tem aviso próprio).
+		if id, ok := suspensionIDFromKey(n.BusinessKey); ok {
+			active, found, err := tx.SuspensionActive(ctx, id)
+			if err != nil || (found && !active) {
+				return ReasonSubscriptionNotActive, err
+			}
+		}
+		if n.SubscriptionID != nil {
+			suspended, err := tx.SubscriptionSuspended(ctx, *n.SubscriptionID)
+			if err != nil || !suspended {
+				return ReasonSubscriptionNotActive, err
+			}
 		}
 	}
 	if n.InvitationID != nil {

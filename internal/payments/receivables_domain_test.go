@@ -501,3 +501,35 @@ func TestResolutionRules(t *testing.T) {
 		})
 	}
 }
+
+// Recebimento perdido só é apontado com o provedor recebido e valor ainda em
+// pagamentos confirmados.
+func TestCompareMissedReceipt(t *testing.T) {
+	c := Charge{ID: uuid.New(), ProviderChargeID: "pay_r", Status: ChargePaid, Amount: brl(10000), AmountPaid: brl(10000), Fee: brl(199),
+		AmountRefunded: brl(0), AmountChargedBack: brl(0), AmountRefundPending: brl(0)}
+	received := provPaid(c, 10000, 199)
+	confirmed := received
+	confirmed.Status = ProviderConfirmed
+	cases := []struct {
+		name    string
+		pending money.Money
+		p       ProviderCharge
+		want    bool
+	}{
+		{"recebido no provedor e pendente aqui", brl(10000), received, true},
+		{"recebido nos dois lados", money.Money{}, received, false},
+		{"pendente aqui e só confirmado no provedor", brl(10000), confirmed, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := compareCharge(LocalCharge{Charge: c, PendingReceipt: tc.pending}, tc.p, time.Now())
+			found := slices.ContainsFunc(fs, func(f Finding) bool {
+				return f.Kind == DiscrepancyPaymentNotReflected && f.DedupeKey == "payment_not_reflected:"+c.ID.String()+":provider_received" &&
+					f.Local["direction"] == DirectionProviderReceived && f.LocalAmount.IsZero() && f.ProviderAmount.Amount() == 10000
+			})
+			if found != tc.want || len(fs) != map[bool]int{true: 1, false: 0}[tc.want] {
+				t.Fatalf("divergências: %+v", kinds(fs))
+			}
+		})
+	}
+}

@@ -16,9 +16,11 @@ var (
 
 // registerTenantRoutes declara as rotas com organização ativa. Cada rota
 // informa a permissão exigida; operações financeiras de criação exigem
-// Idempotency-Key. As rotas com userSession() recusam credenciais de API; nas
-// demais, a autoria vem de Principal.UserID() (nula para credenciais, com o
-// ator api_credential na auditoria), como decide a ADR-059.
+// Idempotency-Key (lista e critério na ADR-075; idempotencyRequiredRoutes,
+// nos testes, impede que uma delas perca a exigência). As rotas com
+// userSession() recusam credenciais de API; nas demais, a autoria vem de
+// Principal.UserID() (nula para credenciais, com o ator api_credential na
+// auditoria), como decide a ADR-059.
 func (a *API) registerTenantRoutes(r chi.Router) {
 	t := func(method, pattern string, perm tenancy.Permission, h http.HandlerFunc, opts ...routeOpt) {
 		a.handle(r, method, pattern, TenantScoped, perm, h, opts...)
@@ -42,7 +44,7 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	t(put, "/api/v1/platform/plan", tenancy.PermPlatformManage, a.changePlatformPlan, userSession())
 	t(get, "/api/v1/platform/addons", tenancy.PermPlatformRead, a.platformAddons)
 	t(get, "/api/v1/platform/addon-orders", tenancy.PermPlatformRead, a.listAddonOrders)
-	t(post, "/api/v1/platform/addon-orders", tenancy.PermPlatformManage, a.createAddonOrder, userSession())
+	t(post, "/api/v1/platform/addon-orders", tenancy.PermPlatformManage, a.createAddonOrder, idempotent(), userSession())
 	t(get, "/api/v1/platform/statements", tenancy.PermPlatformRead, a.listPlatformStatements)
 
 	t(get, "/api/v1/customers", tenancy.PermCustomersRead, a.listCustomers)
@@ -53,6 +55,7 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	// Anonimização: irreversível, com justificativa e somente por uma pessoa identificada (ADR-061).
 	t(post, "/api/v1/customers/{id}/anonymize", tenancy.PermCustomersAnonymize, a.anonymizeCustomer, idempotent(), userSession())
 	t(post, "/api/v1/customers/{id}/contacts", tenancy.PermCustomersWrite, a.addContact)
+	t(patch, "/api/v1/customers/{id}/contacts/{contact_id}", tenancy.PermCustomersWrite, a.updateContact)
 	t(del, "/api/v1/customers/{id}/contacts/{contact_id}", tenancy.PermCustomersWrite, a.removeContact)
 	t(put, "/api/v1/customers/{id}/billing-address", tenancy.PermCustomersWrite, a.setAddress)
 	t(get, "/api/v1/customers/{id}/history", tenancy.PermCustomersRead, a.customerHistory)
@@ -74,7 +77,7 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	t(post, "/api/v1/plans/{id}/prices", tenancy.PermCatalogWrite, a.addPrice)
 
 	t(get, "/api/v1/subscriptions", tenancy.PermSubscriptionsRead, a.listSubscriptions)
-	t(post, "/api/v1/subscriptions", tenancy.PermSubscriptionsWrite, a.createSubscription)
+	t(post, "/api/v1/subscriptions", tenancy.PermSubscriptionsWrite, a.createSubscription, idempotent())
 	t(get, "/api/v1/subscriptions/{id}", tenancy.PermSubscriptionsRead, a.getSubscription)
 	t(get, "/api/v1/subscriptions/{id}/history", tenancy.PermSubscriptionsRead, a.subscriptionHistory)
 	t(post, "/api/v1/subscriptions/{id}/cancel", tenancy.PermSubscriptionsCancel, a.cancelSubscription)
@@ -84,9 +87,9 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	t(post, "/api/v1/subscriptions/{id}/change-plan", tenancy.PermSubscriptionsWrite, a.changeSubscriptionPlan)
 	t(post, "/api/v1/subscriptions/{id}/change-quantity", tenancy.PermSubscriptionsWrite, a.changeSubscriptionQuantity)
 	t(get, "/api/v1/subscriptions/{id}/price-adjustments", tenancy.PermSubscriptionsRead, a.listPriceAdjustments)
-	t(post, "/api/v1/subscriptions/{id}/price-adjustments", tenancy.PermSubscriptionsWrite, a.schedulePriceAdjustment)
+	t(post, "/api/v1/subscriptions/{id}/price-adjustments", tenancy.PermSubscriptionsWrite, a.schedulePriceAdjustment, idempotent())
 	t(del, "/api/v1/subscriptions/{id}/price-adjustments/{adjustment_id}", tenancy.PermSubscriptionsWrite, a.cancelPriceAdjustment)
-	t(post, "/api/v1/subscriptions/{id}/discounts", tenancy.PermSubscriptionsWrite, a.applySubscriptionCoupon)
+	t(post, "/api/v1/subscriptions/{id}/discounts", tenancy.PermSubscriptionsWrite, a.applySubscriptionCoupon, idempotent())
 	t(del, "/api/v1/subscriptions/{id}/discounts", tenancy.PermSubscriptionsWrite, a.removeSubscriptionDiscount)
 	t(get, "/api/v1/subscriptions/{id}/usage", tenancy.PermUsageRead, a.getSubscriptionUsage)
 	t(get, "/api/v1/usage-events", tenancy.PermUsageRead, a.listUsageEvents)
@@ -131,6 +134,7 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	t(get, "/api/v1/notification-templates", tenancy.PermCollectionsRead, a.listNotificationTemplates)
 	t(put, "/api/v1/notification-templates/{key}", tenancy.PermCollectionsWrite, a.updateNotificationTemplate)
 	t(get, "/api/v1/notifications", tenancy.PermCollectionsRead, a.listNotifications)
+	t(get, "/api/v1/notifications/{id}/events", tenancy.PermCollectionsRead, a.listNotificationEvents)
 
 	t(get, "/api/v1/webhook-event-types", tenancy.PermWebhooksRead, a.listWebhookEventTypes)
 	t(get, "/api/v1/webhook-endpoints", tenancy.PermWebhooksRead, a.listWebhookEndpoints)
@@ -139,6 +143,7 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	t(del, "/api/v1/webhook-endpoints/{id}", tenancy.PermWebhooksWrite, a.deleteWebhookEndpoint)
 	t(post, "/api/v1/webhook-endpoints/{id}/rotate-secret", tenancy.PermWebhooksWrite, a.rotateWebhookSecret)
 	t(get, "/api/v1/webhook-endpoints/{id}/deliveries", tenancy.PermWebhooksRead, a.listWebhookDeliveries)
+	t(get, "/api/v1/webhook-deliveries/{id}/attempts", tenancy.PermWebhooksRead, a.listWebhookDeliveryAttempts)
 	t(post, "/api/v1/webhook-deliveries/{id}/retry", tenancy.PermWebhooksWrite, a.retryWebhookDelivery)
 
 	t(get, "/api/v1/ledger/accounts", tenancy.PermLedgerRead, a.ledgerAccounts)

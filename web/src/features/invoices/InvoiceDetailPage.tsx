@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Fragment, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import type { InvoiceDetails } from '../../api/types';
+import { FiscalNotice } from '../../components/FiscalNotice';
 import { CivilDate, DateTime, JsonView, Money, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { KeyValue, PageHeader } from '../../components/ui';
@@ -214,6 +215,7 @@ export function InvoiceDetailView({ invoice }: { invoice: InvoiceDetails }) {
           </>
         }
       />
+      <FiscalNotice />
       <Grid>
         <Grid.Col span={{ base: 12, md: 8 }}>
           <Paper withBorder p="md" radius="md" h="100%">

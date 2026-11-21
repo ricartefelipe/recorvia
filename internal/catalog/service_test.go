@@ -175,19 +175,23 @@ func TestProductsAndMetricsListing(t *testing.T) {
 	e.seedProduct(t, Archived)
 	e.seedMetric(Active)
 
-	ps, err := e.svc.Products(context.Background(), e.tenantID, Archived)
-	if err != nil || len(ps) != 1 || ps[0].Status != Archived || e.st().productFilter != Archived {
-		t.Fatalf("Products = %+v, %v", ps, err)
+	// O limite e o cursor chegam ao armazenamento, e o cursor da página
+	// seguinte volta a quem listou.
+	e.st().nextCursor = "seguinte"
+	ps, err := e.svc.Products(context.Background(), e.tenantID, Archived, 10, "atual")
+	if err != nil || len(ps.Items) != 1 || ps.Items[0].Status != Archived || e.st().productFilter != Archived ||
+		e.st().page != (pageRequest{10, "atual"}) || ps.NextCursor != "seguinte" {
+		t.Fatalf("Products = %+v, %v (página pedida %+v)", ps, err, e.st().page)
 	}
-	ms, err := e.svc.Metrics(context.Background(), e.tenantID)
-	if err != nil || len(ms) != 1 {
+	ms, err := e.svc.Metrics(context.Background(), e.tenantID, 25, "")
+	if err != nil || len(ms.Items) != 1 || e.st().page != (pageRequest{25, ""}) || ms.NextCursor != "seguinte" {
 		t.Fatalf("Metrics = %+v, %v", ms, err)
 	}
 	e.store.fail["Products"], e.store.fail["Metrics"] = errBoom, errBoom
-	if _, err := e.svc.Products(context.Background(), e.tenantID, ""); !errors.Is(err, errBoom) {
+	if _, err := e.svc.Products(context.Background(), e.tenantID, "", 25, ""); !errors.Is(err, errBoom) {
 		t.Errorf("Products deveria propagar o erro: %v", err)
 	}
-	if _, err := e.svc.Metrics(context.Background(), e.tenantID); !errors.Is(err, errBoom) {
+	if _, err := e.svc.Metrics(context.Background(), e.tenantID, 25, ""); !errors.Is(err, errBoom) {
 		t.Errorf("Metrics deveria propagar o erro: %v", err)
 	}
 }
@@ -415,9 +419,12 @@ func TestAddPriceVersion(t *testing.T) {
 	first := d.Prices[0]
 	e.clock.Advance(24 * time.Hour)
 
-	pv, err := e.svc.AddPriceVersion(context.Background(), e.tenantID, e.actor, &e.userID, d.ID, PriceInput{Model: PerUnit, UnitAmount: "4990.5"})
+	pv, planVersion, err := e.svc.AddPriceVersion(context.Background(), e.tenantID, e.actor, &e.userID, d.ID, PriceInput{Model: PerUnit, UnitAmount: "4990.5"}, 1)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if planVersion != 2 || e.st().plans[d.ID].Version != 2 {
+		t.Fatalf("a troca do preço vigente deve gerar a versão 2 do plano: devolvida %d, gravada %d", planVersion, e.st().plans[d.ID].Version)
 	}
 	if pv.Version != 2 || pv.PlanID != d.ID || pv.Model != PerUnit || pv.Currency != money.BRL || !pv.CreatedAt.Equal(e.clock.Now()) {
 		t.Fatalf("versão inesperada: %+v", pv)
@@ -443,9 +450,21 @@ func TestAddPriceVersion(t *testing.T) {
 		t.Fatalf("o plano deve listar todas as versões: %+v", details.Prices)
 	}
 
-	third, err := e.svc.AddPriceVersion(context.Background(), e.tenantID, e.actor, nil, d.ID, flatPrice(12990))
+	third, _, err := e.svc.AddPriceVersion(context.Background(), e.tenantID, e.actor, nil, d.ID, flatPrice(12990), planVersion)
 	if err != nil || third.Version != 3 {
 		t.Fatalf("terceira versão = %+v, %v", third, err)
+	}
+}
+
+// A troca do preço vigente é condicionada à versão do plano (If-Match):
+// divergente, nenhuma versão de preço é gravada.
+func TestAddPriceVersionVersionMismatch(t *testing.T) {
+	e := newCatEnv()
+	d := e.createPlan(t, flatPrice(9990))
+	_, _, err := e.svc.AddPriceVersion(context.Background(), e.tenantID, e.actor, nil, d.ID, flatPrice(1), 3)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	if len(e.st().prices) != 1 || e.st().plans[d.ID].Version != 1 || *e.st().plans[d.ID].CurrentPriceVersionID != d.Prices[0].ID {
+		t.Fatal("o plano e o preço vigente não devem mudar")
 	}
 }
 
@@ -453,7 +472,7 @@ func TestAddPriceVersionContinuesFromHighestVersion(t *testing.T) {
 	e := newCatEnv()
 	d := e.createPlan(t, flatPrice(9990))
 	e.store.maxVersionOverride = ptr(7)
-	pv, err := e.svc.AddPriceVersion(context.Background(), e.tenantID, e.actor, nil, d.ID, flatPrice(1))
+	pv, _, err := e.svc.AddPriceVersion(context.Background(), e.tenantID, e.actor, nil, d.ID, flatPrice(1), 1)
 	if err != nil || pv.Version != 8 {
 		t.Fatalf("versão = %+v, %v; esperado 8", pv, err)
 	}
@@ -463,7 +482,7 @@ func TestAddPriceVersionWithMetric(t *testing.T) {
 	e := newCatEnv()
 	d := e.createPlan(t, flatPrice(9990))
 	m := e.seedMetric(Active)
-	pv, err := e.svc.AddPriceVersion(context.Background(), e.tenantID, e.actor, nil, d.ID, PriceInput{Model: Usage, UnitAmount: "0.35", MetricID: &m.ID})
+	pv, _, err := e.svc.AddPriceVersion(context.Background(), e.tenantID, e.actor, nil, d.ID, PriceInput{Model: Usage, UnitAmount: "0.35", MetricID: &m.ID}, 1)
 	if err != nil || pv.MetricID == nil || *pv.MetricID != m.ID {
 		t.Fatalf("versão com métrica = %+v, %v", pv, err)
 	}
@@ -501,7 +520,7 @@ func TestAddPriceVersionRejected(t *testing.T) {
 			e := newCatEnv()
 			planID, in := tc.setup(t, e)
 			before := len(e.st().prices)
-			_, err := e.svc.AddPriceVersion(context.Background(), e.tenantID, e.actor, nil, planID, in)
+			_, _, err := e.svc.AddPriceVersion(context.Background(), e.tenantID, e.actor, nil, planID, in, 1)
 			assertAppErr(t, err, tc.kind, tc.code)
 			if len(e.st().prices) != before {
 				t.Fatal("nenhuma versão deveria ser gravada")
@@ -517,7 +536,7 @@ func TestAddPriceVersionStoreErrors(t *testing.T) {
 			d := e.createPlan(t, flatPrice(1))
 			m := e.seedMetric(Active)
 			e.store.fail[op] = errBoom
-			_, err := e.svc.AddPriceVersion(context.Background(), e.tenantID, e.actor, nil, d.ID, PriceInput{Model: Usage, UnitAmount: "1", MetricID: &m.ID})
+			_, _, err := e.svc.AddPriceVersion(context.Background(), e.tenantID, e.actor, nil, d.ID, PriceInput{Model: Usage, UnitAmount: "1", MetricID: &m.ID}, 1)
 			if !errors.Is(err, errBoom) {
 				t.Fatalf("esperado erro propagado, obtido %v", err)
 			}
@@ -539,12 +558,13 @@ func TestPlanQueries(t *testing.T) {
 	_, err = e.svc.Plan(context.Background(), e.tenantID, uuid.New())
 	assertAppErr(t, err, apperr.KindNotFound, "plan_not_found")
 
-	plans, err := e.svc.Plans(context.Background(), e.tenantID, Active, &d.ProductID)
-	if err != nil || len(plans) != 1 || e.st().planFilter != Active || *e.st().planProduct != d.ProductID {
+	plans, err := e.svc.Plans(context.Background(), e.tenantID, Active, &d.ProductID, 100, "c1")
+	if err != nil || len(plans.Items) != 1 || e.st().planFilter != Active || *e.st().planProduct != d.ProductID ||
+		e.st().page != (pageRequest{100, "c1"}) {
 		t.Fatalf("Plans = %+v, %v", plans, err)
 	}
 	other := uuid.New()
-	if plans, _ := e.svc.Plans(context.Background(), e.tenantID, "", &other); len(plans) != 0 {
+	if plans, _ := e.svc.Plans(context.Background(), e.tenantID, "", &other, 25, ""); len(plans.Items) != 0 {
 		t.Fatalf("filtro por produto não aplicado: %+v", plans)
 	}
 
@@ -553,7 +573,7 @@ func TestPlanQueries(t *testing.T) {
 		t.Errorf("Plan deveria propagar o erro das versões: %v", err)
 	}
 	e.store.fail["Plans"] = errBoom
-	if _, err := e.svc.Plans(context.Background(), e.tenantID, "", nil); !errors.Is(err, errBoom) {
+	if _, err := e.svc.Plans(context.Background(), e.tenantID, "", nil, 25, ""); !errors.Is(err, errBoom) {
 		t.Errorf("Plans deveria propagar o erro: %v", err)
 	}
 }

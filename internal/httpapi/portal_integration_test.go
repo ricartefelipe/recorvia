@@ -282,7 +282,8 @@ func TestPortalAccessEndsWhenCustomerIsArchived(t *testing.T) {
 	cust := a.env.NewCustomer(t, tn)
 	owner := a.login(tn.Owner, &tn.ID)
 	cookie, _ := openPortal(t, a, createPortalLink(t, owner, cust.ID))
-	if st, body, _ := owner.do(http.MethodPost, "/api/v1/customers/"+cust.ID.String()+"/archive", nil); st != http.StatusOK {
+	if st, body, _ := owner.do(http.MethodPost, "/api/v1/customers/"+cust.ID.String()+"/archive", nil,
+		matchVersion(owner.versionOf("/api/v1/customers/"+cust.ID.String()))...); st != http.StatusOK {
 		t.Fatalf("arquivamento: %d %v", st, body)
 	}
 	if r := a.raw(http.MethodGet, "/api/portal/v1/invoices", nil, nil, cookie); r.status != http.StatusUnauthorized || r.cookie["recorvia_portal"] == nil {
@@ -354,7 +355,8 @@ func TestAPICredentialIngestsUsageWithoutCSRF(t *testing.T) {
 		t.Fatalf("tenant divergente: %d %v", r.status, r.body)
 	}
 	// Rotação: o segredo novo e o anterior (dentro da janela) ingerem.
-	st, rot, _ := owner.do(http.MethodPost, "/api/v1/api-credentials/"+writerID+"/rotate", nil)
+	st, rot, _ := owner.do(http.MethodPost, "/api/v1/api-credentials/"+writerID+"/rotate", nil,
+		matchVersion(owner.versionIn("/api/v1/api-credentials", "id", writerID))...)
 	if st != http.StatusCreated {
 		t.Fatalf("rotação: %d %v", st, rot)
 	}
@@ -366,7 +368,8 @@ func TestAPICredentialIngestsUsageWithoutCSRF(t *testing.T) {
 		}
 	}
 	// Revogação: os dois segredos deixam de valer na hora.
-	if st, body, _ := owner.do(http.MethodDelete, "/api/v1/api-credentials/"+writerID, nil); st != http.StatusNoContent {
+	if st, body, _ := owner.do(http.MethodDelete, "/api/v1/api-credentials/"+writerID, nil,
+		matchVersion(rot["credential"].(map[string]any)["version"])...); st != http.StatusNoContent {
 		t.Fatalf("revogação: %d %v", st, body)
 	}
 	for _, token := range []string{rotated, writer} {

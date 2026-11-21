@@ -71,7 +71,7 @@ C4Container
 | `billing` | faturas, motor de recorrência, créditos | `subscriptions`, `catalog`, `customers`, `ledger` |
 | `payments` | cobranças, operações externas, webhooks, recebimentos | `billing`, `ledger` |
 | `ledger` | partidas dobradas | — |
-| `reporting` | indicadores do dashboard | — |
+| `reporting` | indicadores do dashboard (fórmulas em `indicadores.md`) | — |
 | `notifications` | templates, notificações por e-mail com identidade de negócio, envio com lease | `billing`, `tenancy`, `platformbilling` |
 | `collections` | políticas de cobrança, régua, inadimplência, suspensão e reativação | `notifications`, `subscriptions`, `platformbilling` |
 | `webhooks` | webhooks enviados: endpoints, segredos, entregas e retentativas | `platformbilling` |

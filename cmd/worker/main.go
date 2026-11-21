@@ -3,13 +3,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 	_ "time/tzdata"
 
@@ -44,7 +41,7 @@ func main() {
 		// Executa uma vez as conciliações registradas e termina, sem
 		// agendador, consumidores nem publicador da outbox (recuperação de
 		// desastre: a janela perdida é conciliada antes de religar o worker).
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		ctx, stop := app.SignalContext(context.Background())
 		err := app.RunReconcilePending(ctx, os.Getenv, os.Stdout)
 		stop()
 		if err != nil {
@@ -60,7 +57,7 @@ func main() {
 }
 
 func run(log *slog.Logger) error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := app.SignalContext(context.Background())
 	defer stop()
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
@@ -93,23 +90,11 @@ func run(log *slog.Logger) error {
 	conn := rabbit.NewConn(cfg.AMQPURL, log)
 	w := &app.Worker{Core: core, Metrics: metrics, Conn: conn}
 
-	// Liveness só do processo; readiness com banco e broker (app.WorkerHealthMux).
+	// Liveness só do processo; readiness com banco e broker, não pronta
+	// durante o encerramento (app.WorkerHealthMux). O servidor fica no ar até
+	// o worker terminar a drenagem (app.RunWorker).
 	mux := app.WorkerHealthMux(promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}),
-		app.WorkerProbes{Database: core.DB.Ping, Broker: conn.Connected})
+		app.WorkerProbes{Database: core.DB.Ping, Broker: conn.Connected, ShuttingDown: func() bool { return ctx.Err() != nil }})
 	srv := &http.Server{Addr: cfg.MetricsAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
-
-	runErr := w.Run(ctx)
-	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	shutErr := srv.Shutdown(sctx)
-	select {
-	case err := <-errc:
-		if !errors.Is(err, http.ErrServerClosed) {
-			return errors.Join(runErr, err)
-		}
-	default:
-	}
-	return errors.Join(runErr, shutErr)
+	return app.RunWorker(ctx, log, w.Run, app.HTTPServer{Server: srv})
 }

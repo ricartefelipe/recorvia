@@ -441,3 +441,41 @@ func TestRelayRunKeepsGoingAfterErrors(t *testing.T) {
 		<-done
 	})
 }
+
+// blockingPublisher espera o cancelamento do contexto da publicação.
+type blockingPublisher struct {
+	started chan struct{}
+	ctxErr  error
+}
+
+func (p *blockingPublisher) PublishEvent(ctx context.Context, _ outbox.Record) error {
+	close(p.started)
+	<-ctx.Done()
+	p.ctxErr = ctx.Err()
+	return ctx.Err()
+}
+
+// RNF-11: o encerramento do worker cancela a publicação em andamento e o
+// relay termina; o evento não publicado é devolvido (com contexto sem
+// cancelamento) para que a próxima instância o publique.
+func TestRelayRunPropagatesCancellationToPublish(t *testing.T) {
+	batch := records(0)
+	store := &fakeRelayStore{batches: [][]outbox.Record{batch}}
+	pub := &blockingPublisher{started: make(chan struct{})}
+	r := newRelay(store, pub, &fakeRelayObserver{}, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		r.Run(ctx)
+		close(done)
+	}()
+	<-pub.started
+	cancel()
+	<-done
+	if !errors.Is(pub.ctxErr, context.Canceled) {
+		t.Fatalf("a publicação deve receber o cancelamento: %v", pub.ctxErr)
+	}
+	if len(store.marks) != 0 || len(store.releases) != 1 || store.releases[0].id != batch[0].ID || store.releases[0].ctxErr != nil {
+		t.Fatalf("o evento deve ser devolvido sem marcação: marcas %+v liberações %+v", store.marks, store.releases)
+	}
+}

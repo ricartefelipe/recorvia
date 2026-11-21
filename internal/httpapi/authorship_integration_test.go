@@ -13,6 +13,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/outbox"
 	"github.com/ricartefelipe/recorvia/internal/pgstore"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
+	"github.com/ricartefelipe/recorvia/internal/testsupport/contract"
 	"github.com/ricartefelipe/recorvia/internal/testsupport/pgtest"
 )
 
@@ -94,7 +95,8 @@ func TestAPICredentialAuthorshipOnTenantWriteRoutes(t *testing.T) {
 			return r, id
 		}, "collection_policies", "created_by", "id", "collection_policy.created", ""},
 		{"PUT /api/v1/notification-templates/{key}", http.StatusOK, func(t *testing.T, send sender) (rawResponse, string) {
-			return send(http.MethodPut, "/api/v1/notification-templates/reminder_after_due", template), "reminder_after_due"
+			return send(http.MethodPut, "/api/v1/notification-templates/reminder_after_due", template,
+				matchVersion(owner.versionIn("/api/v1/notification-templates", "key", "reminder_after_due"))...), "reminder_after_due"
 		}, "notification_templates", "updated_by", "template_key", "notification_template.updated", ""},
 		{"POST /api/v1/webhook-endpoints", http.StatusCreated, func(t *testing.T, send sender) (rawResponse, string) {
 			r := send(http.MethodPost, "/api/v1/webhook-endpoints", map[string]any{"url": "https://hooks.cliente.test/" + uuid.NewString(),
@@ -231,7 +233,7 @@ func TestUserSessionRoutesRejectAPICredential(t *testing.T) {
 
 	// Pela sessão, o pedido de serviço adicional grava o membro como autor
 	// (requested_by é obrigatório).
-	order, _ := owner.expect(http.StatusCreated, http.MethodPost, "/api/v1/platform/addon-orders", map[string]any{"addon_code": "implantacao_assistida"})
+	order, _ := owner.expect(http.StatusCreated, http.MethodPost, "/api/v1/platform/addon-orders", map[string]any{"addon_code": "implantacao_assistida"}, "Idempotency-Key", idemKey())
 	if n := count(t, `SELECT count(*) FROM platform_addon_orders WHERE tenant_id = $1 AND id = $2 AND requested_by = $3`, tn.ID,
 		order["id"], tn.Owner.ID); n != 1 {
 		t.Fatalf("autoria do pedido pelo painel: %d", n)
@@ -269,6 +271,10 @@ END $$`); err != nil {
 	}
 
 	path := "/api/v1/dead-letters/" + id + "/discard"
+	// A falha é provocada de propósito no banco: o 500 internal_error não é
+	// declarado no contrato e fica como exceção explícita desta requisição
+	// (ADR-084).
+	contract.AllowUndeclared(t, http.MethodPost, path, http.StatusInternalServerError)
 	if r := a.raw(http.MethodPost, path, map[string]any{"reason": "Evento obsoleto"}, bearer(secret)); r.status != http.StatusInternalServerError {
 		t.Fatalf("descarte com auditoria indisponível: %d %v", r.status, r.body)
 	}

@@ -8,16 +8,22 @@ import { api } from '../../api/client';
 import type { Dashboard } from '../../api/types';
 import { AccessDenied, LoadingState, QueryContent } from '../../components/states';
 import { HelpTip, PageHeader } from '../../components/ui';
-import { currentMonthInTimeZone, formatMonth } from '../../lib/dates';
+import { currentMonthInTimeZone, formatDateTime, formatMonth } from '../../lib/dates';
 import { useUrlFilters } from '../../lib/hooks';
 import { formatBasisPoints, formatMoney } from '../../lib/money';
+import type { Permission } from '../../session/permissions';
 import { useTenant } from '../../session/SessionContext';
 
 export function fetchDashboard(month: string, signal?: AbortSignal): Promise<Dashboard> {
   return api.get<Dashboard>('/api/v1/dashboard', { query: { month }, signal });
 }
 
-const DEFINITION_LABELS: Record<string, string> = {
+/** Chave de um indicador: o nome do campo na resposta, em definitions e em bases. */
+export type IndicatorKey = keyof Dashboard['definitions'];
+type Basis = Dashboard['bases'][IndicatorKey];
+
+/** Rótulo de cada indicador, na ordem da tabela "Como calculamos". */
+export const INDICATOR_LABELS: Record<IndicatorKey, string> = {
   mrr: 'MRR',
   arr: 'ARR',
   billed: 'Receita faturada',
@@ -29,35 +35,61 @@ const DEFINITION_LABELS: Record<string, string> = {
   delinquency_rate_bp: 'Taxa de inadimplência',
   churn_rate_bp: 'Churn',
   active_subscriptions: 'Assinaturas ativas',
-  new_subscriptions: 'Novas assinaturas',
-  canceled_subscriptions: 'Assinaturas canceladas',
+  new_subscriptions: 'Novas no mês',
+  canceled_subscriptions: 'Canceladas no mês',
   refunds: 'Reembolsos',
   chargebacks: 'Chargebacks',
-  recoverables: 'Valores a recuperar de clientes',
+  open_recoverables: 'Valores a recuperar de clientes',
+  pending_provider_receipt: 'A receber do provedor',
   open_discrepancies: 'Divergências abertas',
   unknown_operations: 'Operações com resultado desconhecido',
+};
+
+/**
+ * Lista que corresponde ao número do card, com o filtro que já existe na API e
+ * na tela, e a permissão de leitura da lista: sem ela, o card fica sem link.
+ * Indicadores sem lista correspondente (por exemplo, somas do mês ou
+ * disputas com valor a recuperar, que a lista não filtra) não têm link.
+ */
+export const INDICATOR_LISTS: Partial<Record<IndicatorKey, { href: string; permission: Permission }>> = {
+  open_receivables: { href: '/faturas?open_balance=true', permission: 'invoices.read' },
+  overdue_receivables: { href: '/faturas?overdue=true', permission: 'invoices.read' },
+  active_subscriptions: { href: '/assinaturas?in_force=true', permission: 'subscriptions.read' },
+  open_discrepancies: { href: '/conciliacao?aba=divergencias', permission: 'reconciliation.read' },
+  unknown_operations: { href: '/operacoes-pagamento?status=unknown', permission: 'payments.read' },
+};
+
+export const BASIS_LABELS: Record<Basis, string> = {
+  month: 'Mês consultado',
+  month_end: 'Posição no fim do mês',
+  current: 'Posição atual',
 };
 
 function StatCard({
   label,
   value,
   hint,
-  definitionKey,
-  definitions,
+  indicator,
+  data,
   tone,
-  href,
   badge,
 }: {
   label: string;
   value: ReactNode;
   hint?: ReactNode;
-  definitionKey: string;
-  definitions: Record<string, string>;
+  indicator: IndicatorKey;
+  data: Dashboard;
   tone?: 'danger' | 'warning';
-  href?: string;
   badge?: ReactNode;
 }) {
-  const definition = definitions[definitionKey];
+  const { timeZone, can } = useTenant();
+  const definition = data.definitions?.[indicator];
+  const basis = data.bases?.[indicator];
+  const list = INDICATOR_LISTS[indicator];
+  const href = list && can(list.permission) ? list.href : undefined;
+  // A lista filtrada mostra a posição de hoje: num mês encerrado, ela difere
+  // do número das posições no fim do mês (e o card avisa).
+  const todayList = !!href && (basis === 'month_end' || basis === 'current') && data.month !== currentMonthInTimeZone(timeZone);
   const color = tone === 'danger' ? 'red.7' : tone === 'warning' ? 'orange.7' : undefined;
   return (
     <Paper withBorder p="md" radius="md" component="section" aria-label={label}>
@@ -77,10 +109,29 @@ function StatCard({
             value
           )}
         </Text>
-        {badge}
+        {(badge || basis === 'current') && (
+          <Group gap={4}>
+            {basis === 'current' && (
+              <Badge variant="light" color="blue" size="sm">
+                Posição atual
+              </Badge>
+            )}
+            {badge}
+          </Group>
+        )}
+        {basis === 'month_end' && (
+          <Text size="xs" c="dimmed">
+            Posição em {formatDateTime(data.position_at, timeZone)}
+          </Text>
+        )}
         {hint && (
           <Text size="xs" c="dimmed">
             {hint}
+          </Text>
+        )}
+        {todayList && (
+          <Text size="xs" c="dimmed">
+            A lista mostra a posição de hoje.
           </Text>
         )}
       </Stack>
@@ -106,24 +157,54 @@ function Section({ title, description, children }: { title: string; description?
   );
 }
 
+function indicatorsWith(data: Dashboard, basis: Basis): string {
+  return (Object.keys(INDICATOR_LABELS) as IndicatorKey[])
+    .filter((key) => data.bases?.[key] === basis)
+    .map((key) => INDICATOR_LABELS[key])
+    .join(', ');
+}
+
+/** Explica a base temporal dos indicadores a partir de bases. */
+function BasisSummary({ data, timeZone }: { data: Dashboard; timeZone: string }) {
+  const monthEnd = indicatorsWith(data, 'month_end');
+  const current = indicatorsWith(data, 'current');
+  if (!monthEnd && !current) return null;
+  return (
+    <Stack gap={2} component="section" aria-label="Base dos indicadores">
+      {monthEnd && (
+        <Text size="sm" c="dimmed">
+          Posição em {formatDateTime(data.position_at, timeZone)}: {monthEnd}.
+        </Text>
+      )}
+      {current && (
+        <Text size="sm" c="dimmed">
+          Posição atual, seja qual for o mês: {current}.
+        </Text>
+      )}
+    </Stack>
+  );
+}
+
 function DashboardContent({ data }: { data: Dashboard }) {
   const money = (v: number | undefined) => formatMoney(v ?? 0, data.currency);
-  const defs = data.definitions ?? {};
+  const { timeZone } = useTenant();
+  const defs: Partial<Dashboard['definitions']> = data.definitions ?? {};
   const unknownOps = data.unknown_operations ?? 0;
   const openDiscrepancies = data.open_discrepancies ?? 0;
 
   return (
     <Stack gap="xl">
+      <BasisSummary data={data} timeZone={timeZone} />
       <Section
         title="Receita do mês"
         description="Faturado e recebido são medidas diferentes: uma fatura emitida no mês pode ser paga em outro mês."
       >
-        <SimpleGrid cols={{ base: 1, sm: 2 }}>
+        <SimpleGrid cols={{ base: 1, sm: 3 }}>
           <StatCard
             label="Receita faturada"
             value={money(data.billed)}
-            definitionKey="billed"
-            definitions={defs}
+            indicator="billed"
+            data={data}
             hint={
               data.billed_recurring !== undefined || data.billed_usage !== undefined
                 ? `Recorrente ${money(data.billed_recurring)} · Consumo ${money(data.billed_usage)}`
@@ -133,9 +214,16 @@ function DashboardContent({ data }: { data: Dashboard }) {
           <StatCard
             label="Receita recebida"
             value={money(data.received)}
-            definitionKey="received"
-            definitions={defs}
+            indicator="received"
+            data={data}
             hint="Pagamentos confirmados no mês"
+          />
+          <StatCard
+            label="A receber do provedor"
+            value={money(data.pending_provider_receipt)}
+            indicator="pending_provider_receipt"
+            data={data}
+            hint="Confirmado pelo provedor e ainda não creditado"
           />
         </SimpleGrid>
       </Section>
@@ -145,8 +233,8 @@ function DashboardContent({ data }: { data: Dashboard }) {
           <StatCard
             label="MRR"
             value={money(data.mrr)}
-            definitionKey="mrr"
-            definitions={defs}
+            indicator="mrr"
+            data={data}
             badge={
               <Badge variant="light" color="gray" size="sm">
                 Exclui consumo variável
@@ -156,65 +244,60 @@ function DashboardContent({ data }: { data: Dashboard }) {
           <StatCard
             label="ARR"
             value={money(data.arr)}
-            definitionKey="arr"
-            definitions={defs}
+            indicator="arr"
+            data={data}
             badge={
               <Badge variant="light" color="gray" size="sm">
                 Exclui consumo variável
               </Badge>
             }
           />
-          <StatCard label="Assinaturas ativas" value={data.active_subscriptions} definitionKey="active_subscriptions" definitions={defs} href="/assinaturas?status=active" />
-          <StatCard label="Novas no mês" value={data.new_subscriptions} definitionKey="new_subscriptions" definitions={defs} />
-          <StatCard label="Canceladas no mês" value={data.canceled_subscriptions} definitionKey="canceled_subscriptions" definitions={defs} />
+          <StatCard label="Assinaturas ativas" value={data.active_subscriptions} indicator="active_subscriptions" data={data} />
+          <StatCard label="Novas no mês" value={data.new_subscriptions} indicator="new_subscriptions" data={data} />
+          <StatCard label="Canceladas no mês" value={data.canceled_subscriptions} indicator="canceled_subscriptions" data={data} />
         </SimpleGrid>
       </Section>
 
       <Section title="Recebíveis e inadimplência">
         <SimpleGrid cols={{ base: 1, xs: 2, lg: 4 }}>
-          <StatCard label="Recebíveis em aberto" value={money(data.open_receivables)} definitionKey="open_receivables" definitions={defs} href="/faturas?status=open" />
+          <StatCard label="Recebíveis em aberto" value={money(data.open_receivables)} indicator="open_receivables" data={data} />
           <StatCard
             label="Recebíveis vencidos"
             value={money(data.overdue_receivables)}
-            definitionKey="overdue_receivables"
-            definitions={defs}
+            indicator="overdue_receivables"
+            data={data}
             tone={data.overdue_receivables > 0 ? 'warning' : undefined}
-            href="/faturas?overdue=true"
           />
-          <StatCard label="Taxa de inadimplência" value={formatBasisPoints(data.delinquency_rate_bp)} definitionKey="delinquency_rate_bp" definitions={defs} />
-          <StatCard label="Churn" value={formatBasisPoints(data.churn_rate_bp)} definitionKey="churn_rate_bp" definitions={defs} />
+          <StatCard label="Taxa de inadimplência" value={formatBasisPoints(data.delinquency_rate_bp)} indicator="delinquency_rate_bp" data={data} />
+          <StatCard label="Churn" value={formatBasisPoints(data.churn_rate_bp)} indicator="churn_rate_bp" data={data} />
         </SimpleGrid>
       </Section>
 
       <Section title="Estornos e exceções">
         <SimpleGrid cols={{ base: 1, xs: 2, lg: 5 }}>
-          <StatCard label="Reembolsos" value={money(data.refunds)} definitionKey="refunds" definitions={defs} href="/reembolsos" />
-          <StatCard label="Chargebacks" value={money(data.chargebacks)} definitionKey="chargebacks" definitions={defs} href="/disputas" />
+          <StatCard label="Reembolsos" value={money(data.refunds)} indicator="refunds" data={data} />
+          <StatCard label="Chargebacks" value={money(data.chargebacks)} indicator="chargebacks" data={data} />
           <StatCard
             label="Valores a recuperar de clientes"
             value={money(data.open_recoverables)}
-            definitionKey="recoverables"
-            definitions={defs}
+            indicator="open_recoverables"
+            data={data}
             tone={(data.open_recoverables ?? 0) > 0 ? 'warning' : undefined}
-            hint="Saldo atual, sem relação com o mês"
-            href="/disputas"
           />
           <StatCard
             label="Divergências abertas"
             value={openDiscrepancies}
-            definitionKey="open_discrepancies"
-            definitions={defs}
+            indicator="open_discrepancies"
+            data={data}
             tone={openDiscrepancies > 0 ? 'warning' : undefined}
-            href="/conciliacao?aba=divergencias"
           />
           <StatCard
             label="Operações com resultado desconhecido"
             value={unknownOps}
-            definitionKey="unknown_operations"
-            definitions={defs}
+            indicator="unknown_operations"
+            data={data}
             tone={unknownOps > 0 ? 'danger' : undefined}
             hint={unknownOps > 0 ? 'Reconsulte o provedor antes de cobrar novamente.' : undefined}
-            href="/operacoes-pagamento?status=unknown"
           />
         </SimpleGrid>
       </Section>
@@ -232,16 +315,20 @@ function DashboardContent({ data }: { data: Dashboard }) {
                 <Table.Thead>
                   <Table.Tr>
                     <Table.Th>Indicador</Table.Th>
+                    <Table.Th>Base</Table.Th>
                     <Table.Th>Fórmula</Table.Th>
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
-                  {Object.entries(defs).map(([key, text]) => (
-                    <Table.Tr key={key}>
-                      <Table.Td fw={500}>{DEFINITION_LABELS[key] ?? key}</Table.Td>
-                      <Table.Td>{text}</Table.Td>
-                    </Table.Tr>
-                  ))}
+                  {(Object.keys(INDICATOR_LABELS) as IndicatorKey[])
+                    .filter((key) => defs[key])
+                    .map((key) => (
+                      <Table.Tr key={key}>
+                        <Table.Td fw={500}>{INDICATOR_LABELS[key]}</Table.Td>
+                        <Table.Td>{data.bases?.[key] ? BASIS_LABELS[data.bases[key]] : '—'}</Table.Td>
+                        <Table.Td>{defs[key]}</Table.Td>
+                      </Table.Tr>
+                    ))}
                 </Table.Tbody>
               </Table>
             )}

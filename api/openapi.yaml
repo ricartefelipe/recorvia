@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Recorvia API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     API do Recorvia: gestão de assinaturas, faturamento recorrente, cobranças,
     inadimplência e conciliação de recebíveis.
@@ -12,14 +12,34 @@ info:
       centavos, até 10 casas).
     - Instantes em RFC 3339 (UTC). Datas civis no formato `AAAA-MM-DD`, no fuso
       da organização.
-    - Listas paginadas por cursor: `limit` (1 a 100, padrão 25) e `cursor`.
-      A ordenação é determinística (desempate por `id`).
-    - Erros no formato RFC 9457 (`application/problem+json`).
-    - Concorrência otimista: recursos expõem `version` e `ETag`; alterações
-      exigem `If-Match: "<version>"` quando indicado.
-    - Operações financeiras de criação exigem `Idempotency-Key`.
+    - Listas paginadas por cursor: `limit` (1 a 100, padrão 25), `cursor` opaco
+      e `next_cursor` na resposta (nulo na última página). A ordenação é
+      determinística (desempate por `id`). `sort` só é aceito nas listas que o
+      declaram, com os valores do enum; fora disso, a lista responde 422
+      `invalid_sort` em vez de ignorar o parâmetro.
+    - Erros no formato RFC 9457 (`application/problem+json`), com `request_id`
+      igual ao header `X-Request-ID` da resposta. Fora das operações deste
+      contrato, caminho inexistente responde 404 `route_not_found` e método
+      não aceito por um caminho existente responde 405 `method_not_allowed`,
+      com os métodos aceitos no header `Allow`. `HEAD` é aceito onde `GET` é
+      e responde como ele, sem corpo.
+    - Concorrência otimista: recursos expõem `version` e `ETag`; as alterações
+      que declaram o parâmetro `IfMatch` exigem `If-Match: "<version>"`. Sem o
+      header, a resposta é 428 `if_match_required`; com versão divergente, 412
+      `version_mismatch`, sem nenhum efeito. A resposta de sucesso traz o `ETag`
+      da versão gravada.
+    - Operações financeiras de criação exigem `Idempotency-Key` (veja o parâmetro
+      `IdempotencyKey`): pagamentos manuais, notas de crédito, cobranças,
+      reembolsos, baixas de valor a recuperar, créditos de cliente, execuções de
+      faturamento e de conciliação, anonimização, criação de assinaturas,
+      reajustes programados, aplicação de cupom e pedidos de serviço adicional.
     - Navegador: sessão por cookie HttpOnly, header `X-CSRF-Token` em métodos
       que alteram estado e `X-Recorvia-Tenant` igual à organização ativa.
+    - CORS (somente para as origens de `RECORVIA_ALLOWED_ORIGINS`): a resposta
+      expõe ao navegador os cabeçalhos `ETag`, `Location`, `X-Request-ID`,
+      `Idempotent-Replayed`, `X-Recorvia-Export-Limit`,
+      `X-Recorvia-Export-Truncated`, `X-Recorvia-Export-Next-Cursor` e
+      `X-Recorvia-Export-Next-Part` (`Access-Control-Expose-Headers`).
     - Integrações: `Authorization: Bearer rcv_...` (credencial com escopos e
       vinculada a uma organização). A autoria das ações feitas por credencial
       fica na auditoria (ator `api_credential`). Operações que exigem uma pessoa
@@ -96,18 +116,32 @@ paths:
     post:
       tags: [auth]
       operationId: authLogout
+      summary: Encerra a sessão atual
+      description: >-
+        Remove a sessão do servidor, revoga no provedor de identidade, pelo
+        servidor, o refresh token da sessão e devolve o endereço de
+        encerramento da sessão do navegador no provedor, com `client_id` e
+        `post_logout_redirect_uri`. Nenhum token do provedor (nem o ID token)
+        é devolvido ao navegador.
       security: [ { session: [] } ]
       parameters: [ { $ref: "#/components/parameters/CSRF" } ]
       responses:
-        "200":
-          description: Sessão encerrada
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [redirect_url]
-                properties:
-                  redirect_url: { type: string }
+        "200": { $ref: "#/components/responses/LogoutRedirect" }
+        "403": { $ref: "#/components/responses/UserSessionRequired" }
+  /auth/logout-all:
+    post:
+      tags: [auth]
+      operationId: authLogoutAll
+      summary: Encerra todas as sessões do usuário
+      description: >-
+        Remove todas as sessões do usuário no servidor (em qualquer navegador),
+        revoga no provedor de identidade o refresh token de cada uma e devolve
+        o endereço de encerramento da sessão do navegador atual no provedor,
+        sem tokens.
+      security: [ { session: [] } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      responses:
+        "200": { $ref: "#/components/responses/LogoutRedirect" }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
 
   /api/v1/session:
@@ -156,6 +190,14 @@ paths:
     post:
       tags: [organizations]
       operationId: acceptInvitation
+      summary: Aceita um convite com o usuário da sessão
+      description: >-
+        O convite é de uso único, expira e exige o mesmo e-mail do usuário.
+        Convite inválido, expirado, revogado ou já usado responde 422
+        `invitation_invalid`; e-mail divergente, 403 `invitation_email_mismatch`;
+        quem já participa da organização, 409 `already_member`; organização no
+        limite de usuários do plano da plataforma (inclusive depois de um
+        rebaixamento de plano), 403 `platform_user_limit`.
       security: [ { session: [] } ]
       parameters: [ { $ref: "#/components/parameters/CSRF" } ]
       requestBody:
@@ -179,6 +221,7 @@ paths:
                   tenant_id: { type: string, format: uuid }
                   role: { $ref: "#/components/schemas/Role" }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
 
   /api/v1/organization:
@@ -191,14 +234,22 @@ paths:
     patch:
       tags: [organizations]
       operationId: updateOrganization
+      description: >-
+        Altera o perfil da organização. `address`, quando enviado, substitui o endereço da organização (no formato do
+        endereço de cobrança do cliente); ausente, mantém o atual (o endereço não é removido). Cada alteração registra
+        `organization.updated` na auditoria; a mudança do endereço registra também `organization.address_updated`, com os
+        nomes dos campos alterados (`fields`) e se o endereço foi cadastrado agora (`created`), nunca os valores. O
+        endereço é copiado para o emitente de cada fatura emitida depois da alteração; faturas já emitidas mantêm o
+        emitente gravado na emissão.
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/OrganizationUpdate" } } }
       responses:
-        "200": { description: Atualizada, content: { application/json: { schema: { $ref: "#/components/schemas/Organization" } } } }
+        "200": { description: Atualizada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Organization" } } } }
         "412": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/roles:
     get:
       tags: [organizations]
@@ -216,6 +267,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/RolePermissions" }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/members:
     get:
       tags: [organizations]
@@ -223,36 +275,45 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Membros, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Member" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/members/{user_id}:
     parameters: [ { $ref: "#/components/parameters/Tenant" }, { name: user_id, in: path, required: true, schema: { type: string, format: uuid } } ]
     patch:
       tags: [organizations]
       operationId: updateMemberRole
+      description: Altera o papel do membro na versão da associação informada no If-Match (`version` do membro).
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, required: [role], properties: { role: { $ref: "#/components/schemas/Role" } } } } }
       responses:
-        "200": { description: Papel alterado, content: { application/json: { schema: { $ref: "#/components/schemas/Member" } } } }
+        "200": { description: Papel alterado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Member" } } } }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
     delete:
       tags: [organizations]
       operationId: removeMember
+      description: Remove o membro na versão da associação informada no If-Match (`version` do membro).
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
       responses:
         "204": { description: Removido }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/invitations:
     get:
       tags: [organizations]
       operationId: listInvitations
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      description: Convites, dos mais recentes para os mais antigos, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Convites, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Invitation" } } } } } } }
+        "200": { description: Convites, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/Invitation" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [organizations]
       operationId: createInvitation
@@ -296,19 +357,26 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Planos da plataforma, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PlatformPlan" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/platform/plan:
     put:
       tags: [platform]
       operationId: changePlatformPlan
+      description: >-
+        Troca o plano na versão da assinatura da plataforma informada no If-Match (`subscription.version` de
+        PlatformOverview); o ETag da resposta é a versão gravada. A troca para o plano atual, na versão atual, não tem
+        efeito.
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, required: [plan_code], properties: { plan_code: { type: string } } } } }
       responses:
-        "200": { description: Plano alterado, content: { application/json: { schema: { $ref: "#/components/schemas/PlatformOverview" } } } }
+        "200": { description: Plano alterado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/PlatformOverview" } } } }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/platform/addons:
     get:
       tags: [platform]
@@ -316,31 +384,38 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Serviços adicionais, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PlatformAddon" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/platform/addon-orders:
     get:
       tags: [platform]
       operationId: listAddonOrders
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      description: Pedidos de serviços adicionais da organização, dos mais recentes para os mais antigos, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Pedidos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AddonOrder" } } } } } } }
+        "200": { description: Pedidos, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/AddonOrder" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [platform]
       operationId: createAddonOrder
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, required: [addon_code], properties: { addon_code: { type: string }, notes: { type: string, maxLength: 2000 } } } } }
       responses:
         "201": { description: Pedido registrado, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/platform/statements:
     get:
       tags: [platform]
       operationId: listPlatformStatements
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      description: Demonstrativos mensais, do período mais recente para o mais antigo, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Demonstrativos mensais da plataforma, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PlatformStatement" } } } } } } }
+        "200": { description: Demonstrativos mensais da plataforma, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/PlatformStatement" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/admin/tenants:
     get:
       tags: [platform]
@@ -350,6 +425,109 @@ paths:
       responses:
         "200": { description: Organizações, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AdminTenant" } } } } } } }
         "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/admin/addon-orders:
+    get:
+      tags: [platform]
+      operationId: adminListAddonOrders
+      summary: Pedidos de serviços adicionais de todas as organizações (equipe da plataforma)
+      description: >-
+        Paginada por cursor. Sem `status`, lista os pedidos em aberto
+        (solicitados e agendados), do mais antigo para o mais recente;
+        `requested`, pela solicitação; `scheduled`, pela data do atendimento;
+        `completed` e `canceled`, do encerramento mais recente para o mais
+        antigo. O cursor vale somente para o mesmo filtro (`invalid_cursor`).
+      security: [ { session: [] } ]
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [requested, scheduled, completed, canceled] } }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200":
+          description: Pedidos
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor]
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/StaffAddonOrder" } }
+                  next_cursor: { type: string, nullable: true }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/schedule:
+    parameters: [ { $ref: "#/components/parameters/AdminTenantID" }, { $ref: "#/components/parameters/ID" } ]
+    post:
+      tags: [platform]
+      operationId: adminScheduleAddonOrder
+      summary: Agenda (ou reagenda) o atendimento do pedido
+      description: Na versão do pedido informada no If-Match (`version` do pedido); o ETag da resposta é a versão gravada.
+      security: [ { session: [] } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scheduled_for]
+              properties:
+                scheduled_for: { type: string, format: date-time, description: "Instante futuro, em até um ano" }
+      responses:
+        "200": { description: Pedido agendado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
+  /api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/complete:
+    parameters: [ { $ref: "#/components/parameters/AdminTenantID" }, { $ref: "#/components/parameters/ID" } ]
+    post:
+      tags: [platform]
+      operationId: adminCompleteAddonOrder
+      summary: Conclui o atendimento; o valor entra no próximo demonstrativo da plataforma
+      description: >-
+        O valor entra no demonstrativo do período em que a conclusão ocorreu
+        (ou no seguinte, se esse já estiver fechado). Com a assinatura da
+        plataforma da organização cancelada, responde 409
+        `platform_subscription_canceled`: o pedido deve ser cancelado. Na versão
+        do pedido informada no If-Match; o ETag da resposta é a versão gravada.
+      security: [ { session: [] } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
+      responses:
+        "200": { description: Pedido concluído, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
+  /api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/cancel:
+    parameters: [ { $ref: "#/components/parameters/AdminTenantID" }, { $ref: "#/components/parameters/ID" } ]
+    post:
+      tags: [platform]
+      operationId: adminCancelAddonOrder
+      summary: Cancela o pedido em aberto, sem cobrança
+      description: Na versão do pedido informada no If-Match (`version` do pedido); o ETag da resposta é a versão gravada.
+      security: [ { session: [] } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 3, maxLength: 500 }
+      responses:
+        "200": { description: Pedido cancelado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
 
   /api/v1/customers:
     get:
@@ -392,17 +570,21 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/CustomerInput" } } }
       responses:
-        "200": { description: Atualizado, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerDetails" } } } }
+        "200": { description: Atualizado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerDetails" } } } }
         "412": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/archive:
     post:
       tags: [customers]
       operationId: archiveCustomer
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      description: Arquiva o cliente na versão informada no If-Match. Arquivar um cliente já arquivado, na versão atual, não tem efeito.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       responses:
-        "200": { description: Arquivado, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerDetails" } } } }
+        "200": { description: Arquivado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerDetails" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/anonymize:
     post:
       tags: [customers]
@@ -474,6 +656,29 @@ paths:
         "201": { description: Contato adicionado, content: { application/json: { schema: { $ref: "#/components/schemas/Contact" } } } }
         "409": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/contacts/{contact_id}:
+    patch:
+      tags: [customers]
+      operationId: updateCustomerContact
+      description: >-
+        Altera os campos informados do contato; campo omitido mantém o valor atual (inclusive
+        `receives_billing_email`, que o próprio cliente pode ter alterado pelo portal). `phone` vazio remove o
+        telefone. Sem mudança, nada é gravado. O histórico do cliente registra
+        `customer.contact_updated` com os nomes dos campos alterados, nunca os valores. Responde 404
+        `contact_not_found` para contato inexistente ou de outro cliente e 409 `customer_anonymized` para
+        cliente anonimizado.
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/CSRF" }
+        - { $ref: "#/components/parameters/ID" }
+        - { name: contact_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ContactPatch" } } }
+      responses:
+        "200": { description: Contato alterado, content: { application/json: { schema: { $ref: "#/components/schemas/Contact" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
     delete:
       tags: [customers]
       operationId: removeCustomerContact
@@ -489,30 +694,50 @@ paths:
       tags: [customers]
       operationId: setCustomerAddress
       description: >-
-        Grava o endereço de cobrança do cliente. Responde 409 `customer_anonymized` para cliente anonimizado,
-        que não volta a receber dados pessoais.
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+        Grava o endereço de cobrança do cliente. Sem mudança, nada é gravado. O histórico do cliente registra
+        `customer.address_updated` com os nomes dos campos alterados (`fields`) e se o endereço foi
+        cadastrado agora (`created`), nunca os valores. Responde 409 `customer_anonymized` para cliente
+        anonimizado, que não volta a receber dados pessoais. O endereço faz parte da ficha do cliente: o If-Match
+        é a versão do cliente (`version` de CustomerDetails) e a gravação gera a versão seguinte, devolvida no
+        ETag; sem mudança, a versão não muda.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/Address" } } }
       responses:
-        "200": { description: Endereço gravado, content: { application/json: { schema: { $ref: "#/components/schemas/Address" } } } }
+        "200": { description: Endereço gravado; o ETag é a versão do cliente, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Address" } } } }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/history:
     get:
       tags: [customers]
       operationId: getCustomerHistory
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      description: >-
+        Histórico do cliente (auditoria), do evento mais recente para o mais antigo, em páginas por cursor:
+        `next_cursor` pede a página seguinte e é nulo na última.
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/ID" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
       responses:
-        "200": { description: Histórico do cliente (auditoria), content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AuditEvent" } } } } } } }
+        "200": { description: Histórico do cliente (auditoria), content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AuditEvent" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/credits:
     get:
       tags: [customers]
       operationId: getCustomerCredits
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      description: >-
+        Saldo de crédito do cliente e os movimentos, dos mais recentes para os mais antigos, em páginas por cursor
+        (`entries` é a página; `next_cursor` pede a seguinte).
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
         "200": { description: Saldo e movimentos de crédito, content: { application/json: { schema: { $ref: "#/components/schemas/CreditBalance" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [customers]
       operationId: grantCustomerCredit
@@ -586,9 +811,11 @@ paths:
     get:
       tags: [catalog]
       operationId: listProducts
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { name: status, in: query, schema: { type: string, enum: [active, archived] } } ]
+      description: Produtos, dos criados mais recentemente para os mais antigos, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { name: status, in: query, schema: { type: string, enum: [active, archived] } }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Produtos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Product" } } } } } } }
+        "200": { description: Produtos, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/Product" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [catalog]
       operationId: createProduct
@@ -616,15 +843,18 @@ paths:
                   properties:
                     status: { type: string, enum: [active, archived] }
       responses:
-        "200": { description: Atualizado, content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } } }
+        "200": { description: Atualizado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } } }
         "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/metrics:
     get:
       tags: [catalog]
       operationId: listMetrics
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      description: Métricas pelo código, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Métricas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Metric" } } } } } } }
+        "200": { description: Métricas, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/Metric" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [catalog]
       operationId: createMetric
@@ -639,12 +869,16 @@ paths:
     get:
       tags: [catalog]
       operationId: listPlans
+      description: Planos, dos criados mais recentemente para os mais antigos, em páginas por cursor.
       parameters:
         - { $ref: "#/components/parameters/Tenant" }
         - { name: status, in: query, schema: { type: string, enum: [active, archived] } }
         - { name: product_id, in: query, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
       responses:
-        "200": { description: Planos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Plan" } } } } } } }
+        "200": { description: Planos, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/Plan" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [catalog]
       operationId: createPlan
@@ -670,27 +904,35 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/PlanUpdate" } } }
       responses:
-        "200": { description: Atualizado, content: { application/json: { schema: { $ref: "#/components/schemas/PlanDetails" } } } }
+        "200": { description: Atualizado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/PlanDetails" } } } }
         "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/plans/{id}/prices:
     post:
       tags: [catalog]
       operationId: addPriceVersion
       summary: Cria nova versão de preço (não altera assinaturas existentes)
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      description: >-
+        A nova versão passa a ser o preço vigente do plano, o que altera o plano: o If-Match é a versão do plano
+        (`version` de PlanDetails) e o ETag da resposta é a versão seguinte do plano.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/PriceInput" } } }
       responses:
-        "201": { description: Versão criada, content: { application/json: { schema: { $ref: "#/components/schemas/PriceVersion" } } } }
+        "201": { description: Versão criada; o ETag é a versão do plano, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/PriceVersion" } } } }
         "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/coupons:
     get:
       tags: [catalog]
       operationId: listCoupons
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      description: Cupons, dos criados mais recentemente para os mais antigos, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Cupons, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Coupon" } } } } } } }
+        "200": { description: Cupons, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/Coupon" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [catalog]
       operationId: createCoupon
@@ -705,9 +947,13 @@ paths:
     post:
       tags: [catalog]
       operationId: archiveCoupon
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      description: Arquiva o cupom na versão informada no If-Match. Arquivar um cupom já arquivado, na versão atual, não tem efeito.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       responses:
-        "200": { description: Arquivado, content: { application/json: { schema: { $ref: "#/components/schemas/Coupon" } } } }
+        "200": { description: Arquivado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Coupon" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
 
   /api/v1/subscriptions:
     get:
@@ -718,19 +964,32 @@ paths:
         - { $ref: "#/components/parameters/Limit" }
         - { $ref: "#/components/parameters/Cursor" }
         - { name: status, in: query, schema: { $ref: "#/components/schemas/SubscriptionStatus" } }
+        - name: in_force
+          in: query
+          description: Somente assinaturas em trial, ativas ou em atraso, as das assinaturas ativas do painel.
+          schema: { type: boolean }
         - { name: customer_id, in: query, schema: { type: string, format: uuid } }
       responses:
         "200": { description: Assinaturas, content: { application/json: { schema: { $ref: "#/components/schemas/SubscriptionPage" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [subscriptions]
       operationId: createSubscription
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      description: >-
+        Cria a assinatura com a versão de preço vigente do plano. Exige `Idempotency-Key`: a repetição devolve o resultado
+        registrado (sem o header `ETag`; a versão está no corpo) e, depois de um processamento interrompido ou da validade
+        do registro (24 h), a chave de negócio derivada da chave devolve a mesma assinatura em vez de criar outra. A mesma
+        chave com outro conteúdo de negócio (cliente, plano, quantidade, início, avaliação ou prazo) responde 409
+        `request_key_reused`; 409 `subscription_in_progress` (com Retry-After) indica outra criação com a mesma chave
+        ainda não confirmada.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/SubscriptionInput" } } }
       responses:
-        "201": { description: Assinatura criada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "201": { description: Assinatura criada, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
         "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}:
     get:
@@ -747,6 +1006,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
       responses:
         "200": { description: Histórico de transições, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/SubscriptionHistoryEntry" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/cancel:
     post:
       tags: [subscriptions]
@@ -763,15 +1023,19 @@ paths:
                 mode: { type: string, enum: [immediate, period_end] }
                 reason: { type: string, maxLength: 500 }
       responses:
-        "200": { description: Cancelada ou agendada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "200": { description: Cancelada ou agendada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/resume-renewal:
     post:
       tags: [subscriptions]
       operationId: resumeSubscriptionRenewal
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       responses:
-        "200": { description: Cancelamento agendado desfeito, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "200": { description: Cancelamento agendado desfeito, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/suspend:
     post:
       tags: [subscriptions]
@@ -780,16 +1044,20 @@ paths:
       requestBody:
         content: { application/json: { schema: { type: object, properties: { reason: { type: string, maxLength: 500 } } } } }
       responses:
-        "200": { description: Suspensa, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "200": { description: Suspensa, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/reactivate:
     post:
       tags: [subscriptions]
       operationId: reactivateSubscription
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       responses:
-        "200": { description: Reativada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "200": { description: Reativada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/change-plan:
     post:
       tags: [subscriptions]
@@ -807,9 +1075,11 @@ paths:
                 quantity: { type: integer, minimum: 1, maximum: 1000000 }
                 timing: { $ref: "#/components/schemas/ChangeTiming" }
       responses:
-        "200": { description: Alteração aplicada ou agendada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "200": { description: Alteração aplicada ou agendada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/change-quantity:
     post:
       tags: [subscriptions]
@@ -826,24 +1096,30 @@ paths:
                 quantity: { type: integer, minimum: 1, maximum: 1000000 }
                 timing: { $ref: "#/components/schemas/ChangeTiming" }
       responses:
-        "200": { description: Alteração aplicada ou agendada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "200": { description: Alteração aplicada ou agendada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
         "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/price-adjustments:
     parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
     get:
       tags: [subscriptions]
       operationId: listPriceAdjustments
+      description: Reajustes da assinatura, da vigência mais antiga para a mais recente, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Reajustes, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PriceAdjustment" } } } } } } }
+        "200": { description: Reajustes, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/PriceAdjustment" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [subscriptions]
       operationId: schedulePriceAdjustment
-      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/PriceAdjustmentInput" } } }
       responses:
         "201": { description: Reajuste programado, content: { application/json: { schema: { $ref: "#/components/schemas/PriceAdjustment" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/price-adjustments/{adjustment_id}:
     delete:
@@ -862,7 +1138,7 @@ paths:
     post:
       tags: [subscriptions]
       operationId: applySubscriptionCoupon
-      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, required: [coupon_code], properties: { coupon_code: { type: string } } } } }
@@ -896,6 +1172,7 @@ paths:
         - { name: metric_id, in: query, schema: { type: string, format: uuid } }
       responses:
         "200": { description: Eventos de consumo, content: { application/json: { schema: { $ref: "#/components/schemas/UsageEventPage" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [usage]
       operationId: ingestUsageEvents
@@ -936,19 +1213,49 @@ paths:
         - { name: issued_from, in: query, schema: { type: string, format: date } }
         - { name: issued_to, in: query, schema: { type: string, format: date } }
         - { name: overdue, in: query, schema: { type: boolean } }
+        - name: open_balance
+          in: query
+          description: Somente faturas com saldo em aberto (abertas ou parcialmente pagas), as dos recebíveis em aberto do painel.
+          schema: { type: boolean }
       responses:
         "200": { description: Faturas (ordenadas por emissão decrescente), content: { application/json: { schema: { $ref: "#/components/schemas/InvoicePage" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/invoices/export:
     get:
       tags: [invoices]
       operationId: exportInvoices
+      description: >-
+        Gera o CSV das faturas sob demanda (não é armazenado), separado por ponto e vírgula, das mais recentes
+        para as mais antigas. Colunas: numero, cliente, situacao, emissao, vencimento, periodo_inicio e
+        periodo_fim (primeiro e último dia incluídos no período de faturamento), subtotal, desconto, total,
+        creditos_aplicados, valor_creditado (notas de crédito), pago, valor_baixado, saldo e moeda. Valores
+        em reais com ponto decimal; datas no fuso da organização. Textos que começam com =, +, -, @,
+        tabulação ou retorno de carro recebem um apóstrofo na frente (neutralização de fórmulas). Cada
+        arquivo tem no máximo `X-Recorvia-Export-Limit` faturas (50.000); quando há mais,
+        `X-Recorvia-Export-Truncated` é `true`, `X-Recorvia-Export-Next-Cursor` traz o cursor da parte
+        seguinte e `X-Recorvia-Export-Next-Part` o número dela; a parte seguinte é pedida com os mesmos filtros,
+        `cursor` e `part`, e o arquivo de cada parte se chama `faturas-parte-N.csv`. As partes são consultas
+        independentes, sem uma fotografia única: uma fatura alterada entre partes de modo a entrar ou sair do
+        filtro (por exemplo, de situação) pode faltar ou aparecer numa parte, mas nenhuma fatura que continua no
+        filtro se repete nem é pulada. Fatura cancelada sai com saldo zero. Cada exportação fica na auditoria
+        (`invoices.exported`).
       parameters:
         - { $ref: "#/components/parameters/Tenant" }
         - { name: status, in: query, schema: { $ref: "#/components/schemas/InvoiceStatus" } }
         - { name: issued_from, in: query, schema: { type: string, format: date } }
         - { name: issued_to, in: query, schema: { type: string, format: date } }
+        - { name: cursor, in: query, description: "Cursor da parte seguinte (X-Recorvia-Export-Next-Cursor da parte anterior)", schema: { type: string, maxLength: 200 } }
+        - { name: part, in: query, description: "Número da parte (X-Recorvia-Export-Next-Part da parte anterior), usado no nome do arquivo e na auditoria", schema: { type: integer, minimum: 1, maximum: 100000, default: 1 } }
       responses:
-        "200": { description: CSV gerado sob demanda (não é armazenado), content: { text/csv: { schema: { type: string } } } }
+        "200":
+          description: CSV gerado sob demanda (não é armazenado)
+          headers:
+            X-Recorvia-Export-Limit: { description: Máximo de faturas por arquivo, schema: { type: integer } }
+            X-Recorvia-Export-Truncated: { description: "true quando há faturas além deste arquivo", schema: { type: string, enum: ["true", "false"] } }
+            X-Recorvia-Export-Next-Cursor: { description: Cursor da parte seguinte (somente quando o arquivo foi cortado), schema: { type: string } }
+            X-Recorvia-Export-Next-Part: { description: Número da parte seguinte (somente quando o arquivo foi cortado), schema: { type: integer } }
+          content: { text/csv: { schema: { type: string } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/invoices/{id}:
     get:
       tags: [invoices]
@@ -961,6 +1268,16 @@ paths:
     get:
       tags: [invoices]
       operationId: getInvoiceDocument
+      description: >-
+        Documento comercial da fatura emitida, em HTML imprimível sem scripts. Traz o aviso de que a fatura
+        comercial não é documento fiscal, o emitente (nome, razão social, CNPJ e endereço da organização gravados
+        na emissão; faturas emitidas antes da migration 00019 usam o nome, a razão social e o CNPJ atuais, e as
+        emitidas antes da migration 00024 ou sem endereço cadastrado saem sem o endereço do emitente), o cliente com
+        documento e endereço de cobrança copiados na emissão, emissão, vencimento, condições de pagamento,
+        período de faturamento, itens com período, e o quadro de totais que fecha com o saldo: subtotal,
+        descontos, total, créditos aplicados, notas de crédito, pago, valor baixado e saldo. Na fatura cancelada,
+        o documento informa o cancelamento e o quadro mostra o crédito devolvido ao cliente e o valor cancelado,
+        com saldo zero.
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
       responses:
         "200": { description: Documento comercial imprimível (não é documento fiscal), content: { text/html: { schema: { type: string } } } }
@@ -973,8 +1290,10 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/ReasonInput" } } }
       responses:
-        "200": { description: Cancelada, content: { application/json: { schema: { $ref: "#/components/schemas/InvoiceDetails" } } } }
+        "200": { description: Cancelada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/InvoiceDetails" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/invoices/{id}/mark-uncollectible:
     post:
       tags: [invoices]
@@ -984,8 +1303,10 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/ReasonInput" } } }
       responses:
-        "200": { description: Baixada, content: { application/json: { schema: { $ref: "#/components/schemas/InvoiceDetails" } } } }
+        "200": { description: Baixada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/InvoiceDetails" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/invoices/{id}/credit-notes:
     post:
       tags: [invoices]
@@ -1024,6 +1345,7 @@ paths:
       responses:
         "201": { description: Cobrança solicitada ao provedor, content: { application/json: { schema: { $ref: "#/components/schemas/Charge" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
   /api/v1/billing-runs:
     post:
       tags: [invoices]
@@ -1045,6 +1367,7 @@ paths:
         - { name: invoice_id, in: query, schema: { type: string, format: uuid } }
       responses:
         "200": { description: Cobranças, content: { application/json: { schema: { $ref: "#/components/schemas/ChargePage" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/charges/{id}:
     get:
       tags: [payments]
@@ -1078,6 +1401,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
         "200": { description: Reembolsos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Refund" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/payments:
     get:
       tags: [payments]
@@ -1085,13 +1409,16 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" }, { name: invoice_id, in: query, schema: { type: string, format: uuid } } ]
       responses:
         "200": { description: Recebimentos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Payment" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/disputes:
     get:
       tags: [payments]
       operationId: listDisputes
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      description: Disputas, das abertas mais recentemente para as mais antigas, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Disputas e chargebacks, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Dispute" } } } } } } }
+        "200": { description: Disputas e chargebacks, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/Dispute" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/disputes/{id}:
     get:
       tags: [payments]
@@ -1112,6 +1439,7 @@ paths:
       responses:
         "200": { description: Baixas da disputa, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/RecoverySettlement" } } } } } } }
         "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [payments]
       operationId: settleRecovery
@@ -1140,11 +1468,15 @@ paths:
     get:
       tags: [payments]
       operationId: listPaymentOperations
+      description: Operações externas, das criadas mais recentemente para as mais antigas, em páginas por cursor.
       parameters:
         - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
         - { name: status, in: query, schema: { type: string, enum: [pending, in_flight, succeeded, failed, unknown] } }
       responses:
-        "200": { description: Operações externas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PaymentOperation" } } } } } } }
+        "200": { description: Operações externas, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/PaymentOperation" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/payment-operations/{id}/retry:
     post:
       tags: [payments]
@@ -1161,6 +1493,7 @@ paths:
       responses:
         "200": { description: Operação executada; a situação devolvida é o resultado da tentativa, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentOperation" } } } }
         "404": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
         "409": { description: "Nada executado: operação concluída (operation_completed), esgotada (operation_attempts_exhausted) ou em execução (operation_in_progress)", content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
 
   /api/v1/payment-providers:
@@ -1170,21 +1503,29 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Provedores configurados (sem segredos), content: { application/json: { schema: { type: object, required: [data, available], properties: { data: { type: array, items: { $ref: "#/components/schemas/ProviderAccount" } }, available: { type: array, items: { type: string } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/payment-providers/{provider}:
     put:
       tags: [integrations]
       operationId: configurePaymentProvider
+      description: >-
+        Configura o provedor na versão da conta informada no If-Match (`version` de ProviderAccount); `"0"` para o
+        provedor ainda não configurado (presente apenas em `available`). Versão divergente responde 412 antes de
+        chamar o provedor.
       parameters:
         - { $ref: "#/components/parameters/Tenant" }
         - { $ref: "#/components/parameters/CSRF" }
+        - { $ref: "#/components/parameters/IfMatch" }
         - { name: provider, in: path, required: true, schema: { type: string, enum: [simulator, asaas] } }
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/ProviderAccountInput" } } }
       responses:
-        "200": { description: Configurado; webhook_endpoint_url é exibida uma única vez, content: { application/json: { schema: { $ref: "#/components/schemas/ProviderAccountConfigured" } } } }
+        "200": { description: Configurado; webhook_endpoint_url é exibida uma única vez, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/ProviderAccountConfigured" } } } }
         "403": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
 
   /api/v1/ledger/accounts:
     get:
@@ -1193,6 +1534,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Contas com saldos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/LedgerAccount" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/ledger/transactions:
     get:
       tags: [ledger]
@@ -1205,14 +1547,17 @@ paths:
         - { name: reference_id, in: query, schema: { type: string, format: uuid } }
       responses:
         "200": { description: Lançamentos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/LedgerTransaction" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
 
   /api/v1/reconciliation/runs:
     get:
       tags: [reconciliation]
       operationId: listReconciliationRuns
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      description: Execuções, das mais recentes para as mais antigas, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Execuções, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/ReconciliationRun" } } } } } } }
+        "200": { description: Execuções, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/ReconciliationRun" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [reconciliation]
       operationId: runReconciliation
@@ -1232,6 +1577,7 @@ paths:
         "200": { description: Repetição do pedido de uma execução já encerrada, headers: { Location: { description: Endereço da execução, schema: { type: string } } }, content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationRun" } } } }
         "202": { description: Execução registrada e em andamento, headers: { Location: { description: Endereço da execução para acompanhamento, schema: { type: string } } }, content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationRun" } } } }
         "409": { description: "Outra execução em andamento para o provedor (reconciliation_running, com Retry-After) ou nenhum provedor padrão ativo (provider_not_configured)", headers: { Retry-After: { description: Segundos até a nova tentativa (reconciliation_running), schema: { type: integer } } }, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
   /api/v1/reconciliation/runs/{id}:
     get:
       tags: [reconciliation]
@@ -1246,24 +1592,31 @@ paths:
     get:
       tags: [reconciliation]
       operationId: listDiscrepancies
+      description: Divergências, das detectadas mais recentemente para as mais antigas, em páginas por cursor.
       parameters:
         - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
         - { name: status, in: query, schema: { type: string, enum: [open, resolved, dismissed] } }
         - { name: kind, in: query, schema: { $ref: "#/components/schemas/DiscrepancyKind" } }
       responses:
-        "200": { description: Divergências, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Discrepancy" } } } } } } }
+        "200": { description: Divergências, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/Discrepancy" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/reconciliation/discrepancies/{id}:
     get:
       tags: [reconciliation]
       operationId: getDiscrepancy
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
       responses:
-        "200": { description: Divergência com histórico, content: { application/json: { schema: { $ref: "#/components/schemas/Discrepancy" } } } }
+        "200": { description: Divergência com histórico, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Discrepancy" } } } }
   /api/v1/reconciliation/discrepancies/{id}/resolve:
     post:
       tags: [reconciliation]
       operationId: resolveDiscrepancy
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      description: >-
+        Resolve a divergência aberta na versão informada no If-Match (`version` da divergência). Uma nova detecção da
+        divergência gera outra versão: quem resolve com a versão anterior recebe 412 e precisa consultá-la de novo.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       requestBody:
         required: true
         content:
@@ -1275,8 +1628,11 @@ paths:
                 resolution: { type: string, enum: [accept_provider, keep_local, adjust_ledger, dismiss] }
                 justification: { type: string, minLength: 10, maxLength: 2000 }
       responses:
-        "200": { description: Resolvida, content: { application/json: { schema: { $ref: "#/components/schemas/Discrepancy" } } } }
+        "200": { description: Resolvida, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Discrepancy" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
 
   /api/v1/collection-policies:
     get:
@@ -1285,6 +1641,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Políticas de cobrança, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/CollectionPolicy" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [collections]
       operationId: createCollectionPolicy
@@ -1305,8 +1662,9 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/CollectionPolicyInput" } } }
       responses:
-        "200": { description: Atualizada, content: { application/json: { schema: { $ref: "#/components/schemas/CollectionPolicy" } } } }
+        "200": { description: Atualizada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/CollectionPolicy" } } } }
         "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/notification-templates:
     get:
       tags: [collections]
@@ -1314,13 +1672,18 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Templates de e-mail, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/NotificationTemplate" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/notification-templates/{key}:
     put:
       tags: [collections]
       operationId: updateNotificationTemplate
+      description: >-
+        Grava a personalização do template na versão informada no If-Match (`version` do template): `"0"` para o
+        template padrão, ainda não personalizado.
       parameters:
         - { $ref: "#/components/parameters/Tenant" }
         - { $ref: "#/components/parameters/CSRF" }
+        - { $ref: "#/components/parameters/IfMatch" }
         - { name: key, in: path, required: true, schema: { $ref: "#/components/schemas/TemplateKey" } }
       requestBody:
         required: true
@@ -1333,8 +1696,11 @@ paths:
                 subject: { type: string, minLength: 3, maxLength: 200 }
                 body: { type: string, minLength: 10, maxLength: 10000 }
       responses:
-        "200": { description: Template gravado, content: { application/json: { schema: { $ref: "#/components/schemas/NotificationTemplate" } } } }
+        "200": { description: Template gravado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/NotificationTemplate" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/notifications:
     get:
       tags: [collections]
@@ -1347,6 +1713,17 @@ paths:
         - { name: invoice_id, in: query, schema: { type: string, format: uuid } }
       responses:
         "200": { description: Histórico de envio, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Notification" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/notifications/{id}/events:
+    get:
+      tags: [collections]
+      operationId: listNotificationEvents
+      summary: Linha do tempo de uma notificação (agendamento, adiamentos, tentativas, envio, falha, cancelamento ou supressão)
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Eventos em ordem cronológica, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/NotificationEvent" } } } } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
 
   /api/v1/webhook-event-types:
     get:
@@ -1355,6 +1732,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Tipos de evento disponíveis, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { type: string } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/webhook-endpoints:
     get:
       tags: [webhooks]
@@ -1362,6 +1740,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Endpoints, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/WebhookEndpoint" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [webhooks]
       operationId: createWebhookEndpoint
@@ -1390,22 +1769,35 @@ paths:
                   properties:
                     status: { type: string, enum: [active, disabled] }
       responses:
-        "200": { description: Atualizado, content: { application/json: { schema: { $ref: "#/components/schemas/WebhookEndpoint" } } } }
+        "200": { description: Atualizado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/WebhookEndpoint" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
     delete:
       tags: [webhooks]
       operationId: deleteWebhookEndpoint
-      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
       responses:
         "204": { description: Desativado e removido da listagem ativa }
+        "404": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/webhook-endpoints/{id}/rotate-secret:
     post:
       tags: [webhooks]
       operationId: rotateWebhookSecret
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      description: >-
+        Gera um novo segredo. Os segredos fazem parte do endpoint: a rotação exige a versão do endpoint no If-Match e
+        gera a versão seguinte, devolvida no ETag.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       requestBody:
         content: { application/json: { schema: { type: object, properties: { previous_secret_valid_hours: { type: integer, minimum: 0, maximum: 168 } } } } }
       responses:
-        "200": { description: Novo segredo (exibido uma única vez), content: { application/json: { schema: { $ref: "#/components/schemas/WebhookEndpointWithSecret" } } } }
+        "200": { description: Novo segredo (exibido uma única vez), headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/WebhookEndpointWithSecret" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/webhook-endpoints/{id}/deliveries:
     get:
       tags: [webhooks]
@@ -1413,6 +1805,17 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
         "200": { description: Entregas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/WebhookDelivery" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/webhook-deliveries/{id}/attempts:
+    get:
+      tags: [webhooks]
+      operationId: listWebhookDeliveryAttempts
+      summary: Tentativas individuais de uma entrega, da primeira à mais recente
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Tentativas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/WebhookDeliveryAttempt" } } } } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/webhook-deliveries/{id}/retry:
     post:
       tags: [webhooks]
@@ -1425,11 +1828,15 @@ paths:
     get:
       tags: [integrations]
       operationId: listApiCredentials
+      description: >-
+        Credenciais em páginas por cursor: as ativas primeiro, depois revogadas e expiradas, das mais recentes para
+        as mais antigas. A situação que define a ordem é a do instante da primeira página, levado no cursor.
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Credenciais (sem segredos), content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/ApiCredential" } } } } } } }
+        "200": { description: Credenciais (sem segredos), content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/ApiCredential" } }, next_cursor: { type: string, nullable: true } } } } } }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [integrations]
       operationId: createApiCredential
@@ -1455,27 +1862,41 @@ paths:
       tags: [integrations]
       operationId: rotateApiCredential
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       responses:
-        "201": { description: Nova credencial; a anterior permanece válida por 24 horas, content: { application/json: { schema: { $ref: "#/components/schemas/ApiCredentialWithSecret" } } } }
+        "201": { description: Nova credencial; a anterior permanece válida por 24 horas, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/ApiCredentialWithSecret" } } } }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/api-credentials/{id}:
     delete:
       tags: [integrations]
       operationId: revokeApiCredential
+      description: Revoga a credencial na versão informada no If-Match. Revogar uma credencial já revogada, na versão atual, não tem efeito.
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       responses:
         "204": { description: Revogada }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
 
   /api/v1/dead-letters:
     get:
       tags: [operations]
       operationId: listDeadLetters
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { name: status, in: query, schema: { type: string, enum: [open, replayed, discarded] } } ]
+      description: Mensagens não processadas, das falhas mais recentes para as mais antigas, em páginas por cursor.
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: status, in: query, schema: { type: string, enum: [open, replayed, discarded] } }
       responses:
-        "200": { description: Mensagens não processadas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/DeadLetter" } } } } } } }
+        "200": { description: Mensagens não processadas, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/DeadLetter" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/dead-letters/{id}/replay:
     post:
       tags: [operations]
@@ -1514,6 +1935,7 @@ paths:
         - { name: to, in: query, schema: { type: string, format: date } }
       responses:
         "200": { description: Trilha de auditoria, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AuditEvent" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
 
   /api/v1/dashboard:
     get:
@@ -1521,9 +1943,15 @@ paths:
       operationId: getDashboard
       parameters:
         - { $ref: "#/components/parameters/Tenant" }
-        - { name: month, in: query, description: Mês de referência (AAAA-MM) no fuso da organização, schema: { type: string, pattern: '^\d{4}-\d{2}$' } }
+        - name: month
+          in: query
+          description: >-
+            Mês de referência (AAAA-MM) no fuso da organização; padrão, o mês corrente. Mês inválido (invalid_month) ou futuro
+            (future_month) responde 422.
+          schema: { type: string, pattern: '^\d{4}-\d{2}$' }
       responses:
         "200": { description: Indicadores financeiros, content: { application/json: { schema: { $ref: "#/components/schemas/Dashboard" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
 
   /webhooks/providers/{provider}/{token}:
     post:
@@ -1538,10 +1966,20 @@ paths:
         required: true
         content: { application/json: { schema: { type: object } } }
       responses:
-        "200": { description: Recebido e persistido }
+        "200":
+          description: Recebido e persistido
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [received, duplicate]
+                properties:
+                  received: { type: boolean }
+                  duplicate: { type: boolean, description: O evento já havia sido recebido (reentrega do provedor) }
         "401": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "413": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
 
   /portal/access:
     get:
@@ -1664,22 +2102,37 @@ components:
       name: If-Match
       in: header
       required: true
-      description: Versão esperada do recurso, entre aspas (ex. "3").
+      description: >-
+        Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412
+        `version_mismatch`, sem efeito.
       schema: { type: string }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
       required: true
       description: >-
-        Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx,
-        401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido
-        aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente;
-        o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito.
+        Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou
+        credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o
+        método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado
+        registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro
+        corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no
+        caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave
+        registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx,
+        401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e
+        subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a
+        repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não
+        duplica o efeito.
       schema: { type: string, minLength: 8, maxLength: 255 }
     ID:
       name: id
       in: path
       required: true
+      schema: { type: string, format: uuid }
+    AdminTenantID:
+      name: tenant_id
+      in: path
+      required: true
+      description: Organização do pedido (equipe da plataforma)
       schema: { type: string, format: uuid }
     Limit:
       name: limit
@@ -1690,9 +2143,32 @@ components:
       in: query
       schema: { type: string, maxLength: 512 }
 
+  headers:
+    ETag:
+      description: Versão do recurso entre aspas (ex. "3"), a ser enviada no If-Match da próxima alteração.
+      schema: { type: string }
+
   responses:
     Problem:
       description: Erro estruturado (RFC 9457)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    LogoutRedirect:
+      description: Sessão encerrada
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [redirect_url]
+            properties:
+              redirect_url: { type: string, description: "Encerramento no provedor (client_id e post_logout_redirect_uri), sem tokens" }
+    ProviderUnavailable:
+      description: >-
+        Provedor de pagamento inacessível nesta requisição (RFC 9457): as credenciais da conta do provedor não
+        puderam ser decifradas com as chaves de cifragem configuradas (`provider_credentials_unreadable`; confira o
+        keyring da instalação ou configure o provedor novamente) ou, na resolução de divergência que consulta o
+        provedor, ele não respondeu (`provider_unavailable`). Nada é gravado; repita depois de corrigir a causa.
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
@@ -1726,7 +2202,13 @@ components:
         title: { type: string }
         status: { type: integer }
         detail: { type: string }
-        code: { type: string }
+        code:
+          type: string
+          description: >-
+            Código estável do erro. Além dos códigos de cada operação:
+            `route_not_found` (404, caminho inexistente), `method_not_allowed`
+            (405, com `Allow`), `rate_limited` (429, com `Retry-After`),
+            `payload_too_large` (413) e `internal_error` (500).
         request_id: { type: string }
         errors:
           type: array
@@ -1802,9 +2284,10 @@ components:
         timezone: { type: string }
         invoice_prefix: { type: string, pattern: '^[A-Z0-9]{1,10}$' }
         payment_terms_days: { type: integer, minimum: 0, maximum: 120 }
+        address: { $ref: "#/components/schemas/Address" }
     Organization:
       type: object
-      required: [id, slug, name, timezone, currency, invoice_prefix, payment_terms_days, status, created_at, version]
+      required: [id, slug, name, timezone, currency, invoice_prefix, payment_terms_days, address, status, created_at, version]
       properties:
         id: { type: string, format: uuid }
         slug: { type: string }
@@ -1815,6 +2298,10 @@ components:
         currency: { type: string }
         invoice_prefix: { type: string }
         payment_terms_days: { type: integer }
+        address:
+          description: Endereço da organização, copiado para o emitente das faturas emitidas; nulo enquanto não cadastrado.
+          nullable: true
+          allOf: [ { $ref: "#/components/schemas/Address" } ]
         status: { type: string, enum: [active, suspended, closed] }
         created_at: { type: string, format: date-time }
         version: { type: integer }
@@ -1868,18 +2355,20 @@ components:
         plan: { $ref: "#/components/schemas/PlatformPlan" }
         subscription:
           type: object
-          required: [plan_code, status, current_period_start, current_period_end]
+          required: [plan_code, status, current_period_start, current_period_end, version]
           properties:
             plan_code: { type: string }
             status: { type: string, enum: [trialing, active, past_due, canceled] }
             trial_ends_at: { type: string, format: date-time, nullable: true }
             current_period_start: { type: string, format: date-time }
             current_period_end: { type: string, format: date-time }
+            version: { type: integer, description: Versão da assinatura da plataforma; If-Match da troca de plano }
         usage:
           type: object
-          required: [active_users, active_subscriptions]
+          required: [active_users, pending_invitations, active_subscriptions]
           properties:
             active_users: { type: integer }
+            pending_invitations: { type: integer, description: Convites pendentes; reservam vagas de usuário do plano }
             active_subscriptions: { type: integer }
     PlatformAddon:
       type: object
@@ -1893,7 +2382,7 @@ components:
         kind: { type: string }
     AddonOrder:
       type: object
-      required: [id, addon_code, status, notes, price, currency, created_at]
+      required: [id, addon_code, status, notes, price, currency, created_at, scheduled_for, completed_at, canceled_at, cancel_reason, billed, version]
       properties:
         id: { type: string, format: uuid }
         addon_code: { type: string }
@@ -1902,6 +2391,22 @@ components:
         price: { type: integer, format: int64 }
         currency: { type: string }
         created_at: { type: string, format: date-time }
+        scheduled_for: { type: string, format: date-time, nullable: true, description: Instante combinado para o atendimento }
+        completed_at: { type: string, format: date-time, nullable: true }
+        canceled_at: { type: string, format: date-time, nullable: true }
+        cancel_reason: { type: string, nullable: true }
+        billed: { type: boolean, description: O pedido concluído já entrou em um demonstrativo da plataforma }
+        version: { type: integer }
+    StaffAddonOrder:
+      allOf:
+        - { $ref: "#/components/schemas/AddonOrder" }
+        - type: object
+          required: [tenant_id, tenant_name, tenant_slug, addon_name]
+          properties:
+            tenant_id: { type: string, format: uuid }
+            tenant_name: { type: string }
+            tenant_slug: { type: string }
+            addon_name: { type: string }
     PlatformStatement:
       type: object
       required: [id, period_start, period_end, plan_code, subscription_amount, addons_amount, total, currency, status]
@@ -2019,6 +2524,15 @@ components:
         phone: { type: string }
         role: { type: string, maxLength: 100 }
         receives_billing_email: { type: boolean, default: true }
+    ContactPatch:
+      type: object
+      description: Alteração parcial do contato; campo omitido mantém o valor atual.
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        email: { type: string, maxLength: 320 }
+        phone: { type: string }
+        role: { type: string, maxLength: 100 }
+        receives_billing_email: { type: boolean }
     Contact:
       type: object
       required: [id, name, email, role, receives_billing_email, created_at]
@@ -2044,10 +2558,11 @@ components:
         country: { type: string, default: BR }
     CreditBalance:
       type: object
-      required: [balance, currency, entries]
+      required: [balance, currency, entries, next_cursor]
       properties:
         balance: { type: integer, format: int64 }
         currency: { type: string }
+        next_cursor: { type: string, nullable: true, description: Página seguinte dos movimentos; nulo na última }
         entries:
           type: array
           items:
@@ -2056,7 +2571,7 @@ components:
             properties:
               id: { type: string, format: uuid }
               amount: { type: integer, format: int64 }
-              kind: { type: string, enum: [grant, consumption, return, overpayment] }
+              kind: { type: string, enum: [grant, consumption, return, overpayment, proration, usage_correction] }
               invoice_id: { type: string, format: uuid, nullable: true }
               reason: { type: string }
               created_at: { type: string, format: date-time }
@@ -2432,7 +2947,7 @@ components:
         amount_paid: { type: integer, format: int64 }
         amount_credited: { type: integer, format: int64 }
         amount_written_off: { type: integer, format: int64 }
-        amount_due: { type: integer, format: int64 }
+        amount_due: { type: integer, format: int64, description: "Saldo devedor; zero na fatura cancelada (o crédito aplicado volta ao cliente)." }
         overdue: { type: boolean }
         paid_at: { type: string, format: date-time, nullable: true }
         voided_at: { type: string, format: date-time, nullable: true }
@@ -2677,7 +3192,7 @@ components:
         make_default: { type: boolean }
     ProviderAccount:
       type: object
-      required: [id, provider, environment, status, is_default, created_at]
+      required: [id, provider, environment, status, is_default, created_at, version]
       properties:
         id: { type: string, format: uuid }
         provider: { type: string }
@@ -2686,6 +3201,7 @@ components:
         is_default: { type: boolean }
         api_key_hint: { type: string, description: Últimos 4 caracteres }
         created_at: { type: string, format: date-time }
+        version: { type: integer, description: Versão da configuração (If-Match da próxima configuração) }
     ProviderAccountConfigured:
       type: object
       required: [account, webhook_endpoint_url]
@@ -2758,7 +3274,7 @@ components:
         finished_at: { type: string, format: date-time, nullable: true }
     Discrepancy:
       type: object
-      required: [id, kind, status, created_at, local_value, provider_value]
+      required: [id, kind, status, created_at, local_value, provider_value, version]
       properties:
         id: { type: string, format: uuid }
         run_id: { type: string, format: uuid, nullable: true }
@@ -2779,6 +3295,7 @@ components:
             credencial de API; o responsável fica sempre no histórico (ator do evento reconciliation.discrepancy_resolved).
         resolved_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
+        version: { type: integer, description: Muda a cada nova detecção e na resolução }
         history:
           type: array
           items: { $ref: "#/components/schemas/AuditEvent" }
@@ -2813,7 +3330,7 @@ components:
             version: { type: integer }
     NotificationTemplate:
       type: object
-      required: [key, channel, subject, body, is_default, variables]
+      required: [key, channel, subject, body, is_default, variables, version]
       properties:
         key: { $ref: "#/components/schemas/TemplateKey" }
         channel: { type: string, enum: [email] }
@@ -2822,9 +3339,10 @@ components:
         is_default: { type: boolean }
         variables: { type: array, items: { type: string } }
         updated_at: { type: string, format: date-time, nullable: true }
+        version: { type: integer, description: Versão da personalização; 0 no template padrão }
     Notification:
       type: object
-      required: [id, business_key, template_key, channel, recipient, subject, status, send_after, attempts, created_at]
+      required: [id, business_key, template_key, channel, recipient, subject, status, status_reason, send_after, attempts, created_at]
       properties:
         id: { type: string, format: uuid }
         business_key: { type: string }
@@ -2835,11 +3353,32 @@ components:
         recipient: { type: string }
         subject: { type: string }
         status: { type: string, enum: [scheduled, sending, sent, failed, canceled, suppressed] }
+        status_reason:
+          type: string
+          description: >-
+            Código estável do motivo da situação atual; vazio quando não há motivo (em envio ou enviada).
+            Cancelamento: invoice_paid, invoice_credited, invoice_voided, invoice_uncollectible, superseded,
+            due_date_passed, subscription_not_suspended, invitation_not_pending, feature_unavailable.
+            Supressão: no_recipient, invitation_link_unavailable. Adiamento: outside_send_window,
+            frequency_limit, retry_scheduled. Falha: permanent_failure, attempts_exhausted, content_unavailable.
         send_after: { type: string, format: date-time }
         attempts: { type: integer }
         last_error: { type: string }
         sent_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
+    NotificationEvent:
+      type: object
+      required: [status, reason, attempt, detail, occurred_at]
+      properties:
+        status: { type: string, enum: [scheduled, sending, sent, failed, canceled, suppressed] }
+        reason:
+          type: string
+          description: >-
+            Código estável do evento: scheduled, attempt, sent, retry_scheduled e os motivos de status_reason
+            da notificação.
+        attempt: { type: integer, description: Número da tentativa corrente quando o evento ocorreu }
+        detail: { type: string, description: Complemento (erro da tentativa ou instante do adiamento); vazio sem complemento }
+        occurred_at: { type: string, format: date-time }
 
     WebhookEndpointInput:
       type: object
@@ -2889,10 +3428,20 @@ components:
         last_error: { type: string }
         delivered_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
+    WebhookDeliveryAttempt:
+      type: object
+      required: [attempt, started_at, duration_ms, status_code, error, signature_count]
+      properties:
+        attempt: { type: integer, minimum: 1 }
+        started_at: { type: string, format: date-time }
+        duration_ms: { type: integer, minimum: 0 }
+        status_code: { type: integer, nullable: true, description: Código HTTP da resposta; nulo quando não houve resposta }
+        error: { type: string, description: Erro da tentativa; vazio quando o destino respondeu 2xx }
+        signature_count: { type: integer, minimum: 0, description: Assinaturas enviadas (mais de uma durante a rotação do segredo) }
 
     ApiCredential:
       type: object
-      required: [id, name, prefix, scopes, created_at]
+      required: [id, name, prefix, scopes, created_at, version]
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
@@ -2902,6 +3451,7 @@ components:
         expires_at: { type: string, format: date-time, nullable: true }
         last_used_at: { type: string, format: date-time, nullable: true }
         revoked_at: { type: string, format: date-time, nullable: true }
+        version: { type: integer }
     ApiCredentialWithSecret:
       type: object
       required: [credential, secret]
@@ -2941,25 +3491,46 @@ components:
 
     Dashboard:
       type: object
-      required: [month, currency, mrr, arr, billed, received, open_receivables, overdue_receivables, delinquency_rate_bp,
-                 churn_rate_bp, active_subscriptions, new_subscriptions, canceled_subscriptions, refunds, chargebacks, open_recoverables,
-                 definitions]
+      description: >-
+        Indicadores do painel financeiro (RF-17). Cada indicador tem a fórmula em definitions e a base temporal em bases:
+        month (fluxo do mês consultado), month_end (posição em position_at) ou current (posição atual, seja qual for o mês).
+        Fórmulas detalhadas em docs/arquitetura/indicadores.md.
+      required: [month, currency, position_at, mrr, arr, billed, billed_recurring, billed_usage, received,
+                 open_receivables, overdue_receivables, delinquency_rate_bp, churn_rate_bp, active_subscriptions,
+                 new_subscriptions, canceled_subscriptions, refunds, chargebacks, open_recoverables, pending_provider_receipt,
+                 open_discrepancies, unknown_operations, definitions, bases]
       properties:
         month: { type: string }
         currency: { type: string }
-        mrr: { type: integer, format: int64, description: Receita recorrente mensal fixa (exclui consumo) }
-        arr: { type: integer, format: int64 }
+        position_at:
+          type: string
+          format: date-time
+          description: >-
+            Instante das posições de base month_end: o último instante do mês consultado ou, no mês corrente, o momento da
+            consulta.
+        mrr:
+          type: integer
+          format: int64
+          description: >-
+            Receita recorrente mensal fixa na posição atual, com o reajuste vigente e líquida de descontos recorrentes (exclui
+            consumo)
+        arr: { type: integer, format: int64, description: MRR × 12 na posição atual }
         billed: { type: integer, format: int64, description: Total emitido no mês }
-        billed_recurring: { type: integer, format: int64 }
-        billed_usage: { type: integer, format: int64 }
-        received: { type: integer, format: int64, description: Pagamentos recebidos no mês }
-        open_receivables: { type: integer, format: int64 }
-        overdue_receivables: { type: integer, format: int64 }
-        delinquency_rate_bp: { type: integer, description: Pontos-base }
-        churn_rate_bp: { type: integer, description: Pontos-base }
-        active_subscriptions: { type: integer }
-        new_subscriptions: { type: integer }
-        canceled_subscriptions: { type: integer }
+        billed_recurring: { type: integer, format: int64, description: Parte faturada nos itens de mensalidade }
+        billed_usage: { type: integer, format: int64, description: Parte faturada nos itens de consumo e excedente }
+        received:
+          type: integer
+          format: int64
+          description: >-
+            Pagamentos confirmados no mês, pela data de pagamento, via provedor ou registro manual. Inclui os pagamentos
+            confirmados pelo provedor e ainda não creditados por ele (pending_provider_receipt).
+        open_receivables: { type: integer, format: int64, description: Saldo a receber em position_at }
+        overdue_receivables: { type: integer, format: int64, description: Saldo a receber vencido em position_at }
+        delinquency_rate_bp: { type: integer, description: "Pontos-base, em position_at" }
+        churn_rate_bp: { type: integer, description: "Pontos-base, sobre as assinaturas vigentes fora de trial no início do mês" }
+        active_subscriptions: { type: integer, description: "Em trial, ativas ou em atraso em position_at" }
+        new_subscriptions: { type: integer, description: Iniciadas no mês }
+        canceled_subscriptions: { type: integer, description: Encerradas no mês }
         refunds: { type: integer, format: int64, description: Movimento líquido da conta de reembolsos no mês }
         chargebacks:
           type: integer
@@ -2973,11 +3544,76 @@ components:
           type: integer
           format: int64
           description: >-
-            Saldo atual dos valores a recuperar de clientes (conta customer_recoverables): crédito de pagamento excedente já usado
-            e estornado por chargeback, menos as baixas recebidas e perdidas. Não depende do mês consultado.
-        open_discrepancies: { type: integer }
-        unknown_operations: { type: integer }
-        definitions: { type: object, additionalProperties: { type: string } }
+            Saldo dos valores a recuperar de clientes (conta customer_recoverables) em position_at: crédito de pagamento
+            excedente já usado e estornado por chargeback, menos as baixas recebidas e perdidas.
+        pending_provider_receipt:
+          type: integer
+          format: int64
+          description: >-
+            Saldo, em position_at, dos pagamentos confirmados pelo provedor e ainda não creditados por ele (conta
+            provider_confirmed), por exemplo cartão no prazo de recebimento. No recebimento, o bruto passa aos valores em
+            liquidação, a taxa é reconhecida e o líquido vai para o disponível liquidado (ADR-080).
+        open_discrepancies: { type: integer, description: Divergências de conciliação abertas na posição atual }
+        unknown_operations: { type: integer, description: Operações de pagamento com resultado desconhecido na posição atual }
+        definitions:
+          type: object
+          description: Fórmula de cada indicador, com a chave igual ao nome do campo.
+          required: [mrr, arr, billed, billed_recurring, billed_usage, received, open_receivables, overdue_receivables,
+                     delinquency_rate_bp, churn_rate_bp, active_subscriptions, new_subscriptions,
+                     canceled_subscriptions, refunds, chargebacks, open_recoverables, pending_provider_receipt,
+                     open_discrepancies, unknown_operations]
+          properties:
+            mrr: { type: string }
+            arr: { type: string }
+            billed: { type: string }
+            billed_recurring: { type: string }
+            billed_usage: { type: string }
+            received: { type: string }
+            open_receivables: { type: string }
+            overdue_receivables: { type: string }
+            delinquency_rate_bp: { type: string }
+            churn_rate_bp: { type: string }
+            active_subscriptions: { type: string }
+            new_subscriptions: { type: string }
+            canceled_subscriptions: { type: string }
+            refunds: { type: string }
+            chargebacks: { type: string }
+            open_recoverables: { type: string }
+            pending_provider_receipt: { type: string }
+            open_discrepancies: { type: string }
+            unknown_operations: { type: string }
+        bases:
+          type: object
+          description: Base temporal de cada indicador, com a chave igual ao nome do campo.
+          required: [mrr, arr, billed, billed_recurring, billed_usage, received, open_receivables, overdue_receivables,
+                     delinquency_rate_bp, churn_rate_bp, active_subscriptions, new_subscriptions,
+                     canceled_subscriptions, refunds, chargebacks, open_recoverables, pending_provider_receipt,
+                     open_discrepancies, unknown_operations]
+          properties:
+            mrr: { $ref: "#/components/schemas/DashboardBasis" }
+            arr: { $ref: "#/components/schemas/DashboardBasis" }
+            billed: { $ref: "#/components/schemas/DashboardBasis" }
+            billed_recurring: { $ref: "#/components/schemas/DashboardBasis" }
+            billed_usage: { $ref: "#/components/schemas/DashboardBasis" }
+            received: { $ref: "#/components/schemas/DashboardBasis" }
+            open_receivables: { $ref: "#/components/schemas/DashboardBasis" }
+            overdue_receivables: { $ref: "#/components/schemas/DashboardBasis" }
+            delinquency_rate_bp: { $ref: "#/components/schemas/DashboardBasis" }
+            churn_rate_bp: { $ref: "#/components/schemas/DashboardBasis" }
+            active_subscriptions: { $ref: "#/components/schemas/DashboardBasis" }
+            new_subscriptions: { $ref: "#/components/schemas/DashboardBasis" }
+            canceled_subscriptions: { $ref: "#/components/schemas/DashboardBasis" }
+            refunds: { $ref: "#/components/schemas/DashboardBasis" }
+            chargebacks: { $ref: "#/components/schemas/DashboardBasis" }
+            open_recoverables: { $ref: "#/components/schemas/DashboardBasis" }
+            pending_provider_receipt: { $ref: "#/components/schemas/DashboardBasis" }
+            open_discrepancies: { $ref: "#/components/schemas/DashboardBasis" }
+            unknown_operations: { $ref: "#/components/schemas/DashboardBasis" }
+    DashboardBasis:
+      type: string
+      enum: [month, month_end, current]
+      description: >-
+        month: fluxo do mês consultado; month_end: posição em position_at; current: posição atual, que não muda com o mês.
 
     PortalSession:
       type: object

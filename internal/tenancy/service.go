@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ricartefelipe/recorvia/internal/audit"
+	"github.com/ricartefelipe/recorvia/internal/kernel/address"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
 	"github.com/ricartefelipe/recorvia/internal/kernel/ids"
@@ -18,9 +19,13 @@ import (
 
 // Tx são as operações dentro da transação de um tenant.
 type Tx interface {
+	// Tenant devolve a organização com o endereço (nil sem cadastro).
 	Tenant(ctx context.Context) (Tenant, error)
 	InsertTenant(ctx context.Context, t Tenant) error
+	// UpdateTenant grava os dados cadastrais, sem o endereço.
 	UpdateTenant(ctx context.Context, t Tenant) error
+	// UpsertTenantAddress grava o endereço da organização.
+	UpsertTenantAddress(ctx context.Context, a address.Address, at time.Time) error
 	InitTenantResources(ctx context.Context) error
 
 	Membership(ctx context.Context, userID uuid.UUID, forUpdate bool) (Membership, error)
@@ -32,11 +37,14 @@ type Tx interface {
 	Invitation(ctx context.Context, id uuid.UUID, forUpdate bool) (Invitation, error)
 	InsertInvitation(ctx context.Context, inv Invitation) error
 	UpdateInvitation(ctx context.Context, inv Invitation) error
-	Invitations(ctx context.Context) ([]Invitation, error)
+	Invitations(ctx context.Context, limit int, cursor string) (InvitationPage, error)
 	PendingInvitations(ctx context.Context, now time.Time) (int, error)
 
 	DefaultPlatformPlan(ctx context.Context) (platformbilling.Plan, error)
-	PlatformPlan(ctx context.Context) (platformbilling.Plan, error)
+	// LockPlatformPlan lê o plano da plataforma bloqueando a assinatura do
+	// tenant na plataforma até o fim da transação: convites, aceites, troca de
+	// plano e criação de assinaturas contam o consumo um de cada vez.
+	LockPlatformPlan(ctx context.Context) (platformbilling.Plan, error)
 	PlatformUsage(ctx context.Context) (platformbilling.Usage, error)
 	InsertPlatformSubscription(ctx context.Context, s platformbilling.Subscription) error
 
@@ -147,6 +155,10 @@ func (s *Service) Organization(ctx context.Context, tenantID uuid.UUID) (Tenant,
 }
 
 // UpdateOrganization altera os dados com controle de concorrência otimista.
+// O endereço informado substitui o atual na mesma transação; quando muda, a
+// auditoria registra organization.address_updated com os nomes dos campos
+// alterados e se o endereço foi cadastrado agora, como no endereço de
+// cobrança do cliente.
 func (s *Service) UpdateOrganization(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, in TenantInput, expectedVersion int) (Tenant, error) {
 	var t Tenant
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
@@ -157,6 +169,7 @@ func (s *Service) UpdateOrganization(ctx context.Context, tenantID uuid.UUID, ac
 		if expectedVersion != t.Version {
 			return apperr.PreconditionFailed("version_mismatch", "A organização foi alterada por outra pessoa. Recarregue e tente novamente.")
 		}
+		prev := t.Address
 		if err := t.ApplyUpdate(in); err != nil {
 			return err
 		}
@@ -164,7 +177,22 @@ func (s *Service) UpdateOrganization(ctx context.Context, tenantID uuid.UUID, ac
 			return err
 		}
 		t.Version++
-		return tx.Audit(ctx, audit.New(tenantID, s.clock.Now(), actor, "organization.updated", "organization", tenantID.String(), nil))
+		now := s.clock.Now()
+		if err := tx.Audit(ctx, audit.New(tenantID, now, actor, "organization.updated", "organization", tenantID.String(), nil)); err != nil {
+			return err
+		}
+		if t.Address == nil {
+			return nil
+		}
+		changed := t.Address.ChangedFields(prev)
+		if len(changed) == 0 {
+			return nil
+		}
+		if err := tx.UpsertTenantAddress(ctx, *t.Address, now); err != nil {
+			return err
+		}
+		return tx.Audit(ctx, audit.New(tenantID, now, actor, "organization.address_updated", "organization", tenantID.String(),
+			map[string]any{"fields": changed, "created": prev == nil}))
 	})
 	return t, err
 }
@@ -221,19 +249,22 @@ func (s *Service) Members(ctx context.Context, tenantID uuid.UUID) ([]Member, er
 	return out, err
 }
 
-// Invitations lista os convites.
-func (s *Service) Invitations(ctx context.Context, tenantID uuid.UUID) ([]Invitation, error) {
-	var out []Invitation
+// Invitations lista os convites, dos mais recentes para os mais antigos, em
+// páginas por cursor.
+func (s *Service) Invitations(ctx context.Context, tenantID uuid.UUID, limit int, cursor string) (InvitationPage, error) {
+	var out InvitationPage
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		var err error
-		out, err = tx.Invitations(ctx)
+		out, err = tx.Invitations(ctx, limit, cursor)
 		return err
 	})
 	return out, err
 }
 
 // Invite cria um convite. Somente proprietários convidam proprietários. O
-// limite de usuários do plano considera membros ativos e convites pendentes.
+// limite de usuários do plano considera membros ativos e convites pendentes,
+// contados com a assinatura da plataforma bloqueada (convites simultâneos não
+// passam do limite).
 func (s *Service) Invite(ctx context.Context, tenantID uuid.UUID, inviter Access, inviterRef UserRef, email string, role Role) (Invitation, string, error) {
 	email, err := NormalizeEmail(email)
 	if err != nil {
@@ -252,7 +283,7 @@ func (s *Service) Invite(ctx context.Context, tenantID uuid.UUID, inviter Access
 		InvitedBy: inviter.UserID, ExpiresAt: now.Add(InvitationTTL), CreatedAt: now,
 	}
 	err = s.store.InTenant(ctx, tenantID, func(tx Tx) error {
-		plan, err := tx.PlatformPlan(ctx)
+		plan, err := tx.LockPlatformPlan(ctx)
 		if err != nil {
 			return err
 		}
@@ -260,11 +291,9 @@ func (s *Service) Invite(ctx context.Context, tenantID uuid.UUID, inviter Access
 		if err != nil {
 			return err
 		}
-		pending, err := tx.PendingInvitations(ctx, now)
-		if err != nil {
+		if usage.PendingInvitations, err = tx.PendingInvitations(ctx, now); err != nil {
 			return err
 		}
-		usage.ActiveUsers += pending
 		if err := platformbilling.CheckUserLimit(plan, usage); err != nil {
 			return err
 		}
@@ -311,7 +340,10 @@ func (s *Service) RevokeInvitation(ctx context.Context, tenantID uuid.UUID, acto
 }
 
 // AcceptInvitation associa o usuário autenticado à organização do convite.
-// O convite é de uso único, expira e exige o mesmo e-mail do usuário.
+// O convite é de uso único, expira e exige o mesmo e-mail do usuário. O
+// limite de usuários do plano é conferido de novo (o plano pode ter mudado
+// depois do convite), com a assinatura da plataforma bloqueada antes do
+// convite: aceites simultâneos contam os membros um de cada vez.
 func (s *Service) AcceptInvitation(ctx context.Context, user UserRef, token string) (Membership, error) {
 	invalid := apperr.Invalid("invitation_invalid", "Convite inválido, expirado ou já utilizado.")
 	if len(token) < 20 || len(token) > 200 {
@@ -327,6 +359,10 @@ func (s *Service) AcceptInvitation(ctx context.Context, user UserRef, token stri
 	now := s.clock.Now()
 	var m Membership
 	err = s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		plan, err := tx.LockPlatformPlan(ctx)
+		if err != nil {
+			return err
+		}
 		inv, err := tx.Invitation(ctx, invID, true)
 		if err != nil {
 			return err
@@ -338,9 +374,19 @@ func (s *Service) AcceptInvitation(ctx context.Context, user UserRef, token stri
 			return apperr.Forbidden("invitation_email_mismatch", "Este convite foi enviado para outro endereço de e-mail.")
 		}
 		existing, err := tx.Membership(ctx, user.ID, true)
-		switch {
-		case err == nil && existing.Status == MembershipActive:
+		if err == nil && existing.Status == MembershipActive {
 			return apperr.Conflict("already_member", "Você já participa desta organização.")
+		}
+		if err == nil || apperr.IsKind(err, apperr.KindNotFound) {
+			usage, uerr := tx.PlatformUsage(ctx)
+			if uerr != nil {
+				return uerr
+			}
+			if lerr := platformbilling.CheckJoinLimit(plan, usage); lerr != nil {
+				return lerr
+			}
+		}
+		switch {
 		case err == nil:
 			existing.Role, existing.Status = inv.Role, MembershipActive
 			if err := tx.UpdateMembership(ctx, existing); err != nil {
@@ -369,8 +415,10 @@ func (s *Service) AcceptInvitation(ctx context.Context, user UserRef, token stri
 
 // ChangeRole altera o papel de um membro. Regras: somente proprietários
 // concedem ou retiram o papel de proprietário; a organização mantém ao menos
-// um proprietário ativo.
-func (s *Service) ChangeRole(ctx context.Context, tenantID uuid.UUID, actor Access, actorRef UserRef, target uuid.UUID, role Role) (Membership, error) {
+// um proprietário ativo. A gravação é condicionada à versão esperada da
+// associação (If-Match): divergente, nada é alterado (412).
+func (s *Service) ChangeRole(ctx context.Context, tenantID uuid.UUID, actor Access, actorRef UserRef, target uuid.UUID, role Role,
+	expectedVersion int) (Membership, error) {
 	if _, err := ParseRole(string(role)); err != nil {
 		return Membership{}, apperr.Invalid("invalid_role", "Papel inválido.", apperr.FieldError{Field: "role", Message: "Papel inválido."})
 	}
@@ -392,7 +440,7 @@ func (s *Service) ChangeRole(ctx context.Context, tenantID uuid.UUID, actor Acce
 			}
 		}
 		previous := m.Role
-		m.Role = role
+		m.Role, m.Version = role, expectedVersion
 		if err := tx.UpdateMembership(ctx, m); err != nil {
 			return err
 		}
@@ -403,9 +451,10 @@ func (s *Service) ChangeRole(ctx context.Context, tenantID uuid.UUID, actor Acce
 	return m, err
 }
 
-// RemoveMember desativa a associação. As sessões do usuário perdem o acesso
-// a esta organização na próxima requisição (ResolveAccess).
-func (s *Service) RemoveMember(ctx context.Context, tenantID uuid.UUID, actor Access, actorRef UserRef, target uuid.UUID) error {
+// RemoveMember desativa a associação, condicionada à versão esperada
+// (If-Match). As sessões do usuário perdem o acesso a esta organização na
+// próxima requisição (ResolveAccess).
+func (s *Service) RemoveMember(ctx context.Context, tenantID uuid.UUID, actor Access, actorRef UserRef, target uuid.UUID, expectedVersion int) error {
 	return s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		m, err := tx.Membership(ctx, target, true)
 		if err != nil {
@@ -422,7 +471,7 @@ func (s *Service) RemoveMember(ctx context.Context, tenantID uuid.UUID, actor Ac
 				return err
 			}
 		}
-		m.Status = MembershipRemoved
+		m.Status, m.Version = MembershipRemoved, expectedVersion
 		if err := tx.UpdateMembership(ctx, m); err != nil {
 			return err
 		}

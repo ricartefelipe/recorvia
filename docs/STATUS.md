@@ -18,6 +18,8 @@ resultado real) e as pendências.
 | 9 | Release `0.1.0` | `release/0.1.0` | integrada em `main` com a tag `v0.1.0` |
 | 10 | Pendências da 0.1.0: retenção automática, recuperação de desastre exercitada, Alertmanager e métricas de fila, portal, chargeback com crédito, conciliação assíncrona, baixa do valor a recuperar | sete branches `feature/*` | integradas em `develop` (PRs #12 a #18) |
 | 11 | Release `0.2.0` | `release/0.2.0` | integrada em `main` com a tag `v0.2.0` |
+| 12 | Auditoria de todos os requisitos (RF-01 a RF-17, RNF-01 a RNF-12) e correção do que ela encontrou | nove branches `feature/*` | integradas em `develop` (PRs #21 a #29) |
+| 13 | Release `0.3.0` | `release/0.3.0` | integrada em `main` com a tag `v0.3.0` |
 
 A autoria das operações feitas por credencial de API foi corrigida depois das etapas 6 e 7
 (`feature/autoria-credenciais-api`, PR #9).
@@ -128,6 +130,26 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
   `docs/DESENVOLVIMENTO.md`.
 - **API**: 134 operações no contrato, todas implementadas; migrations até a `00018`.
 
+### Etapa 12: auditoria de requisitos
+- **Auditoria:** cinco auditores percorreram os 17 requisitos funcionais e os 12 não funcionais
+  contra o código e os testes. Uma conferência independente comparou depois cada achado com o
+  `develop`: 56 resolvidos com teste, 7 dependentes do dono e os demais fechados nas últimas frentes.
+- **Defeitos corrigidos:** cobrança em dobro na reentrega (ADR-076); `Idempotency-Key` ausente em
+  quatro criações financeiras (ADR-075); limites do plano da plataforma ultrapassáveis (ADR-077);
+  implantação assistida nunca atendida; ID token no navegador e revogação de sessões (ADR-078);
+  documento da fatura que não fechava com o saldo e emitente mutável (ADR-079); ledger sem conta de
+  confirmação do provedor (ADR-080); aviso de suspensão fora da janela (ADR-081); indicadores do
+  painel errados (ADR-074); senhas em mensagens de erro e encerramento do worker que perdia o ack
+  (ADR-082).
+- **RF-15 completo:** `If-Match` em todas as alterações de recursos versionados, paginação por cursor
+  em todas as listas que cortavam em silêncio, `sort` em allowlist e erros 404/405 em RFC 9457
+  (ADR-082, ADR-083 e ADR-085).
+- **Acabamento:** endereço da organização no emitente da fatura, aviso fiscal no portal e no e-mail,
+  cards do painel com links para as listas, simulador com reembolso e chargeback de cobrança
+  confirmada, validação de cada resposta dos testes HTTP contra o contrato e quatro roteiros E2E
+  novos (ADR-084).
+- **API:** 142 operações no contrato, todas implementadas; migrations até a `00024`.
+
 ## Verificações executadas
 
 | Data | Comando | Resultado |
@@ -169,12 +191,21 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
 | 2026-11-21 | `make obs-check` (frentes de alertas e retenção) | Collector, Jaeger e Alertmanager válidos; regras e `promtool test rules` aprovados; roteamento por severidade conferido |
 | 2026-11-21 | CI dos PRs #12 a #18 | todos os checks aprovados, inclusive `observability-stack` (alerta entregue por e-mail no Mailpit) e `disaster-recovery`; no #12, um teste de cifragem com falso alarme ocasional foi corrigido |
 | 2026-11-21 | Baixa do valor a recuperar: concorrência | 8 pedidos simultâneos de 6,00 sobre saldo de 20,00: exatamente 3 aceitos; gravação direta no banco também recusada acima do limite |
+| 2026-11-21 | Auditoria dos requisitos (5 auditores) e conferência independente contra o `develop` (5 conferentes e 5 céticos) | 56 achados resolvidos com teste; 7 dependentes do dono; os demais fechados nos PRs #27 a #29 ou registrados abaixo |
+| 2026-11-21 | Revisão independente dos PRs #27, #28 e #29 (focos distintos e 1 verificador por achado) | #27: 3 defeitos confirmados e corrigidos (versão da conta que perde o padrão do provedor, modais presos depois do 412, página vazia que escondia o paginador); #28: 2; #29: nenhum; cada correção com teste que falha sem ela |
+| 2026-11-21 | Integração local de cada frente depois de integrar `develop` (`internal/httpapi` completo, com o validador de contrato) | aprovada; conflitos de sentido entre frentes corrigidos (sessões com gerações, CSV no validador, `If-Match` no exercício de recuperação de desastre) |
+| 2026-11-21 | CI dos PRs #21 a #29 | todos os checks aprovados, inclusive `e2e` com os roteiros 06 a 09 e `disaster-recovery`; no #28, o roteiro 07 falhou na primeira execução por um seletor do interruptor (corrigido) |
 
 ## Pendências reais
 
 - **Asaas**: o adaptador segue a documentação oficial e é coberto por testes de contrato, mas **não
   foi exercitado no sandbox**: exige chave de API do sandbox e URL pública para receber webhooks. O
   passo a passo está em `docs/integracoes/asaas.md`.
+- **Produção**: hospedagem, domínio, HTTPS e o Keycloak de produção dependem da escolha do dono.
+- **Plano da plataforma**: cobrança real e emissão de NFS-e dos demonstrativos; valores comerciais dos
+  planos e tela para editá-los.
+- **Decisões do dono**: guardar os valores anterior e novo das alterações no histórico do cliente
+  (hoje só os nomes dos campos, ADR-079, por causa da LGPD); início de assinatura agendado no futuro.
 - **Limites dos alertas**: são pontos de partida; a calibração depende de volume real.
 - **Retenção e anonimização**: os dados pessoais copiados nas faturas já emitidas permanecem (a
   fatura emitida é imutável, ADR-061); o cadastro do cliente no provedor de pagamento não é alterado;
@@ -186,14 +217,24 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
   fora do ambiente local.
 - **Valor a recuperar**: não há estorno de baixa nem registro de recebimento depois de uma baixa
   como perda; o recebido entra no disponível sem conciliação com o extrato bancário.
-- **Migrations com índices sem `CONCURRENTLY`** (00014 e 00015): em bancos grandes, a criação
-  bloqueia escritas durante a aplicação.
+- **Ledger**: pagamentos confirmados antes da conta `provider_confirmed` (ADR-080) mantêm o saldo
+  antigo em valores em liquidação. Não há produção; os bancos de demonstração são recriados com
+  `make reset`, e a forma de migrar dados reais está na ADR-080 e no runbook de conciliação.
+- **Painel**: MRR e ARR são posição atual (reconstruir meses passados exige retrato mensal); "Receita
+  faturada" exclui as faturas canceladas pela situação atual (ADR-074).
+- **API**: alterações em tabelas sem `version` (revogar convite, contatos, links do portal,
+  retentativas) seguem protegidas pela situação atual (409), sem `If-Match`; parâmetros de consulta
+  desconhecidos são ignorados, exceto `sort`; os campos de seleção do catálogo carregam todas as
+  páginas, sem busca no servidor (ADR-083 e ADR-085).
+- **Imagens**: fixadas por tag exata e verificadas na CI (`make pin-check`), sem digest (ADR-082).
+- **Migrations com índices sem `CONCURRENTLY`** (00014, 00015, 00019 e 00023): em bancos grandes,
+  a criação bloqueia escritas durante a aplicação.
 - **Revisão independente**: o repositório tem um único mantenedor; a proteção de branches exige os
   checks da CI e PR, com 0 aprovações obrigatórias. Recomenda-se exigir ao menos uma aprovação quando
   houver outro revisor.
 
 ## Ponto de retomada
 
-Versão `0.2.0` publicada (tag `v0.2.0` em `main`). Próximos passos sugeridos: validar o adaptador do
-Asaas no sandbox (`docs/integracoes/asaas.md`), escolher onde hospedar a produção e calibrar os
-limites dos alertas com o volume real.
+Versão `0.3.0` publicada (tag `v0.3.0` em `main`), com todos os requisitos auditados. Próximos passos
+sugeridos: validar o adaptador do Asaas no sandbox (`docs/integracoes/asaas.md`), escolher onde
+hospedar a produção e calibrar os limites dos alertas com o volume real.

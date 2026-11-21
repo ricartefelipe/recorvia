@@ -175,8 +175,13 @@ func (a *API) deleteWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	version, err := ifMatch(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	p := mustPrincipal(r)
-	if err := a.Webhooks.DeleteEndpoint(r.Context(), p.TenantID, p.Actor(), id); err != nil {
+	if err := a.Webhooks.DeleteEndpoint(r.Context(), p.TenantID, p.Actor(), id, version); err != nil {
 		a.writeError(w, r, err)
 		return
 	}
@@ -189,6 +194,11 @@ func (a *API) rotateWebhookSecret(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	version, err := ifMatch(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	var body struct {
 		PreviousSecretValidHours *int `json:"previous_secret_valid_hours"`
 	}
@@ -197,7 +207,7 @@ func (a *API) rotateWebhookSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	e, secret, err := a.Webhooks.RotateSecret(r.Context(), p.TenantID, p.Actor(), id, body.PreviousSecretValidHours)
+	e, secret, err := a.Webhooks.RotateSecret(r.Context(), p.TenantID, p.Actor(), id, body.PreviousSecretValidHours, version)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -241,4 +251,34 @@ func (a *API) retryWebhookDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.writeJSON(w, r, http.StatusOK, deliveryView(d))
+}
+
+type webhookDeliveryAttemptDTO struct {
+	Attempt        int       `json:"attempt"`
+	StartedAt      time.Time `json:"started_at"`
+	DurationMS     int64     `json:"duration_ms"`
+	StatusCode     *int      `json:"status_code"`
+	Error          string    `json:"error"`
+	SignatureCount int       `json:"signature_count"`
+}
+
+// listWebhookDeliveryAttempts devolve as tentativas individuais de uma
+// entrega, da primeira à mais recente.
+func (a *API) listWebhookDeliveryAttempts(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	attempts, err := a.Webhooks.DeliveryAttempts(r.Context(), mustPrincipal(r).TenantID, id)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	out := make([]webhookDeliveryAttemptDTO, 0, len(attempts))
+	for _, at := range attempts {
+		out = append(out, webhookDeliveryAttemptDTO{Attempt: at.Number, StartedAt: at.StartedAt, DurationMS: at.Duration.Milliseconds(),
+			StatusCode: at.StatusCode, Error: at.Error, SignatureCount: at.SignatureCount})
+	}
+	a.writeJSON(w, r, http.StatusOK, list(out))
 }

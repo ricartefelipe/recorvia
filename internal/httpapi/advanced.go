@@ -78,16 +78,21 @@ func couponView(c catalog.Coupon) couponDTO {
 }
 
 func (a *API) listCoupons(w http.ResponseWriter, r *http.Request) {
-	list, err := a.Coupons.List(r.Context(), mustPrincipal(r).TenantID)
+	limit, cursor, err := pageParams(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	out := make([]couponDTO, len(list))
-	for i, c := range list {
+	pg, err := a.Coupons.List(r.Context(), mustPrincipal(r).TenantID, limit, cursor)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	out := make([]couponDTO, len(pg.Items))
+	for i, c := range pg.Items {
 		out[i] = couponView(c)
 	}
-	a.writeJSON(w, r, http.StatusOK, map[string]any{"data": out})
+	a.writeJSON(w, r, http.StatusOK, newPage(out, pg.NextCursor))
 }
 
 func (a *API) createCoupon(w http.ResponseWriter, r *http.Request) {
@@ -126,13 +131,18 @@ func (a *API) archiveCoupon(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	p := mustPrincipal(r)
-	c, err := a.Coupons.Archive(r.Context(), p.TenantID, p.Actor(), id)
+	version, err := ifMatch(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, couponView(c))
+	p := mustPrincipal(r)
+	c, err := a.Coupons.Archive(r.Context(), p.TenantID, p.Actor(), id, version)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	a.writeVersioned(w, r, http.StatusOK, c.Version, couponView(c))
 }
 
 // --- mudanças de plano e quantidade ---
@@ -220,16 +230,21 @@ func (a *API) listPriceAdjustments(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	list, err := a.Terms.Adjustments(r.Context(), mustPrincipal(r).TenantID, id)
+	limit, cursor, err := pageParams(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	out := make([]adjustmentDTO, len(list))
-	for i, x := range list {
+	pg, err := a.Terms.Adjustments(r.Context(), mustPrincipal(r).TenantID, id, limit, cursor)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	out := make([]adjustmentDTO, len(pg.Items))
+	for i, x := range pg.Items {
 		out[i] = adjustmentView(x)
 	}
-	a.writeJSON(w, r, http.StatusOK, map[string]any{"data": out})
+	a.writeJSON(w, r, http.StatusOK, newPage(out, pg.NextCursor))
 }
 
 func (a *API) schedulePriceAdjustment(w http.ResponseWriter, r *http.Request) {

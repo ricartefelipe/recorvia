@@ -17,6 +17,7 @@ import (
 	"github.com/pressly/goose/v3"
 
 	"github.com/ricartefelipe/recorvia/db"
+	"github.com/ricartefelipe/recorvia/internal/infra/redact"
 )
 
 // Nomes fixos dos papéis; as migrations concedem privilégios a eles.
@@ -59,6 +60,9 @@ func Bootstrap(ctx context.Context, superURL string, o BootstrapOptions) (err er
 	if err := o.validate(); err != nil {
 		return err
 	}
+	// Nenhuma mensagem de erro sai com a URL de superusuário nem com as
+	// senhas dos papéis.
+	defer func() { err = redact.Error(err, superURL, o.OwnerPassword, o.AppPassword) }()
 	conn, err := pgx.Connect(ctx, superURL)
 	if err != nil {
 		return fmt.Errorf("bootstrap: conexão de superusuário: %w", err)
@@ -138,6 +142,7 @@ func provider(sqlDB *sql.DB) (*goose.Provider, error) {
 
 // Up aplica todas as migrations pendentes como recorvia_owner.
 func Up(ctx context.Context, ownerURL string) (applied []string, err error) {
+	defer func() { err = redact.Error(err, ownerURL) }()
 	sqlDB, err := sql.Open("pgx", ownerURL)
 	if err != nil {
 		return nil, err
@@ -161,6 +166,7 @@ func Up(ctx context.Context, ownerURL string) (applied []string, err error) {
 // DownTo reverte as migrations aplicadas acima da versão informada, da mais
 // recente para a mais antiga (reversão operacional e testes do Down).
 func DownTo(ctx context.Context, ownerURL string, version int64) (reverted []string, err error) {
+	defer func() { err = redact.Error(err, ownerURL) }()
 	sqlDB, err := sql.Open("pgx", ownerURL)
 	if err != nil {
 		return nil, err
@@ -183,6 +189,7 @@ func DownTo(ctx context.Context, ownerURL string, version int64) (reverted []str
 
 // Status descreve cada migration e se foi aplicada.
 func Status(ctx context.Context, ownerURL string) (lines []string, err error) {
+	defer func() { err = redact.Error(err, ownerURL) }()
 	sqlDB, err := sql.Open("pgx", ownerURL)
 	if err != nil {
 		return nil, err

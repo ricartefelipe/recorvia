@@ -23,6 +23,8 @@ type couponState struct {
 	coupons map[uuid.UUID]Coupon
 	plans   map[uuid.UUID]bool
 	audits  []audit.Entry
+	// page é o limite e o cursor recebidos pela última listagem.
+	page pageRequest
 }
 
 func newCouponState() *couponState {
@@ -30,7 +32,7 @@ func newCouponState() *couponState {
 }
 
 func (c *couponState) clone() *couponState {
-	return &couponState{coupons: maps.Clone(c.coupons), plans: maps.Clone(c.plans), audits: slices.Clone(c.audits)}
+	return &couponState{coupons: maps.Clone(c.coupons), plans: maps.Clone(c.plans), audits: slices.Clone(c.audits), page: c.page}
 }
 
 // fakeCouponStore implementa CouponStore e CouponTx em memória. Cada
@@ -114,10 +116,11 @@ func (t *fakeCouponTx) Coupon(_ context.Context, id uuid.UUID, forUpdate bool) (
 }
 
 // Coupons segue a ordenação da consulta: mais recentes primeiro.
-func (t *fakeCouponTx) Coupons(context.Context) ([]Coupon, error) {
+func (t *fakeCouponTx) Coupons(_ context.Context, limit int, cursor string) (Page[Coupon], error) {
 	if err := t.s.hit("Coupons"); err != nil {
-		return nil, err
+		return Page[Coupon]{}, err
 	}
+	t.st.page = pageRequest{limit, cursor}
 	out := slices.Collect(maps.Values(t.st.coupons))
 	slices.SortFunc(out, func(a, b Coupon) int {
 		if c := b.CreatedAt.Compare(a.CreatedAt); c != 0 {
@@ -125,16 +128,17 @@ func (t *fakeCouponTx) Coupons(context.Context) ([]Coupon, error) {
 		}
 		return strings.Compare(b.ID.String(), a.ID.String())
 	})
-	return out, nil
+	return Page[Coupon]{Items: out}, nil
 }
 
-// ArchiveCoupon reproduz o UPDATE: arquiva e incrementa a versão.
-func (t *fakeCouponTx) ArchiveCoupon(_ context.Context, id uuid.UUID) error {
+// ArchiveCoupon reproduz o UPDATE condicionado à versão: arquiva e
+// incrementa a versão.
+func (t *fakeCouponTx) ArchiveCoupon(_ context.Context, id uuid.UUID, version int) error {
 	if err := t.s.hit("ArchiveCoupon"); err != nil {
 		return err
 	}
 	c, ok := t.st.coupons[id]
-	if !ok {
+	if !ok || c.Version != version {
 		return apperr.PreconditionFailed("version_mismatch", "O cupom foi alterado por outra pessoa.")
 	}
 	c.Status = Archived

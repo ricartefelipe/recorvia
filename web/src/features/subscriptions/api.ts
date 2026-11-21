@@ -1,6 +1,7 @@
 import { api } from '../../api/client';
 import type {
   ChangeTiming,
+  CursorPage,
   DataList,
   PriceAdjustment,
   PriceAdjustmentInput,
@@ -14,11 +15,15 @@ import type {
   UsageEventPage,
 } from '../../api/types';
 
+import type { PageRequest } from '../../lib/pages';
+
 const enc = encodeURIComponent;
 const base = (id: string) => `/api/v1/subscriptions/${enc(id)}`;
 
 export interface SubscriptionListParams {
   status?: SubscriptionStatus;
+  /** Somente em trial, ativas ou em atraso, a base das assinaturas ativas do painel. */
+  in_force?: boolean;
   customer_id?: string;
   cursor?: string;
   limit?: number;
@@ -28,7 +33,8 @@ export const subscriptionsApi = {
   list: (params: SubscriptionListParams, signal?: AbortSignal) =>
     api.get<SubscriptionPage>('/api/v1/subscriptions', { query: { ...params }, signal }),
   get: (id: string, signal?: AbortSignal) => api.get<Subscription>(base(id), { signal }),
-  create: (input: SubscriptionInput) => api.post<Subscription>('/api/v1/subscriptions', input),
+  create: (input: SubscriptionInput, idempotencyKey: string) =>
+    api.post<Subscription>('/api/v1/subscriptions', input, { idempotencyKey }),
   history: (id: string, signal?: AbortSignal) =>
     api.get<DataList<SubscriptionHistoryEntry>>(`${base(id)}/history`, { signal }),
   cancel: (s: Subscription, input: { mode: 'immediate' | 'period_end'; reason?: string }) =>
@@ -41,13 +47,14 @@ export const subscriptionsApi = {
     api.post<Subscription>(`${base(s.id)}/change-plan`, input, { ifMatch: s.version }),
   changeQuantity: (s: Subscription, input: { quantity: number; timing: ChangeTiming }) =>
     api.post<Subscription>(`${base(s.id)}/change-quantity`, input, { ifMatch: s.version }),
-  listAdjustments: (id: string, signal?: AbortSignal) =>
-    api.get<DataList<PriceAdjustment>>(`${base(id)}/price-adjustments`, { signal }),
-  scheduleAdjustment: (id: string, input: PriceAdjustmentInput) =>
-    api.post<PriceAdjustment>(`${base(id)}/price-adjustments`, input),
+  /** Reajustes pela vigência, em páginas por cursor. */
+  listAdjustments: (id: string, page: PageRequest, signal?: AbortSignal) =>
+    api.get<CursorPage<PriceAdjustment>>(`${base(id)}/price-adjustments`, { query: { ...page }, signal }),
+  scheduleAdjustment: (id: string, input: PriceAdjustmentInput, idempotencyKey: string) =>
+    api.post<PriceAdjustment>(`${base(id)}/price-adjustments`, input, { idempotencyKey }),
   cancelAdjustment: (id: string, adjustmentId: string) => api.delete(`${base(id)}/price-adjustments/${enc(adjustmentId)}`),
-  applyCoupon: (id: string, couponCode: string) =>
-    api.post<SubscriptionDiscount>(`${base(id)}/discounts`, { coupon_code: couponCode }),
+  applyCoupon: (id: string, couponCode: string, idempotencyKey: string) =>
+    api.post<SubscriptionDiscount>(`${base(id)}/discounts`, { coupon_code: couponCode }, { idempotencyKey }),
   removeDiscount: (id: string) => api.delete(`${base(id)}/discounts`),
   usage: (id: string, signal?: AbortSignal) => api.get<SubscriptionUsage>(`${base(id)}/usage`, { signal }),
   usageEvents: (params: { subscription_id?: string; metric_id?: string; cursor?: string; limit?: number }, signal?: AbortSignal) =>

@@ -1,8 +1,12 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"go.opentelemetry.io/otel"
@@ -12,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/ricartefelipe/recorvia/internal/infra/logging"
 	"github.com/ricartefelipe/recorvia/internal/infra/rabbit"
 	"github.com/ricartefelipe/recorvia/internal/infra/telemetry"
 	"github.com/ricartefelipe/recorvia/internal/scheduler"
@@ -50,7 +55,7 @@ func TestInstrumentCreatesConsumerSpanUnderPropagatedContext(t *testing.T) {
 			h := instrument("payments.invoice_issued", func(ctx context.Context, _ rabbit.Message) error {
 				inside = trace.SpanContextFromContext(ctx)
 				return tc.err
-			})
+			}, slog.New(slog.DiscardHandler))
 			m := rabbit.Message{ID: "msg-1", Type: "invoice.issued", Attempt: 2,
 				Headers: map[string]string{"traceparent": "00-" + parent + "-00f067aa0ba902b7-01"}}
 			err := h(context.Background(), m)
@@ -118,5 +123,69 @@ func TestTraceJobsPreservesSchedule(t *testing.T) {
 		if traced[i].Name != orig[i].Name || traced[i].Interval != orig[i].Interval || traced[i].Timeout != orig[i].Timeout {
 			t.Fatalf("tarefa %s alterada", orig[i].Name)
 		}
+	}
+}
+
+// RNF-07: o registro de cada mensagem e os logs do handler levam consumer,
+// message_id, tenant_id, o request_id da requisição que originou o evento e
+// trace_id e span_id do span de consumo; sem request_id no evento, o campo
+// não aparece vazio.
+func TestInstrumentLogsWithEventCorrelation(t *testing.T) {
+	recordSpans(t)
+	parent := "4bf92f3577b34da6a3ce929d0e0e4736"
+	cases := []struct {
+		name      string
+		err       error
+		requestID string
+		wantMsg   string
+	}{
+		{"sucesso", nil, "req-evento-0001", "mensagem processada"},
+		{"falha", errors.New("provedor indisponível"), "req-evento-0002", "falha no processamento da mensagem"},
+		{"evento sem requisição", nil, "", "mensagem processada"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log := logging.New(&buf, "debug", "worker")
+			var span trace.SpanContext
+			h := instrument("payments.invoice_issued", func(ctx context.Context, _ rabbit.Message) error {
+				span = trace.SpanContextFromContext(ctx)
+				log.InfoContext(ctx, "cobrança solicitada")
+				return tc.err
+			}, log)
+			headers := map[string]string{"traceparent": "00-" + parent + "-00f067aa0ba902b7-01"}
+			if tc.requestID != "" {
+				headers["request_id"] = tc.requestID
+			}
+			_ = h(context.Background(), rabbit.Message{ID: "msg-1", Type: "invoice.issued", TenantID: "t-1", Headers: headers})
+			got := map[string]map[string]any{}
+			for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+				var m map[string]any
+				if err := json.Unmarshal([]byte(line), &m); err != nil {
+					t.Fatal(err)
+				}
+				got[m["msg"].(string)] = m
+			}
+			for _, msg := range []string{"cobrança solicitada", tc.wantMsg} {
+				m := got[msg]
+				want := map[string]any{"consumer": "payments.invoice_issued", "message_id": "msg-1", "tenant_id": "t-1",
+					"trace_id": parent, "span_id": span.SpanID().String()}
+				if tc.requestID != "" {
+					want["request_id"] = tc.requestID
+				}
+				for k, v := range want {
+					if m[k] != v {
+						t.Errorf("%s: %s=%v, esperado %v", msg, k, m[k], v)
+					}
+				}
+				if _, ok := m["request_id"]; tc.requestID == "" && ok {
+					t.Errorf("%s: request_id vazio no log", msg)
+				}
+				// O aviso de falha é do consumidor (rabbit): aqui, só debug.
+				if msg == tc.wantMsg && m["level"] != "DEBUG" {
+					t.Errorf("%s: nível %v, esperado DEBUG", msg, m["level"])
+				}
+			}
+		})
 	}
 }

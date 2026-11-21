@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ricartefelipe/recorvia/internal/customers"
+	"github.com/ricartefelipe/recorvia/internal/kernel/address"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/calendar"
 	"github.com/ricartefelipe/recorvia/internal/kernel/money"
@@ -122,17 +123,31 @@ type Invoice struct {
 	AmountWrittenOff money.Money
 	AmountDue        money.Money
 	CustomerSnapshot customers.Snapshot
-	Memo             string
-	PaidAt           *time.Time
-	VoidedAt         *time.Time
-	VoidReason       string
-	UncollectibleAt  *time.Time
-	Items            []Item
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	Version          int
+	// Issuer são os dados do emitente gravados na emissão; nil nas faturas
+	// emitidas antes da ADR-079 (o documento usa então os dados atuais da
+	// organização).
+	Issuer          *Issuer
+	Memo            string
+	PaidAt          *time.Time
+	VoidedAt        *time.Time
+	VoidReason      string
+	UncollectibleAt *time.Time
+	Items           []Item
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	Version         int
 
 	changes []StatusChange
+}
+
+// Issuer identifica o emitente (a organização) como estava na emissão.
+// Address é o endereço da organização na emissão; nil quando não havia
+// endereço cadastrado ou na fatura emitida antes da ADR-084.
+type Issuer struct {
+	Name           string           `json:"name"`
+	LegalName      string           `json:"legal_name,omitempty"`
+	DocumentNumber string           `json:"document_number,omitempty"`
+	Address        *address.Address `json:"address,omitempty"`
 }
 
 // NewDraft cria uma fatura em rascunho.
@@ -430,7 +445,10 @@ func (inv *Invoice) ApplyPaymentWithRecovery(amount money.Money, at time.Time) (
 }
 
 // Void cancela uma fatura em aberto sem pagamentos nem notas de crédito. O
-// chamador estorna o lançamento de emissão no ledger.
+// chamador estorna o lançamento de emissão no ledger e devolve ao cliente o
+// crédito aplicado; por isso a fatura cancelada não tem saldo devedor
+// (constraint invoices_due_consistency, ADR-079). CreditApplied continua
+// registrando o crédito que foi aplicado na emissão (e devolvido).
 func (inv *Invoice) Void(reason string, at time.Time) error {
 	if inv.Status != Open {
 		return apperr.Conflict("invoice_not_voidable", "Somente faturas em aberto sem pagamentos podem ser canceladas.")
@@ -442,6 +460,7 @@ func (inv *Invoice) Void(reason string, at time.Time) error {
 		return apperr.Invalid("invalid_reason", "Informe o motivo do cancelamento (3 a 500 caracteres).")
 	}
 	inv.VoidedAt, inv.VoidReason = &at, reason
+	inv.AmountDue = money.Zero(inv.Currency)
 	return inv.transition(Void, at, reason, nil)
 }
 

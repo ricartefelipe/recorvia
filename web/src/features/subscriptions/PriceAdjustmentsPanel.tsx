@@ -2,7 +2,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { ActionIcon, Button, Group, Modal, Stack, Table, Text, Textarea, TextInput, Tooltip } from '@mantine/core';
 import { DatePickerInput } from '@mantine/dates';
 import { IconCalendarPlus, IconX } from '@tabler/icons-react';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Controller, useForm, useWatch } from 'react-hook-form';
 import { z } from 'zod';
@@ -10,9 +10,10 @@ import type { PriceAdjustment, PriceAdjustmentInput, Subscription } from '../../
 import { CivilDate, Money, StatusBadge } from '../../components/format';
 import { MoneyInput } from '../../components/inputs';
 import { EmptyState, QueryContent } from '../../components/states';
-import { confirmAction, LabeledSegmented } from '../../components/ui';
+import { confirmAction, CursorPager, LabeledSegmented } from '../../components/ui';
 import { addDaysToCivilDate, todayInTimeZone } from '../../lib/dates';
-import { useApiMutation } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
+import { useIdempotencyKey } from '../../lib/idempotency';
 import { priceAdjustmentKindLabels, priceAdjustmentStatusLabels, labelOf } from '../../lib/labels';
 import { formatBasisPoints, parseMoneyToNumber, parsePercentToBasisPoints } from '../../lib/money';
 import { optionalText, reasonField } from '../../lib/validation';
@@ -62,8 +63,11 @@ function ScheduleModal({ subscription, opened, onClose }: { subscription: Subscr
     resolver: zodResolver(schema),
     defaultValues: { effective_date: null, kind: 'percent', percent: '', new_amount: '', index_name: '', reason: '' },
   });
+  const idempotency = useIdempotencyKey();
   const mutation = useApiMutation<PriceAdjustmentInput, PriceAdjustment, FormValues>({
-    mutationFn: (input) => subscriptionsApi.scheduleAdjustment(subscription.id, input),
+    mutationFn: (input) =>
+      subscriptionsApi.scheduleAdjustment(subscription.id, input, idempotency.keyFor({ subscription: subscription.id, ...input })),
+    idempotency,
     invalidate: ['subscriptions'],
     successMessage: 'Reajuste programado.',
     form,
@@ -150,10 +154,13 @@ export function PriceAdjustmentsPanel({ subscription }: { subscription: Subscrip
   const { keys } = useTenant();
   const [opened, setOpened] = useState(false);
   const canWrite = usePermission('subscriptions.write');
+  const pagination = useCursorPagination(`adjustments:${subscription.id}`);
   const query = useQuery({
-    queryKey: keys('subscriptions', 'adjustments', subscription.id),
-    queryFn: ({ signal }) => subscriptionsApi.listAdjustments(subscription.id, signal),
+    queryKey: keys('subscriptions', 'adjustments', subscription.id, pagination.cursor),
+    queryFn: ({ signal }) => subscriptionsApi.listAdjustments(subscription.id, { cursor: pagination.cursor, limit: 25 }, signal),
+    placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   const cancel = useApiMutation<PriceAdjustment, unknown>({
     mutationFn: (a) => subscriptionsApi.cancelAdjustment(subscription.id, a.id),
     invalidate: ['subscriptions'],
@@ -174,70 +181,80 @@ export function PriceAdjustmentsPanel({ subscription }: { subscription: Subscrip
         </Can>
       </Group>
       <QueryContent query={query}>
-        {({ data }) =>
-          data.length === 0 ? (
+        {(page) =>
+          page.data.length === 0 ? (
             <EmptyState title="Nenhum reajuste" description="Programe reajustes anuais por índice ou por novo valor." />
           ) : (
-            <Table.ScrollContainer minWidth={820}>
-              <Table aria-label="Reajustes">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Vigência</Table.Th>
-                    <Table.Th>Tipo</Table.Th>
-                    <Table.Th>Reajuste</Table.Th>
-                    <Table.Th>Índice</Table.Th>
-                    <Table.Th>Antes → depois</Table.Th>
-                    <Table.Th>Situação</Table.Th>
-                    <Table.Th>Motivo</Table.Th>
-                    {canWrite && <Table.Th aria-label="Ações" />}
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {data.map((a) => (
-                    <Table.Tr key={a.id}>
-                      <Table.Td>
-                        <CivilDate value={a.effective_date} />
-                      </Table.Td>
-                      <Table.Td>{labelOf(priceAdjustmentKindLabels, a.kind)}</Table.Td>
-                      <Table.Td>{a.kind === 'percent' ? formatBasisPoints(a.percent_bp) : <Money value={a.new_amount} />}</Table.Td>
-                      <Table.Td>{a.index_name || '—'}</Table.Td>
-                      <Table.Td>
-                        {a.previous_amount !== null && a.previous_amount !== undefined ? (
-                          <>
-                            <Money value={a.previous_amount} /> → <Money value={a.resulting_amount} />
-                          </>
-                        ) : (
-                          '—'
-                        )}
-                      </Table.Td>
-                      <Table.Td>
-                        <StatusBadge status={a.status} labels={priceAdjustmentStatusLabels} />
-                      </Table.Td>
-                      <Table.Td>{a.reason}</Table.Td>
-                      {canWrite && (
+            <>
+              <Table.ScrollContainer minWidth={820}>
+                <Table aria-label="Reajustes">
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Vigência</Table.Th>
+                      <Table.Th>Tipo</Table.Th>
+                      <Table.Th>Reajuste</Table.Th>
+                      <Table.Th>Índice</Table.Th>
+                      <Table.Th>Antes → depois</Table.Th>
+                      <Table.Th>Situação</Table.Th>
+                      <Table.Th>Motivo</Table.Th>
+                      {canWrite && <Table.Th aria-label="Ações" />}
+                    </Table.Tr>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {page.data.map((a) => (
+                      <Table.Tr key={a.id}>
                         <Table.Td>
-                          {a.status === 'scheduled' && (
-                            <Tooltip label="Cancelar reajuste">
-                              <ActionIcon
-                                variant="subtle"
-                                color="red"
-                                aria-label="Cancelar reajuste"
-                                onClick={async () => {
-                                  const ok = await confirmAction({ title: 'Cancelar reajuste', message: 'O reajuste programado não será aplicado.', confirmLabel: 'Cancelar reajuste', danger: true });
-                                  if (ok) cancel.mutate(a);
-                                }}
-                              >
-                                <IconX size={16} />
-                              </ActionIcon>
-                            </Tooltip>
+                          <CivilDate value={a.effective_date} />
+                        </Table.Td>
+                        <Table.Td>{labelOf(priceAdjustmentKindLabels, a.kind)}</Table.Td>
+                        <Table.Td>{a.kind === 'percent' ? formatBasisPoints(a.percent_bp) : <Money value={a.new_amount} />}</Table.Td>
+                        <Table.Td>{a.index_name || '—'}</Table.Td>
+                        <Table.Td>
+                          {a.previous_amount !== null && a.previous_amount !== undefined ? (
+                            <>
+                              <Money value={a.previous_amount} /> → <Money value={a.resulting_amount} />
+                            </>
+                          ) : (
+                            '—'
                           )}
                         </Table.Td>
-                      )}
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            </Table.ScrollContainer>
+                        <Table.Td>
+                          <StatusBadge status={a.status} labels={priceAdjustmentStatusLabels} />
+                        </Table.Td>
+                        <Table.Td>{a.reason}</Table.Td>
+                        {canWrite && (
+                          <Table.Td>
+                            {a.status === 'scheduled' && (
+                              <Tooltip label="Cancelar reajuste">
+                                <ActionIcon
+                                  variant="subtle"
+                                  color="red"
+                                  aria-label="Cancelar reajuste"
+                                  onClick={async () => {
+                                    const ok = await confirmAction({ title: 'Cancelar reajuste', message: 'O reajuste programado não será aplicado.', confirmLabel: 'Cancelar reajuste', danger: true });
+                                    if (ok) cancel.mutate(a);
+                                  }}
+                                >
+                                  <IconX size={16} />
+                                </ActionIcon>
+                              </Tooltip>
+                            )}
+                          </Table.Td>
+                        )}
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
+              <CursorPager
+                page={pagination.page}
+                hasPrevious={pagination.hasPrevious}
+                hasNext={!!page.next_cursor}
+                onPrevious={pagination.previous}
+                onNext={() => page.next_cursor && pagination.next(page.next_cursor)}
+                loading={query.isFetching}
+              />
+            </>
           )
         }
       </QueryContent>

@@ -627,12 +627,16 @@ func (s *Service) loadLocalSide(ctx context.Context, tenantID uuid.UUID, account
 		for _, r := range refunds {
 			byCharge[r.ChargeID] = append(byCharge[r.ChargeID], r)
 		}
+		pending, err := tx.PendingReceipts(ctx, ids)
+		if err != nil {
+			return err
+		}
 		local = make([]LocalCharge, 0, len(charges))
 		for _, c := range charges {
-			local = append(local, LocalCharge{Charge: c, Refunds: byCharge[c.ID]})
+			local = append(local, LocalCharge{Charge: c, Refunds: byCharge[c.ID], PendingReceipt: pending[c.ID]})
 		}
 		for _, c := range rotated {
-			rotation = append(rotation, LocalCharge{Charge: c, Refunds: byCharge[c.ID]})
+			rotation = append(rotation, LocalCharge{Charge: c, Refunds: byCharge[c.ID], PendingReceipt: pending[c.ID]})
 		}
 		if unknown, err = tx.UnknownOperations(ctx, now, maxUnknownOperations+1); err != nil {
 			return err
@@ -968,6 +972,11 @@ func (s *Service) ResolveDiscrepancy(ctx context.Context, tenantID uuid.UUID, ac
 		if d, err = tx.Discrepancy(ctx, in.ID, false); err != nil {
 			return err
 		}
+		// Recusa antecipada da versão divergente, antes de consultar o
+		// provedor; a condição do UPDATE, adiante, é a que decide.
+		if d.Version != in.ExpectedVersion {
+			return errDiscrepancyVersion
+		}
 		if d.Status != DiscrepancyOpen {
 			return apperr.Conflict("discrepancy_not_open", "A divergência já foi resolvida.")
 		}
@@ -1020,6 +1029,9 @@ func (s *Service) ResolveDiscrepancy(ctx context.Context, tenantID uuid.UUID, ac
 		if cur.Status != DiscrepancyOpen {
 			return apperr.Conflict("discrepancy_not_open", "A divergência já foi resolvida.")
 		}
+		// A gravação da resolução é condicionada à versão esperada: se a
+		// divergência mudou (nova detecção ou outra resolução), nada é gravado.
+		cur.Version = in.ExpectedVersion
 		now := s.clock.Now()
 		if err := s.applyResolution(ctx, tx, &cur, in.Resolution, snapshot, notFound, actor, now); err != nil {
 			return err
@@ -1038,6 +1050,11 @@ func (s *Service) ResolveDiscrepancy(ctx context.Context, tenantID uuid.UUID, ac
 	})
 	return d, err
 }
+
+// errDiscrepancyVersion recusa a resolução com versão diferente da informada
+// no If-Match.
+var errDiscrepancyVersion = apperr.PreconditionFailed("version_mismatch",
+	"A divergência foi alterada depois da sua consulta. Recarregue e tente novamente.")
 
 func errNotApplicable(kind DiscrepancyKind, r Resolution) error {
 	return apperr.Conflict("resolution_not_applicable", fmt.Sprintf("A resolução %s não se aplica a divergências do tipo %s.", r, kind))
@@ -1116,8 +1133,17 @@ func (s *Service) applyResolution(ctx context.Context, tx Tx, d *Discrepancy, r 
 	if err != nil {
 		return err
 	}
-	if d.Kind == DiscrepancyPaymentNotReflected && (!snapshot.Status.IsPaid() || IsSettledStatus(c.Status)) {
-		return apperr.Conflict("payment_not_applicable", "O provedor não informa pagamento a aplicar nesta cobrança.")
+	if d.Kind == DiscrepancyPaymentNotReflected {
+		if d.LocalValue["direction"] == DirectionProviderReceived {
+			// Recebimento perdido: a cobrança já está paga; a adoção do
+			// provedor lança o recebimento e a liquidação (ensureReceived,
+			// em applyProviderStateFrom).
+			if !snapshot.Status.IsReceived() || !IsSettledStatus(c.Status) {
+				return apperr.Conflict("payment_not_applicable", "O provedor não informa o recebimento desta cobrança.")
+			}
+		} else if !snapshot.Status.IsPaid() || IsSettledStatus(c.Status) {
+			return apperr.Conflict("payment_not_applicable", "O provedor não informa pagamento a aplicar nesta cobrança.")
+		}
 	}
 	if err := s.applyProviderStateFrom(ctx, tx, &c, *snapshot, now, actor, true); err != nil {
 		return err
@@ -1138,7 +1164,11 @@ func (s *Service) requireConverged(ctx context.Context, tx Tx, c Charge, pc Prov
 	if err != nil {
 		return err
 	}
-	for _, f := range compareCharge(LocalCharge{Charge: c, Refunds: refunds}, pc, now) {
+	pending, err := tx.PendingReceipts(ctx, []uuid.UUID{c.ID})
+	if err != nil {
+		return err
+	}
+	for _, f := range compareCharge(LocalCharge{Charge: c, Refunds: refunds, PendingReceipt: pending[c.ID]}, pc, now) {
 		if f.Kind == kind && f.RefundID == nil {
 			return apperr.Conflict("provider_state_not_applied",
 				"O retrato atual do provedor não elimina a divergência; verifique a cobrança no provedor ou resolva mantendo o registro local.")
@@ -1215,7 +1245,11 @@ func (s *Service) postAdjustment(ctx context.Context, tx Tx, d *Discrepancy, now
 	if err != nil || !ok {
 		return err
 	}
-	if err := tx.PostLedger(ctx, t); err != nil {
+	// O ajuste acerta o valor que o provedor credita ou debita: liquidado no
+	// disponível como as demais movimentações com o provedor. Antes do
+	// recebimento, o disponível fica com a diferença até o recebimento
+	// creditar o líquido local.
+	if err := postProviderMovement(ctx, tx, t); err != nil {
 		return err
 	}
 	d.LedgerTransactionID = &t.ID

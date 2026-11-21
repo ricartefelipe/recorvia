@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -77,6 +79,10 @@ type Deps struct {
 	Portal        *portal.Service
 	Credentials   *apicredentials.Service
 	Providers     []string
+	// InvoiceExportMaxRows limita as faturas por arquivo exportado; zero usa
+	// o padrão (exportMaxRows). Os testes reduzem o limite para exercitar a
+	// exportação em partes.
+	InvoiceExportMaxRows int
 	// Ready verifica dependências críticas (readiness).
 	Ready func(ctx context.Context) map[string]error
 }
@@ -137,7 +143,7 @@ func (a *API) handle(r chi.Router, method, pattern string, access Access, perm t
 		o(&info)
 	}
 	a.routes = append(a.routes, info)
-	var handler http.Handler = h
+	handler := a.requestRules(method, pattern, h)
 	if info.Idempotent {
 		handler = a.idempotency(info, handler)
 	}
@@ -159,7 +165,12 @@ func (a *API) handle(r chi.Router, method, pattern string, access Access, perm t
 func NewRouter(d Deps) (*API, http.Handler) {
 	a := &API{Deps: d, log: d.Log}
 	r := chi.NewRouter()
-	r.Use(a.requestID, a.recoverer, a.observe, a.securityHeaders, a.cors)
+	// HEAD em rota GET responde como GET, sem corpo (RFC 9110).
+	r.Use(a.requestID, a.recoverer, a.observe, a.securityHeaders, a.cors, middleware.GetHead)
+	// Rota inexistente e método não permitido também respondem no formato
+	// RFC 9457, com o request_id; o 405 informa os métodos aceitos em Allow.
+	r.NotFound(a.routeNotFound)
+	r.MethodNotAllowed(a.methodNotAllowed(r))
 
 	r.Get("/livez", a.livez)
 	r.Get("/readyz", a.readyz)
@@ -193,11 +204,57 @@ func NewRouter(d Deps) (*API, http.Handler) {
 
 func (a *API) registerAuthenticated(r chi.Router) {
 	a.handle(r, http.MethodPost, "/auth/logout", Authenticated, "", a.authLogout)
+	a.handle(r, http.MethodPost, "/auth/logout-all", Authenticated, "", a.authLogoutAll)
 	a.handle(r, http.MethodGet, "/api/v1/session", Authenticated, "", a.getSession)
 	a.handle(r, http.MethodPut, "/api/v1/session/tenant", Authenticated, "", a.switchTenant)
 	a.handle(r, http.MethodPost, "/api/v1/organizations", Authenticated, "", a.createOrganization)
 	a.handle(r, http.MethodPost, "/api/v1/invitations/accept", Authenticated, "", a.acceptInvitation)
 	a.handle(r, http.MethodGet, "/api/v1/admin/tenants", PlatformStaff, "", a.adminTenants)
+	// Atendimento dos serviços adicionais pela equipe da plataforma (ADR-077).
+	a.handle(r, http.MethodGet, "/api/v1/admin/addon-orders", PlatformStaff, "", a.adminAddonOrders)
+	a.handle(r, http.MethodPost, "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/schedule", PlatformStaff, "", a.adminScheduleAddonOrder)
+	a.handle(r, http.MethodPost, "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/complete", PlatformStaff, "", a.adminCompleteAddonOrder)
+	a.handle(r, http.MethodPost, "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/cancel", PlatformStaff, "", a.adminCancelAddonOrder)
+}
+
+// routeNotFound responde às rotas que não existem.
+func (a *API) routeNotFound(w http.ResponseWriter, r *http.Request) {
+	a.writeError(w, r, apperr.NotFound("route_not_found", "Recurso não encontrado."))
+}
+
+// allowMethods são os métodos testados para compor o header Allow; HEAD
+// acompanha GET (middleware.GetHead).
+var allowMethods = []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions}
+
+// methodNotAllowed responde ao método não aceito por uma rota existente. O
+// chi não repassa ao handler personalizado os métodos da rota: eles são
+// obtidos consultando o próprio roteador. O chi também chega aqui com método
+// desconhecido (PROPFIND) em qualquer caminho: se nenhum método atende o
+// caminho, a rota não existe (404).
+func (a *API) methodNotAllowed(routes chi.Routes) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.RawPath
+		if path == "" {
+			path = r.URL.Path
+		}
+		var allow []string
+		for _, m := range allowMethods {
+			if routes.Match(chi.NewRouteContext(), m, path) {
+				allow = append(allow, m)
+				if m == http.MethodGet {
+					allow = append(allow, http.MethodHead)
+				}
+			}
+		}
+		if len(allow) == 0 {
+			a.routeNotFound(w, r)
+			return
+		}
+		for _, m := range allow {
+			w.Header().Add("Allow", m)
+		}
+		a.writeError(w, r, errMethodNotAllowed)
+	}
 }
 
 var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{8,64}$`)
@@ -286,12 +343,23 @@ func normalizeMethod(m string) string {
 }
 
 // observe registra log de acesso e métricas por padrão de rota (nunca pela
-// URL concreta, que contém identificadores) e pelo método normalizado.
+// URL concreta, que contém identificadores) e pelo método normalizado. O log
+// de acesso leva a correlação completa da requisição: request_id, trace_id e
+// span_id e, quando identificados, tenant_id, user_id e principal. O tenant
+// pedido no header X-Recorvia-Tenant vai como requested_tenant_id, inclusive
+// na requisição recusada antes da validação do tenant (401, ou 403 de
+// permissão): ele não foi validado, por isso não ocupa a chave tenant_id.
 func (a *API) observe(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w}
-		next.ServeHTTP(rec, r)
+		// O coletor recebe o tenant, o usuário e o principal identificados
+		// pelas etapas internas, que o log de acesso inclui.
+		ctx := logging.Collect(r.Context())
+		if requested, ok := requestedTenant(r); ok {
+			ctx = logging.WithAttrs(ctx, slog.String("requested_tenant_id", requested))
+		}
+		next.ServeHTTP(rec, r.WithContext(ctx))
 		route := "unmatched"
 		if rc := chi.RouteContext(r.Context()); rc != nil && rc.RoutePattern() != "" {
 			route = rc.RoutePattern()
@@ -316,9 +384,24 @@ func (a *API) observe(next http.Handler) http.Handler {
 		if route == "/livez" || route == "/readyz" {
 			return
 		}
-		a.log.InfoContext(r.Context(), "requisição", slog.String("method", method), slog.String("route", route),
+		a.log.InfoContext(logging.Collected(ctx), "requisição", slog.String("method", method), slog.String("route", route),
 			slog.Int("status", rec.status), slog.Duration("duration", d))
 	})
+}
+
+// requestedTenant devolve o tenant pedido no header X-Recorvia-Tenant, na
+// forma canônica, somente quando o valor é um identificador válido: o header
+// vem do cliente e não é repetido no log quando malformado.
+func requestedTenant(r *http.Request) (string, bool) {
+	h := r.Header.Get("X-Recorvia-Tenant")
+	if h == "" || len(h) > 64 {
+		return "", false
+	}
+	id, err := uuid.Parse(h)
+	if err != nil {
+		return "", false
+	}
+	return id.String(), true
 }
 
 func (a *API) securityHeaders(next http.Handler) http.Handler {
@@ -334,6 +417,11 @@ func (a *API) securityHeaders(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// exposedHeaders são os cabeçalhos de resposta liberados para origens
+// permitidas (Access-Control-Expose-Headers).
+const exposedHeaders = "ETag, Location, X-Request-ID, Idempotent-Replayed, X-Recorvia-Export-Limit, X-Recorvia-Export-Truncated, " +
+	"X-Recorvia-Export-Next-Cursor, X-Recorvia-Export-Next-Part"
 
 // cors só responde a origens explicitamente permitidas; por padrão a
 // aplicação é servida na mesma origem e nenhum header CORS é emitido.
@@ -351,6 +439,10 @@ func (a *API) cors(next http.Handler) http.Handler {
 			h.Set("Access-Control-Allow-Origin", origin)
 			h.Set("Access-Control-Allow-Credentials", "true")
 			h.Set("Vary", "Origin")
+			// Cabeçalhos de resposta que a interface lê (concorrência,
+			// idempotência, rastreio e o corte da exportação de faturas): sem
+			// isto, o navegador os esconde do fetch em outra origem.
+			h.Set("Access-Control-Expose-Headers", exposedHeaders)
 			if r.Method == http.MethodOptions {
 				h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE")
 				h.Set("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token, X-Recorvia-Tenant, If-Match, Idempotency-Key, X-Request-ID")

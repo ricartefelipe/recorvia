@@ -208,6 +208,8 @@ type notificationTemplateDTO struct {
 	IsDefault bool       `json:"is_default"`
 	Variables []string   `json:"variables"`
 	UpdatedAt *time.Time `json:"updated_at"`
+	// Version é a versão da personalização; 0 no template padrão.
+	Version int `json:"version"`
 }
 
 func templateView(t notifications.Template) notificationTemplateDTO {
@@ -216,7 +218,7 @@ func templateView(t notifications.Template) notificationTemplateDTO {
 		vars = []string{}
 	}
 	return notificationTemplateDTO{Key: string(t.Key), Channel: notifications.ChannelEmail, Subject: t.Subject, Body: t.Body,
-		IsDefault: t.IsDefault, Variables: vars, UpdatedAt: t.UpdatedAt}
+		IsDefault: t.IsDefault, Variables: vars, UpdatedAt: t.UpdatedAt, Version: t.Version}
 }
 
 func (a *API) listNotificationTemplates(w http.ResponseWriter, r *http.Request) {
@@ -232,7 +234,14 @@ func (a *API) listNotificationTemplates(w http.ResponseWriter, r *http.Request) 
 	a.writeJSON(w, r, http.StatusOK, list(out))
 }
 
+// updateNotificationTemplate grava a personalização do template na versão do
+// If-Match: "0" para o template padrão, ainda não personalizado.
 func (a *API) updateNotificationTemplate(w http.ResponseWriter, r *http.Request) {
+	version, err := ifMatchOrDefault(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	var in struct {
 		Subject string `json:"subject"`
 		Body    string `json:"body"`
@@ -242,31 +251,35 @@ func (a *API) updateNotificationTemplate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	p := mustPrincipal(r)
-	t, err := a.Notifications.UpdateTemplate(r.Context(), p.TenantID, p.Actor(), p.UserID(), chi.URLParam(r, "key"), in.Subject, in.Body)
+	t, err := a.Notifications.UpdateTemplate(r.Context(), p.TenantID, p.Actor(), p.UserID(), chi.URLParam(r, "key"), in.Subject, in.Body, version)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, templateView(t))
+	a.writeVersioned(w, r, http.StatusOK, t.Version, templateView(t))
 }
 
 // --- histórico de notificações ---
 
+// notificationDTO é uma notificação do histórico. status_reason é o código
+// estável do motivo da situação atual (cancelamento, supressão, falha ou
+// adiamento), vazio quando não há motivo.
 type notificationDTO struct {
-	ID          uuid.UUID  `json:"id"`
-	BusinessKey string     `json:"business_key"`
-	CustomerID  *uuid.UUID `json:"customer_id"`
-	InvoiceID   *uuid.UUID `json:"invoice_id"`
-	TemplateKey string     `json:"template_key"`
-	Channel     string     `json:"channel"`
-	Recipient   string     `json:"recipient"`
-	Subject     string     `json:"subject"`
-	Status      string     `json:"status"`
-	SendAfter   time.Time  `json:"send_after"`
-	Attempts    int        `json:"attempts"`
-	LastError   string     `json:"last_error"`
-	SentAt      *time.Time `json:"sent_at"`
-	CreatedAt   time.Time  `json:"created_at"`
+	ID           uuid.UUID  `json:"id"`
+	BusinessKey  string     `json:"business_key"`
+	CustomerID   *uuid.UUID `json:"customer_id"`
+	InvoiceID    *uuid.UUID `json:"invoice_id"`
+	TemplateKey  string     `json:"template_key"`
+	Channel      string     `json:"channel"`
+	Recipient    string     `json:"recipient"`
+	Subject      string     `json:"subject"`
+	Status       string     `json:"status"`
+	StatusReason string     `json:"status_reason"`
+	SendAfter    time.Time  `json:"send_after"`
+	Attempts     int        `json:"attempts"`
+	LastError    string     `json:"last_error"`
+	SentAt       *time.Time `json:"sent_at"`
+	CreatedAt    time.Time  `json:"created_at"`
 }
 
 func notificationView(n notifications.Notification) notificationDTO {
@@ -276,7 +289,8 @@ func notificationView(n notifications.Notification) notificationDTO {
 	}
 	return notificationDTO{ID: n.ID, BusinessKey: n.BusinessKey, CustomerID: n.CustomerID, InvoiceID: n.InvoiceID,
 		TemplateKey: string(n.TemplateKey), Channel: channel, Recipient: strings.Join(n.Recipients, ", "), Subject: n.Subject,
-		Status: string(n.Status), SendAfter: n.SendAfter, Attempts: n.Attempts, LastError: n.LastError, SentAt: n.SentAt, CreatedAt: n.CreatedAt}
+		Status: string(n.Status), StatusReason: n.StatusReason, SendAfter: n.SendAfter, Attempts: n.Attempts, LastError: n.LastError,
+		SentAt: n.SentAt, CreatedAt: n.CreatedAt}
 }
 
 func (a *API) listNotifications(w http.ResponseWriter, r *http.Request) {
@@ -302,4 +316,32 @@ func (a *API) listNotifications(w http.ResponseWriter, r *http.Request) {
 		out = append(out, notificationView(n))
 	}
 	a.writeJSON(w, r, http.StatusOK, newPage(out, page.NextCursor))
+}
+
+type notificationEventDTO struct {
+	Status     string    `json:"status"`
+	Reason     string    `json:"reason"`
+	Attempt    int       `json:"attempt"`
+	Detail     string    `json:"detail"`
+	OccurredAt time.Time `json:"occurred_at"`
+}
+
+// listNotificationEvents devolve a linha do tempo de uma notificação, em
+// ordem cronológica.
+func (a *API) listNotificationEvents(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	events, err := a.Notifications.Events(r.Context(), mustPrincipal(r).TenantID, id)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	out := make([]notificationEventDTO, 0, len(events))
+	for _, e := range events {
+		out = append(out, notificationEventDTO{Status: string(e.Status), Reason: e.Reason, Attempt: e.Attempt, Detail: e.Detail, OccurredAt: e.At})
+	}
+	a.writeJSON(w, r, http.StatusOK, list(out))
 }

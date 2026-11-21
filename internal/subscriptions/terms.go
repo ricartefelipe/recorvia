@@ -45,7 +45,9 @@ type TermsTx interface {
 	InsertDiscount(ctx context.Context, d Discount, appliedBy *uuid.UUID) error
 	EndActiveDiscount(ctx context.Context, subscriptionID uuid.UUID, at time.Time) (bool, error)
 	InsertAdjustment(ctx context.Context, a PriceAdjustment) error
-	Adjustments(ctx context.Context, subscriptionID uuid.UUID) ([]PriceAdjustment, error)
+	// Adjustments devolve uma página dos reajustes da assinatura, pela
+	// vigência (limite e cursor opaco).
+	Adjustments(ctx context.Context, subscriptionID uuid.UUID, limit int, cursor string) (AdjustmentPage, error)
 	Adjustment(ctx context.Context, subscriptionID, id uuid.UUID) (PriceAdjustment, error)
 	CancelAdjustment(ctx context.Context, a PriceAdjustment) error
 	ScheduledChanges(ctx context.Context, subscriptionID uuid.UUID) ([]ScheduledChange, error)
@@ -200,15 +202,23 @@ func (s *TermsService) ScheduleAdjustment(ctx context.Context, tenantID uuid.UUI
 	return a, err
 }
 
-// Adjustments lista os reajustes da assinatura.
-func (s *TermsService) Adjustments(ctx context.Context, tenantID, subscriptionID uuid.UUID) ([]PriceAdjustment, error) {
-	var out []PriceAdjustment
+// AdjustmentPage é uma página dos reajustes da assinatura, da vigência mais
+// antiga para a mais recente; NextCursor vazio indica a última página.
+type AdjustmentPage struct {
+	Items      []PriceAdjustment
+	NextCursor string
+}
+
+// Adjustments lista os reajustes da assinatura pela vigência, em páginas por
+// cursor.
+func (s *TermsService) Adjustments(ctx context.Context, tenantID, subscriptionID uuid.UUID, limit int, cursor string) (AdjustmentPage, error) {
+	var out AdjustmentPage
 	err := s.store.InTermsTx(ctx, tenantID, func(tx TermsTx) error {
 		if _, err := tx.Get(ctx, subscriptionID, false); err != nil {
 			return err
 		}
 		var err error
-		out, err = tx.Adjustments(ctx, subscriptionID)
+		out, err = tx.Adjustments(ctx, subscriptionID, limit, cursor)
 		return err
 	})
 	return out, err

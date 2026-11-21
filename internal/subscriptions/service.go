@@ -1,7 +1,11 @@
 package subscriptions
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,7 +23,10 @@ import (
 
 // ListFilter define filtros permitidos.
 type ListFilter struct {
-	Status     Status
+	Status Status
+	// InForce restringe às assinaturas em trial, ativas ou em atraso, as
+	// mesmas das assinaturas ativas do painel.
+	InForce    bool
 	CustomerID *uuid.UUID
 	Limit      int
 	Cursor     string
@@ -49,10 +56,18 @@ type Tx interface {
 	Customer(ctx context.Context, id uuid.UUID) (customers.Customer, error)
 	Plan(ctx context.Context, id uuid.UUID) (catalog.Plan, error)
 	PriceVersion(ctx context.Context, id uuid.UUID) (catalog.PriceVersion, error)
-	PlatformPlan(ctx context.Context) (platformbilling.Plan, error)
+	// LockPlatformPlan lê o plano da plataforma bloqueando a assinatura do
+	// tenant na plataforma até o fim da transação: criações e reativações
+	// simultâneas contam os contratos ativos uma de cada vez.
+	LockPlatformPlan(ctx context.Context) (platformbilling.Plan, error)
 	PlatformUsage(ctx context.Context) (platformbilling.Usage, error)
 
-	Insert(ctx context.Context, s Subscription) error
+	// Insert grava a assinatura. false indica que outra transação já
+	// confirmou uma assinatura com a mesma RequestKey (nada é gravado).
+	Insert(ctx context.Context, s Subscription) (bool, error)
+	// ByRequestKey lê a assinatura criada com a chave de negócio informada
+	// (não encontrada: apperr.KindNotFound).
+	ByRequestKey(ctx context.Context, key string) (Subscription, error)
 	Get(ctx context.Context, id uuid.UUID, forUpdate bool) (Subscription, error)
 	Update(ctx context.Context, s Subscription) error
 	List(ctx context.Context, f ListFilter) (Page, error)
@@ -90,13 +105,70 @@ type CreateInput struct {
 	StartDate        *calendar.Date
 	TrialDays        *int
 	PaymentTermsDays *int
+	// RequestKey é a chave de negócio do pedido (derivada do
+	// Idempotency-Key). Com ela, a repetição do pedido devolve a assinatura
+	// já criada, mesmo depois de expirado o registro da resposta.
+	RequestKey string
 }
 
-// Create cria uma assinatura com a versão de preço vigente do plano.
+// RequestFingerprint é a impressão dos campos de negócio do pedido de
+// criação, gravada com a chave de negócio: SHA-256 de cliente, plano,
+// quantidade (vazia vale 1), data de início, dias de avaliação e prazo de
+// pagamento (ausentes distintos de zero).
+func RequestFingerprint(in CreateInput) []byte {
+	qty := in.Quantity
+	if qty == 0 {
+		qty = 1
+	}
+	opt := func(v *int) string {
+		if v == nil {
+			return "-"
+		}
+		return strconv.Itoa(*v)
+	}
+	start := "-"
+	if in.StartDate != nil {
+		start = in.StartDate.String()
+	}
+	sum := sha256.Sum256([]byte(strings.Join([]string{in.CustomerID.String(), in.PlanID.String(), strconv.Itoa(qty), start,
+		opt(in.TrialDays), opt(in.PaymentTermsDays)}, "|")))
+	return sum[:]
+}
+
+// Create cria uma assinatura com a versão de preço vigente do plano. Com
+// RequestKey, é repetível: a mesma chave com o mesmo conteúdo (impressão dos
+// campos de negócio, RequestFingerprint) devolve a assinatura já criada,
+// inclusive quando outra transação a grava ao mesmo tempo; com outro
+// conteúdo, é recusada com conflito (request_key_reused).
 func (s *Service) Create(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, in CreateInput) (Subscription, error) {
 	now := s.clock.Now()
+	var fingerprint []byte
+	if in.RequestKey != "" {
+		fingerprint = RequestFingerprint(in)
+	}
 	var sub Subscription
+	// existing devolve a assinatura já criada com a chave do pedido;
+	// found=false quando não há.
+	existing := func(tx Tx) (bool, error) {
+		prev, err := tx.ByRequestKey(ctx, in.RequestKey)
+		if apperr.IsKind(err, apperr.KindNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if !bytes.Equal(prev.RequestFingerprint, fingerprint) {
+			return false, apperr.Conflict("request_key_reused", "A chave do pedido já foi usada para outra assinatura.")
+		}
+		sub = prev
+		return true, nil
+	}
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		if in.RequestKey != "" {
+			if found, err := existing(tx); found || err != nil {
+				return err
+			}
+		}
 		loc, err := tx.TenantLocation(ctx)
 		if err != nil {
 			return err
@@ -119,7 +191,7 @@ func (s *Service) Create(ctx context.Context, tenantID uuid.UUID, actor audit.Ac
 		if err != nil {
 			return err
 		}
-		pplan, err := tx.PlatformPlan(ctx)
+		pplan, err := tx.LockPlatformPlan(ctx)
 		if err != nil {
 			return err
 		}
@@ -128,11 +200,7 @@ func (s *Service) Create(ctx context.Context, tenantID uuid.UUID, actor audit.Ac
 				return err
 			}
 		}
-		usage, err := tx.PlatformUsage(ctx)
-		if err != nil {
-			return err
-		}
-		if err := platformbilling.CheckSubscriptionLimit(pplan, usage); err != nil {
+		if err := checkSubscriptionLimit(ctx, tx, pplan); err != nil {
 			return err
 		}
 		start := now
@@ -156,7 +224,18 @@ func (s *Service) Create(ctx context.Context, tenantID uuid.UUID, actor audit.Ac
 		if err != nil {
 			return err
 		}
-		if err := tx.Insert(ctx, sub); err != nil {
+		sub.RequestKey, sub.RequestFingerprint = in.RequestKey, fingerprint
+		inserted, err := tx.Insert(ctx, sub)
+		if err != nil {
+			return err
+		}
+		if !inserted {
+			// Outra transação confirmou a assinatura com a mesma chave
+			// enquanto esta a preparava: devolve a confirmada.
+			found, err := existing(tx)
+			if err == nil && !found {
+				err = apperr.Conflict("subscription_in_progress", "Pedido de criação da assinatura em processamento; tente novamente.")
+			}
 			return err
 		}
 		if err := tx.InsertHistory(ctx, sub.ID, actor, sub.PopEvents()); err != nil {
@@ -170,6 +249,16 @@ func (s *Service) Create(ctx context.Context, tenantID uuid.UUID, actor audit.Ac
 			map[string]any{"plan_id": plan.ID, "price_version": price.Version, "quantity": qty}))
 	})
 	return sub, err
+}
+
+// checkSubscriptionLimit confere o limite de contratos ativos do plano da
+// plataforma; o plano deve ter sido lido com LockPlatformPlan.
+func checkSubscriptionLimit(ctx context.Context, tx Tx, pplan platformbilling.Plan) error {
+	usage, err := tx.PlatformUsage(ctx)
+	if err != nil {
+		return err
+	}
+	return platformbilling.CheckSubscriptionLimit(pplan, usage)
 }
 
 // Get retorna uma assinatura.
@@ -286,8 +375,22 @@ func (s *Service) Suspend(ctx context.Context, tenantID uuid.UUID, actor audit.A
 		func(_ Tx, sub *Subscription, now time.Time) error { return sub.Suspend(reason, now) })
 }
 
-// Reactivate reativa a assinatura suspensa.
+// Reactivate reativa a assinatura suspensa. Suspensas não contam como
+// contratos ativos: a reativação ocupa uma vaga e confere o limite do plano
+// da plataforma, como a criação.
 func (s *Service) Reactivate(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, id uuid.UUID, expectedVersion int) (Subscription, error) {
 	return s.mutate(ctx, tenantID, actor, id, expectedVersion, "subscription.reactivated", outbox.EventSubscriptionReactivate,
-		func(_ Tx, sub *Subscription, now time.Time) error { return sub.Reactivate(now) })
+		func(tx Tx, sub *Subscription, now time.Time) error {
+			if sub.Status != Suspended {
+				return sub.Reactivate(now) // recusa com o erro de transição
+			}
+			pplan, err := tx.LockPlatformPlan(ctx)
+			if err != nil {
+				return err
+			}
+			if err := checkSubscriptionLimit(ctx, tx, pplan); err != nil {
+				return err
+			}
+			return sub.Reactivate(now)
+		})
 }

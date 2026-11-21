@@ -24,8 +24,10 @@ type tenantState struct {
 	statements []Statement
 	audits     []audit.Entry
 	updates    int
-	// addonsByStart define o total de adicionais concluídos por início de período.
-	addonsByStart map[time.Time]money.Money
+	// pending é o número de convites pendentes.
+	pending int
+	// orderUpdates conta as gravações de pedidos.
+	orderUpdates int
 	// existing simula demonstrativos já gravados (chave: início do período).
 	existing map[time.Time]bool
 }
@@ -37,7 +39,10 @@ type fakeStore struct {
 	addons  map[string]Addon
 	tenants map[uuid.UUID]*tenantState
 	due     []uuid.UUID
-	fail    map[string]error
+	staff   []StaffAddonOrder
+	// staffQuery registra o pedido recebido na listagem da equipe.
+	staffQuery StaffAddonQuery
+	fail       map[string]error
 	// cancelAfter cancela o contexto após o número de transações informado.
 	cancelAfter int
 	cancel      context.CancelFunc
@@ -55,7 +60,7 @@ func newFakeStore() *fakeStore {
 func (f *fakeStore) tenant(id uuid.UUID) *tenantState {
 	st, ok := f.tenants[id]
 	if !ok {
-		st = &tenantState{addonsByStart: map[time.Time]money.Money{}, existing: map[time.Time]bool{}}
+		st = &tenantState{existing: map[time.Time]bool{}}
 		f.tenants[id] = st
 	}
 	return st
@@ -105,6 +110,14 @@ func (f *fakeStore) TenantsDueStatement(_ context.Context, now time.Time) ([]uui
 	return f.due, nil
 }
 
+func (f *fakeStore) StaffAddonOrders(_ context.Context, q StaffAddonQuery) ([]StaffAddonOrder, error) {
+	f.staffQuery = q
+	if err := f.err("StaffAddonOrders"); err != nil {
+		return nil, err
+	}
+	return f.staff[:min(len(f.staff), q.Limit)], nil
+}
+
 type fakeTx struct {
 	store *fakeStore
 	st    *tenantState
@@ -124,8 +137,13 @@ func (t *fakeTx) UpdateSubscription(_ context.Context, s Subscription) error {
 	if err := t.store.err("UpdateSubscription"); err != nil {
 		return err
 	}
+	// Como a gravação condicionada do armazenamento: somente na versão lida.
+	if s.Version != t.st.sub.Version {
+		return apperr.PreconditionFailed("version_mismatch", "versão divergente")
+	}
 	t.st.updates++
 	t.st.sub = s
+	t.st.sub.Version++
 	return nil
 }
 
@@ -166,14 +184,80 @@ func (t *fakeTx) InsertAddonOrder(_ context.Context, o AddonOrder) error {
 	return nil
 }
 
-func (t *fakeTx) CompletedAddonsTotal(_ context.Context, from, _ time.Time) (money.Money, error) {
-	if err := t.store.err("CompletedAddonsTotal"); err != nil {
+func (t *fakeTx) PendingInvitations(context.Context, time.Time) (int, error) {
+	if err := t.store.err("PendingInvitations"); err != nil {
+		return 0, err
+	}
+	return t.st.pending, nil
+}
+
+func (t *fakeTx) AddonOrder(_ context.Context, id uuid.UUID) (AddonOrder, error) {
+	if err := t.store.err("AddonOrder"); err != nil {
+		return AddonOrder{}, err
+	}
+	for _, o := range t.st.orders {
+		if o.ID == id {
+			return o, nil
+		}
+	}
+	return AddonOrder{}, apperr.NotFound("addon_order_not_found", "Pedido não encontrado.")
+}
+
+func (t *fakeTx) UpdateAddonOrder(_ context.Context, o AddonOrder) error {
+	if err := t.store.err("UpdateAddonOrder"); err != nil {
+		return err
+	}
+	for i, cur := range t.st.orders {
+		if cur.ID == o.ID {
+			if cur.Version != o.Version {
+				return apperr.Conflict("version_conflict", "versão divergente")
+			}
+			o.Version++
+			t.st.orders[i] = o
+			t.st.orderUpdates++
+			return nil
+		}
+	}
+	return apperr.NotFound("addon_order_not_found", "Pedido não encontrado.")
+}
+
+func (t *fakeTx) unbilled(before time.Time) []int {
+	var idx []int
+	for i, o := range t.st.orders {
+		if o.Status == AddonCompleted && o.StatementID == nil && o.CompletedAt != nil && o.CompletedAt.Before(before) {
+			idx = append(idx, i)
+		}
+	}
+	return idx
+}
+
+func (t *fakeTx) UnbilledAddonsTotal(_ context.Context, before time.Time) (money.Money, error) {
+	if err := t.store.err("UnbilledAddonsTotal"); err != nil {
 		return money.Money{}, err
 	}
-	if v, ok := t.st.addonsByStart[from]; ok {
-		return v, nil
+	idx := t.unbilled(before)
+	if len(idx) == 0 {
+		return money.Zero(money.BRL), nil
 	}
-	return money.Zero(money.BRL), nil
+	total := t.st.orders[idx[0]].Price
+	for _, i := range idx[1:] {
+		var err error
+		if total, err = total.Add(t.st.orders[i].Price); err != nil {
+			return money.Money{}, err
+		}
+	}
+	return total, nil
+}
+
+func (t *fakeTx) MarkAddonsBilled(_ context.Context, statementID uuid.UUID, before time.Time) error {
+	if err := t.store.err("MarkAddonsBilled"); err != nil {
+		return err
+	}
+	for _, i := range t.unbilled(before) {
+		id := statementID
+		t.st.orders[i].StatementID = &id
+	}
+	return nil
 }
 
 func (t *fakeTx) InsertStatement(_ context.Context, s Statement) (bool, error) {

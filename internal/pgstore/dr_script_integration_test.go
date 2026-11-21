@@ -244,7 +244,7 @@ func TestKeyRotationPhasesAcrossProcesses(t *testing.T) {
 	t.Cleanup(owner.Close)
 
 	tn := env.NewTenant(t, "rotacao")
-	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "profissional"); err != nil {
+	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "profissional", env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	rcv := newReceiver(t)
@@ -259,7 +259,7 @@ func TestKeyRotationPhasesAcrossProcesses(t *testing.T) {
 	err = phase2.Payments().InTenant(ctx, tn.ID, func(tx payments.Tx) error {
 		return tx.SaveAccount(ctx, payments.ProviderAccount{ID: ids.New(), TenantID: tn.ID, Provider: "simulator", Environment: "local",
 			Status: "active", IsDefault: true, APIKey: "sim_rotacao_0001", APIKeyHint: "0001", Secret: strings.Repeat("r", 40),
-			CreatedAt: now, UpdatedAt: now, Version: 1}, []byte("hash-do-token-rotacao"))
+			CreatedAt: now, UpdatedAt: now, Version: 1}, []byte("hash-do-token-rotacao"), 0)
 	})
 	if err != nil {
 		t.Fatal(err)

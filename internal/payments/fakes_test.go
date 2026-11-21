@@ -76,8 +76,12 @@ type payData struct {
 	webhooks          map[uuid.UUID]StoredWebhook
 	inbox             map[string]bool
 	posted            []ledger.Transaction
-	audits            []audit.Entry
-	events            []outbox.Event
+	// ledger guarda todos os lançamentos gravados, como o banco: os testes
+	// limpam posted para observar só os lançamentos seguintes, sem apagar o
+	// histórico usado pela idempotência e pelo saldo a receber do pagamento.
+	ledger []ledger.Transaction
+	audits []audit.Entry
+	events []outbox.Event
 	receivables
 }
 
@@ -97,6 +101,7 @@ func (d payData) clone() payData {
 	c.webhooks = maps.Clone(d.webhooks)
 	c.inbox = maps.Clone(d.inbox)
 	c.posted = slices.Clone(d.posted)
+	c.ledger = slices.Clone(d.ledger)
 	c.audits = slices.Clone(d.audits)
 	c.events = slices.Clone(d.events)
 	c.receivables = d.receivables.clone()
@@ -249,10 +254,22 @@ func (s *payStore) AccountByProvider(_ context.Context, provider string) (Provid
 	return ProviderAccount{}, apperr.NotFound("provider_account_not_found", "Conta não encontrada.")
 }
 
-func (s *payStore) SaveAccount(_ context.Context, a ProviderAccount, hash []byte) error {
+// SaveAccount reproduz a gravação condicionada à versão: 0 cria a conta do
+// provedor; acima de 0, substitui a configuração com essa versão.
+func (s *payStore) SaveAccount(_ context.Context, a ProviderAccount, hash []byte, expectedVersion int) error {
 	if err := s.fail("SaveAccount"); err != nil {
 		return err
 	}
+	current := 0
+	for _, x := range s.accounts {
+		if x.Provider == a.Provider && x.TenantID == a.TenantID {
+			current = x.Version
+		}
+	}
+	if current != expectedVersion {
+		return apperr.PreconditionFailed("version_mismatch", "A configuração do provedor foi alterada por outra pessoa.")
+	}
+	a.Version = expectedVersion + 1
 	s.accounts[a.ID] = a
 	s.saved = append(s.saved, savedAccount{a, hash})
 	return nil
@@ -521,8 +538,63 @@ func (s *payStore) PostLedger(_ context.Context, t ledger.Transaction) error {
 	if err := t.Validate(); err != nil {
 		return err
 	}
+	// Como o banco, a chave de idempotência descarta o lançamento repetido.
+	if slices.ContainsFunc(s.ledger, func(p ledger.Transaction) bool { return p.IdempotencyKey == t.IdempotencyKey }) {
+		return nil
+	}
 	s.posted = append(s.posted, t)
+	s.ledger = append(s.ledger, t)
 	return nil
+}
+
+func (s *payStore) PendingReceipts(ctx context.Context, chargeIDs []uuid.UUID) (map[uuid.UUID]money.Money, error) {
+	if err := s.fail("PendingReceipts"); err != nil {
+		return nil, err
+	}
+	out := map[uuid.UUID]money.Money{}
+	for _, id := range chargeIDs {
+		_, pending, ok, err := s.PaymentPendingReceipt(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if ok && !pending.IsZero() {
+			out[id] = pending
+		}
+	}
+	return out, nil
+}
+
+func (s *payStore) PaymentPendingReceipt(_ context.Context, chargeID uuid.UUID) (Payment, money.Money, bool, error) {
+	if err := s.fail("PaymentPendingReceipt"); err != nil {
+		return Payment{}, money.Money{}, false, err
+	}
+	for _, p := range s.payments {
+		if p.ChargeID == nil || *p.ChargeID != chargeID {
+			continue
+		}
+		pending := money.Zero(p.Amount.Currency())
+		for _, t := range s.ledger {
+			if t.ReferenceType != "payment" || t.ReferenceID != p.ID {
+				continue
+			}
+			for _, e := range t.Entries {
+				if e.Account != ledger.ProviderConfirmed {
+					continue
+				}
+				var err error
+				if e.Direction == ledger.Debit {
+					pending, err = pending.Add(e.Amount)
+				} else {
+					pending, err = pending.Sub(e.Amount)
+				}
+				if err != nil {
+					return Payment{}, money.Money{}, false, err
+				}
+			}
+		}
+		return p, pending, true, nil
+	}
+	return Payment{}, money.Money{}, false, nil
 }
 
 func (s *payStore) Audit(_ context.Context, e audit.Entry) error {
@@ -585,6 +657,7 @@ type fakeGateway struct {
 	getErr         error
 	configureCalls []configureCall
 	configureErr   error
+	onConfigure    func()
 	getByID        map[string]gwResult
 	refundCalls    []RefundRequest
 	refundResults  []refundRes
@@ -691,6 +764,9 @@ func (g *fakeGateway) ListCharges(_ context.Context, req ListRequest) (ListResul
 func (g *fakeGateway) ConfigureWebhook(ctx context.Context, url, secret string) error {
 	_, ok := ctx.Deadline()
 	g.configureCalls = append(g.configureCalls, configureCall{url, secret, ok})
+	if g.onConfigure != nil {
+		g.onConfigure()
+	}
 	return g.configureErr
 }
 

@@ -76,7 +76,7 @@ func TestWorkerReceivablesJobsAndMetrics(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	env := fixture.New(t, 8, time.Now().UTC())
 	tn := env.NewTenant(t, "worker")
-	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "escala"); err != nil {
+	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "escala", env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	st, err := paysim.Load("")
@@ -151,17 +151,18 @@ func TestWorkerReceivablesJobsAndMetrics(t *testing.T) {
 	if err := w.job(t, "payments.reconcile")(ctx); err != nil {
 		t.Fatal(err)
 	}
-	runs, err := env.Store.ListReconciliationRuns(ctx, tn.ID, 10)
+	runs, _, err := env.Store.ListReconciliationRuns(ctx, tn.ID, 10, "")
 	if err != nil || len(runs) != 1 || runs[0].Trigger != payments.TriggerScheduled || runs[0].Status != payments.RunCompleted {
 		t.Fatalf("execuções agendadas: %+v %v", runs, err)
 	}
 
-	discrepancies, err := env.Store.ListDiscrepancies(ctx, tn.ID, "open", "", 10)
+	discrepancies, _, err := env.Store.ListDiscrepancies(ctx, tn.ID, "open", "", 10, "")
 	if err != nil || len(discrepancies) != 1 {
 		t.Fatalf("divergências: %v %v", discrepancies, err)
 	}
 	if _, err := pay.ResolveDiscrepancy(ctx, tn.ID, tn.Actor, &tn.Owner.ID, payments.ResolveInput{ID: discrepancies[0].ID,
-		Resolution: payments.ResolutionAcceptProvider, Justification: "Pagamento confirmado no painel do provedor."}); err != nil {
+		Resolution: payments.ResolutionAcceptProvider, Justification: "Pagamento confirmado no painel do provedor.",
+		ExpectedVersion: discrepancies[0].Version}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -409,12 +410,12 @@ func TestWorkerExecutesRegisteredReconciliations(t *testing.T) {
 	}
 	// A divergência é encerrada para não alterar as contagens agregadas dos
 	// demais testes do pacote, que compartilham o banco.
-	open, err := env.Store.ListDiscrepancies(ctx, tn.ID, "open", "", 10)
+	open, _, err := env.Store.ListDiscrepancies(ctx, tn.ID, "open", "", 10, "")
 	if err != nil || len(open) != 1 {
 		t.Fatalf("divergência aberta: %v %v", open, err)
 	}
 	if _, err := pay.ResolveDiscrepancy(ctx, tn.ID, tn.Actor, &tn.Owner.ID, payments.ResolveInput{ID: open[0].ID,
-		Resolution: payments.ResolutionDismiss, Justification: "Encerrada ao fim do roteiro do executor."}); err != nil {
+		Resolution: payments.ResolutionDismiss, Justification: "Encerrada ao fim do roteiro do executor.", ExpectedVersion: open[0].Version}); err != nil {
 		t.Fatal(err)
 	}
 	families, err := metrics.Registry.Gather()

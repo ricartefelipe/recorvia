@@ -416,27 +416,32 @@ func TestTermsServiceAdjustments(t *testing.T) {
 	}
 	f.store.adjustments = append(slices.Clone(mine), PriceAdjustment{ID: uuid.New(), SubscriptionID: uuid.New(), Status: AdjustmentScheduled})
 
-	got, err := f.svc.Adjustments(context.Background(), f.tenantID, f.sub.ID)
+	f.store.adjustmentNext = "seguinte"
+	got, err := f.svc.Adjustments(context.Background(), f.tenantID, f.sub.ID, 10, "atual")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0].ID != mine[0].ID || got[1].ID != mine[1].ID {
+	if len(got.Items) != 2 || got.Items[0].ID != mine[0].ID || got.Items[1].ID != mine[1].ID {
 		t.Fatalf("somente os reajustes da assinatura: %+v", got)
+	}
+	// O limite e o cursor chegam ao armazenamento, e o cursor seguinte volta.
+	if f.store.adjustmentPage != "10|atual" || got.NextCursor != "seguinte" {
+		t.Fatalf("página pedida %q, cursor devolvido %q", f.store.adjustmentPage, got.NextCursor)
 	}
 	if !slices.Equal(f.store.forUpdate, []bool{false}) || !slices.Equal(f.store.tenants, []uuid.UUID{f.tenantID}) {
 		t.Fatalf("consulta sem bloqueio na transação do tenant: bloqueio=%v tenants=%v", f.store.forUpdate, f.store.tenants)
 	}
 
 	t.Run("assinatura inexistente", func(t *testing.T) {
-		got, err := f.svc.Adjustments(context.Background(), f.tenantID, uuid.New())
+		got, err := f.svc.Adjustments(context.Background(), f.tenantID, uuid.New(), 25, "")
 		wantKind(t, err, apperr.KindNotFound, "subscription_not_found")
-		if got != nil {
+		if len(got.Items) != 0 {
 			t.Fatalf("nada deveria ser listado: %+v", got)
 		}
 	})
 
 	t.Run("assinatura de outro tenant", func(t *testing.T) {
-		_, err := f.svc.Adjustments(context.Background(), uuid.New(), f.sub.ID)
+		_, err := f.svc.Adjustments(context.Background(), uuid.New(), f.sub.ID, 25, "")
 		wantKind(t, err, apperr.KindNotFound, "subscription_not_found")
 	})
 
@@ -444,7 +449,7 @@ func TestTermsServiceAdjustments(t *testing.T) {
 		injected := errors.New("consulta indisponível")
 		f.store.errs["Adjustments"] = injected
 		t.Cleanup(func() { delete(f.store.errs, "Adjustments") })
-		if _, err := f.svc.Adjustments(context.Background(), f.tenantID, f.sub.ID); !errors.Is(err, injected) {
+		if _, err := f.svc.Adjustments(context.Background(), f.tenantID, f.sub.ID, 25, ""); !errors.Is(err, injected) {
 			t.Fatalf("esperava a falha injetada, obtive %v", err)
 		}
 	})

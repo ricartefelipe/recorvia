@@ -9,6 +9,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/dbgen"
 	"github.com/ricartefelipe/recorvia/internal/identity"
 	"github.com/ricartefelipe/recorvia/internal/infra/postgres"
+	"github.com/ricartefelipe/recorvia/internal/kernel/address"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/platformbilling"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
@@ -85,7 +86,31 @@ func (tx tenancyTx) Tenant(ctx context.Context) (tenancy.Tenant, error) {
 	if err != nil {
 		return tenancy.Tenant{}, notFound(err, "organization_not_found", "Organização não encontrada.")
 	}
-	return tenantFromRow(r), nil
+	t := tenantFromRow(r)
+	if t.Address, err = tx.tenantAddress(ctx); err != nil {
+		return tenancy.Tenant{}, err
+	}
+	return t, nil
+}
+
+// tenantAddress devolve o endereço da organização corrente (nil sem
+// cadastro).
+func (b base) tenantAddress(ctx context.Context) (*address.Address, error) {
+	r, err := b.q.GetTenantAddress(ctx, b.tenantID)
+	if postgres.IsNoRows(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &address.Address{Street: r.Street, Number: r.Number, Complement: r.Complement, District: r.District, City: r.City,
+		State: r.State, PostalCode: r.PostalCode, Country: r.Country}, nil
+}
+
+func (tx tenancyTx) UpsertTenantAddress(ctx context.Context, a address.Address, at time.Time) error {
+	return tx.q.UpsertTenantAddress(ctx, dbgen.UpsertTenantAddressParams{TenantID: tx.tenantID, Street: a.Street, Number: a.Number,
+		Complement: a.Complement, District: a.District, City: a.City, State: a.State, PostalCode: a.PostalCode, Country: a.Country,
+		UpdatedAt: at})
 }
 
 func (tx tenancyTx) InsertTenant(ctx context.Context, t tenancy.Tenant) error {
@@ -198,13 +223,23 @@ func (tx tenancyTx) UpdateInvitation(ctx context.Context, inv tenancy.Invitation
 		AcceptedBy: inv.AcceptedBy, RevokedAt: inv.RevokedAt, RevokedBy: inv.RevokedBy})
 }
 
-func (tx tenancyTx) Invitations(ctx context.Context) ([]tenancy.Invitation, error) {
-	rows, err := tx.q.ListInvitations(ctx, tx.tenantID)
-	out := make([]tenancy.Invitation, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, invitationFromRow(r))
+func (tx tenancyTx) Invitations(ctx context.Context, limit int, cursor string) (tenancy.InvitationPage, error) {
+	cts, cid, err := parseTimeCursor(cursor)
+	if err != nil {
+		return tenancy.InvitationPage{}, err
 	}
-	return out, err
+	limit = pageLimit(limit)
+	rows, err := tx.q.ListInvitations(ctx, dbgen.ListInvitationsParams{TenantID: tx.tenantID, CursorTs: cts, CursorID: cid, RowLimit: int32(limit + 1)})
+	if err != nil {
+		return tenancy.InvitationPage{}, err
+	}
+	var p tenancy.InvitationPage
+	rows, p.NextCursor = keysetPage(rows, limit, func(r dbgen.Invitation) (time.Time, uuid.UUID) { return r.CreatedAt, r.ID })
+	p.Items = make([]tenancy.Invitation, 0, len(rows))
+	for _, r := range rows {
+		p.Items = append(p.Items, invitationFromRow(r))
+	}
+	return p, nil
 }
 
 func (tx tenancyTx) PendingInvitations(ctx context.Context, now time.Time) (int, error) {
@@ -220,8 +255,8 @@ func (tx tenancyTx) DefaultPlatformPlan(ctx context.Context) (platformbilling.Pl
 	return platformPlanFromRow(r), nil
 }
 
-func (tx tenancyTx) PlatformPlan(ctx context.Context) (platformbilling.Plan, error) {
-	return tx.platformPlan(ctx)
+func (tx tenancyTx) LockPlatformPlan(ctx context.Context) (platformbilling.Plan, error) {
+	return tx.lockedPlatformPlan(ctx)
 }
 
 func (tx tenancyTx) PlatformUsage(ctx context.Context) (platformbilling.Usage, error) {
@@ -248,6 +283,23 @@ func platformPlanFromRow(r dbgen.PlatformPlan) platformbilling.Plan {
 
 func (b base) platformPlan(ctx context.Context) (platformbilling.Plan, error) {
 	sub, err := b.q.GetTenantPlatformSubscription(ctx, b.tenantID)
+	if err != nil {
+		return platformbilling.Plan{}, notFound(err, "platform_subscription_not_found", "Assinatura da plataforma não encontrada.")
+	}
+	r, err := b.q.GetPlatformPlan(ctx, sub.PlanCode)
+	if err != nil {
+		return platformbilling.Plan{}, err
+	}
+	return platformPlanFromRow(r), nil
+}
+
+// lockedPlatformPlan lê o plano bloqueando a linha da assinatura do tenant na
+// plataforma (FOR UPDATE) até o fim da transação. As checagens de limite
+// (convites, aceites, criação e reativação de assinaturas) e a troca de
+// plano passam por esse bloqueio, o que serializa a contagem do consumo em
+// READ COMMITTED (ADR-077).
+func (b base) lockedPlatformPlan(ctx context.Context) (platformbilling.Plan, error) {
+	sub, err := b.q.GetTenantPlatformSubscriptionForUpdate(ctx, b.tenantID)
 	if err != nil {
 		return platformbilling.Plan{}, notFound(err, "platform_subscription_not_found", "Assinatura da plataforma não encontrada.")
 	}

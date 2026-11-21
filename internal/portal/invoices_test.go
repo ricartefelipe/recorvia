@@ -342,6 +342,7 @@ func TestInvoicesWithoutIssueDateCannotAnchorCursor(t *testing.T) {
 func TestInvoiceDetailRestrictedToSessionCustomer(t *testing.T) {
 	e := newEnv(t)
 	e.d().tenant.Timezone = "America/Sao_Paulo"
+	e.d().tenant.LegalName, e.d().tenant.DocumentNumber = "Acme Serviços Ltda.", "11222333000181"
 	other := e.addCustomer(e.tenantID, "Outro Cliente")
 	due := testNow.Add(24 * time.Hour)
 	own := e.addInvoice(e.tenantID, e.customer.ID, billing.Open, 15990, 15990, &due)
@@ -356,7 +357,8 @@ func TestInvoiceDetailRestrictedToSessionCustomer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.ID != own.ID || d.OrganizationName != "Acme Serviços" || d.Location.String() != "America/Sao_Paulo" || d.CheckoutURL == "" || d.Overdue {
+	if d.ID != own.ID || d.OrganizationName != "Acme Serviços" || d.OrganizationLegalName != "Acme Serviços Ltda." ||
+		d.OrganizationDocument != "11222333000181" || d.Location.String() != "America/Sao_Paulo" || d.CheckoutURL == "" || d.Overdue {
 		t.Fatalf("detalhe: %+v", d)
 	}
 	for _, leaky := range []bool{false, true} {

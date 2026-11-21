@@ -69,7 +69,10 @@ type Tx interface {
 	// AccountByProvider devolve a conta sem as credenciais (APIKey e Secret
 	// vazios): a troca da configuração não depende de decifrar a anterior.
 	AccountByProvider(ctx context.Context, provider string) (ProviderAccount, error)
-	SaveAccount(ctx context.Context, a ProviderAccount, endpointTokenHash []byte) error
+	// SaveAccount grava a conta na versão esperada: 0 cria a conta do provedor
+	// (412 version_mismatch se ela já existir); acima de 0, substitui a
+	// configuração com essa versão (412 se a linha tiver outra versão).
+	SaveAccount(ctx context.Context, a ProviderAccount, endpointTokenHash []byte, expectedVersion int) error
 	Accounts(ctx context.Context) ([]ProviderAccount, error)
 
 	Invoice(ctx context.Context, id uuid.UUID, forUpdate bool) (billing.Invoice, error)
@@ -97,6 +100,11 @@ type Tx interface {
 
 	InsertPayment(ctx context.Context, p Payment) (bool, error)
 	PaymentByRequestKey(ctx context.Context, key string) (Payment, error)
+	// PaymentPendingReceipt devolve o pagamento da cobrança e o valor dele
+	// ainda em pagamentos confirmados no provedor (saldo da conta
+	// provider_confirmed nos lançamentos do pagamento), à espera do
+	// recebimento. ok=false quando a cobrança não tem pagamento.
+	PaymentPendingReceipt(ctx context.Context, chargeID uuid.UUID) (pay Payment, pending money.Money, ok bool, err error)
 	GrantCustomerCredit(ctx context.Context, customerID uuid.UUID, amount money.Money, kind string, invoiceID *uuid.UUID, reason string, at time.Time) error
 
 	InsertWebhook(ctx context.Context, w StoredWebhook) (bool, error)
@@ -179,38 +187,52 @@ var errNothingToDo = errors.New("payments: nada a fazer")
 // vigente: se o saldo da fatura mudou enquanto a criação estava em andamento
 // e a cobrança foi substituída na conclusão, devolve a substituta.
 func (s *Service) RequestCharge(ctx context.Context, tenantID, invoiceID uuid.UUID, actor audit.Actor) (*Charge, error) {
-	var charge Charge
+	var charge *Charge
 	var opID uuid.UUID
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		inv, err := tx.Invoice(ctx, invoiceID, true)
 		if err != nil {
 			return err
 		}
-		if (inv.Status != billing.Open && inv.Status != billing.PartiallyPaid) || !inv.AmountDue.IsPositive() {
-			return errNothingToDo
-		}
-		last, err := tx.LatestCharge(ctx, invoiceID)
-		if err != nil {
-			return err
-		}
-		if last != nil && (last.Status == ChargePending || last.Status == ChargeAwaitingPayment) {
-			charge = *last
-			return errNothingToDo
-		}
-		charge, opID, err = s.insertChargeForBalance(ctx, tx, tenantID, inv, last, actor, s.clock.Now())
+		charge, opID, err = s.chargeForInvoice(ctx, tx, tenantID, inv, actor, s.clock.Now())
 		return err
 	})
-	if errors.Is(err, errNothingToDo) {
-		if charge.ID == uuid.Nil {
-			return nil, nil
-		}
-		return &charge, nil
-	}
 	if err != nil {
 		return nil, err
 	}
+	if opID == uuid.Nil {
+		return charge, nil
+	}
 	current := s.executeBestEffort(ctx, tenantID, charge.ID, opID)
 	return s.chargeAfter(context.WithoutCancel(ctx), tenantID, current)
+}
+
+// chargeForInvoice decide, na transação corrente e com a fatura já bloqueada,
+// a cobrança pelo saldo da fatura: devolve a cobrança em andamento, se houver
+// (opID nulo), ou grava uma nova com a operação que a cria no provedor (opID
+// preenchido; a chamada ao provedor ocorre depois do commit). Fatura sem
+// saldo a cobrar ou tenant sem provedor padrão devolve cobrança nula. Os
+// consumidores de eventos o chamam na mesma transação que marca o inbox, de
+// modo que uma reentrega já registrada nunca solicita outra cobrança.
+func (s *Service) chargeForInvoice(ctx context.Context, tx Tx, tenantID uuid.UUID, inv billing.Invoice, actor audit.Actor, now time.Time) (*Charge, uuid.UUID, error) {
+	if (inv.Status != billing.Open && inv.Status != billing.PartiallyPaid) || !inv.AmountDue.IsPositive() {
+		return nil, uuid.Nil, nil
+	}
+	last, err := tx.LatestCharge(ctx, inv.ID)
+	if err != nil {
+		return nil, uuid.Nil, err
+	}
+	if last != nil && (last.Status == ChargePending || last.Status == ChargeAwaitingPayment) {
+		return last, uuid.Nil, nil
+	}
+	charge, opID, err := s.insertChargeForBalance(ctx, tx, tenantID, inv, last, actor, now)
+	if errors.Is(err, errNothingToDo) {
+		return nil, uuid.Nil, nil
+	}
+	if err != nil {
+		return nil, uuid.Nil, err
+	}
+	return &charge, opID, nil
 }
 
 // insertChargeForBalance grava, na transação corrente, a cobrança pelo saldo
@@ -1063,6 +1085,14 @@ func (s *Service) applyProviderStateFrom(ctx context.Context, tx Tx, c *Charge, 
 			return apperr.Conflict("provider_state_conflict", "Provedor informou cancelamento de cobrança já paga; verificar na conciliação.")
 		}
 	}
+	if IsSettledStatus(c.Status) && pc.Status.IsReceived() {
+		// Recebimento informado (ou implicado por situação posterior, como
+		// reembolso e chargeback) em qualquer ordem: idempotente, inclusive
+		// para retrato antigo que chega depois de uma situação posterior.
+		if err := s.ensureReceived(ctx, tx, c, now); err != nil {
+			return err
+		}
+	}
 	if IsSettledStatus(c.Status) {
 		if err := s.syncRefunds(ctx, tx, c, pc, now, actor); err != nil {
 			return err
@@ -1129,18 +1159,9 @@ var paidAfterClosureAudit = map[ChargeStatus]string{
 func (s *Service) applyToInvoice(ctx context.Context, tx Tx, inv *billing.Invoice, pay Payment, viaProvider bool, actor audit.Actor, now time.Time) error {
 	if inv.Status == billing.Void || inv.Status == billing.Paid {
 		// Fatura já quitada ou cancelada: o valor bruto vira crédito do
-		// cliente e a taxa do provedor é reconhecida como despesa.
-		if err := s.creditOverpayment(ctx, tx, inv, pay, pay.Amount, viaProvider, actor, now); err != nil {
-			return err
-		}
-		if !viaProvider || !pay.Fee.IsPositive() {
-			return nil
-		}
-		t, ok, err := ledger.ProviderFeeCharged(ids.New(), pay.TenantID, pay.ID, pay.Fee, now)
-		if err != nil || !ok {
-			return err
-		}
-		return tx.PostLedger(ctx, t)
+		// cliente. Pelo provedor, a taxa é reconhecida no recebimento, como
+		// nos demais pagamentos (ensureReceived).
+		return s.creditOverpayment(ctx, tx, inv, pay, pay.Amount, viaProvider, actor, now)
 	}
 	applied, excess, recovered, err := inv.ApplyPaymentWithRecovery(pay.Amount, now)
 	if err != nil {
@@ -1155,7 +1176,7 @@ func (s *Service) applyToInvoice(ctx context.Context, tx Tx, inv *billing.Invoic
 	var t ledger.Transaction
 	var ok bool
 	if viaProvider {
-		t, ok, err = ledger.ProviderPaymentReceived(ids.New(), pay.TenantID, pay.ID, applied, pay.Fee, now)
+		t, ok, err = ledger.ProviderPaymentConfirmed(ids.New(), pay.TenantID, pay.ID, applied, now)
 	} else {
 		t, ok, err = ledger.ManualPaymentReceived(ids.New(), pay.TenantID, pay.ID, applied, now)
 	}
@@ -1362,15 +1383,25 @@ const ConsumerInvoiceCredited = "payments.invoice_credited"
 // canceladas localmente e, havendo saldo, uma nova cobrança é solicitada
 // pelo valor atualizado. Cobranças ainda em criação no provedor (pending)
 // não são alteradas aqui: o ajuste ocorre quando a operação de criação é
-// concluída (recordOutcome), de modo que a mensagem é registrada sem depender
-// de reentregas dentro da janela de retentativas do consumidor. É repetível:
-// na reentrega não há cobrança divergente a cancelar e a solicitação devolve
-// a cobrança já criada. Um pagamento que ainda chegue pela cobrança antiga é
-// aplicado normalmente e o excedente vira crédito do cliente.
+// concluída (recordOutcome). A marcação do inbox, os cancelamentos locais e
+// a gravação da nova cobrança com sua operação ocorrem na mesma transação:
+// uma reentrega da mensagem (confirmação perdida, republicação ou
+// reprocessamento da fila de mensagens mortas) não altera nada, mesmo que a
+// cobrança nova já tenha sido recusada pelo provedor. As chamadas ao provedor
+// (cancelamentos e criação) acontecem depois do commit e, se falharem, são
+// retomadas pela recuperação das operações. Um pagamento que ainda chegue
+// pela cobrança antiga é aplicado normalmente e o excedente vira crédito do
+// cliente.
 func (s *Service) HandleInvoiceCredited(ctx context.Context, tenantID, invoiceID, messageID uuid.UUID) error {
 	var cancelOps []uuid.UUID
+	var charge *Charge
+	var opID uuid.UUID
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
-		cancelOps = nil
+		cancelOps, charge, opID = nil, nil, uuid.Nil
+		first, err := tx.MarkInbox(ctx, ConsumerInvoiceCredited, messageID)
+		if err != nil || !first {
+			return err
+		}
 		// Bloqueia as cobranças antes da fatura, na mesma ordem do registro
 		// do resultado da criação e da confirmação de pagamento, para que as
 		// transações concorrentes se serializem sem impasse.
@@ -1406,35 +1437,50 @@ func (s *Service) HandleInvoiceCredited(ctx context.Context, tenantID, invoiceID
 				cancelOps = append(cancelOps, id)
 			}
 		}
-		return nil
+		charge, opID, err = s.chargeForInvoice(ctx, tx, tenantID, inv, systemActor, now)
+		return err
 	})
 	if err != nil {
 		return err
 	}
 	s.executeAll(ctx, tenantID, cancelOps)
-	if _, err := s.RequestCharge(ctx, tenantID, invoiceID, systemActor); err != nil {
-		return err
+	if opID != uuid.Nil {
+		s.executeBestEffort(ctx, tenantID, charge.ID, opID)
 	}
-	return s.store.InTenant(ctx, tenantID, func(tx Tx) error {
-		_, err := tx.MarkInbox(ctx, ConsumerInvoiceCredited, messageID)
-		return err
-	})
+	return nil
 }
 
 // ConsumerInvoiceIssued identifica o consumidor que cria cobranças.
 const ConsumerInvoiceIssued = "payments.invoice_issued"
 
-// HandleInvoiceIssued cria a cobrança de uma fatura emitida e depois
-// registra o inbox numa transação própria. A cobrança é idempotente por
-// fatura (RequestCharge retorna a existente), então uma reentrega após falha
-// entre as duas etapas não duplica a cobrança.
+// HandleInvoiceIssued cria a cobrança de uma fatura emitida. A marcação do
+// inbox e a gravação da cobrança com a operação de criação ocorrem na mesma
+// transação: uma reentrega da mensagem já processada não solicita outra
+// cobrança, nem quando a primeira foi recusada pelo provedor (a nova
+// tentativa depois da recusa é pedida explicitamente, por RetryCharge, e não
+// decorre da reentrega). A chamada ao provedor acontece depois do commit; se falhar, a
+// operação gravada é retomada pela recuperação agendada.
 func (s *Service) HandleInvoiceIssued(ctx context.Context, tenantID, invoiceID, messageID uuid.UUID) error {
-	_, err := s.RequestCharge(ctx, tenantID, invoiceID, systemActor)
+	var charge *Charge
+	var opID uuid.UUID
+	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		charge, opID = nil, uuid.Nil
+		first, err := tx.MarkInbox(ctx, ConsumerInvoiceIssued, messageID)
+		if err != nil || !first {
+			return err
+		}
+		inv, err := tx.Invoice(ctx, invoiceID, true)
+		if err != nil {
+			return err
+		}
+		charge, opID, err = s.chargeForInvoice(ctx, tx, tenantID, inv, systemActor, s.clock.Now())
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	return s.store.InTenant(ctx, tenantID, func(tx Tx) error {
-		_, err := tx.MarkInbox(ctx, ConsumerInvoiceIssued, messageID)
-		return err
-	})
+	if opID != uuid.Nil {
+		s.executeBestEffort(ctx, tenantID, charge.ID, opID)
+	}
+	return nil
 }

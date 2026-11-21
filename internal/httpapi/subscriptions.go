@@ -67,7 +67,7 @@ func (a *API) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pg, err := a.Subscriptions.List(r.Context(), mustPrincipal(r).TenantID, subscriptions.ListFilter{Status: subscriptions.Status(r.URL.Query().Get("status")),
-		CustomerID: customerID, Limit: limit, Cursor: r.URL.Query().Get("cursor")})
+		InForce: r.URL.Query().Get("in_force") == "true", CustomerID: customerID, Limit: limit, Cursor: r.URL.Query().Get("cursor")})
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -103,7 +103,8 @@ func (a *API) createSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	p := mustPrincipal(r)
 	s, err := a.Subscriptions.Create(r.Context(), p.TenantID, p.Actor(), subscriptions.CreateInput{CustomerID: in.CustomerID, PlanID: in.PlanID,
-		Quantity: in.Quantity, StartDate: start, TrialDays: in.TrialDays, PaymentTermsDays: in.PaymentTermsDays})
+		Quantity: in.Quantity, StartDate: start, TrialDays: in.TrialDays, PaymentTermsDays: in.PaymentTermsDays,
+		RequestKey: idempotencyKeyFrom(r.Context())})
 	if err != nil {
 		a.writeError(w, r, err)
 		return

@@ -97,14 +97,23 @@ func (s *Store) ListPayments(ctx context.Context, tenantID uuid.UUID, invoiceID 
 	return out, next, err
 }
 
-// ListOperations lista operações externas.
-func (s *Store) ListOperations(ctx context.Context, tenantID uuid.UUID, status string) ([]payments.Operation, error) {
+// ListOperations lista operações externas, das criadas mais recentemente para
+// as mais antigas, em páginas por cursor.
+func (s *Store) ListOperations(ctx context.Context, tenantID uuid.UUID, status string, limit int, cursor string) ([]payments.Operation, string, error) {
+	cts, cid, err := parseTimeCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	limit = pageLimit(limit)
 	var out []payments.Operation
-	err := s.inTenant(ctx, tenantID, func(b base) error {
-		rows, err := b.q.ListOperations(ctx, dbgen.ListOperationsParams{TenantID: tenantID, Status: strPtr(status)})
+	next := ""
+	err = s.inTenant(ctx, tenantID, func(b base) error {
+		rows, err := b.q.ListOperations(ctx, dbgen.ListOperationsParams{TenantID: tenantID, Status: strPtr(status), CursorTs: cts, CursorID: cid,
+			RowLimit: int32(limit + 1)})
 		if err != nil {
 			return err
 		}
+		rows, next = keysetPage(rows, limit, func(r dbgen.PaymentOperation) (time.Time, uuid.UUID) { return r.CreatedAt, r.ID })
 		for _, r := range rows {
 			op, err := operationFromRow(r)
 			if err != nil {
@@ -114,21 +123,21 @@ func (s *Store) ListOperations(ctx context.Context, tenantID uuid.UUID, status s
 		}
 		return nil
 	})
-	return out, err
+	return out, next, err
 }
 
-// OperationTenant confere que a operação pertence ao tenant.
-func (s *Store) OperationExists(ctx context.Context, tenantID, id uuid.UUID) (bool, error) {
-	found := false
+// Operation devolve a operação externa do tenant.
+func (s *Store) Operation(ctx context.Context, tenantID, id uuid.UUID) (payments.Operation, error) {
+	var op payments.Operation
 	err := s.inTenant(ctx, tenantID, func(b base) error {
-		_, err := b.q.GetOperation(ctx, dbgen.GetOperationParams{TenantID: tenantID, ID: id})
+		r, err := b.q.GetOperation(ctx, dbgen.GetOperationParams{TenantID: tenantID, ID: id})
 		if err != nil {
 			return notFound(err, "operation_not_found", "Operação não encontrada.")
 		}
-		found = true
-		return nil
+		op, err = operationFromRow(r)
+		return err
 	})
-	return found, err
+	return op, err
 }
 
 // Clock expõe o relógio do store.

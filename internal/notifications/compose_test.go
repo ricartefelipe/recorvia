@@ -117,6 +117,39 @@ func (s staticSource) CustomTemplate(context.Context, TemplateKey) (*Template, e
 	return s.t, s.err
 }
 
+// O e-mail padrão de fatura emitida avisa que a fatura comercial não é
+// documento fiscal; o template editado pelo tenant continua com o texto que
+// ele gravou, sem o aviso acrescentado.
+func TestInvoiceIssuedFiscalNotice(t *testing.T) {
+	ctx := context.Background()
+	inv := ids.New()
+	vars := map[string]string{VarInvoiceNumber: "F-9", VarCustomerName: "Ana", VarOrganizationName: "Acme", VarAmountDue: "R$ 10,00",
+		VarDueDate: "10/11/2026"}
+	def, err := Compose(ctx, nil, Request{BusinessKey: InvoiceIssuedKey(inv), Key: KeyInvoiceIssued, Recipients: []string{"a@x.test"},
+		Vars: vars, InvoiceID: &inv, SendAfter: t0}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(def.Content.Text, InvoiceFiscalNotice) || !strings.Contains(def.Content.HTML, InvoiceFiscalNotice) {
+		t.Fatalf("e-mail padrão sem o aviso fiscal:\n%s\n%s", def.Content.Text, def.Content.HTML)
+	}
+	custom := &Template{Key: KeyInvoiceIssued, Subject: "Sua fatura {{invoice_number}}", Body: "Olá, {{customer_name}}. Segue a fatura."}
+	edited, err := Compose(ctx, staticSource{t: custom}, Request{BusinessKey: InvoiceIssuedKey(inv), Key: KeyInvoiceIssued,
+		Recipients: []string{"a@x.test"}, Vars: vars, InvoiceID: &inv, SendAfter: t0}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edited.Content.Text != "Olá, Ana. Segue a fatura." || strings.Contains(edited.Content.HTML, InvoiceFiscalNotice) {
+		t.Fatalf("template editado alterado: %q / %q", edited.Content.Text, edited.Content.HTML)
+	}
+	// Os demais padrões não levam o aviso (não acompanham a emissão).
+	for _, k := range []TemplateKey{KeyReminderBeforeDue, KeyReminderAfterDue, KeyPaymentConfirmed, KeySubscriptionSuspended} {
+		if d, _ := DefaultTemplate(k); strings.Contains(d.Body, InvoiceFiscalNotice) {
+			t.Errorf("%s não deveria ter o aviso fiscal", k)
+		}
+	}
+}
+
 func TestCompose(t *testing.T) {
 	ctx := context.Background()
 	custom := &Template{Key: KeyInvoiceIssued, Subject: "Personalizado {{invoice_number}}", Body: "Corpo {{customer_name}}"}

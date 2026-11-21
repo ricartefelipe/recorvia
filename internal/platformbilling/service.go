@@ -13,18 +13,6 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/kernel/money"
 )
 
-// AddonOrder é a solicitação de um serviço adicional (ex.: implantação assistida).
-type AddonOrder struct {
-	ID          uuid.UUID
-	TenantID    uuid.UUID
-	AddonCode   string
-	Status      string
-	Notes       string
-	Price       money.Money
-	RequestedBy uuid.UUID
-	CreatedAt   time.Time
-}
-
 // Addon é um serviço adicional ofertado.
 type Addon struct {
 	Code        string
@@ -42,8 +30,16 @@ type Tx interface {
 	Plan(ctx context.Context, code string) (Plan, error)
 	Addon(ctx context.Context, code string) (Addon, error)
 	Usage(ctx context.Context) (Usage, error)
+	PendingInvitations(ctx context.Context, now time.Time) (int, error)
 	InsertAddonOrder(ctx context.Context, o AddonOrder) error
-	CompletedAddonsTotal(ctx context.Context, from, to time.Time) (money.Money, error)
+	// AddonOrder lê o pedido com bloqueio.
+	AddonOrder(ctx context.Context, id uuid.UUID) (AddonOrder, error)
+	UpdateAddonOrder(ctx context.Context, o AddonOrder) error
+	// UnbilledAddonsTotal soma os pedidos concluídos antes de before que
+	// ainda não entraram em demonstrativo.
+	UnbilledAddonsTotal(ctx context.Context, before time.Time) (money.Money, error)
+	// MarkAddonsBilled vincula esses pedidos ao demonstrativo gravado.
+	MarkAddonsBilled(ctx context.Context, statementID uuid.UUID, before time.Time) error
 	InsertStatement(ctx context.Context, s Statement) (bool, error)
 	TenantLocation(ctx context.Context) (*time.Location, error)
 	Audit(ctx context.Context, e audit.Entry) error
@@ -55,6 +51,9 @@ type Store interface {
 	Plans(ctx context.Context) ([]Plan, error)
 	Addons(ctx context.Context) ([]Addon, error)
 	TenantsDueStatement(ctx context.Context, now time.Time) ([]uuid.UUID, error)
+	// StaffAddonOrders lista pedidos de todas as organizações (equipe da
+	// plataforma) na ordem do filtro, depois do cursor.
+	StaffAddonOrders(ctx context.Context, q StaffAddonQuery) ([]StaffAddonOrder, error)
 }
 
 // Service expõe os casos de uso do faturamento da plataforma.
@@ -85,7 +84,7 @@ func (s *Service) Overview(ctx context.Context, tenantID uuid.UUID) (Overview, e
 		if err != nil {
 			return err
 		}
-		usage, err := tx.Usage(ctx)
+		usage, err := s.usage(ctx, tx)
 		if err != nil {
 			return err
 		}
@@ -95,20 +94,44 @@ func (s *Service) Overview(ctx context.Context, tenantID uuid.UUID) (Overview, e
 	return out, err
 }
 
+// usage lê o consumo, incluindo os convites pendentes que reservam vagas.
+func (s *Service) usage(ctx context.Context, tx Tx) (Usage, error) {
+	usage, err := tx.Usage(ctx)
+	if err != nil {
+		return Usage{}, err
+	}
+	usage.PendingInvitations, err = tx.PendingInvitations(ctx, s.clock.Now())
+	return usage, err
+}
+
 // Plans lista os planos disponíveis.
 func (s *Service) Plans(ctx context.Context) ([]Plan, error) { return s.store.Plans(ctx) }
 
 // Addons lista os serviços adicionais.
 func (s *Service) Addons(ctx context.Context) ([]Addon, error) { return s.store.Addons(ctx) }
 
-// ChangePlan troca o plano da plataforma, validando o consumo atual contra os
-// limites do plano de destino. A mudança vale a partir do período corrente.
-func (s *Service) ChangePlan(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, planCode string) (Subscription, error) {
+// errSubscriptionVersion recusa a troca de plano com versão da assinatura
+// diferente da informada no If-Match.
+var errSubscriptionVersion = apperr.PreconditionFailed("version_mismatch",
+	"A assinatura da plataforma foi alterada por outra pessoa. Recarregue e tente novamente.")
+
+// ChangePlan troca o plano da plataforma na versão esperada da assinatura
+// (If-Match), validando o consumo atual (membros ativos, convites pendentes e
+// contratos ativos) contra os limites do plano de destino. A mudança vale a
+// partir do período corrente. A leitura da assinatura bloqueia a linha:
+// convites, aceites e criações de assinatura leem o plano com o mesmo
+// bloqueio, de modo que nenhum deles conta o consumo durante a troca. Com a
+// versão divergente nada é gravado nem auditado (412), inclusive na troca
+// para o plano atual, que não tem efeito.
+func (s *Service) ChangePlan(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, planCode string, expectedVersion int) (Subscription, error) {
 	var out Subscription
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		sub, err := tx.Subscription(ctx)
 		if err != nil {
 			return err
+		}
+		if sub.Version != expectedVersion {
+			return errSubscriptionVersion
 		}
 		if sub.PlanCode == planCode {
 			out = sub
@@ -118,7 +141,7 @@ func (s *Service) ChangePlan(ctx context.Context, tenantID uuid.UUID, actor audi
 		if err != nil {
 			return err
 		}
-		usage, err := tx.Usage(ctx)
+		usage, err := s.usage(ctx, tx)
 		if err != nil {
 			return err
 		}
@@ -126,7 +149,7 @@ func (s *Service) ChangePlan(ctx context.Context, tenantID uuid.UUID, actor audi
 			return err
 		}
 		previous := sub.PlanCode
-		sub.PlanCode = target.Code
+		sub.PlanCode, sub.Version = target.Code, expectedVersion
 		if err := tx.UpdateSubscription(ctx, sub); err != nil {
 			return err
 		}
@@ -153,8 +176,8 @@ func (s *Service) RequestAddon(ctx context.Context, tenantID uuid.UUID, actor au
 			return apperr.Invalid("addon_inactive", "Serviço adicional indisponível.")
 		}
 		out = AddonOrder{
-			ID: ids.New(), TenantID: tenantID, AddonCode: addon.Code, Status: "requested", Notes: notes,
-			Price: addon.Price, RequestedBy: requester, CreatedAt: s.clock.Now(),
+			ID: ids.New(), TenantID: tenantID, AddonCode: addon.Code, Status: AddonRequested, Notes: notes,
+			Price: addon.Price, RequestedBy: requester, CreatedAt: s.clock.Now(), Version: 1,
 		}
 		if err := tx.InsertAddonOrder(ctx, out); err != nil {
 			return err
@@ -196,7 +219,10 @@ func (s *Service) CloseDueStatements(ctx context.Context) (int, error) {
 				if err != nil {
 					return err
 				}
-				addons, err := tx.CompletedAddonsTotal(ctx, sub.PeriodStart, sub.PeriodEnd)
+				// Pedidos concluídos antes do fim do período e ainda não
+				// cobrados (inclusive os concluídos em período já fechado,
+				// por atraso entre a conclusão e o fechamento).
+				addons, err := tx.UnbilledAddonsTotal(ctx, sub.PeriodEnd)
 				if err != nil {
 					return err
 				}
@@ -210,6 +236,9 @@ func (s *Service) CloseDueStatements(ctx context.Context) (int, error) {
 				}
 				if inserted {
 					inTenant++
+					if err := tx.MarkAddonsBilled(ctx, st.ID, sub.PeriodEnd); err != nil {
+						return err
+					}
 				}
 				if err := sub.Advance(loc); err != nil {
 					return err
@@ -223,4 +252,129 @@ func (s *Service) CloseDueStatements(ctx context.Context) (int, error) {
 		closed += inTenant // contados somente após o commit
 	}
 	return closed, nil
+}
+
+// StaffAddonOrders lista os pedidos de serviços adicionais de todas as
+// organizações para a equipe da plataforma, paginados por cursor. Sem
+// filtro, lista os pedidos em aberto (solicitados e agendados), do mais
+// antigo para o mais recente; agendados, pela data do atendimento;
+// concluídos e cancelados, do encerramento mais recente para o mais antigo.
+func (s *Service) StaffAddonOrders(ctx context.Context, status, cursor string, limit int) (StaffAddonPage, error) {
+	var st AddonStatus
+	if status != "" {
+		var err error
+		if st, err = ParseAddonStatus(status); err != nil {
+			return StaffAddonPage{}, err
+		}
+	}
+	after, err := ParseAddonCursor(st, cursor)
+	if err != nil {
+		return StaffAddonPage{}, err
+	}
+	if limit <= 0 {
+		limit = DefaultStaffPageSize
+	}
+	limit = min(limit, MaxStaffPageSize)
+	items, err := s.store.StaffAddonOrders(ctx, StaffAddonQuery{Status: st, After: after, Limit: limit + 1})
+	if err != nil {
+		return StaffAddonPage{}, err
+	}
+	page := StaffAddonPage{Items: items}
+	if len(items) > limit {
+		page.Items = items[:limit]
+		last := page.Items[limit-1]
+		page.NextCursor = EncodeAddonCursor(st, AddonCursor{At: last.SortKey(st), ID: last.ID})
+	}
+	return page, nil
+}
+
+// Staff identifica o integrante da equipe da plataforma que atende o pedido.
+type Staff struct {
+	UserID      uuid.UUID
+	DisplayName string
+}
+
+func (st Staff) actor() audit.Actor { return audit.User(st.UserID, st.DisplayName) }
+
+// ScheduleAddonOrder agenda o atendimento do pedido na versão esperada
+// (If-Match).
+func (s *Service) ScheduleAddonOrder(ctx context.Context, staff Staff, tenantID, orderID uuid.UUID, at time.Time,
+	expectedVersion int) (AddonOrder, error) {
+	return s.handleAddonOrder(ctx, staff, tenantID, orderID, expectedVersion, "platform.addon_scheduled", func(o *AddonOrder, _ Subscription, now time.Time) error {
+		return o.Schedule(at, now, staff.UserID)
+	})
+}
+
+// CompleteAddonOrder conclui o atendimento na versão esperada (If-Match): o
+// valor do pedido entra no demonstrativo do período em que a conclusão
+// ocorreu (ou no seguinte, se esse já estiver fechado). Com a assinatura da
+// plataforma cancelada não há demonstrativo a fechar: a conclusão é recusada
+// (o pedido é cancelado), para que nenhum pedido fique concluído sem
+// cobrança.
+func (s *Service) CompleteAddonOrder(ctx context.Context, staff Staff, tenantID, orderID uuid.UUID, expectedVersion int) (AddonOrder, error) {
+	return s.handleAddonOrder(ctx, staff, tenantID, orderID, expectedVersion, "platform.addon_completed", func(o *AddonOrder, sub Subscription, now time.Time) error {
+		if sub.Status == StatusCanceled {
+			return apperr.Conflict("platform_subscription_canceled",
+				"A assinatura da plataforma desta organização está cancelada: o serviço não pode ser concluído nem cobrado. Cancele o pedido.")
+		}
+		return o.Complete(now, staff.UserID)
+	})
+}
+
+// CancelAddonOrder cancela o pedido em aberto, sem cobrança, na versão
+// esperada (If-Match).
+func (s *Service) CancelAddonOrder(ctx context.Context, staff Staff, tenantID, orderID uuid.UUID, reason string,
+	expectedVersion int) (AddonOrder, error) {
+	return s.handleAddonOrder(ctx, staff, tenantID, orderID, expectedVersion, "platform.addon_canceled", func(o *AddonOrder, _ Subscription, now time.Time) error {
+		return o.Cancel(reason, now, staff.UserID)
+	})
+}
+
+// errAddonOrderVersion recusa a transição do pedido com versão diferente da
+// informada no If-Match.
+var errAddonOrderVersion = apperr.PreconditionFailed("version_mismatch",
+	"O pedido foi alterado por outra pessoa. Recarregue e tente novamente.")
+
+// handleAddonOrder aplica a transição na transação do tenant do pedido, com
+// auditoria na trilha do tenant. A assinatura da plataforma é bloqueada
+// antes do pedido, na mesma ordem do fechamento do demonstrativo: a
+// conclusão e o fechamento não se cruzam, e o pedido concluído é cobrado
+// exatamente uma vez. O pedido bloqueado precisa estar na versão esperada
+// (If-Match), que também condiciona a gravação: divergente, nada é gravado
+// nem auditado (412).
+func (s *Service) handleAddonOrder(ctx context.Context, staff Staff, tenantID, orderID uuid.UUID, expectedVersion int, action string,
+	apply func(o *AddonOrder, sub Subscription, now time.Time) error) (AddonOrder, error) {
+	var out AddonOrder
+	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		sub, err := tx.Subscription(ctx)
+		if err != nil {
+			return err
+		}
+		o, err := tx.AddonOrder(ctx, orderID)
+		if err != nil {
+			return err
+		}
+		if o.Version != expectedVersion {
+			return errAddonOrderVersion
+		}
+		now := s.clock.Now()
+		from := o.Status
+		if err := apply(&o, sub, now); err != nil {
+			return err
+		}
+		if err := tx.UpdateAddonOrder(ctx, o); err != nil {
+			return err
+		}
+		o.Version++
+		out = o
+		details := map[string]any{"addon": o.AddonCode, "from": from, "to": o.Status, "platform_staff": true}
+		if o.ScheduledFor != nil && o.Status == AddonScheduled {
+			details["scheduled_for"] = *o.ScheduledFor
+		}
+		if o.Status == AddonCanceled {
+			details["reason"] = o.CancelReason
+		}
+		return tx.Audit(ctx, audit.New(tenantID, now, staff.actor(), action, "platform_addon_order", o.ID.String(), details))
+	})
+	return out, err
 }

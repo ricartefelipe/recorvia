@@ -79,7 +79,7 @@ func (s *Service) syncDispute(ctx context.Context, tx Tx, c *Charge, pc Provider
 		if err := c.CloseDispute(true, charged, now); err != nil {
 			return err
 		}
-		if err := tx.ReverseLedger(ctx, "dispute.opened:"+d.ID.String(), "Chargeback revertido: disputa ganha", now); err != nil {
+		if err := s.reverseChargeback(ctx, tx, c, d, now); err != nil {
 			return err
 		}
 	case DisputeLost:
@@ -225,7 +225,7 @@ func (s *Service) closeLostDispute(ctx context.Context, tx Tx, c *Charge, d *Dis
 			return money.Money{}, chargebackCredit{}, err
 		}
 		if ok {
-			if err := tx.PostLedger(ctx, t); err != nil {
+			if err := s.postChargeMovement(ctx, tx, c, t, now); err != nil {
 				return money.Money{}, chargebackCredit{}, err
 			}
 		}
@@ -276,7 +276,7 @@ func (s *Service) openDispute(ctx context.Context, tx Tx, c *Charge, pc Provider
 		return Dispute{}, false, err
 	}
 	if ok {
-		if err := tx.PostLedger(ctx, t); err != nil {
+		if err := s.postChargeMovement(ctx, tx, c, t, now); err != nil {
 			return Dispute{}, false, err
 		}
 	}
@@ -314,4 +314,24 @@ func (s *Service) LatestDispute(ctx context.Context, tenantID, chargeID uuid.UUI
 		return err
 	})
 	return d, err
+}
+
+// reverseChargeback estorna a retenção da disputa ganha (estorno do
+// lançamento dispute.opened) e liquida no disponível o valor devolvido pelo
+// provedor. A liquidação é a do estorno do lançamento de abertura, montado
+// com o mesmo valor e a mesma chave, sem depender de leitura do ledger.
+func (s *Service) reverseChargeback(ctx context.Context, tx Tx, c *Charge, d Dispute, now time.Time) error {
+	const desc = "Chargeback revertido: disputa ganha"
+	if err := tx.ReverseLedger(ctx, "dispute.opened:"+d.ID.String(), desc, now); err != nil {
+		return err
+	}
+	opened, ok, err := ledger.ChargebackOpened(ids.New(), c.TenantID, d.ID, d.Amount, now)
+	if err != nil || !ok {
+		return err
+	}
+	st, ok, err := ledger.Settlement(ids.New(), opened.Reversal(ids.New(), now, desc))
+	if err != nil || !ok {
+		return err
+	}
+	return tx.PostLedger(ctx, st)
 }

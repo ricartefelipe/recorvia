@@ -56,8 +56,12 @@ func TestOverview(t *testing.T) {
 	if ov.Plan.Code != "escala" || ov.Subscription.Version != 4 || ov.Usage.ActiveSubscriptions != 40 {
 		t.Fatalf("visão geral inesperada: %+v", ov)
 	}
+	f.state().pending = 2
+	if ov, err = f.svc.Overview(context.Background(), f.tenantID); err != nil || ov.Usage.PendingInvitations != 2 || ov.Usage.ReservedUsers() != 4 {
+		t.Fatalf("convites pendentes devem constar no consumo: %+v %v", ov.Usage, err)
+	}
 
-	for _, op := range []string{"Subscription", "Plan", "Usage"} {
+	for _, op := range []string{"Subscription", "Plan", "Usage", "PendingInvitations"} {
 		t.Run("falha em "+op, func(t *testing.T) {
 			f := newFixture(t)
 			f.store.fail[op] = errBoom
@@ -91,7 +95,7 @@ func TestChangePlanSamePlanHasNoEffect(t *testing.T) {
 	f := newFixture(t)
 	// Nem o plano de destino é consultado: a troca para o mesmo plano é neutra.
 	f.store.fail["Plan"] = errBoom
-	sub, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, "escala")
+	sub, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, "escala", 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +109,8 @@ func TestChangePlanSamePlanHasNoEffect(t *testing.T) {
 
 func TestChangePlanSuccess(t *testing.T) {
 	f := newFixture(t)
-	sub, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, "essencial")
+	f.state().pending = 1 // dois membros e um convite cabem nos três usuários do plano
+	sub, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, "essencial", 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,6 +151,10 @@ func TestChangePlanRejected(t *testing.T) {
 		}},
 		{name: "downgrade com usuários acima do limite", plan: "essencial", kind: apperr.KindConflict, code: "platform_downgrade_users",
 			setup: func(f *fixture) { f.state().usage.ActiveUsers = 4 }},
+		// Dois membros e dois convites pendentes não cabem nos três usuários
+		// do plano: aceitos depois da troca, passariam do limite.
+		{name: "downgrade com convites pendentes acima do limite", plan: "essencial", kind: apperr.KindConflict, code: "platform_downgrade_users",
+			setup: func(f *fixture) { f.state().pending = 2 }},
 		{name: "downgrade com contratos acima do limite", plan: "essencial", kind: apperr.KindConflict, code: "platform_downgrade_subscriptions",
 			setup: func(f *fixture) { f.state().usage.ActiveSubscriptions = 150 }},
 	}
@@ -155,7 +164,7 @@ func TestChangePlanRejected(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(f)
 			}
-			_, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, tc.plan)
+			_, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, tc.plan, 4)
 			assertAppErr(t, err, tc.kind, tc.code)
 			if st := f.state(); st.sub.PlanCode != "escala" || st.updates != 0 || len(st.audits) != 0 {
 				t.Fatalf("nada deveria ser alterado: %+v", st.sub)
@@ -164,12 +173,29 @@ func TestChangePlanRejected(t *testing.T) {
 	}
 }
 
+// Com a versão da assinatura diferente da do If-Match, a troca é recusada
+// sem efeito, inclusive para o plano atual e para um plano que não caberia
+// no consumo: a versão é conferida antes de qualquer outra regra.
+func TestChangePlanVersionMismatch(t *testing.T) {
+	for _, plan := range []string{"essencial", "escala", "ouro"} {
+		t.Run(plan, func(t *testing.T) {
+			f := newFixture(t)
+			f.state().usage.ActiveUsers = 4
+			_, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, plan, 3)
+			assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+			if st := f.state(); st.sub.PlanCode != "escala" || st.sub.Version != 4 || st.updates != 0 || len(st.audits) != 0 {
+				t.Fatalf("nada deveria ser gravado nem auditado: %+v (%d auditorias)", st.sub, len(st.audits))
+			}
+		})
+	}
+}
+
 func TestChangePlanStoreErrors(t *testing.T) {
-	for _, op := range []string{"Subscription", "Plan", "Usage", "UpdateSubscription", "Audit"} {
+	for _, op := range []string{"Subscription", "Plan", "Usage", "PendingInvitations", "UpdateSubscription", "Audit"} {
 		t.Run(op, func(t *testing.T) {
 			f := newFixture(t)
 			f.store.fail[op] = errBoom
-			if _, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, "essencial"); !errors.Is(err, errBoom) {
+			if _, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, "essencial", 4); !errors.Is(err, errBoom) {
 				t.Fatalf("esperado erro propagado, obtido %v", err)
 			}
 		})
@@ -269,7 +295,13 @@ func statementStarts(sts []Statement) []time.Time {
 
 func TestCloseDueStatementsCatchUp(t *testing.T) {
 	f := dueFixture(t)
-	f.state().addonsByStart[utc(2026, time.September, 16, 3, 0)] = money.New(250000, money.BRL)
+	// Concluído no segundo período (setembro a outubro): cobrado no
+	// demonstrativo desse período e vinculado a ele.
+	done := utc(2026, time.October, 2, 15, 0)
+	f.state().orders = []AddonOrder{
+		{ID: uuid.New(), AddonCode: "implantacao_assistida", Status: AddonCompleted, Price: money.New(250000, money.BRL), CompletedAt: &done, Version: 3},
+		{ID: uuid.New(), AddonCode: "implantacao_assistida", Status: AddonScheduled, Price: money.New(250000, money.BRL), Version: 2},
+	}
 
 	n, err := f.svc.CloseDueStatements(context.Background())
 	if err != nil {
@@ -300,6 +332,12 @@ func TestCloseDueStatementsCatchUp(t *testing.T) {
 	}
 	if st.updates != 1 {
 		t.Errorf("assinatura deveria ser gravada uma vez, gravada %d", st.updates)
+	}
+	if id := st.orders[0].StatementID; id == nil || *id != st.statements[1].ID {
+		t.Fatalf("o pedido concluído deve ficar vinculado ao demonstrativo que o cobrou: %v", id)
+	}
+	if st.orders[1].StatementID != nil {
+		t.Fatal("pedido não concluído não é cobrado")
 	}
 }
 
@@ -441,7 +479,7 @@ func TestCloseDueStatementsStopsWhenContextCanceled(t *testing.T) {
 
 func TestCloseDueStatementsErrors(t *testing.T) {
 	for _, op := range []string{"TenantsDueStatement", "InTenant", "TenantLocation", "Subscription", "Plan",
-		"CompletedAddonsTotal", "InsertStatement", "UpdateSubscription"} {
+		"UnbilledAddonsTotal", "InsertStatement", "MarkAddonsBilled", "UpdateSubscription"} {
 		t.Run(op, func(t *testing.T) {
 			f := dueFixture(t)
 			f.store.fail[op] = errBoom
@@ -452,7 +490,8 @@ func TestCloseDueStatementsErrors(t *testing.T) {
 	}
 	t.Run("adicionais em outra moeda", func(t *testing.T) {
 		f := dueFixture(t)
-		f.state().addonsByStart[utc(2026, time.August, 16, 3, 0)] = money.New(1, money.Currency{})
+		done := utc(2026, time.August, 20, 3, 0)
+		f.state().orders = []AddonOrder{{ID: uuid.New(), Status: AddonCompleted, Price: money.New(1, money.Currency{}), CompletedAt: &done}}
 		if _, err := f.svc.CloseDueStatements(context.Background()); !errors.Is(err, money.ErrCurrencyMismatch) {
 			t.Fatalf("esperado ErrCurrencyMismatch, obtido %v", err)
 		}

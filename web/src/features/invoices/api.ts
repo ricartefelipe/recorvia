@@ -1,4 +1,5 @@
 import { api } from '../../api/client';
+import type { TextWithHeaders } from '../../api/http';
 import type {
   BillingRunResult,
   Charge,
@@ -19,15 +20,42 @@ export interface InvoiceListParams {
   issued_from?: string;
   issued_to?: string;
   overdue?: boolean;
+  /** Somente com saldo em aberto (abertas ou parcialmente pagas), a base dos recebíveis em aberto do painel. */
+  open_balance?: boolean;
   cursor?: string;
+  limit?: number;
+}
+
+/**
+ * Uma parte da exportação CSV. Cada arquivo tem no máximo `limit` faturas;
+ * quando há mais, `truncated` é verdadeiro e `nextCursor` pede a parte
+ * seguinte com os mesmos filtros.
+ */
+export interface InvoiceExportPart {
+  csv: string;
+  truncated: boolean;
+  nextCursor?: string;
   limit?: number;
 }
 
 export const invoicesApi = {
   list: (params: InvoiceListParams, signal?: AbortSignal) =>
     api.get<InvoicePage>('/api/v1/invoices', { query: { ...params }, signal }),
-  exportCsv: (params: Pick<InvoiceListParams, 'status' | 'issued_from' | 'issued_to'>) =>
-    api.get<string>('/api/v1/invoices/export', { query: { ...params }, responseType: 'text' }),
+  exportCsv: async (
+    params: Pick<InvoiceListParams, 'status' | 'issued_from' | 'issued_to' | 'cursor'> & { part?: number },
+  ): Promise<InvoiceExportPart> => {
+    const { text, headers } = await api.get<TextWithHeaders>('/api/v1/invoices/export', {
+      query: { ...params },
+      responseType: 'textWithHeaders',
+    });
+    const limit = Number(headers.get('X-Recorvia-Export-Limit'));
+    return {
+      csv: text,
+      truncated: headers.get('X-Recorvia-Export-Truncated') === 'true',
+      nextCursor: headers.get('X-Recorvia-Export-Next-Cursor') || undefined,
+      limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+    };
+  },
   get: (id: string, signal?: AbortSignal) => api.get<InvoiceDetails>(base(id), { signal }),
   document: (id: string) => api.get<string>(`${base(id)}/document`, { responseType: 'text' }),
   void: (invoice: InvoiceDetails, reason: string) =>

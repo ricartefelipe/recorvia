@@ -180,6 +180,10 @@ type Finding struct {
 type LocalCharge struct {
 	Charge  Charge
 	Refunds []Refund
+	// PendingReceipt é o valor do pagamento da cobrança ainda em pagamentos
+	// confirmados no provedor, à espera do recebimento (ADR-080); zero (ou
+	// sem moeda) quando não há pendência.
+	PendingReceipt money.Money
 }
 
 // CompareInput reúne os dois lados de uma execução.
@@ -258,6 +262,11 @@ func isChargebackStatus(s ProviderStatus) bool {
 	return s == ProviderChargebackRequested || s == ProviderChargebackDispute
 }
 
+// DirectionProviderReceived identifica, em payment_not_reflected, o
+// pagamento confirmado localmente e já recebido (creditado) no provedor: o
+// recebimento e a liquidação ainda não foram lançados.
+const DirectionProviderReceived = "provider_received"
+
 // compareCharge compara uma cobrança local com a visão do provedor.
 func compareCharge(l LocalCharge, p ProviderCharge, now time.Time) []Finding {
 	c := l.Charge
@@ -288,6 +297,14 @@ func compareCharge(l LocalCharge, p ProviderCharge, now time.Time) []Finding {
 		return nil
 	}
 	var out []Finding
+	if p.Status.IsReceived() && l.PendingReceipt.IsPositive() {
+		// Recebimento perdido: o provedor já creditou o pagamento, que aqui
+		// continua só confirmado (webhook de recebimento não processado).
+		f := chargeFinding(DiscrepancyPaymentNotReflected, c, &p, "payment_not_reflected:"+id+":provider_received")
+		f.Local["direction"] = DirectionProviderReceived
+		f.LocalAmount, f.ProviderAmount = moneyPtr(money.Zero(l.PendingReceipt.Currency())), moneyPtr(l.PendingReceipt)
+		out = append(out, f)
+	}
 	if p.Amount != c.AmountPaid {
 		f := chargeFinding(DiscrepancyAmountMismatch, c, &p, fmt.Sprintf("amount_mismatch:%s:paid:%d:%d", id, c.AmountPaid.Amount(), p.Amount.Amount()))
 		f.Local["basis"] = "paid"
@@ -464,6 +481,9 @@ type ResolveInput struct {
 	ID            uuid.UUID
 	Resolution    Resolution
 	Justification string
+	// ExpectedVersion é a versão da divergência vista por quem resolve
+	// (If-Match); divergente, nada é alterado (412 version_mismatch).
+	ExpectedVersion int
 }
 
 func validateResolve(in ResolveInput) (ResolveInput, error) {

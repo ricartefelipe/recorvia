@@ -86,7 +86,7 @@ func bearer(token string, extra ...string) map[string]string {
 func apiPlanTenant(t *testing.T, a *apiEnv, prefix string) fixture.Tenant {
 	t.Helper()
 	tn := a.env.NewTenant(t, prefix)
-	if _, err := a.env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "profissional"); err != nil {
+	if _, err := a.env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "profissional", a.env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	return tn
@@ -188,9 +188,16 @@ func TestAPICredentialsOverHTTP(t *testing.T) {
 	}
 
 	// Rotação: identificador mantido; o segredo anterior vale por 24 horas.
-	st, rot, _ := owner.do(http.MethodPost, "/api/v1/api-credentials/"+id+"/rotate", nil)
-	if st != 201 || rot["credential"].(map[string]any)["id"] != id || rot["secret"] == secret {
-		t.Fatalf("rotação: %d %v", st, rot)
+	if st, body, _ := owner.do(http.MethodPost, "/api/v1/api-credentials/"+id+"/rotate", nil); st != 428 || body["code"] != "if_match_required" {
+		t.Fatalf("rotação sem If-Match: %d %v", st, body)
+	}
+	if st, body, _ := owner.do(http.MethodPost, "/api/v1/api-credentials/"+id+"/rotate", nil, matchVersion(2)...); st != 412 || body["code"] != "version_mismatch" {
+		t.Fatalf("rotação com versão divergente: %d %v", st, body)
+	}
+	st, rot, rotH := owner.do(http.MethodPost, "/api/v1/api-credentials/"+id+"/rotate", nil, matchVersion(owner.versionIn("/api/v1/api-credentials", "id", id))...)
+	if st != 201 || rot["credential"].(map[string]any)["id"] != id || rot["secret"] == secret || rotH.Get("ETag") != `"2"` ||
+		rot["credential"].(map[string]any)["version"] != float64(2) {
+		t.Fatalf("rotação: %d %v (ETag %q)", st, rot, rotH.Get("ETag"))
 	}
 	rotated := rot["secret"].(string)
 	for _, token := range []string{secret, rotated} {
@@ -208,17 +215,20 @@ func TestAPICredentialsOverHTTP(t *testing.T) {
 		t.Fatalf("segredo novo: %d", r.status)
 	}
 	// Revogação imediata.
-	if st, body, _ := owner.do(http.MethodDelete, "/api/v1/api-credentials/"+id, nil); st != 204 {
+	if st, body, _ := owner.do(http.MethodDelete, "/api/v1/api-credentials/"+id, nil, matchVersion(1)...); st != 412 || body["code"] != "version_mismatch" {
+		t.Fatalf("revogação com a versão anterior à rotação: %d %v", st, body)
+	}
+	if st, body, _ := owner.do(http.MethodDelete, "/api/v1/api-credentials/"+id, nil, matchVersion(2)...); st != 204 {
 		t.Fatalf("revogação: %d %v", st, body)
 	}
 	if r := a.raw(http.MethodGet, "/api/v1/customers", nil, bearer(rotated)); r.status != 401 {
 		t.Fatalf("credencial revogada aceita: %d", r.status)
 	}
 	// Outro tenant não revoga nem rotaciona credencial alheia.
-	if st, _, _ := ownerB.do(http.MethodDelete, "/api/v1/api-credentials/"+id, nil); st != 404 {
+	if st, _, _ := ownerB.do(http.MethodDelete, "/api/v1/api-credentials/"+id, nil, matchVersion(3)...); st != 404 {
 		t.Fatalf("revogação por outro tenant: %d", st)
 	}
-	if st, _, _ := owner.do(http.MethodPost, "/api/v1/api-credentials/"+id+"/rotate", nil); st != 409 {
+	if st, _, _ := owner.do(http.MethodPost, "/api/v1/api-credentials/"+id+"/rotate", nil, matchVersion(3)...); st != 409 {
 		t.Fatalf("rotação de credencial revogada: %d", st)
 	}
 }

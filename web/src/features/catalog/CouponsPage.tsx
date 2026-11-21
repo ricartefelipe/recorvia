@@ -2,7 +2,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { ActionIcon, Button, Code, Group, Modal, MultiSelect, NumberInput, Select, SimpleGrid, Stack, Table, Text, TextInput, Tooltip } from '@mantine/core';
 import { DateTimePicker } from '@mantine/dates';
 import { IconArchive, IconPlus } from '@tabler/icons-react';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Controller, useForm, useWatch } from 'react-hook-form';
 import { z } from 'zod';
@@ -10,9 +10,9 @@ import type { Coupon, CouponInput } from '../../api/types';
 import { DateTime, StatusBadge } from '../../components/format';
 import { MoneyInput } from '../../components/inputs';
 import { EmptyState, QueryContent } from '../../components/states';
-import { confirmAction, LabeledSegmented } from '../../components/ui';
+import { confirmAction, CursorPager, LabeledSegmented } from '../../components/ui';
 import { zonedWallTimeToUtc } from '../../lib/dates';
-import { useApiMutation } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
 import { catalogStatusLabels, couponDurationLabels, labelOf } from '../../lib/labels';
 import { formatBasisPoints, formatMoney, parseMoneyToNumber, parsePercentToBasisPoints } from '../../lib/money';
 import { optionalInt, requiredText } from '../../lib/validation';
@@ -239,9 +239,15 @@ export function CouponsPage() {
   const { keys } = useTenant();
   const [creating, setCreating] = useState(false);
   const canWrite = usePermission('catalog.write');
-  const query = useQuery({ queryKey: keys('coupons', 'list'), queryFn: ({ signal }) => catalogApi.listCoupons(signal) });
+  const pagination = useCursorPagination('coupons');
+  const query = useQuery({
+    queryKey: keys('coupons', 'page', pagination.cursor),
+    queryFn: ({ signal }) => catalogApi.listCoupons({ cursor: pagination.cursor, limit: 25 }, signal),
+    placeholderData: keepPreviousData,
+  });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   const archive = useApiMutation<Coupon, Coupon>({
-    mutationFn: (c) => catalogApi.archiveCoupon(c.id),
+    mutationFn: (c) => catalogApi.archiveCoupon(c.id, c.version),
     invalidate: ['coupons'],
     successMessage: 'Cupom arquivado.',
   });
@@ -265,62 +271,72 @@ export function CouponsPage() {
         </Can>
       </Group>
       <QueryContent query={query}>
-        {({ data }) =>
-          data.length === 0 ? (
+        {(page) =>
+          page.data.length === 0 ? (
             <EmptyState title="Nenhum cupom" description="Cupons concedem descontos percentuais ou de valor fixo nas assinaturas." />
           ) : (
-            <Table.ScrollContainer minWidth={880}>
-              <Table aria-label="Cupons">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Código</Table.Th>
-                    <Table.Th>Nome</Table.Th>
-                    <Table.Th>Desconto</Table.Th>
-                    <Table.Th>Duração</Table.Th>
-                    <Table.Th>Resgates</Table.Th>
-                    <Table.Th>Validade</Table.Th>
-                    <Table.Th>Situação</Table.Th>
-                    {canWrite && <Table.Th aria-label="Ações" />}
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {data.map((c) => (
-                    <Table.Tr key={c.id}>
-                      <Table.Td>
-                        <Code>{c.code}</Code>
-                      </Table.Td>
-                      <Table.Td>{c.name}</Table.Td>
-                      <Table.Td>{discountText(c)}</Table.Td>
-                      <Table.Td>{durationText(c)}</Table.Td>
-                      <Table.Td>
-                        {c.redemptions_count}
-                        {c.max_redemptions ? ` de ${c.max_redemptions}` : ''}
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="sm">
-                          {c.valid_from ? <DateTime value={c.valid_from} dateOnly /> : 'Desde a criação'} –{' '}
-                          {c.valid_until ? <DateTime value={c.valid_until} dateOnly /> : 'sem fim'}
-                        </Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <StatusBadge status={c.status} labels={catalogStatusLabels} />
-                      </Table.Td>
-                      {canWrite && (
-                        <Table.Td>
-                          {c.status === 'active' && (
-                            <Tooltip label="Arquivar cupom">
-                              <ActionIcon variant="subtle" color="red" aria-label={`Arquivar cupom ${c.code}`} onClick={() => void onArchive(c)}>
-                                <IconArchive size={16} />
-                              </ActionIcon>
-                            </Tooltip>
-                          )}
-                        </Table.Td>
-                      )}
+            <>
+              <Table.ScrollContainer minWidth={880}>
+                <Table aria-label="Cupons">
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Código</Table.Th>
+                      <Table.Th>Nome</Table.Th>
+                      <Table.Th>Desconto</Table.Th>
+                      <Table.Th>Duração</Table.Th>
+                      <Table.Th>Resgates</Table.Th>
+                      <Table.Th>Validade</Table.Th>
+                      <Table.Th>Situação</Table.Th>
+                      {canWrite && <Table.Th aria-label="Ações" />}
                     </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            </Table.ScrollContainer>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {page.data.map((c) => (
+                      <Table.Tr key={c.id}>
+                        <Table.Td>
+                          <Code>{c.code}</Code>
+                        </Table.Td>
+                        <Table.Td>{c.name}</Table.Td>
+                        <Table.Td>{discountText(c)}</Table.Td>
+                        <Table.Td>{durationText(c)}</Table.Td>
+                        <Table.Td>
+                          {c.redemptions_count}
+                          {c.max_redemptions ? ` de ${c.max_redemptions}` : ''}
+                        </Table.Td>
+                        <Table.Td>
+                          <Text size="sm">
+                            {c.valid_from ? <DateTime value={c.valid_from} dateOnly /> : 'Desde a criação'} –{' '}
+                            {c.valid_until ? <DateTime value={c.valid_until} dateOnly /> : 'sem fim'}
+                          </Text>
+                        </Table.Td>
+                        <Table.Td>
+                          <StatusBadge status={c.status} labels={catalogStatusLabels} />
+                        </Table.Td>
+                        {canWrite && (
+                          <Table.Td>
+                            {c.status === 'active' && (
+                              <Tooltip label="Arquivar cupom">
+                                <ActionIcon variant="subtle" color="red" aria-label={`Arquivar cupom ${c.code}`} onClick={() => void onArchive(c)}>
+                                  <IconArchive size={16} />
+                                </ActionIcon>
+                              </Tooltip>
+                            )}
+                          </Table.Td>
+                        )}
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
+              <CursorPager
+                page={pagination.page}
+                hasPrevious={pagination.hasPrevious}
+                hasNext={!!page.next_cursor}
+                onPrevious={pagination.previous}
+                onNext={() => page.next_cursor && pagination.next(page.next_cursor)}
+                loading={query.isFetching}
+              />
+            </>
           )
         }
       </QueryContent>

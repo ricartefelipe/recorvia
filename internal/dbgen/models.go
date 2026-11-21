@@ -304,6 +304,7 @@ type IdempotencyKey struct {
 	CompletedAt         *time.Time
 	ExpiresAt           time.Time
 	ResponseLocation    *string
+	LeaseToken          *uuid.UUID
 }
 
 type Invitation struct {
@@ -351,6 +352,7 @@ type Invoice struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 	Version            int32
+	IssuerSnapshot     []byte
 }
 
 type InvoiceItem struct {
@@ -596,15 +598,22 @@ type PlatformAddon struct {
 }
 
 type PlatformAddonOrder struct {
-	ID          uuid.UUID
-	TenantID    uuid.UUID
-	AddonCode   string
-	Status      string
-	Notes       string
-	PriceAmount int64
-	RequestedBy uuid.UUID
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID           uuid.UUID
+	TenantID     uuid.UUID
+	AddonCode    string
+	Status       string
+	Notes        string
+	PriceAmount  int64
+	RequestedBy  uuid.UUID
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	ScheduledFor *time.Time
+	CompletedAt  *time.Time
+	CanceledAt   *time.Time
+	CancelReason *string
+	HandledBy    *uuid.UUID
+	StatementID  *uuid.UUID
+	Version      int32
 }
 
 type PlatformPlan struct {
@@ -780,6 +789,8 @@ type Subscription struct {
 	PriceOverrideAmount       pgtype.Numeric
 	PriceOverrideAdjustmentID *uuid.UUID
 	PendingUsageStarts        []time.Time
+	RequestKey                *string
+	RequestFingerprint        []byte
 }
 
 type SubscriptionHistory struct {
@@ -845,6 +856,19 @@ type Tenant struct {
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 	Version          int32
+}
+
+type TenantAddress struct {
+	TenantID   uuid.UUID
+	Street     string
+	Number     string
+	Complement string
+	District   string
+	City       string
+	State      string
+	PostalCode string
+	Country    string
+	UpdatedAt  time.Time
 }
 
 type TenantPlatformSubscription struct {

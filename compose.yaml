@@ -83,6 +83,11 @@ services:
       migrate-bootstrap: { condition: service_completed_successfully }
     environment:
       RECORVIA_MIGRATIONS_DATABASE_URL: postgres://recorvia_owner:${RECORVIA_OWNER_PASSWORD}@postgres:5432/recorvia?sslmode=disable
+      # Somente no ambiente local: inclui o usuário de demonstração da equipe
+      # da plataforma (realm embutido) em platform_staff. Recusado em produção.
+      RECORVIA_OIDC_ISSUER: http://localhost:${KEYCLOAK_PORT:-8180}/realms/recorvia
+      RECORVIA_DEMO_STAFF_SUBJECT: 7f3c6a2e-0b1d-4c55-9a8e-1a2b3c4d5e06
+      RECORVIA_DEMO_STAFF_EMAIL: equipe@recorvia.test
     restart: "no"
 
   redis:
@@ -205,7 +210,10 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    stop_grace_period: 2m
+    # Drenagem no SIGTERM (ADR-082): confirmação do cancelamento do consumo
+    # (até 5 s), mensagem em andamento (HandlerTimeout de 2 min) e
+    # encerramento do servidor de saúde (até 5 s), com folga.
+    stop_grace_period: 2m30s
 
   # Interface web: SPA estática e proxy para a API (mesma origem, cookies de
   # sessão sem CORS).

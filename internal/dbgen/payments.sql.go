@@ -14,7 +14,8 @@ import (
 )
 
 const clearDefaultProviderAccount = `-- name: ClearDefaultProviderAccount :exec
-UPDATE payment_provider_accounts SET is_default = false WHERE tenant_id = $1 AND is_default AND id <> $2
+UPDATE payment_provider_accounts SET is_default = false, version = version + 1
+ WHERE tenant_id = $1 AND is_default AND id <> $2
 `
 
 type ClearDefaultProviderAccountParams struct {
@@ -22,6 +23,8 @@ type ClearDefaultProviderAccountParams struct {
 	KeepID   uuid.UUID
 }
 
+// A conta que deixa de ser a padrão muda de representação e ganha versão nova:
+// um If-Match lido antes da troca passa a receber 412 (ADR-083).
 func (q *Queries) ClearDefaultProviderAccount(ctx context.Context, arg ClearDefaultProviderAccountParams) error {
 	_, err := q.db.Exec(ctx, clearDefaultProviderAccount, arg.TenantID, arg.KeepID)
 	return err
@@ -278,6 +281,55 @@ func (q *Queries) GetChargeForUpdate(ctx context.Context, arg GetChargeForUpdate
 		&i.UpdatedAt,
 		&i.Version,
 		&i.AmountRefundPending,
+	)
+	return i, err
+}
+
+const getChargePaymentPendingReceipt = `-- name: GetChargePaymentPendingReceipt :one
+SELECT p.id, p.tenant_id, p.invoice_id, p.charge_id, p.customer_id, p.amount, p.fee_amount, p.currency, p.method, p.source, p.paid_at, p.note, p.recorded_by, p.request_key, p.created_at,
+       COALESCE((SELECT sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END)
+                   FROM ledger_transactions t
+                   JOIN ledger_entries e ON e.tenant_id = t.tenant_id AND e.transaction_id = t.id
+                   JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+                  WHERE t.tenant_id = p.tenant_id AND t.reference_type = 'payment' AND t.reference_id = p.id
+                    AND a.code = 'provider_confirmed'), 0)::bigint AS pending_receipt
+  FROM payments p
+ WHERE p.tenant_id = $1 AND p.charge_id = $2
+`
+
+type GetChargePaymentPendingReceiptParams struct {
+	TenantID uuid.UUID
+	ChargeID *uuid.UUID
+}
+
+type GetChargePaymentPendingReceiptRow struct {
+	Payment        Payment
+	PendingReceipt int64
+}
+
+// Pagamento da cobrança e o valor dele ainda em pagamentos confirmados no
+// provedor (saldo de provider_confirmed nos lançamentos que referenciam o
+// pagamento: confirmação, excedente e recebimento), à espera do recebimento.
+func (q *Queries) GetChargePaymentPendingReceipt(ctx context.Context, arg GetChargePaymentPendingReceiptParams) (GetChargePaymentPendingReceiptRow, error) {
+	row := q.db.QueryRow(ctx, getChargePaymentPendingReceipt, arg.TenantID, arg.ChargeID)
+	var i GetChargePaymentPendingReceiptRow
+	err := row.Scan(
+		&i.Payment.ID,
+		&i.Payment.TenantID,
+		&i.Payment.InvoiceID,
+		&i.Payment.ChargeID,
+		&i.Payment.CustomerID,
+		&i.Payment.Amount,
+		&i.Payment.FeeAmount,
+		&i.Payment.Currency,
+		&i.Payment.Method,
+		&i.Payment.Source,
+		&i.Payment.PaidAt,
+		&i.Payment.Note,
+		&i.Payment.RecordedBy,
+		&i.Payment.RequestKey,
+		&i.Payment.CreatedAt,
+		&i.PendingReceipt,
 	)
 	return i, err
 }
@@ -649,6 +701,53 @@ func (q *Queries) InsertPayment(ctx context.Context, arg InsertPaymentParams) (i
 	return result.RowsAffected(), nil
 }
 
+const insertProviderAccount = `-- name: InsertProviderAccount :execrows
+INSERT INTO payment_provider_accounts (id, tenant_id, provider, environment, status, is_default, api_key_ciphertext, api_key_key_id,
+                                       api_key_hint, webhook_secret_ciphertext, webhook_secret_key_id, webhook_endpoint_token_hash,
+                                       created_at, updated_at, version)
+VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8,
+        $9, $10, $11, $12, $12, 1)
+ON CONFLICT (tenant_id, provider) DO NOTHING
+`
+
+type InsertProviderAccountParams struct {
+	ID                       uuid.UUID
+	TenantID                 uuid.UUID
+	Provider                 string
+	Environment              string
+	IsDefault                bool
+	ApiKeyCiphertext         []byte
+	ApiKeyKeyID              *string
+	ApiKeyHint               *string
+	WebhookSecretCiphertext  []byte
+	WebhookSecretKeyID       *string
+	WebhookEndpointTokenHash []byte
+	CreatedAt                time.Time
+}
+
+// Primeira configuração do provedor (versão esperada 0): nenhuma linha se
+// outra pessoa configurou o provedor antes.
+func (q *Queries) InsertProviderAccount(ctx context.Context, arg InsertProviderAccountParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertProviderAccount,
+		arg.ID,
+		arg.TenantID,
+		arg.Provider,
+		arg.Environment,
+		arg.IsDefault,
+		arg.ApiKeyCiphertext,
+		arg.ApiKeyKeyID,
+		arg.ApiKeyHint,
+		arg.WebhookSecretCiphertext,
+		arg.WebhookSecretKeyID,
+		arg.WebhookEndpointTokenHash,
+		arg.CreatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const insertWebhookEvent = `-- name: InsertWebhookEvent :execrows
 INSERT INTO provider_webhook_events (id, tenant_id, provider_account_id, provider, provider_event_id, event_type, provider_charge_id,
                                      occurred_at, received_at, payload, status)
@@ -803,18 +902,76 @@ func (q *Queries) ListCharges(ctx context.Context, arg ListChargesParams) ([]Cha
 	return items, nil
 }
 
+const listChargesPendingReceipt = `-- name: ListChargesPendingReceipt :many
+SELECT p.charge_id::uuid AS charge_id,
+       sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END)::bigint AS pending_receipt
+  FROM payments p
+  JOIN ledger_transactions t ON t.tenant_id = p.tenant_id AND t.reference_type = 'payment' AND t.reference_id = p.id
+  JOIN ledger_entries e ON e.tenant_id = t.tenant_id AND e.transaction_id = t.id
+  JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+ WHERE p.tenant_id = $1 AND p.charge_id = ANY ($2::uuid[]) AND a.code = 'provider_confirmed'
+ GROUP BY p.charge_id
+HAVING sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END) <> 0
+`
+
+type ListChargesPendingReceiptParams struct {
+	TenantID  uuid.UUID
+	ChargeIds []uuid.UUID
+}
+
+type ListChargesPendingReceiptRow struct {
+	ChargeID       uuid.UUID
+	PendingReceipt int64
+}
+
+// Valor ainda em pagamentos confirmados no provedor por cobrança, em lote
+// para a conciliação: só as cobranças com pendência de recebimento.
+func (q *Queries) ListChargesPendingReceipt(ctx context.Context, arg ListChargesPendingReceiptParams) ([]ListChargesPendingReceiptRow, error) {
+	rows, err := q.db.Query(ctx, listChargesPendingReceipt, arg.TenantID, arg.ChargeIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListChargesPendingReceiptRow
+	for rows.Next() {
+		var i ListChargesPendingReceiptRow
+		if err := rows.Scan(&i.ChargeID, &i.PendingReceipt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listOperations = `-- name: ListOperations :many
-SELECT id, tenant_id, charge_id, refund_id, kind, status, external_reference, attempts, lease_until, next_attempt_at, last_error, provider_response, created_at, updated_at, completed_at FROM payment_operations WHERE tenant_id = $1 AND ($2::text IS NULL OR status = $2)
- ORDER BY updated_at DESC, id DESC LIMIT 200
+SELECT id, tenant_id, charge_id, refund_id, kind, status, external_reference, attempts, lease_until, next_attempt_at, last_error, provider_response, created_at, updated_at, completed_at FROM payment_operations
+ WHERE tenant_id = $1 AND ($2::text IS NULL OR status = $2)
+   AND ($3::timestamptz IS NULL OR (created_at, id) < ($3::timestamptz, $4::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT $5
 `
 
 type ListOperationsParams struct {
 	TenantID uuid.UUID
 	Status   *string
+	CursorTs *time.Time
+	CursorID *uuid.UUID
+	RowLimit int32
 }
 
+// Paginação por keyset em (created_at, id): updated_at muda a cada tentativa
+// e deslocaria a operação entre as páginas.
 func (q *Queries) ListOperations(ctx context.Context, arg ListOperationsParams) ([]PaymentOperation, error) {
-	rows, err := q.db.Query(ctx, listOperations, arg.TenantID, arg.Status)
+	rows, err := q.db.Query(ctx, listOperations,
+		arg.TenantID,
+		arg.Status,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1163,6 +1320,50 @@ func (q *Queries) UpdateOperation(ctx context.Context, arg UpdateOperationParams
 	return err
 }
 
+const updateProviderAccount = `-- name: UpdateProviderAccount :execrows
+UPDATE payment_provider_accounts
+   SET environment = $1, status = 'active', is_default = $2,
+       api_key_ciphertext = $3, api_key_key_id = $4, api_key_hint = $5,
+       webhook_secret_ciphertext = $6, webhook_secret_key_id = $7,
+       webhook_endpoint_token_hash = $8, version = version + 1
+ WHERE tenant_id = $9 AND provider = $10 AND version = $11
+`
+
+type UpdateProviderAccountParams struct {
+	Environment              string
+	IsDefault                bool
+	ApiKeyCiphertext         []byte
+	ApiKeyKeyID              *string
+	ApiKeyHint               *string
+	WebhookSecretCiphertext  []byte
+	WebhookSecretKeyID       *string
+	WebhookEndpointTokenHash []byte
+	TenantID                 uuid.UUID
+	Provider                 string
+	Version                  int32
+}
+
+// Nova configuração do provedor, condicionada à versão esperada (If-Match).
+func (q *Queries) UpdateProviderAccount(ctx context.Context, arg UpdateProviderAccountParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateProviderAccount,
+		arg.Environment,
+		arg.IsDefault,
+		arg.ApiKeyCiphertext,
+		arg.ApiKeyKeyID,
+		arg.ApiKeyHint,
+		arg.WebhookSecretCiphertext,
+		arg.WebhookSecretKeyID,
+		arg.WebhookEndpointTokenHash,
+		arg.TenantID,
+		arg.Provider,
+		arg.Version,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const updateWebhookEventStatus = `-- name: UpdateWebhookEventStatus :exec
 UPDATE provider_webhook_events SET status = $1, error = $2, processed_at = $3
  WHERE tenant_id = $4 AND id = $5
@@ -1183,52 +1384,6 @@ func (q *Queries) UpdateWebhookEventStatus(ctx context.Context, arg UpdateWebhoo
 		arg.ProcessedAt,
 		arg.TenantID,
 		arg.ID,
-	)
-	return err
-}
-
-const upsertProviderAccount = `-- name: UpsertProviderAccount :exec
-INSERT INTO payment_provider_accounts (id, tenant_id, provider, environment, status, is_default, api_key_ciphertext, api_key_key_id,
-                                       api_key_hint, webhook_secret_ciphertext, webhook_secret_key_id, webhook_endpoint_token_hash,
-                                       created_at, updated_at, version)
-VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8,
-        $9, $10, $11, $12, $12, 1)
-ON CONFLICT (tenant_id, provider) DO UPDATE
-   SET environment = EXCLUDED.environment, status = 'active', is_default = EXCLUDED.is_default,
-       api_key_ciphertext = EXCLUDED.api_key_ciphertext, api_key_key_id = EXCLUDED.api_key_key_id, api_key_hint = EXCLUDED.api_key_hint,
-       webhook_secret_ciphertext = EXCLUDED.webhook_secret_ciphertext, webhook_secret_key_id = EXCLUDED.webhook_secret_key_id,
-       webhook_endpoint_token_hash = EXCLUDED.webhook_endpoint_token_hash, version = payment_provider_accounts.version + 1
-`
-
-type UpsertProviderAccountParams struct {
-	ID                       uuid.UUID
-	TenantID                 uuid.UUID
-	Provider                 string
-	Environment              string
-	IsDefault                bool
-	ApiKeyCiphertext         []byte
-	ApiKeyKeyID              *string
-	ApiKeyHint               *string
-	WebhookSecretCiphertext  []byte
-	WebhookSecretKeyID       *string
-	WebhookEndpointTokenHash []byte
-	CreatedAt                time.Time
-}
-
-func (q *Queries) UpsertProviderAccount(ctx context.Context, arg UpsertProviderAccountParams) error {
-	_, err := q.db.Exec(ctx, upsertProviderAccount,
-		arg.ID,
-		arg.TenantID,
-		arg.Provider,
-		arg.Environment,
-		arg.IsDefault,
-		arg.ApiKeyCiphertext,
-		arg.ApiKeyKeyID,
-		arg.ApiKeyHint,
-		arg.WebhookSecretCiphertext,
-		arg.WebhookSecretKeyID,
-		arg.WebhookEndpointTokenHash,
-		arg.CreatedAt,
 	)
 	return err
 }

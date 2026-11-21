@@ -101,7 +101,7 @@ func webhookService(env *fixture.Env, client *safehttp.Client) *webhooks.Service
 func webhookTenant(t *testing.T, env *fixture.Env, prefix string) fixture.Tenant {
 	t.Helper()
 	tn := env.NewTenant(t, prefix)
-	if _, err := env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "profissional"); err != nil {
+	if _, err := env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "profissional", env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	return tn
@@ -152,7 +152,7 @@ func TestWebhookDeliverySignatureAndRotation(t *testing.T) {
 		t.Fatalf("assinatura recebida: %v", err)
 	}
 	hours := 1
-	rotated, newSecret, err := svc.RotateSecret(ctx, tn.ID, tn.Actor, ep.ID, &hours)
+	rotated, newSecret, err := svc.RotateSecret(ctx, tn.ID, tn.Actor, ep.ID, &hours, ep.Version)
 	if err != nil || len(rotated.Secrets) != 2 || rotated.Secrets[0].ExpiresAt != nil {
 		t.Fatalf("rotação: %+v %v", rotated, err)
 	}
@@ -326,7 +326,7 @@ func TestWebhookRetriesManualRetryAndConcurrency(t *testing.T) {
 	if err := svc.HandleEvent(ctx, tn.ID, ids.New(), outbox.EventChargeCreated, now, []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.DeleteEndpoint(ctx, tn.ID, tn.Actor, ep.ID); err != nil {
+	if err := svc.DeleteEndpoint(ctx, tn.ID, tn.Actor, ep.ID, ep.Version); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := svc.DeliverTenant(ctx, tn.ID); err != nil || out.Exhausted != 1 || rcv.count() != 2 {
@@ -417,13 +417,14 @@ func TestWebhookRotationListingMatchesSigningSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	values := []string{first}
+	version := ep.Version
 	for range 6 {
 		env.Clock.Advance(time.Minute)
-		_, v, err := svc.RotateSecret(ctx, tn.ID, tn.Actor, ep.ID, nil)
+		rotated, v, err := svc.RotateSecret(ctx, tn.ID, tn.Actor, ep.ID, nil, version)
 		if err != nil {
 			t.Fatal(err)
 		}
-		values = append(values, v)
+		values, version = append(values, v), rotated.Version
 	}
 	got, err := svc.Endpoint(ctx, tn.ID, ep.ID)
 	if err != nil || len(got.Secrets) != webhooks.MaxSignatures {
@@ -514,7 +515,7 @@ func TestWebhookManualRetryLimitAndDisableAfterDowngrade(t *testing.T) {
 	if ae, ok := apperr.As(err); !ok || ae.Kind != apperr.KindConflict || ae.Code != "delivery_attempts_limit" {
 		t.Fatalf("reenvio além do limite: %v", err)
 	}
-	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "essencial"); err != nil {
+	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "essencial", env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := svc.UpdateEndpoint(ctx, tn.ID, tn.Actor, ep.ID, webhooks.Input{URL: ep.URL, EventTypes: ep.EventTypes}, "disabled", 0)

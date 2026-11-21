@@ -27,14 +27,15 @@ export const paymentsApi = {
     api.get<CursorPage<Refund>>('/api/v1/refunds', { query: { ...params }, signal }),
   listPayments: (params: { invoice_id?: string; cursor?: string; limit?: number }, signal?: AbortSignal) =>
     api.get<CursorPage<Payment>>('/api/v1/payments', { query: { ...params }, signal }),
-  listDisputes: (signal?: AbortSignal) => api.get<DataList<Dispute>>('/api/v1/disputes', { signal }),
+  listDisputes: (params: { cursor?: string; limit?: number }, signal?: AbortSignal) =>
+    api.get<CursorPage<Dispute>>('/api/v1/disputes', { query: { ...params }, signal }),
   getDispute: (id: string, signal?: AbortSignal) => api.get<Dispute>(`/api/v1/disputes/${enc(id)}`, { signal }),
   listRecoverySettlements: (disputeId: string, signal?: AbortSignal) =>
     api.get<DataList<RecoverySettlement>>(`/api/v1/disputes/${enc(disputeId)}/recovery-settlements`, { signal }),
   settleRecovery: (disputeId: string, input: RecoverySettlementInput, idempotencyKey: string) =>
     api.post<RecoverySettlement>(`/api/v1/disputes/${enc(disputeId)}/recovery-settlements`, input, { idempotencyKey }),
-  listOperations: (status: PaymentOperationStatus | undefined, signal?: AbortSignal) =>
-    api.get<DataList<PaymentOperation>>('/api/v1/payment-operations', { query: { status }, signal }),
+  listOperations: (params: { status?: PaymentOperationStatus; cursor?: string; limit?: number }, signal?: AbortSignal) =>
+    api.get<CursorPage<PaymentOperation>>('/api/v1/payment-operations', { query: { ...params }, signal }),
   retryOperation: (id: string) => api.post<PaymentOperation>(`/api/v1/payment-operations/${enc(id)}/retry`),
 };
 

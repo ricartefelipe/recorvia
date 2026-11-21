@@ -69,7 +69,8 @@ func TestPerUnitPercentAdjustmentKeepsFractionalUnitPrice(t *testing.T) {
 	if prev == nil || res == nil || override == nil || !ratEqual(t, *prev, "4.5") || !ratEqual(t, *res, "4.725") || !ratEqual(t, *override, "4.725") {
 		t.Errorf("valores gravados: anterior %v resultante %v assinatura %v", prev, res, override)
 	}
-	adjs, err := a.Terms.Adjustments(ctx, tn.ID, sub.ID)
+	adjPage, err := a.Terms.Adjustments(ctx, tn.ID, sub.ID, 100, "")
+	adjs := adjPage.Items
 	if err != nil {
 		t.Fatal(err)
 	}

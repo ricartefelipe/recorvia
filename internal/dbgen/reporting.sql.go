@@ -81,36 +81,20 @@ func (q *Queries) DashboardContraRevenue(ctx context.Context, arg DashboardContr
 
 const dashboardDelinquencyBase = `-- name: DashboardDelinquencyBase :one
 SELECT COALESCE(sum(total), 0)::bigint FROM invoices
- WHERE tenant_id = $1 AND status NOT IN ('void', 'draft') AND due_at > $2 AND due_at <= $3
+ WHERE tenant_id = $1 AND status <> 'draft' AND due_at > $2 AND due_at <= $3
+   AND (voided_at IS NULL OR voided_at > $3)
 `
 
 type DashboardDelinquencyBaseParams struct {
-	TenantID uuid.UUID
-	Since    *time.Time
-	Now      *time.Time
+	TenantID   uuid.UUID
+	Since      *time.Time
+	PositionAt *time.Time
 }
 
-// Base da inadimplência: total das faturas com vencimento nos últimos 90 dias.
+// Base da inadimplência: total das faturas emitidas com vencimento nos 90
+// dias anteriores à posição, sem as canceladas até o instante da posição.
 func (q *Queries) DashboardDelinquencyBase(ctx context.Context, arg DashboardDelinquencyBaseParams) (int64, error) {
-	row := q.db.QueryRow(ctx, dashboardDelinquencyBase, arg.TenantID, arg.Since, arg.Now)
-	var column_1 int64
-	err := row.Scan(&column_1)
-	return column_1, err
-}
-
-const dashboardDelinquencyOpen = `-- name: DashboardDelinquencyOpen :one
-SELECT COALESCE(sum(amount_due), 0)::bigint FROM invoices
- WHERE tenant_id = $1 AND status IN ('open', 'partially_paid') AND due_at > $2 AND due_at <= $3
-`
-
-type DashboardDelinquencyOpenParams struct {
-	TenantID uuid.UUID
-	Since    *time.Time
-	Now      *time.Time
-}
-
-func (q *Queries) DashboardDelinquencyOpen(ctx context.Context, arg DashboardDelinquencyOpenParams) (int64, error) {
-	row := q.db.QueryRow(ctx, dashboardDelinquencyOpen, arg.TenantID, arg.Since, arg.Now)
+	row := q.db.QueryRow(ctx, dashboardDelinquencyBase, arg.TenantID, arg.Since, arg.PositionAt)
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
@@ -118,25 +102,47 @@ func (q *Queries) DashboardDelinquencyOpen(ctx context.Context, arg DashboardDel
 
 const dashboardMRRComponents = `-- name: DashboardMRRComponents :many
 
-SELECT s.billing_interval, pv.pricing_model,
-       COALESCE(sum(pv.flat_amount), 0)::bigint AS flat_total,
-       COALESCE(sum(pv.unit_amount * s.quantity), 0)::numeric AS per_unit_total
-  FROM subscriptions s
-  JOIN plan_price_versions pv ON pv.tenant_id = s.tenant_id AND pv.id = s.price_version_id
- WHERE s.tenant_id = $1 AND s.status IN ('active', 'past_due')
- GROUP BY s.billing_interval, pv.pricing_model
+SELECT m.billing_interval,
+       COALESCE(sum(m.fixed), 0)::numeric AS gross_total,
+       COALESCE(sum(CASE m.discount_type
+                      WHEN 'percent' THEN m.fixed * m.percent_off_bp * 0.0001
+                      WHEN 'amount' THEN LEAST(m.amount_off::numeric, m.fixed)
+                      ELSE 0 END), 0)::numeric AS discount_total
+  FROM (
+    SELECT s.billing_interval,
+           (CASE pv.pricing_model
+              WHEN 'flat' THEN COALESCE(s.price_override_amount, pv.flat_amount::numeric)
+              WHEN 'flat_plus_overage' THEN COALESCE(s.price_override_amount, pv.flat_amount::numeric)
+              WHEN 'per_unit' THEN COALESCE(s.price_override_amount, pv.unit_amount) * s.quantity
+              ELSE 0 END)::numeric AS fixed,
+           c.discount_type, c.percent_off_bp, c.amount_off
+      FROM subscriptions s
+      JOIN plan_price_versions pv ON pv.tenant_id = s.tenant_id AND pv.id = s.price_version_id
+      LEFT JOIN subscription_discounts d ON d.tenant_id = s.tenant_id AND d.subscription_id = s.id AND d.status = 'active'
+      LEFT JOIN coupons c ON c.tenant_id = d.tenant_id AND c.id = d.coupon_id AND c.duration <> 'once'
+     WHERE s.tenant_id = $1 AND s.status IN ('active', 'past_due')) m
+ GROUP BY m.billing_interval
 `
 
 type DashboardMRRComponentsRow struct {
 	BillingInterval string
-	PricingModel    string
-	FlatTotal       int64
-	PerUnitTotal    pgtype.Numeric
+	GrossTotal      pgtype.Numeric
+	DiscountTotal   pgtype.Numeric
 }
 
 // Indicadores do dashboard. Valores em centavos; períodos [início, fim).
-// Componente recorrente fixo das assinaturas ativas ou em atraso, por
-// modelo e periodicidade. O consumo e o excedente não entram no MRR.
+// Fórmulas documentadas em docs/arquitetura/indicadores.md (ADR-074).
+// @position_at é o instante da posição: o último instante do mês consultado
+// ou, no mês corrente, o momento da consulta.
+// Componente recorrente fixo vigente (posição atual) das assinaturas ativas
+// ou em atraso, por periodicidade. gross_total é o componente fixo com o
+// reajuste da assinatura (price_override_amount, ADR-027): valor fixo nos
+// modelos fixo e fixo com excedente, preço por unidade × quantidade no modelo
+// por unidade. discount_total é o desconto recorrente do cupom ativo de
+// duração "forever" ou "repeating" (o de uso único fica fora): percentual
+// sobre o componente fixo ou valor fixo limitado a ele. Valores exatos
+// (numeric), divididos por 12 nos planos anuais e arredondados na aplicação.
+// O consumo e o excedente não entram no MRR.
 func (q *Queries) DashboardMRRComponents(ctx context.Context, tenantID uuid.UUID) ([]DashboardMRRComponentsRow, error) {
 	rows, err := q.db.Query(ctx, dashboardMRRComponents, tenantID)
 	if err != nil {
@@ -146,12 +152,7 @@ func (q *Queries) DashboardMRRComponents(ctx context.Context, tenantID uuid.UUID
 	var items []DashboardMRRComponentsRow
 	for rows.Next() {
 		var i DashboardMRRComponentsRow
-		if err := rows.Scan(
-			&i.BillingInterval,
-			&i.PricingModel,
-			&i.FlatTotal,
-			&i.PerUnitTotal,
-		); err != nil {
+		if err := rows.Scan(&i.BillingInterval, &i.GrossTotal, &i.DiscountTotal); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -162,26 +163,129 @@ func (q *Queries) DashboardMRRComponents(ctx context.Context, tenantID uuid.UUID
 	return items, nil
 }
 
-const dashboardReceivables = `-- name: DashboardReceivables :one
-SELECT COALESCE(sum(amount_due), 0)::bigint AS open_total,
-       COALESCE(sum(amount_due) FILTER (WHERE due_at <= $1), 0)::bigint AS overdue_total
-  FROM invoices WHERE tenant_id = $2 AND status IN ('open', 'partially_paid')
+const dashboardOpenDiscrepancies = `-- name: DashboardOpenDiscrepancies :one
+SELECT count(*)::int FROM reconciliation_discrepancies WHERE tenant_id = $1 AND status = 'open'
 `
 
-type DashboardReceivablesParams struct {
-	Now      *time.Time
-	TenantID uuid.UUID
+// Posição atual: divergências de conciliação abertas (fila de trabalho).
+func (q *Queries) DashboardOpenDiscrepancies(ctx context.Context, tenantID uuid.UUID) (int32, error) {
+	row := q.db.QueryRow(ctx, dashboardOpenDiscrepancies, tenantID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
-type DashboardReceivablesRow struct {
-	OpenTotal    int64
-	OverdueTotal int64
+const dashboardPendingProviderReceipt = `-- name: DashboardPendingProviderReceipt :one
+SELECT COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END), 0)::bigint AS balance
+  FROM ledger_entries e
+  JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+  JOIN ledger_transactions t ON t.tenant_id = e.tenant_id AND t.id = e.transaction_id
+ WHERE e.tenant_id = $1 AND a.code = 'provider_confirmed' AND t.occurred_at <= $2
+`
+
+type DashboardPendingProviderReceiptParams struct {
+	TenantID   uuid.UUID
+	PositionAt time.Time
 }
 
-func (q *Queries) DashboardReceivables(ctx context.Context, arg DashboardReceivablesParams) (DashboardReceivablesRow, error) {
-	row := q.db.QueryRow(ctx, dashboardReceivables, arg.Now, arg.TenantID)
-	var i DashboardReceivablesRow
-	err := row.Scan(&i.OpenTotal, &i.OverdueTotal)
+// Saldo da conta de pagamentos confirmados no provedor (débitos menos
+// créditos) no instante da posição: pagamentos já confirmados, contados em
+// Recebido, cujo valor o provedor ainda não creditou (ADR-080).
+func (q *Queries) DashboardPendingProviderReceipt(ctx context.Context, arg DashboardPendingProviderReceiptParams) (int64, error) {
+	row := q.db.QueryRow(ctx, dashboardPendingProviderReceipt, arg.TenantID, arg.PositionAt)
+	var balance int64
+	err := row.Scan(&balance)
+	return balance, err
+}
+
+const dashboardReceivablesAt = `-- name: DashboardReceivablesAt :one
+WITH candidates AS (
+  SELECT i.id FROM invoices i
+   WHERE i.tenant_id = $3 AND i.status IN ('open', 'partially_paid') AND i.issued_at <= $1
+  UNION
+  SELECT i.id FROM invoices i WHERE i.tenant_id = $3 AND i.paid_at > $1 AND i.issued_at <= $1
+  UNION
+  SELECT i.id FROM invoices i WHERE i.tenant_id = $3 AND i.voided_at > $1 AND i.issued_at <= $1
+  UNION
+  SELECT i.id FROM invoices i WHERE i.tenant_id = $3 AND i.uncollectible_at > $1 AND i.issued_at <= $1
+), refs AS (
+  SELECT c.id AS invoice_id, 'invoice'::text AS reference_type, c.id AS reference_id FROM candidates c
+  UNION ALL
+  SELECT c.id, 'payment', p.id FROM candidates c JOIN payments p ON p.tenant_id = $3 AND p.invoice_id = c.id
+  UNION ALL
+  SELECT c.id, 'credit_note', cn.id FROM candidates c JOIN credit_notes cn ON cn.tenant_id = $3 AND cn.invoice_id = c.id
+), balances AS (
+  SELECT r.invoice_id, sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END) AS balance
+    FROM refs r
+    JOIN ledger_transactions t ON t.tenant_id = $3 AND t.reference_type = r.reference_type AND t.reference_id = r.reference_id
+    JOIN ledger_entries e ON e.tenant_id = t.tenant_id AND e.transaction_id = t.id
+    JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+   WHERE a.code = 'accounts_receivable' AND t.occurred_at <= $1
+   GROUP BY r.invoice_id
+)
+SELECT COALESCE(sum(b.balance) FILTER (WHERE b.balance > 0), 0)::bigint AS open_total,
+       COALESCE(sum(b.balance) FILTER (WHERE b.balance > 0 AND i.due_at <= $1), 0)::bigint AS overdue_total,
+       COALESCE(sum(b.balance) FILTER (WHERE b.balance > 0 AND i.due_at > $2 AND i.due_at <= $1), 0)::bigint AS delinquency_open
+  FROM balances b
+  JOIN invoices i ON i.tenant_id = $3 AND i.id = b.invoice_id
+`
+
+type DashboardReceivablesAtParams struct {
+	PositionAt *time.Time
+	Since      *time.Time
+	TenantID   uuid.UUID
+}
+
+type DashboardReceivablesAtRow struct {
+	OpenTotal       int64
+	OverdueTotal    int64
+	DelinquencyOpen int64
+}
+
+// Recebíveis no instante da posição de um mês encerrado, pelo ledger: saldo
+// de contas a receber por fatura (emissão menos crédito aplicado, pagamentos,
+// notas de crédito e baixas como incobrável, com os estornos) até
+// @position_at. Só as faturas que podiam ter saldo na posição entram:
+// emitidas até ela e ainda em aberto, ou pagas, canceladas ou baixadas
+// depois dela (paid_at, voided_at, uncollectible_at); uma fatura encerrada
+// antes da posição tinha saldo zero. Cada ramo usa um índice próprio: com RLS,
+// só comparações simples de coluna (operadores leakproof) viram condição de
+// índice, o que exclui uma expressão como COALESCE. As partidas de cada fatura são achadas pela referência do lançamento
+// (a fatura, os seus pagamentos e as suas notas de crédito), por índice.
+func (q *Queries) DashboardReceivablesAt(ctx context.Context, arg DashboardReceivablesAtParams) (DashboardReceivablesAtRow, error) {
+	row := q.db.QueryRow(ctx, dashboardReceivablesAt, arg.PositionAt, arg.Since, arg.TenantID)
+	var i DashboardReceivablesAtRow
+	err := row.Scan(&i.OpenTotal, &i.OverdueTotal, &i.DelinquencyOpen)
+	return i, err
+}
+
+const dashboardReceivablesCurrent = `-- name: DashboardReceivablesCurrent :one
+SELECT COALESCE(sum(amount_due), 0)::bigint AS open_total,
+       COALESCE(sum(amount_due) FILTER (WHERE due_at <= $1), 0)::bigint AS overdue_total,
+       COALESCE(sum(amount_due) FILTER (WHERE due_at > $2 AND due_at <= $1), 0)::bigint AS delinquency_open
+  FROM invoices
+ WHERE tenant_id = $3 AND status IN ('open', 'partially_paid')
+`
+
+type DashboardReceivablesCurrentParams struct {
+	PositionAt *time.Time
+	Since      *time.Time
+	TenantID   uuid.UUID
+}
+
+type DashboardReceivablesCurrentRow struct {
+	OpenTotal       int64
+	OverdueTotal    int64
+	DelinquencyOpen int64
+}
+
+// Recebíveis na posição atual (mês corrente): amount_due das faturas em
+// aberto. Equivale ao saldo de contas a receber por fatura no ledger
+// (DashboardReceivablesAt no instante atual), sem ler o histórico.
+func (q *Queries) DashboardReceivablesCurrent(ctx context.Context, arg DashboardReceivablesCurrentParams) (DashboardReceivablesCurrentRow, error) {
+	row := q.db.QueryRow(ctx, dashboardReceivablesCurrent, arg.PositionAt, arg.Since, arg.TenantID)
+	var i DashboardReceivablesCurrentRow
+	err := row.Scan(&i.OpenTotal, &i.OverdueTotal, &i.DelinquencyOpen)
 	return i, err
 }
 
@@ -207,48 +311,87 @@ const dashboardRecoverables = `-- name: DashboardRecoverables :one
 SELECT COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END), 0)::bigint AS balance
   FROM ledger_entries e
   JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
- WHERE e.tenant_id = $1 AND a.code = 'customer_recoverables'
+  JOIN ledger_transactions t ON t.tenant_id = e.tenant_id AND t.id = e.transaction_id
+ WHERE e.tenant_id = $1 AND a.code = 'customer_recoverables' AND t.occurred_at <= $2
 `
 
-// Saldo atual da conta de valores a recuperar de clientes (débitos menos
-// créditos): o excedente já usado estornado por chargeback menos as baixas
-// recebidas e perdidas.
-func (q *Queries) DashboardRecoverables(ctx context.Context, tenantID uuid.UUID) (int64, error) {
-	row := q.db.QueryRow(ctx, dashboardRecoverables, tenantID)
+type DashboardRecoverablesParams struct {
+	TenantID   uuid.UUID
+	PositionAt time.Time
+}
+
+// Saldo da conta de valores a recuperar de clientes (débitos menos créditos)
+// no instante da posição: o excedente já usado estornado por chargeback menos
+// as baixas recebidas e perdidas.
+func (q *Queries) DashboardRecoverables(ctx context.Context, arg DashboardRecoverablesParams) (int64, error) {
+	row := q.db.QueryRow(ctx, dashboardRecoverables, arg.TenantID, arg.PositionAt)
 	var balance int64
 	err := row.Scan(&balance)
 	return balance, err
 }
 
 const dashboardSubscriptionCounts = `-- name: DashboardSubscriptionCounts :one
-SELECT count(*) FILTER (WHERE status IN ('trialing', 'active', 'past_due'))::int AS active_now,
-       count(*) FILTER (WHERE created_at >= $1 AND created_at < $2)::int AS created_in_period,
-       count(*) FILTER (WHERE ended_at >= $1 AND ended_at < $2)::int AS ended_in_period,
-       count(*) FILTER (WHERE started_at < $1 AND status <> 'trialing' AND (ended_at IS NULL OR ended_at >= $1))::int AS active_at_start
-  FROM subscriptions WHERE tenant_id = $3
+WITH s AS (
+  SELECT sub.started_at, sub.ended_at,
+         COALESCE((SELECT h.to_status FROM subscription_history h
+                    WHERE h.tenant_id = sub.tenant_id AND h.subscription_id = sub.id AND h.occurred_at < $2
+                    ORDER BY h.occurred_at DESC, h.id DESC LIMIT 1),
+                  CASE WHEN sub.trial_ends_at >= $2 THEN 'trialing' ELSE 'active' END) AS status_at_start,
+         COALESCE((SELECT h.to_status FROM subscription_history h
+                    WHERE h.tenant_id = sub.tenant_id AND h.subscription_id = sub.id AND h.occurred_at <= $1
+                    ORDER BY h.occurred_at DESC, h.id DESC LIMIT 1),
+                  CASE WHEN sub.trial_ends_at > $1 THEN 'trialing' ELSE 'active' END) AS status_at_position
+    FROM subscriptions sub
+   WHERE sub.tenant_id = $4 AND sub.started_at < $3 AND (sub.ended_at IS NULL OR sub.ended_at >= $2)
+), c AS (
+  SELECT s.started_at, s.ended_at, s.status_at_start, s.status_at_position, (s.started_at < $2 AND s.status_at_start IN ('active', 'past_due', 'suspended')) AS active_at_start
+    FROM s
+)
+SELECT count(*) FILTER (WHERE status_at_position IN ('trialing', 'active', 'past_due')
+                          AND (ended_at IS NULL OR ended_at > $1))::int AS active_at_position,
+       count(*) FILTER (WHERE started_at >= $2)::int AS started_in_period,
+       count(*) FILTER (WHERE ended_at < $3)::int AS ended_in_period,
+       count(*) FILTER (WHERE active_at_start)::int AS active_at_start,
+       count(*) FILTER (WHERE active_at_start AND ended_at < $3)::int AS churned_in_period
+  FROM c
 `
 
 type DashboardSubscriptionCountsParams struct {
-	FromTs   time.Time
-	ToTs     time.Time
-	TenantID uuid.UUID
+	PositionAt *time.Time
+	FromTs     time.Time
+	ToTs       *time.Time
+	TenantID   uuid.UUID
 }
 
 type DashboardSubscriptionCountsRow struct {
-	ActiveNow       int32
-	CreatedInPeriod int32
-	EndedInPeriod   int32
-	ActiveAtStart   int32
+	ActiveAtPosition int32
+	StartedInPeriod  int32
+	EndedInPeriod    int32
+	ActiveAtStart    int32
+	ChurnedInPeriod  int32
 }
 
+// Situação de cada assinatura num instante: a do último registro do
+// histórico (subscription_history) até o instante. Sem registro até o
+// instante (início retroativo: o histórico começa na criação), a situação é
+// derivada do contrato: em trial enquanto trial_ends_at for posterior ao
+// instante, ativa depois. O encerramento usa ended_at (o fim do período no
+// cancelamento ao fim do período, registrado depois pelo motor). Assinaturas
+// encerradas antes do mês não entram em nenhum indicador e ficam fora.
 func (q *Queries) DashboardSubscriptionCounts(ctx context.Context, arg DashboardSubscriptionCountsParams) (DashboardSubscriptionCountsRow, error) {
-	row := q.db.QueryRow(ctx, dashboardSubscriptionCounts, arg.FromTs, arg.ToTs, arg.TenantID)
+	row := q.db.QueryRow(ctx, dashboardSubscriptionCounts,
+		arg.PositionAt,
+		arg.FromTs,
+		arg.ToTs,
+		arg.TenantID,
+	)
 	var i DashboardSubscriptionCountsRow
 	err := row.Scan(
-		&i.ActiveNow,
-		&i.CreatedInPeriod,
+		&i.ActiveAtPosition,
+		&i.StartedInPeriod,
 		&i.EndedInPeriod,
 		&i.ActiveAtStart,
+		&i.ChurnedInPeriod,
 	)
 	return i, err
 }
@@ -257,6 +400,7 @@ const dashboardUnknownOperations = `-- name: DashboardUnknownOperations :one
 SELECT count(*)::int FROM payment_operations WHERE tenant_id = $1 AND status = 'unknown'
 `
 
+// Posição atual: operações de pagamento sem histórico de situação.
 func (q *Queries) DashboardUnknownOperations(ctx context.Context, tenantID uuid.UUID) (int32, error) {
 	row := q.db.QueryRow(ctx, dashboardUnknownOperations, tenantID)
 	var column_1 int32

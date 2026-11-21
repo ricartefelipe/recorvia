@@ -69,6 +69,8 @@ type invoiceStore struct {
 	events       []outbox.Event
 	errs         map[string]error
 	listFilter   ListFilter
+	cutoff       *Cutoff
+	cutoffMax    int
 	txCount      int
 }
 
@@ -121,6 +123,11 @@ func (s *invoiceStore) UpdateInvoiceProgress(_ context.Context, inv *Invoice) er
 func (s *invoiceStore) List(_ context.Context, f ListFilter) (Page, error) {
 	s.listFilter = f
 	return Page{NextCursor: "proximo"}, s.fail("List")
+}
+
+func (s *invoiceStore) ListCutoff(_ context.Context, f ListFilter, maxRows int) (*Cutoff, error) {
+	s.listFilter, s.cutoffMax = f, maxRows
+	return s.cutoff, s.fail("ListCutoff")
 }
 
 func (s *invoiceStore) StatusHistory(_ context.Context, id uuid.UUID) ([]HistoryEntry, error) {
@@ -540,6 +547,68 @@ func TestServiceListFilters(t *testing.T) {
 		if _, err := f.svc.List(context.Background(), f.tenantID, ListFilter{Status: st}); err != nil {
 			t.Fatalf("situação %s é filtro válido: %v", st, err)
 		}
+	}
+}
+
+func TestServiceListCutoff(t *testing.T) {
+	f := newInvoiceFixture(t)
+	ctx := context.Background()
+	if c, err := f.svc.ListCutoff(ctx, f.tenantID, ListFilter{Status: Open, Overdue: true}, 50000); err != nil || c != nil {
+		t.Fatalf("listagem dentro do limite não tem corte: %v %v", c, err)
+	}
+	if f.store.cutoffMax != 50000 || !f.store.listFilter.Now.Equal(f.clock.Now()) || f.store.listFilter.Status != Open {
+		t.Fatalf("filtro e limite repassados: %d %+v", f.store.cutoffMax, f.store.listFilter)
+	}
+	want := &Cutoff{CreatedAt: invoiceNow, ID: uuid.MustParse("01900000-0000-7000-8000-000000000005"), NextCursor: "proximo"}
+	f.store.cutoff = want
+	if c, err := f.svc.ListCutoff(ctx, f.tenantID, ListFilter{}, 2); err != nil || c != want {
+		t.Fatalf("corte: %v %v", c, err)
+	}
+	for _, tc := range []struct {
+		name   string
+		filter ListFilter
+		max    int
+		code   string
+	}{
+		{"situação desconhecida", ListFilter{Status: "atrasada"}, 10, "invalid_filter"},
+		{"limite zero", ListFilter{}, 0, "invalid_limit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := f.svc.ListCutoff(ctx, f.tenantID, tc.filter, tc.max)
+			wantAppErr(t, err, apperr.KindInvalid, tc.code)
+		})
+	}
+	f.store.errs = map[string]error{"ListCutoff": errors.New("falha")}
+	if _, err := f.svc.ListCutoff(ctx, f.tenantID, ListFilter{}, 10); err == nil {
+		t.Fatal("falha do armazenamento deve ser propagada")
+	}
+}
+
+// O corte inclui as faturas que vêm antes dele na listagem (criação mais
+// recente; na mesma criação, identificador maior) e a própria fatura do corte.
+func TestCutoffIncludes(t *testing.T) {
+	low, mid, high := uuid.MustParse("01900000-0000-7000-8000-000000000001"), uuid.MustParse("01900000-0000-7000-8000-000000000002"),
+		uuid.MustParse("01900000-0000-7000-8000-000000000003")
+	c := &Cutoff{CreatedAt: invoiceNow, ID: mid}
+	cases := []struct {
+		name string
+		inv  Invoice
+		want bool
+	}{
+		{"criada depois", Invoice{CreatedAt: invoiceNow.Add(time.Microsecond), ID: low}, true},
+		{"criada antes", Invoice{CreatedAt: invoiceNow.Add(-time.Microsecond), ID: high}, false},
+		{"mesma criação, identificador maior", Invoice{CreatedAt: invoiceNow, ID: high}, true},
+		{"a própria fatura do corte", Invoice{CreatedAt: invoiceNow, ID: mid}, true},
+		{"mesma criação, identificador menor", Invoice{CreatedAt: invoiceNow, ID: low}, false},
+	}
+	for _, tc := range cases {
+		if got := c.Includes(tc.inv); got != tc.want {
+			t.Errorf("%s: %v, esperado %v", tc.name, got, tc.want)
+		}
+	}
+	var none *Cutoff
+	if !none.Includes(Invoice{}) {
+		t.Fatal("sem corte, toda fatura é incluída")
 	}
 }
 

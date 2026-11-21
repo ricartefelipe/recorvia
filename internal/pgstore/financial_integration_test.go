@@ -78,7 +78,8 @@ func TestAmountLimitStoredAtExactBoundary(t *testing.T) {
 			t.Errorf("%s = %v, esperado %s", name, v, want[name])
 		}
 	}
-	adjs, err := a.Terms.Adjustments(ctx, tn.ID, sub.ID)
+	adjPage, err := a.Terms.Adjustments(ctx, tn.ID, sub.ID, 100, "")
+	adjs := adjPage.Items
 	if err != nil {
 		t.Fatal(err)
 	}

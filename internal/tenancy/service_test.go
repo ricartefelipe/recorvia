@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ricartefelipe/recorvia/internal/audit"
+	"github.com/ricartefelipe/recorvia/internal/kernel/address"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
 	"github.com/ricartefelipe/recorvia/internal/kernel/money"
@@ -243,6 +244,103 @@ func TestUpdateOrganization(t *testing.T) {
 	}
 }
 
+func orgAddress() address.Address {
+	return address.Address{Street: " Av. Paulista ", Number: "1000", Complement: "10º andar", District: "Bela Vista", City: "São Paulo",
+		State: "sp", PostalCode: "01310-100"}
+}
+
+// O endereço da organização é gravado com o perfil, normalizado como o de
+// cobrança do cliente, e a auditoria informa só os nomes dos campos
+// alterados e se o endereço foi cadastrado agora. Sem endereço no pedido, o
+// atual é mantido; sem mudança, nada é gravado nem auditado como alteração
+// do endereço.
+func TestUpdateOrganizationAddress(t *testing.T) {
+	e := newEnv(t)
+	actor := audit.User(e.owner.ID, "dona")
+	ctx := context.Background()
+	a := orgAddress()
+	tn, err := e.svc.UpdateOrganization(ctx, e.tenantID, actor, TenantInput{Name: "Acme", Address: &a}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := address.Address{Street: "Av. Paulista", Number: "1000", Complement: "10º andar", District: "Bela Vista", City: "São Paulo",
+		State: "SP", PostalCode: "01310100", Country: "BR"}
+	if tn.Address == nil || *tn.Address != want || tn.Version != 2 {
+		t.Fatalf("organização devolvida: %+v %+v", tn, tn.Address)
+	}
+	if stored := e.d().tenant.Address; stored == nil || *stored != want || e.store.calls["UpsertTenantAddress"] != 1 {
+		t.Fatalf("endereço gravado: %+v (gravações: %d)", stored, e.store.calls["UpsertTenantAddress"])
+	}
+	created := e.lastAudit(t)
+	if created.Action != "organization.address_updated" || created.ResourceType != "organization" || created.Actor != actor ||
+		created.Details["created"] != true || len(created.Details["fields"].([]string)) != 8 {
+		t.Fatalf("auditoria do cadastro do endereço: %+v", created)
+	}
+
+	// Sem endereço no pedido, o atual fica; nenhuma auditoria de endereço.
+	audits := len(e.d().audits)
+	if tn, err = e.svc.UpdateOrganization(ctx, e.tenantID, actor, TenantInput{Name: "Acme Brasil"}, 2); err != nil || tn.Address == nil || *tn.Address != want {
+		t.Fatalf("sem endereço no pedido: %+v %v", tn.Address, err)
+	}
+	if got := e.d().audits[audits:]; len(got) != 1 || got[0].Action != "organization.updated" || e.store.calls["UpsertTenantAddress"] != 1 {
+		t.Fatalf("auditorias sem mudança de endereço: %+v", got)
+	}
+
+	// O mesmo endereço, só com outra grafia, também não é alteração.
+	same := want
+	same.State, same.PostalCode = "sp", "01310-100"
+	audits = len(e.d().audits)
+	if _, err = e.svc.UpdateOrganization(ctx, e.tenantID, actor, TenantInput{Name: "Acme Brasil", Address: &same}, 3); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.d().audits[audits:]; len(got) != 1 || e.store.calls["UpsertTenantAddress"] != 1 {
+		t.Fatalf("endereço igual não deveria ser regravado: %+v", got)
+	}
+
+	// Mudança: somente os nomes dos campos, nunca os valores.
+	moved := want
+	moved.Number, moved.PostalCode = "2000", "01311000"
+	if tn, err = e.svc.UpdateOrganization(ctx, e.tenantID, actor, TenantInput{Name: "Acme Brasil", Address: &moved}, 4); err != nil {
+		t.Fatal(err)
+	}
+	updated := e.lastAudit(t)
+	if updated.Action != "organization.address_updated" || updated.Details["created"] != false ||
+		fmt.Sprint(updated.Details["fields"]) != "[number postal_code]" || strings.Contains(fmt.Sprint(updated.Details), "01311000") {
+		t.Fatalf("auditoria da alteração do endereço: %+v", updated)
+	}
+	if *e.d().tenant.Address != moved || tn.Version != 5 {
+		t.Fatalf("endereço alterado: %+v (versão %d)", e.d().tenant.Address, tn.Version)
+	}
+}
+
+func TestUpdateOrganizationAddressRejected(t *testing.T) {
+	t.Run("endereço inválido", func(t *testing.T) {
+		e := newEnv(t)
+		bad := orgAddress()
+		bad.State, bad.PostalCode = "São Paulo", "123"
+		_, err := e.svc.UpdateOrganization(context.Background(), e.tenantID, audit.System("t"), TenantInput{Name: "Acme", Address: &bad}, 1)
+		fields := assertAppErr(t, err, apperr.KindInvalid, "invalid_organization")
+		if fmt.Sprint(fields) != "[address.state address.postal_code]" {
+			t.Fatalf("campos: %v", fields)
+		}
+		if e.d().tenant.Address != nil || len(e.d().audits) != 0 || e.d().tenant.Version != 1 {
+			t.Fatal("nada deveria ser gravado")
+		}
+	})
+	t.Run("falha ao gravar o endereço desfaz o perfil", func(t *testing.T) {
+		e := newEnv(t)
+		e.store.fail["UpsertTenantAddress"] = errBoom
+		a := orgAddress()
+		_, err := e.svc.UpdateOrganization(context.Background(), e.tenantID, audit.System("t"), TenantInput{Name: "Acme 2", Address: &a}, 1)
+		if !errors.Is(err, errBoom) {
+			t.Fatalf("esperado erro propagado, obtido %v", err)
+		}
+		if d := e.d(); d.tenant.Name != "Acme" || d.tenant.Address != nil || len(d.audits) != 0 {
+			t.Fatalf("a alteração deveria ser desfeita: %+v", d.tenant)
+		}
+	})
+}
+
 func TestUpdateOrganizationRejected(t *testing.T) {
 	t.Run("dados inválidos", func(t *testing.T) {
 		e := newEnv(t)
@@ -332,8 +430,8 @@ func TestListings(t *testing.T) {
 	if err != nil || len(members) != 2 {
 		t.Fatalf("Members = %v, %v", members, err)
 	}
-	invs, err := e.svc.Invitations(context.Background(), e.tenantID)
-	if err != nil || len(invs) != 1 || invs[0].Email != "nova@acme.com" {
+	invs, err := e.svc.Invitations(context.Background(), e.tenantID, 25, "")
+	if err != nil || len(invs.Items) != 1 || invs.Items[0].Email != "nova@acme.com" || invs.NextCursor != "" {
 		t.Fatalf("Invitations = %v, %v", invs, err)
 	}
 	e.store.userMemberships[e.owner.ID] = []UserMembership{{TenantID: e.tenantID, TenantSlug: "acme", Role: RoleOwner}}
@@ -348,7 +446,7 @@ func TestListings(t *testing.T) {
 	if _, err := e.svc.Members(context.Background(), e.tenantID); !errors.Is(err, errBoom) {
 		t.Errorf("Members deveria propagar o erro: %v", err)
 	}
-	if _, err := e.svc.Invitations(context.Background(), e.tenantID); !errors.Is(err, errBoom) {
+	if _, err := e.svc.Invitations(context.Background(), e.tenantID, 25, ""); !errors.Is(err, errBoom) {
 		t.Errorf("Invitations deveria propagar o erro: %v", err)
 	}
 	if _, err := e.svc.UserOrganizations(context.Background(), e.owner.ID); !errors.Is(err, errBoom) {
@@ -479,7 +577,7 @@ func TestInviteUnlimitedPlan(t *testing.T) {
 }
 
 func TestInviteStoreErrors(t *testing.T) {
-	for _, op := range []string{"PlatformPlan", "PlatformUsage", "PendingInvitations", "InsertInvitation", "Emit", "Audit"} {
+	for _, op := range []string{"LockPlatformPlan", "PlatformUsage", "PendingInvitations", "InsertInvitation", "Emit", "Audit"} {
 		t.Run(op, func(t *testing.T) {
 			e := newEnv(t)
 			e.store.fail[op] = errBoom
@@ -666,6 +764,41 @@ func TestAcceptInvitationRejected(t *testing.T) {
 	}
 }
 
+// O aceite confere o limite de usuários de novo: depois de um rebaixamento do
+// plano (ou de qualquer mudança que reduza as vagas), convites antigos não
+// levam a organização além do limite.
+func TestAcceptInvitationRechecksUserLimit(t *testing.T) {
+	e := newEnv(t) // plano com até 3 usuários e 1 membro ativo
+	_, first := e.invite(t, "a@acme.com", RoleOperator)
+	_, second := e.invite(t, "b@acme.com", RoleOperator)
+	one := 2
+	e.d().plan.MaxUsers = &one
+
+	if _, err := e.svc.AcceptInvitation(context.Background(), UserRef{ID: uuid.New(), Email: "a@acme.com"}, first); err != nil {
+		t.Fatalf("o primeiro aceite cabe no limite: %v", err)
+	}
+	if e.store.calls["LockPlatformPlan"] < 3 {
+		t.Fatal("o aceite deve ler o plano com bloqueio")
+	}
+	before := len(e.d().members)
+	_, err := e.svc.AcceptInvitation(context.Background(), UserRef{ID: uuid.New(), Email: "b@acme.com"}, second)
+	assertAppErr(t, err, apperr.KindLimitExceeded, "platform_user_limit")
+	if len(e.d().members) != before {
+		t.Fatal("aceite acima do limite não pode criar associação")
+	}
+
+	// Membro removido que volta também ocupa vaga.
+	former := e.addMember(RoleAuditor, MembershipRemoved, "volta@acme.com")
+	e.d().plan.MaxUsers = nil
+	_, back := e.invite(t, "volta@acme.com", RoleFinance)
+	e.d().plan.MaxUsers = &one
+	_, err = e.svc.AcceptInvitation(context.Background(), former, back)
+	assertAppErr(t, err, apperr.KindLimitExceeded, "platform_user_limit")
+	if e.d().members[former.ID].Status != MembershipRemoved {
+		t.Fatal("membro removido não pode ser reativado acima do limite")
+	}
+}
+
 func TestAcceptInvitationValidatesTokenBeforeLookup(t *testing.T) {
 	e := newEnv(t)
 	_, err := e.svc.AcceptInvitation(context.Background(), UserRef{ID: uuid.New()}, "")
@@ -691,8 +824,10 @@ func TestAcceptInvitationStoreErrors(t *testing.T) {
 		op   string
 		user func(*env) UserRef
 	}{
+		{"LockPlatformPlan", newcomer},
 		{"Invitation", newcomer},
 		{"Membership", newcomer},
+		{"PlatformUsage", newcomer},
 		{"InsertMembership", newcomer},
 		{"UpdateMembership", removed},
 		{"UpdateInvitation", newcomer},
@@ -721,7 +856,7 @@ func TestChangeRole(t *testing.T) {
 	admin := e.addMember(RoleAdmin, MembershipActive, "admin@acme.com")
 	fin := e.addMember(RoleFinance, MembershipActive, "fin@acme.com")
 
-	m, err := e.svc.ChangeRole(context.Background(), e.tenantID, e.access(admin), admin, fin.ID, RoleOperator)
+	m, err := e.svc.ChangeRole(context.Background(), e.tenantID, e.access(admin), admin, fin.ID, RoleOperator, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -738,6 +873,32 @@ func TestChangeRole(t *testing.T) {
 	}
 }
 
+// A versão do If-Match vai na condição da gravação da associação: divergente,
+// o papel e a situação não mudam e nada é auditado.
+func TestMemberChangesRequireCurrentVersion(t *testing.T) {
+	e := newEnv(t)
+	fin := e.addMember(RoleFinance, MembershipActive, "fin@acme.com")
+	audits := len(e.d().audits)
+	_, err := e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, fin.ID, RoleOperator, 2)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	err = e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, fin.ID, 2)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	if stored := e.d().members[fin.ID]; stored.Role != RoleFinance || stored.Status != MembershipActive || stored.Version != 1 ||
+		len(e.d().audits) != audits || e.store.calls["UpdateMembership"] != 2 {
+		t.Fatalf("associação com versão divergente não pode mudar: %+v", stored)
+	}
+	m, err := e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, fin.ID, RoleOperator, 1)
+	if err != nil || m.Version != 2 {
+		t.Fatalf("alteração na versão atual: %+v %v", m, err)
+	}
+	// A versão anterior à alteração não remove mais o membro.
+	err = e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, fin.ID, 1)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	if err := e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, fin.ID, m.Version); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestChangeRoleOwnerRules(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -750,7 +911,7 @@ func TestChangeRoleOwnerRules(t *testing.T) {
 			name: "admin não rebaixa proprietário",
 			run: func(e *env) (Membership, error) {
 				admin := e.addMember(RoleAdmin, MembershipActive, "admin@acme.com")
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(admin), admin, e.owner.ID, RoleAdmin)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(admin), admin, e.owner.ID, RoleAdmin, 1)
 			},
 			kind: apperr.KindForbidden, code: "owner_only",
 		},
@@ -758,14 +919,14 @@ func TestChangeRoleOwnerRules(t *testing.T) {
 			name: "admin não promove a proprietário",
 			run: func(e *env) (Membership, error) {
 				admin := e.addMember(RoleAdmin, MembershipActive, "admin@acme.com")
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(admin), admin, admin.ID, RoleOwner)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(admin), admin, admin.ID, RoleOwner, 1)
 			},
 			kind: apperr.KindForbidden, code: "owner_only",
 		},
 		{
 			name: "último proprietário não pode ser rebaixado",
 			run: func(e *env) (Membership, error) {
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, RoleAdmin)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, RoleAdmin, 1)
 			},
 			kind: apperr.KindConflict, code: "last_owner",
 		},
@@ -773,7 +934,7 @@ func TestChangeRoleOwnerRules(t *testing.T) {
 			name: "proprietário removido não conta como outro proprietário",
 			run: func(e *env) (Membership, error) {
 				e.addMember(RoleOwner, MembershipRemoved, "ex@acme.com")
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, RoleAdmin)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, RoleAdmin, 1)
 			},
 			kind: apperr.KindConflict, code: "last_owner",
 		},
@@ -781,7 +942,7 @@ func TestChangeRoleOwnerRules(t *testing.T) {
 			name: "proprietário rebaixa outro proprietário",
 			run: func(e *env) (Membership, error) {
 				other := e.addMember(RoleOwner, MembershipActive, "socia@acme.com")
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID, RoleFinance)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID, RoleFinance, 1)
 			},
 			wantOK: RoleFinance,
 		},
@@ -789,28 +950,28 @@ func TestChangeRoleOwnerRules(t *testing.T) {
 			name: "proprietário promove admin a proprietário",
 			run: func(e *env) (Membership, error) {
 				admin := e.addMember(RoleAdmin, MembershipActive, "admin@acme.com")
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, admin.ID, RoleOwner)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, admin.ID, RoleOwner, 1)
 			},
 			wantOK: RoleOwner,
 		},
 		{
 			name: "manter o papel de proprietário não exige outro proprietário",
 			run: func(e *env) (Membership, error) {
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, RoleOwner)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, RoleOwner, 1)
 			},
 			wantOK: RoleOwner,
 		},
 		{
 			name: "papel desconhecido",
 			run: func(e *env) (Membership, error) {
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, Role("deus"))
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, Role("deus"), 1)
 			},
 			kind: apperr.KindInvalid, code: "invalid_role",
 		},
 		{
 			name: "membro inexistente",
 			run: func(e *env) (Membership, error) {
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, uuid.New(), RoleAdmin)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, uuid.New(), RoleAdmin, 1)
 			},
 			kind: apperr.KindNotFound, code: "member_not_found",
 		},
@@ -818,7 +979,7 @@ func TestChangeRoleOwnerRules(t *testing.T) {
 			name: "membro removido",
 			run: func(e *env) (Membership, error) {
 				ex := e.addMember(RoleOperator, MembershipRemoved, "ex@acme.com")
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, ex.ID, RoleAdmin)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, ex.ID, RoleAdmin, 1)
 			},
 			kind: apperr.KindNotFound, code: "member_not_found",
 		},
@@ -850,7 +1011,7 @@ func TestChangeRoleStoreErrors(t *testing.T) {
 			e := newEnv(t)
 			other := e.addMember(RoleOwner, MembershipActive, "socia@acme.com")
 			e.store.fail[op] = errBoom
-			_, err := e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID, RoleAdmin)
+			_, err := e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID, RoleAdmin, 1)
 			if !errors.Is(err, errBoom) {
 				t.Fatalf("esperado erro propagado, obtido %v", err)
 			}
@@ -866,7 +1027,7 @@ func TestRemoveMember(t *testing.T) {
 	admin := e.addMember(RoleAdmin, MembershipActive, "admin@acme.com")
 	op := e.addMember(RoleOperator, MembershipActive, "op@acme.com")
 
-	if err := e.svc.RemoveMember(context.Background(), e.tenantID, e.access(admin), admin, op.ID); err != nil {
+	if err := e.svc.RemoveMember(context.Background(), e.tenantID, e.access(admin), admin, op.ID, 1); err != nil {
 		t.Fatal(err)
 	}
 	if e.d().members[op.ID].Status != MembershipRemoved {
@@ -889,17 +1050,17 @@ func TestRemoveMemberRules(t *testing.T) {
 	}{
 		{"admin não remove proprietário", func(e *env) error {
 			admin := e.addMember(RoleAdmin, MembershipActive, "admin@acme.com")
-			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(admin), admin, e.owner.ID)
+			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(admin), admin, e.owner.ID, 1)
 		}, apperr.KindForbidden, "owner_only"},
 		{"último proprietário não pode ser removido", func(e *env) error {
-			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID)
+			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, 1)
 		}, apperr.KindConflict, "last_owner"},
 		{"membro inexistente", func(e *env) error {
-			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, uuid.New())
+			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, uuid.New(), 1)
 		}, apperr.KindNotFound, "member_not_found"},
 		{"membro já removido", func(e *env) error {
 			ex := e.addMember(RoleOperator, MembershipRemoved, "ex@acme.com")
-			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, ex.ID)
+			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, ex.ID, 1)
 		}, apperr.KindNotFound, "member_not_found"},
 	}
 	for _, tc := range cases {
@@ -914,7 +1075,7 @@ func TestRemoveMemberRules(t *testing.T) {
 	t.Run("proprietário remove outro proprietário", func(t *testing.T) {
 		e := newEnv(t)
 		other := e.addMember(RoleOwner, MembershipActive, "socia@acme.com")
-		if err := e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID); err != nil {
+		if err := e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID, 1); err != nil {
 			t.Fatal(err)
 		}
 		if e.d().members[other.ID].Status != MembershipRemoved {
@@ -929,7 +1090,7 @@ func TestRemoveMemberStoreErrors(t *testing.T) {
 			e := newEnv(t)
 			other := e.addMember(RoleOwner, MembershipActive, "socia@acme.com")
 			e.store.fail[op] = errBoom
-			if err := e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID); !errors.Is(err, errBoom) {
+			if err := e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID, 1); !errors.Is(err, errBoom) {
 				t.Fatalf("esperado erro propagado, obtido %v", err)
 			}
 			if e.d().members[other.ID].Status != MembershipActive {

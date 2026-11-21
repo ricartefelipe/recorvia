@@ -74,14 +74,14 @@ func TestAuditKeyringAgainstDatabase(t *testing.T) {
 	// provedor (chave de API e segredo do webhook), endpoint de webhook e uma
 	// notificação ainda não enviada.
 	a := env.NewTenant(t, "keyring-a")
-	if _, err := env.Platform.ChangePlan(ctx, a.ID, a.Actor, "profissional"); err != nil {
+	if _, err := env.Platform.ChangePlan(ctx, a.ID, a.Actor, "profissional", env.PlatformVersion(t, a.ID)); err != nil {
 		t.Fatal(err)
 	}
 	accountID := ids.New()
 	err = env.Store.Payments().InTenant(ctx, a.ID, func(tx payments.Tx) error {
 		return tx.SaveAccount(ctx, payments.ProviderAccount{ID: accountID, TenantID: a.ID, Provider: "simulator", Environment: "local",
 			Status: "active", IsDefault: true, APIKey: "sim_keyring_0001", APIKeyHint: "0001", Secret: strings.Repeat("s", 40),
-			CreatedAt: now, UpdatedAt: now, Version: 1}, []byte("hash-do-token-a"))
+			CreatedAt: now, UpdatedAt: now, Version: 1}, []byte("hash-do-token-a"), 0)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestAuditKeyringAgainstDatabase(t *testing.T) {
 	rotated := testKeyring(t, "t2", map[string]byte{"t1": 7, "t2": 8})
 	rotatedStore := pgstore.New(env.DB, rotated, env.Clock, nil)
 	b := env.NewTenant(t, "keyring-b")
-	if _, err := env.Platform.ChangePlan(ctx, b.ID, b.Actor, "profissional"); err != nil {
+	if _, err := env.Platform.ChangePlan(ctx, b.ID, b.Actor, "profissional", env.PlatformVersion(t, b.ID)); err != nil {
 		t.Fatal(err)
 	}
 	rotatedHooks := webhooks.NewService(rotatedStore.Webhooks(), transport{client}, client, env.Clock, webhooks.Config{Lease: time.Minute,
@@ -312,7 +312,11 @@ func TestAuditKeyringAgainstDatabase(t *testing.T) {
 	// Dados fora de uso não bloqueiam: conta desativada, endpoint removido e
 	// notificação encerrada deixam de exigir a chave antiga.
 	t.Run("dados fora de uso não bloqueiam", func(t *testing.T) {
-		if err := hooks.DeleteEndpoint(ctx, a.ID, a.Actor, oldEndpoint.ID); err != nil {
+		current, err := hooks.Endpoint(ctx, a.ID, oldEndpoint.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := hooks.DeleteEndpoint(ctx, a.ID, a.Actor, oldEndpoint.ID, current.Version); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := owner.Exec(ctx, `UPDATE payment_provider_accounts SET status = 'disabled', is_default = false WHERE id = $1`, accountID); err != nil {
@@ -417,7 +421,7 @@ func TestProviderCredentialsUnreadableAndReconfiguration(t *testing.T) {
 	}
 	newKey := "sim_nova_" + uuid.NewString()[:8]
 	second, err := recovered.ConfigureAccount(ctx, tn.ID, tn.Actor, payments.AccountInput{Provider: "simulator", Environment: "local",
-		APIKey: newKey, WebhookSecret: strings.Repeat("b", 40)})
+		APIKey: newKey, WebhookSecret: strings.Repeat("b", 40), ExpectedVersion: accounts[0].Version})
 	if err != nil {
 		t.Fatalf("a reconfiguração deveria funcionar sem decifrar as credenciais anteriores: %v", err)
 	}

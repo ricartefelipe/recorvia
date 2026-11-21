@@ -1,14 +1,21 @@
 -- Assinaturas, histórico e descontos.
 
--- name: InsertSubscription :exec
+-- name: InsertSubscription :execrows
+-- Sem linhas afetadas: outra transação já confirmou a assinatura com a mesma
+-- chave de negócio (request_key); o ON CONFLICT espera a outra transação
+-- terminar, e a releitura pela chave encontra a assinatura confirmada.
 INSERT INTO subscriptions (id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date,
                            trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at,
                            cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days,
-                           created_at, updated_at, version)
+                           request_key, request_fingerprint, created_at, updated_at, version)
 VALUES (@id, @tenant_id, @customer_id, @plan_id, @price_version_id, @status, @quantity, @billing_interval, @timezone, @anchor_date,
         sqlc.narg(trial_ends_at), @started_at, @current_period_start, @current_period_end, @next_billing_index, sqlc.narg(next_billing_at),
         @cancel_at_period_end, sqlc.narg(canceled_at), sqlc.narg(cancel_reason), sqlc.narg(ended_at), sqlc.narg(suspended_at),
-        sqlc.narg(suspension_reason), sqlc.narg(payment_terms_days), @created_at, @created_at, 1);
+        sqlc.narg(suspension_reason), sqlc.narg(payment_terms_days), sqlc.narg(request_key), sqlc.narg(request_fingerprint), @created_at, @created_at, 1)
+ON CONFLICT (tenant_id, request_key) DO NOTHING;
+
+-- name: GetSubscriptionByRequestKey :one
+SELECT * FROM subscriptions WHERE tenant_id = @tenant_id AND request_key = @request_key;
 
 -- name: GetSubscription :one
 SELECT * FROM subscriptions WHERE tenant_id = @tenant_id AND id = @id;
@@ -48,6 +55,7 @@ SELECT s.*, c.name AS customer_name, p.name AS plan_name
   JOIN plans p ON p.tenant_id = s.tenant_id AND p.id = s.plan_id
  WHERE s.tenant_id = @tenant_id
    AND (sqlc.narg(status)::text IS NULL OR s.status = sqlc.narg(status))
+   AND (NOT @only_in_force::boolean OR s.status IN ('trialing', 'active', 'past_due'))
    AND (sqlc.narg(customer_id)::uuid IS NULL OR s.customer_id = sqlc.narg(customer_id))
    AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (s.created_at, s.id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
  ORDER BY s.created_at DESC, s.id DESC
@@ -138,8 +146,14 @@ VALUES (@id, @tenant_id, @subscription_id, @effective_date, @kind, sqlc.narg(per
         @reason, 'scheduled', sqlc.narg(created_by), @created_at);
 
 -- name: ListPriceAdjustments :many
-SELECT * FROM subscription_price_adjustments WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id
- ORDER BY effective_date, created_at, id LIMIT 200;
+-- Paginação por keyset em (effective_date, created_at, id), que não mudam
+-- depois da programação.
+SELECT * FROM subscription_price_adjustments
+ WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id
+   AND (sqlc.narg(cursor_date)::date IS NULL
+        OR (effective_date, created_at, id) > (sqlc.narg(cursor_date)::date, sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY effective_date, created_at, id
+ LIMIT @row_limit;
 
 -- name: GetPriceAdjustmentForUpdate :one
 SELECT * FROM subscription_price_adjustments

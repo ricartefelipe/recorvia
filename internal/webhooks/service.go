@@ -83,6 +83,8 @@ type Tx interface {
 	// expectedAttempts; false indica que outra execução a reivindicou.
 	UpdateDelivery(ctx context.Context, d Delivery, expectedAttempts int) (bool, error)
 	InsertAttempt(ctx context.Context, a Attempt) error
+	// Attempts lista as tentativas de uma entrega em ordem crescente.
+	Attempts(ctx context.Context, deliveryID uuid.UUID) ([]Attempt, error)
 
 	MarkInbox(ctx context.Context, consumer string, messageID uuid.UUID) (bool, error)
 	Audit(ctx context.Context, e audit.Entry) error
@@ -357,9 +359,9 @@ func (s *Service) UpdateEndpoint(ctx context.Context, tenantID uuid.UUID, actor 
 	}
 }
 
-// DeleteEndpoint desativa o endpoint e o retira da listagem. Entregas
-// pendentes deixam de ser tentadas.
-func (s *Service) DeleteEndpoint(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, id uuid.UUID) error {
+// DeleteEndpoint desativa o endpoint e o retira da listagem, condicionado à
+// versão esperada (If-Match). Entregas pendentes deixam de ser tentadas.
+func (s *Service) DeleteEndpoint(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, id uuid.UUID, expectedVersion int) error {
 	now := s.clock.Now()
 	return s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		e, err := liveEndpoint(ctx, tx, id, true, now)
@@ -367,7 +369,7 @@ func (s *Service) DeleteEndpoint(ctx context.Context, tenantID uuid.UUID, actor 
 			return err
 		}
 		e.Status, e.DeletedAt, e.UpdatedAt = Disabled, &now, now
-		if err := tx.UpdateEndpoint(ctx, e, e.Version); err != nil {
+		if err := tx.UpdateEndpoint(ctx, e, expectedVersion); err != nil {
 			return err
 		}
 		return tx.Audit(ctx, audit.New(tenantID, now, actor, "webhook_endpoint.deleted", "webhook_endpoint", e.ID.String(), nil))
@@ -379,8 +381,11 @@ func (s *Service) DeleteEndpoint(ctx context.Context, tenantID uuid.UUID, actor 
 // período em que as entregas levam as duas assinaturas. Valem no máximo
 // MaxSignatures segredos ao mesmo tempo: os anteriores mais antigos além
 // desse limite são encerrados na rotação, de modo que a listagem coincide
-// com os segredos que assinam as entregas.
-func (s *Service) RotateSecret(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, id uuid.UUID, previousValidHours *int) (Endpoint, string, error) {
+// com os segredos que assinam as entregas. A rotação altera o endpoint (os
+// segredos fazem parte dele): exige a versão esperada (If-Match) e gera a
+// versão seguinte.
+func (s *Service) RotateSecret(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, id uuid.UUID, previousValidHours *int,
+	expectedVersion int) (Endpoint, string, error) {
 	window := DefaultRotationWindow
 	if previousValidHours != nil {
 		// O inteiro é validado antes da conversão: a multiplicação por
@@ -401,6 +406,10 @@ func (s *Service) RotateSecret(ctx context.Context, tenantID uuid.UUID, actor au
 			return err
 		}
 		if err := requireFeature(ctx, tx); err != nil {
+			return err
+		}
+		e.UpdatedAt = now
+		if err := tx.UpdateEndpoint(ctx, e, expectedVersion); err != nil {
 			return err
 		}
 		if err := tx.ExpireSecrets(ctx, e.ID, now.Add(window)); err != nil {
@@ -436,6 +445,32 @@ func (s *Service) Deliveries(ctx context.Context, tenantID, endpointID uuid.UUID
 		return err
 	})
 	return p, err
+}
+
+// DeliveryAttempts lista as tentativas individuais de uma entrega, da
+// primeira à mais recente. Entrega inexistente ou de endpoint removido: 404,
+// como na listagem das entregas.
+func (s *Service) DeliveryAttempts(ctx context.Context, tenantID, deliveryID uuid.UUID) ([]Attempt, error) {
+	var out []Attempt
+	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		d, err := tx.Delivery(ctx, deliveryID, false)
+		if err != nil {
+			return err
+		}
+		if _, err := liveEndpoint(ctx, tx, d.EndpointID, false, s.clock.Now()); err != nil {
+			if apperr.IsKind(err, apperr.KindNotFound) {
+				return errDeliveryNotFound()
+			}
+			return err
+		}
+		out, err = tx.Attempts(ctx, deliveryID)
+		return err
+	})
+	return out, err
+}
+
+func errDeliveryNotFound() error {
+	return apperr.NotFound("webhook_delivery_not_found", "Entrega de webhook não encontrada.")
 }
 
 // RetryDelivery agenda o reenvio manual de uma entrega (auditado).

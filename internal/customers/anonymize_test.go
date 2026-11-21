@@ -230,7 +230,7 @@ func TestAnonymize(t *testing.T) {
 func TestAnonymizeArchivedCustomer(t *testing.T) {
 	e := newSvcEnv()
 	c := e.seed(t, companyInput())
-	if _, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, c.ID); err != nil {
+	if _, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, c.ID, 1); err != nil {
 		t.Fatal(err)
 	}
 	got, err := e.svc.Anonymize(context.Background(), e.tenantID, e.actor, c.ID, validReason)
@@ -383,8 +383,8 @@ func TestAnonymizedCustomerRejectsNewPersonalData(t *testing.T) {
 	assertAppErr(t, err, apperr.KindConflict, "customer_archived")
 	_, err = e.svc.AddContact(ctx, e.tenantID, e.actor, c.ID, ContactInput{Name: "Ana", Email: "ana@example.com"})
 	assertAppErr(t, err, apperr.KindConflict, "customer_anonymized")
-	_, err = e.svc.SetAddress(ctx, e.tenantID, e.actor, c.ID, Address{Street: "Rua A", Number: "1", District: "Centro", City: "Recife", State: "PE",
-		PostalCode: "50000000"})
+	_, _, err = e.svc.SetAddress(ctx, e.tenantID, e.actor, c.ID, Address{Street: "Rua A", Number: "1", District: "Centro", City: "Recife", State: "PE",
+		PostalCode: "50000000"}, res.Customer.Version)
 	assertAppErr(t, err, apperr.KindConflict, "customer_anonymized")
 	st := e.st()
 	if len(st.contacts[c.ID]) != 0 || st.customers[c.ID] != res.Customer {
@@ -395,7 +395,7 @@ func TestAnonymizedCustomerRejectsNewPersonalData(t *testing.T) {
 	}
 	// Cliente apenas arquivado continua aceitando contato e endereço, como antes.
 	archived := e.seed(t, companyInput())
-	if _, err := e.svc.Archive(ctx, e.tenantID, e.actor, archived.ID); err != nil {
+	if _, err := e.svc.Archive(ctx, e.tenantID, e.actor, archived.ID, 1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.svc.AddContact(ctx, e.tenantID, e.actor, archived.ID, ContactInput{Name: "Financeiro", Email: "fin@acme.com"}); err != nil {

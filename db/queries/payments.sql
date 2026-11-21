@@ -13,19 +13,29 @@ SELECT * FROM payment_provider_accounts WHERE tenant_id = @tenant_id AND provide
 SELECT * FROM payment_provider_accounts WHERE tenant_id = @tenant_id ORDER BY provider;
 
 -- name: ClearDefaultProviderAccount :exec
-UPDATE payment_provider_accounts SET is_default = false WHERE tenant_id = @tenant_id AND is_default AND id <> @keep_id;
+-- A conta que deixa de ser a padrão muda de representação e ganha versão nova:
+-- um If-Match lido antes da troca passa a receber 412 (ADR-083).
+UPDATE payment_provider_accounts SET is_default = false, version = version + 1
+ WHERE tenant_id = @tenant_id AND is_default AND id <> @keep_id;
 
--- name: UpsertProviderAccount :exec
+-- name: InsertProviderAccount :execrows
+-- Primeira configuração do provedor (versão esperada 0): nenhuma linha se
+-- outra pessoa configurou o provedor antes.
 INSERT INTO payment_provider_accounts (id, tenant_id, provider, environment, status, is_default, api_key_ciphertext, api_key_key_id,
                                        api_key_hint, webhook_secret_ciphertext, webhook_secret_key_id, webhook_endpoint_token_hash,
                                        created_at, updated_at, version)
 VALUES (@id, @tenant_id, @provider, @environment, 'active', @is_default, @api_key_ciphertext, @api_key_key_id, @api_key_hint,
         @webhook_secret_ciphertext, @webhook_secret_key_id, @webhook_endpoint_token_hash, @created_at, @created_at, 1)
-ON CONFLICT (tenant_id, provider) DO UPDATE
-   SET environment = EXCLUDED.environment, status = 'active', is_default = EXCLUDED.is_default,
-       api_key_ciphertext = EXCLUDED.api_key_ciphertext, api_key_key_id = EXCLUDED.api_key_key_id, api_key_hint = EXCLUDED.api_key_hint,
-       webhook_secret_ciphertext = EXCLUDED.webhook_secret_ciphertext, webhook_secret_key_id = EXCLUDED.webhook_secret_key_id,
-       webhook_endpoint_token_hash = EXCLUDED.webhook_endpoint_token_hash, version = payment_provider_accounts.version + 1;
+ON CONFLICT (tenant_id, provider) DO NOTHING;
+
+-- name: UpdateProviderAccount :execrows
+-- Nova configuração do provedor, condicionada à versão esperada (If-Match).
+UPDATE payment_provider_accounts
+   SET environment = @environment, status = 'active', is_default = @is_default,
+       api_key_ciphertext = @api_key_ciphertext, api_key_key_id = @api_key_key_id, api_key_hint = @api_key_hint,
+       webhook_secret_ciphertext = @webhook_secret_ciphertext, webhook_secret_key_id = @webhook_secret_key_id,
+       webhook_endpoint_token_hash = @webhook_endpoint_token_hash, version = version + 1
+ WHERE tenant_id = @tenant_id AND provider = @provider AND version = @version;
 
 -- name: ResolveWebhookEndpoint :one
 SELECT tenant_id::uuid AS tenant_id, account_id::uuid AS account_id FROM app_resolve_webhook_endpoint(@provider, @token_hash);
@@ -112,8 +122,13 @@ SELECT o.status::text AS status, count(*)::bigint AS total
  GROUP BY o.status;
 
 -- name: ListOperations :many
-SELECT * FROM payment_operations WHERE tenant_id = @tenant_id AND (sqlc.narg(status)::text IS NULL OR status = sqlc.narg(status))
- ORDER BY updated_at DESC, id DESC LIMIT 200;
+-- Paginação por keyset em (created_at, id): updated_at muda a cada tentativa
+-- e deslocaria a operação entre as páginas.
+SELECT * FROM payment_operations
+ WHERE tenant_id = @tenant_id AND (sqlc.narg(status)::text IS NULL OR status = sqlc.narg(status))
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (created_at, id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT @row_limit;
 
 -- name: TenantsWithPendingOperations :many
 SELECT t::uuid AS tenant_id FROM app_tenants_with_pending_payment_operations(@now) AS t;
@@ -130,6 +145,33 @@ ON CONFLICT DO NOTHING;
 
 -- name: GetPaymentByRequestKey :one
 SELECT * FROM payments WHERE tenant_id = @tenant_id AND request_key = @request_key;
+
+-- name: GetChargePaymentPendingReceipt :one
+-- Pagamento da cobrança e o valor dele ainda em pagamentos confirmados no
+-- provedor (saldo de provider_confirmed nos lançamentos que referenciam o
+-- pagamento: confirmação, excedente e recebimento), à espera do recebimento.
+SELECT sqlc.embed(p),
+       COALESCE((SELECT sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END)
+                   FROM ledger_transactions t
+                   JOIN ledger_entries e ON e.tenant_id = t.tenant_id AND e.transaction_id = t.id
+                   JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+                  WHERE t.tenant_id = p.tenant_id AND t.reference_type = 'payment' AND t.reference_id = p.id
+                    AND a.code = 'provider_confirmed'), 0)::bigint AS pending_receipt
+  FROM payments p
+ WHERE p.tenant_id = @tenant_id AND p.charge_id = @charge_id;
+
+-- name: ListChargesPendingReceipt :many
+-- Valor ainda em pagamentos confirmados no provedor por cobrança, em lote
+-- para a conciliação: só as cobranças com pendência de recebimento.
+SELECT p.charge_id::uuid AS charge_id,
+       sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END)::bigint AS pending_receipt
+  FROM payments p
+  JOIN ledger_transactions t ON t.tenant_id = p.tenant_id AND t.reference_type = 'payment' AND t.reference_id = p.id
+  JOIN ledger_entries e ON e.tenant_id = t.tenant_id AND e.transaction_id = t.id
+  JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+ WHERE p.tenant_id = @tenant_id AND p.charge_id = ANY (@charge_ids::uuid[]) AND a.code = 'provider_confirmed'
+ GROUP BY p.charge_id
+HAVING sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END) <> 0;
 
 -- name: ListPayments :many
 SELECT * FROM payments

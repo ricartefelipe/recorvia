@@ -65,6 +65,16 @@ func (e *identEnv) begin(t *testing.T, returnTo string) string {
 	return e.idp.gotState
 }
 
+// login conclui um login completo e devolve a sessão e o usuário.
+func (e *identEnv) login(t *testing.T) (Session, User) {
+	t.Helper()
+	sess, user, _, err := e.svc.CompleteLogin(context.Background(), e.begin(t, "/"), "codigo")
+	if err != nil {
+		t.Fatalf("CompleteLogin: %v", err)
+	}
+	return sess, user
+}
+
 // --- BeginLogin ---
 
 func TestBeginLogin(t *testing.T) {
@@ -271,14 +281,38 @@ func TestCompleteLoginInfrastructureErrors(t *testing.T) {
 			t.Fatalf("esperado erro propagado, obtido %v", err)
 		}
 	})
-	t.Run("falha ao gravar a sessão", func(t *testing.T) {
-		e := newIdentEnv()
-		state := e.begin(t, "/")
-		e.sessions.fail["Save"] = errBoom
-		if _, _, _, err := e.svc.CompleteLogin(context.Background(), state, "codigo"); !errors.Is(err, errBoom) {
-			t.Fatalf("esperado erro propagado, obtido %v", err)
-		}
-	})
+	for _, op := range []string{"Generations", "Create"} {
+		t.Run("falha em "+op, func(t *testing.T) {
+			e := newIdentEnv()
+			state := e.begin(t, "/")
+			e.sessions.fail[op] = errBoom
+			if _, _, _, err := e.svc.CompleteLogin(context.Background(), state, "codigo"); !errors.Is(err, errBoom) {
+				t.Fatalf("esperado erro propagado, obtido %v", err)
+			}
+		})
+	}
+}
+
+// A sessão do login nasce com a geração corrente do usuário: sessões
+// revogadas antes continuam recusadas, e a nova vale.
+func TestCompleteLoginStampsCurrentGeneration(t *testing.T) {
+	e := newIdentEnv()
+	sess, user := e.login(t)
+	if sess.Generation != 0 {
+		t.Fatalf("geração inicial: %d", sess.Generation)
+	}
+	// Revogação em massa no armazenamento ("encerrar todas", membro removido
+	// ou usuário desativado): a geração do usuário avança.
+	if err := e.sessions.DeleteAllForUser(context.Background(), user.ID); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := e.login(t)
+	if next.Generation != 1 {
+		t.Fatalf("a sessão nova deve ter a geração corrente: %d", next.Generation)
+	}
+	if _, _, err := e.svc.Authenticate(context.Background(), next.ID); err != nil {
+		t.Fatalf("sessão nova depois da revogação: %v", err)
+	}
 }
 
 // --- Authenticate ---
@@ -583,7 +617,7 @@ func TestSwitchTenantStoreErrors(t *testing.T) {
 	t.Run("falha ao gravar mantém a sessão anterior", func(t *testing.T) {
 		e := newIdentEnv()
 		old := e.seedSession(t)
-		e.sessions.fail["Save"] = errBoom
+		e.sessions.fail["Create"] = errBoom
 		if _, err := e.svc.SwitchTenant(context.Background(), old, uuid.New(), allow); !errors.Is(err, errBoom) {
 			t.Fatalf("esperado erro propagado, obtido %v", err)
 		}
@@ -602,45 +636,204 @@ func TestSwitchTenantStoreErrors(t *testing.T) {
 	})
 }
 
+// Revogação durante a troca de organização: a sessão nova herda a geração
+// da anterior e não é gravada; o usuário precisa entrar de novo.
+func TestSwitchTenantAfterRevocationIsRefused(t *testing.T) {
+	e := newIdentEnv()
+	old := e.seedSession(t)
+	allow := func(context.Context, uuid.UUID, uuid.UUID) error {
+		return e.sessions.DeleteAllForUser(context.Background(), old.UserID) // "encerrar todas" em outra aba
+	}
+	_, err := e.svc.SwitchTenant(context.Background(), old, uuid.New(), allow)
+	assertKind(t, err, apperr.KindUnauthenticated, "session_invalid")
+	if len(e.sessions.sessions) != 0 {
+		t.Fatalf("nenhuma sessão pode sobrar: %v", e.sessions.sessions)
+	}
+	e.sessions.fail["Generations"] = errBoom
+	if _, err := e.svc.SwitchTenant(context.Background(), e.seedSession(t), uuid.New(),
+		func(context.Context, uuid.UUID, uuid.UUID) error { return nil }); !errors.Is(err, errBoom) {
+		t.Fatalf("esperado erro propagado, obtido %v", err)
+	}
+}
+
+// Requisição em voo: a sessão é lida, as sessões do usuário são revogadas
+// e a requisição tenta regravar a sessão (toque). A gravação condicional
+// recusa, e a sessão não volta a existir.
+func TestAuthenticateInFlightDoesNotResurrectRevokedSession(t *testing.T) {
+	e := newIdentEnv()
+	sess := e.seedSession(t)
+	e.clock.Advance(e.policy.TouchInterval) // a requisição vai regravar a sessão
+	e.sessions.afterGet = func() {
+		e.sessions.afterGet = nil
+		if err := e.sessions.DeleteAllForUser(context.Background(), sess.UserID); err != nil {
+			t.Error(err)
+		}
+	}
+	_, _, err := e.svc.Authenticate(context.Background(), sess.ID)
+	assertKind(t, err, apperr.KindUnauthenticated, "session_invalid")
+	if _, ok := e.sessions.sessions[sess.ID]; ok {
+		t.Fatal("a sessão revogada não pode ser regravada")
+	}
+}
+
 // --- Logout, revogação e consultas ---
 
 func TestLogout(t *testing.T) {
 	e := newIdentEnv()
 	sess := e.seedSession(t)
-	target, err := e.svc.Logout(context.Background(), sess, "https://app.example/")
+	res, err := e.svc.Logout(context.Background(), sess, "https://app.example/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := e.sessions.sessions[sess.ID]; ok {
 		t.Fatal("a sessão local deve ser removida")
 	}
-	if !strings.Contains(target, "id_token_hint=id-1") || !strings.Contains(target, "post_logout_redirect_uri=https%3A%2F%2Fapp.example%2F") {
-		t.Fatalf("URL de encerramento inesperada: %s", target)
+	// O navegador recebe client_id e post_logout_redirect_uri, nunca o ID token.
+	if strings.Contains(res.RedirectURL, "id_token") || strings.Contains(res.RedirectURL, "id-1") ||
+		!strings.Contains(res.RedirectURL, "client_id=recorvia-web") ||
+		!strings.Contains(res.RedirectURL, "post_logout_redirect_uri=https%3A%2F%2Fapp.example%2F") {
+		t.Fatalf("URL de encerramento inesperada: %s", res.RedirectURL)
+	}
+	if !slices.Equal(e.idp.revoked, []string{"refresh-1"}) || res.ProviderErr != nil {
+		t.Fatalf("o refresh token deve ser revogado no provedor pelo servidor: %v %v", e.idp.revoked, res.ProviderErr)
+	}
+
+	// Falha na revogação no provedor não impede o logout local.
+	sess = e.seedSession(t)
+	e.idp.revokeErr = errBoom
+	res, err = e.svc.Logout(context.Background(), sess, "/")
+	if err != nil || !errors.Is(res.ProviderErr, errBoom) || res.RedirectURL == "" {
+		t.Fatalf("falha no provedor deve ser informada sem impedir o logout: %+v, %v", res, err)
+	}
+	if _, ok := e.sessions.sessions[sess.ID]; ok {
+		t.Fatal("a sessão local deve ser removida mesmo com falha no provedor")
 	}
 
 	e.sessions.fail["Delete"] = errBoom
-	target, err = e.svc.Logout(context.Background(), sess, "/")
-	if !errors.Is(err, errBoom) || target != "" {
-		t.Fatalf("falha ao remover deve impedir o logout no provedor: %q, %v", target, err)
+	res, err = e.svc.Logout(context.Background(), sess, "/")
+	if !errors.Is(err, errBoom) || res.RedirectURL != "" {
+		t.Fatalf("falha ao remover deve impedir o logout no provedor: %+v, %v", res, err)
 	}
 }
 
-func TestRevokeAll(t *testing.T) {
+func TestLogoutAll(t *testing.T) {
 	e := newIdentEnv()
 	sess := e.seedSession(t)
-	other := Session{ID: "sessao-2", UserID: sess.UserID}
-	stranger := Session{ID: "sessao-3", UserID: uuid.New()}
-	e.sessions.sessions[other.ID], e.sessions.sessions[stranger.ID] = other, stranger
-
-	if err := e.svc.RevokeAll(context.Background(), sess.UserID); err != nil {
-		t.Fatal(err)
+	tenant := uuid.New()
+	other := Session{ID: "sessao-2", UserID: sess.UserID, ActiveTenantID: &tenant, Tokens: Tokens{RefreshToken: "refresh-2"}}
+	noRefresh := Session{ID: "sessao-4", UserID: sess.UserID}
+	stranger := Session{ID: "sessao-3", UserID: uuid.New(), Tokens: Tokens{RefreshToken: "refresh-3"}}
+	for _, s := range []Session{other, noRefresh, stranger} {
+		e.sessions.sessions[s.ID] = s
+	}
+	res, err := e.svc.LogoutAll(context.Background(), sess, "https://app.example/")
+	if err != nil || res.ProviderErr != nil {
+		t.Fatal(err, res.ProviderErr)
 	}
 	if len(e.sessions.sessions) != 1 || e.sessions.sessions["sessao-3"].ID == "" {
 		t.Fatalf("somente as sessões do usuário devem ser removidas: %v", e.sessions.sessions)
 	}
-	e.sessions.fail["DeleteAllForUser"] = errBoom
-	if err := e.svc.RevokeAll(context.Background(), sess.UserID); !errors.Is(err, errBoom) {
-		t.Fatalf("esperado erro propagado, obtido %v", err)
+	if !slices.Equal(e.idp.revoked, []string{"refresh-1", "refresh-2"}) {
+		t.Fatalf("cada refresh token do usuário é revogado uma vez: %v", e.idp.revoked)
+	}
+	if e.sessions.gens[sess.UserID] != 1 {
+		t.Fatal("encerrar todas as sessões incrementa a geração do usuário")
+	}
+	if strings.Contains(res.RedirectURL, "id_token") || !strings.Contains(res.RedirectURL, "client_id=") {
+		t.Fatalf("URL de encerramento inesperada: %s", res.RedirectURL)
+	}
+
+	e.idp.revoked, e.idp.revokeErr = nil, errBoom
+	e.sessions.sessions[other.ID] = other
+	if res, err := e.svc.LogoutAll(context.Background(), sess, "/"); err != nil || !errors.Is(res.ProviderErr, errBoom) {
+		t.Fatalf("falha no provedor é informada sem impedir o encerramento: %+v %v", res, err)
+	}
+	for _, op := range []string{"ListForUser", "DeleteAllForUser", "Delete"} {
+		e.sessions.fail = map[string]error{op: errBoom}
+		if _, err := e.svc.LogoutAll(context.Background(), sess, "/"); !errors.Is(err, errBoom) {
+			t.Fatalf("%s: esperado erro propagado, obtido %v", op, err)
+		}
+	}
+}
+
+// Provedor fora do ar: as revogações correm em paralelo e o encerramento
+// termina no prazo total, não no prazo somado de cada sessão.
+func TestLogoutAllRevokesInParallelWithinDeadline(t *testing.T) {
+	e := newIdentEnv()
+	e.policy.RevokeTimeout = 50 * time.Millisecond
+	e.rebuild()
+	sess := e.seedSession(t)
+	for i, rt := range []string{"refresh-2", "refresh-3"} {
+		id := "sessao-extra-" + string(rune('a'+i))
+		e.sessions.sessions[id] = Session{ID: id, UserID: sess.UserID, Tokens: Tokens{RefreshToken: rt}}
+	}
+	e.idp.revokeBlock = true
+	res, err := e.svc.LogoutAll(context.Background(), sess, "/")
+	if err != nil || !errors.Is(res.ProviderErr, context.DeadlineExceeded) {
+		t.Fatalf("o prazo esgotado é informado sem impedir o encerramento: %+v %v", res, err)
+	}
+	if e.idp.maxInFlight != 3 {
+		t.Fatalf("as três revogações devem correr em paralelo: %d", e.idp.maxInFlight)
+	}
+	if len(e.sessions.sessions) != 0 {
+		t.Fatal("as sessões locais são encerradas mesmo com o provedor fora do ar")
+	}
+}
+
+func TestRevokeTenantSessions(t *testing.T) {
+	e := newIdentEnv()
+	sess := e.seedSession(t)
+	tenantA, tenantB := uuid.New(), uuid.New()
+	sess.ActiveTenantID = &tenantA
+	e.sessions.sessions[sess.ID] = sess
+	inB := Session{ID: "sessao-2", UserID: sess.UserID, ActiveTenantID: &tenantB}
+	noTenant := Session{ID: "sessao-3", UserID: sess.UserID}
+	strangerInA := Session{ID: "sessao-4", UserID: uuid.New(), ActiveTenantID: &tenantA}
+	for _, s := range []Session{inB, noTenant, strangerInA} {
+		e.sessions.sessions[s.ID] = s
+	}
+	n, err := e.svc.RevokeTenantSessions(context.Background(), sess.UserID, tenantA)
+	if err != nil || n != 1 {
+		t.Fatalf("RevokeTenantSessions = %d, %v", n, err)
+	}
+	if e.sessions.tenantGens[tenantGenKey(sess.UserID, tenantA)] != 1 || e.sessions.gens[sess.UserID] != 0 {
+		t.Fatal("somente a geração do usuário no tenant muda")
+	}
+	// Uma requisição em voo que regrave a sessão do tenant é recusada.
+	if err := e.sessions.Save(context.Background(), sess, time.Hour); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("sessão do tenant revogado não pode ser regravada: %v", err)
+	}
+	if _, ok := e.sessions.sessions[sess.ID]; ok {
+		t.Fatal("a sessão com o tenant ativo deve ser encerrada")
+	}
+	for _, id := range []string{"sessao-2", "sessao-3", "sessao-4"} {
+		if _, ok := e.sessions.sessions[id]; !ok {
+			t.Fatalf("a sessão %s não pode ser encerrada", id)
+		}
+	}
+	for _, op := range []string{"InvalidateTenant", "ListForUser", "Delete"} {
+		e.sessions.sessions[sess.ID] = sess
+		e.sessions.fail = map[string]error{op: errBoom}
+		if _, err := e.svc.RevokeTenantSessions(context.Background(), sess.UserID, tenantA); !errors.Is(err, errBoom) {
+			t.Fatalf("%s: esperado erro propagado, obtido %v", op, err)
+		}
+	}
+}
+
+// Usuário desativado perde todas as sessões, não só a da requisição.
+func TestAuthenticateDisabledUserRevokesAllSessions(t *testing.T) {
+	e := newIdentEnv()
+	sess := e.seedSession(t)
+	other := Session{ID: "sessao-2", UserID: sess.UserID, ExpiresAt: testNow.Add(time.Hour), LastSeenAt: testNow}
+	e.sessions.sessions[other.ID] = other
+	u := e.users.byID[sess.UserID]
+	u.Status = "disabled"
+	e.users.byID[sess.UserID] = u
+
+	_, _, err := e.svc.Authenticate(context.Background(), sess.ID)
+	assertKind(t, err, apperr.KindUnauthenticated, "session_invalid")
+	if len(e.sessions.sessions) != 0 || !slices.Contains(e.sessions.revoked, sess.UserID) {
+		t.Fatalf("todas as sessões do usuário desativado devem ser encerradas: %v", e.sessions.sessions)
 	}
 }
 

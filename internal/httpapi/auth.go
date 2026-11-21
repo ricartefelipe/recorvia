@@ -313,19 +313,42 @@ func (a *API) accessChecker(ctx context.Context, tenantID, userID uuid.UUID) err
 	return err
 }
 
+func (a *API) postLogoutURL() string {
+	if a.Config != nil && a.Config.PublicURL != nil {
+		return a.Config.PublicURL.String()
+	}
+	return "/"
+}
+
+// authLogout encerra a sessão. O endereço devolvido leva o navegador ao
+// encerramento da sessão no provedor com client_id e
+// post_logout_redirect_uri; o refresh token é revogado pelo servidor e
+// nenhum token do provedor vai para o navegador.
 func (a *API) authLogout(w http.ResponseWriter, r *http.Request) {
 	p := mustPrincipal(r)
-	post := "/"
-	if a.Config != nil && a.Config.PublicURL != nil {
-		post = a.Config.PublicURL.String()
-	}
-	target, err := a.Identity.Logout(r.Context(), p.Session, post)
+	res, err := a.Identity.Logout(r.Context(), p.Session, a.postLogoutURL())
+	a.finishLogout(w, r, res, err)
+}
+
+// authLogoutAll encerra todas as sessões do usuário, em qualquer
+// navegador, e revoga no provedor os refresh tokens de cada uma.
+func (a *API) authLogoutAll(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(r)
+	res, err := a.Identity.LogoutAll(r.Context(), p.Session, a.postLogoutURL())
+	a.finishLogout(w, r, res, err)
+}
+
+func (a *API) finishLogout(w http.ResponseWriter, r *http.Request, res identity.LogoutResult, err error) {
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
+	if res.ProviderErr != nil {
+		// A sessão local já foi encerrada; o provedor expira o token sozinho.
+		a.log.WarnContext(r.Context(), "revogação no provedor de identidade falhou", slog.String("error", res.ProviderErr.Error()))
+	}
 	a.clearSessionCookie(w)
-	a.writeJSON(w, r, http.StatusOK, map[string]string{"redirect_url": target})
+	a.writeJSON(w, r, http.StatusOK, map[string]string{"redirect_url": res.RedirectURL})
 }
 
 type orgSummaryDTO struct {

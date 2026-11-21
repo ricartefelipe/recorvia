@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
-import type { Dispute, RecoverySettlement, Refund } from '../../api/types';
+import type { Dispute, PaymentOperation, RecoverySettlement, Refund } from '../../api/types';
 import { todayInTimeZone } from '../../lib/dates';
 import { PERMISSIONS } from '../../session/permissions';
 import { makeCharge, makeSession } from '../../test/fixtures';
@@ -9,7 +9,7 @@ import { renderPage } from '../../test/render';
 import { server } from '../../test/server';
 import { canRequestRefund } from './api';
 import { ChargesTable } from './ChargesTable';
-import { DisputesPage, RefundsPage } from './PaymentListsPages';
+import { DisputesPage, PaymentOperationsPage, RefundsPage } from './PaymentListsPages';
 import { RefundModal } from './RefundModal';
 
 const CHARGE_ID = '0195f1a0-0000-7000-8000-00000000c001';
@@ -216,6 +216,24 @@ describe('disputas', () => {
     expect(within(table).queryByRole('button', { name: /Dar baixa|Ver baixas/ })).not.toBeInTheDocument();
   });
 
+  it('a listagem segue o next_cursor', async () => {
+    const cursors: (string | null)[] = [];
+    server.use(
+      http.get('/api/v1/disputes', ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('cursor');
+        cursors.push(cursor);
+        return cursor
+          ? HttpResponse.json({ data: [dispute({ id: '0195f1a0-0000-7000-8000-0000000d1009', amount: 7700 })], next_cursor: null })
+          : HttpResponse.json({ data: [dispute({ amount: 5500 })], next_cursor: 'disputas-2' });
+      }),
+    );
+    const { user } = renderPage(<DisputesPage />, { path: '/disputas' });
+    expect(await screen.findByText('R$ 55,00')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Próxima/ }));
+    expect(await screen.findByText('R$ 77,00')).toBeInTheDocument();
+    expect(cursors).toEqual([null, 'disputas-2']);
+  });
+
   it('disputa perdida de pagamento com excedente mostra o crédito consumido, o valor a recuperar e o saldo', async () => {
     const disputes: Dispute[] = [
       withRecovery({ recovery_received_amount: 1500, recovery_outstanding_amount: 500 }),
@@ -328,5 +346,45 @@ describe('disputas', () => {
     expect(await within(modal).findByText(/já foi baixado por completo/)).toBeInTheDocument();
     expect(within(modal).getAllByText('Perdido').length).toBeGreaterThan(0);
     expect(within(modal).queryByLabelText(/Valor da baixa/)).not.toBeInTheDocument();
+  });
+});
+
+describe('operações de pagamento', () => {
+  const operation = (overrides: Partial<PaymentOperation> = {}): PaymentOperation => ({
+    id: '0195f1a0-0000-7000-8000-0000000f0001',
+    charge_id: CHARGE_ID,
+    refund_id: null,
+    kind: 'create_charge',
+    status: 'succeeded',
+    external_reference: 'op-primeira',
+    attempts: 1,
+    next_attempt_at: '2026-11-17T12:00:00Z',
+    last_error: '',
+    created_at: '2026-11-17T12:00:00Z',
+    updated_at: '2026-11-17T12:00:00Z',
+    ...overrides,
+  });
+
+  it('a listagem segue o next_cursor e o aviso de resultado desconhecido indica que há mais', async () => {
+    const cursors: (string | null)[] = [];
+    server.use(
+      http.get('/api/v1/payment-operations', ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get('status') === 'unknown') {
+          return HttpResponse.json({ data: [operation({ id: 'u1', status: 'unknown' })], next_cursor: 'desconhecidas-2' });
+        }
+        const cursor = url.searchParams.get('cursor');
+        cursors.push(cursor);
+        return cursor
+          ? HttpResponse.json({ data: [operation({ id: 'o2', external_reference: 'op-segunda' })], next_cursor: null })
+          : HttpResponse.json({ data: [operation()], next_cursor: 'operacoes-2' });
+      }),
+    );
+    const { user } = renderPage(<PaymentOperationsPage />, { path: '/operacoes-de-pagamento' });
+    expect(await screen.findByText('op-primeira')).toBeInTheDocument();
+    expect(await screen.findByText('1 ou mais operação(ões) com resultado desconhecido')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Próxima/ }));
+    expect(await screen.findByText('op-segunda')).toBeInTheDocument();
+    expect(cursors).toEqual([null, 'operacoes-2']);
   });
 });

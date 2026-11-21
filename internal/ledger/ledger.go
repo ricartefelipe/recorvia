@@ -4,8 +4,18 @@
 // nenhum lançamento é alterado ou removido.
 //
 // O ledger registra a movimentação operacional (faturamento, recebíveis,
-// liquidação no provedor, taxas, reembolsos, chargebacks). Ele não substitui
-// a contabilidade fiscal nem o reconhecimento contábil de receita.
+// confirmação e liquidação no provedor, taxas, reembolsos, chargebacks). Ele
+// não substitui a contabilidade fiscal nem o reconhecimento contábil de
+// receita.
+//
+// Ciclo do pagamento pelo provedor (ADR-080): a confirmação leva o valor
+// bruto de contas a receber para pagamentos confirmados no provedor
+// (payment.confirmed); o recebimento informado pelo provedor transfere o
+// bruto para os valores em liquidação e reconhece a taxa (payment.received);
+// a liquidação (settlement.*) leva o líquido ao disponível. Toda
+// movimentação posterior com o provedor (reembolso, retenção e liberação de
+// chargeback, ajuste de conciliação) passa pelos valores em liquidação e é
+// liquidada no disponível da mesma forma (Settlement).
 package ledger
 
 import (
@@ -24,8 +34,15 @@ type AccountCode string
 
 // Contas do plano operacional.
 const (
-	AccountsReceivable        AccountCode = "accounts_receivable"
-	BilledRevenue             AccountCode = "billed_revenue"
+	AccountsReceivable AccountCode = "accounts_receivable"
+	BilledRevenue      AccountCode = "billed_revenue"
+	// ProviderConfirmed reúne os pagamentos confirmados pelo provedor e
+	// ainda não recebidos (valor bruto a receber do provedor): sai da conta
+	// quando o provedor informa o recebimento.
+	ProviderConfirmed AccountCode = "provider_confirmed"
+	// ProviderClearing é a conta de passagem das movimentações com o
+	// provedor: recebe o bruto recebido, paga taxas, reembolsos, retenções de
+	// chargeback e ajustes, e é liquidada no disponível (Cash).
 	ProviderClearing          AccountCode = "provider_clearing"
 	Cash                      AccountCode = "cash"
 	ProviderFees              AccountCode = "provider_fees"
@@ -67,6 +84,7 @@ type AccountDef struct {
 var Chart = []AccountDef{
 	{AccountsReceivable, "Contas a receber", Asset},
 	{BilledRevenue, "Receita faturada", Revenue},
+	{ProviderConfirmed, "Pagamentos confirmados no provedor", Asset},
 	{ProviderClearing, "Valores em liquidação no provedor", Asset},
 	{Cash, "Disponível liquidado", Asset},
 	{ProviderFees, "Taxas do provedor", Expense},
@@ -213,12 +231,25 @@ func InvoiceIssued(id, tenant, invoiceID uuid.UUID, number string, total, credit
 	return build(id, tenant, "invoice.issued", "Emissão da fatura "+number, at, "invoice", invoiceID, "invoice.issued:"+invoiceID.String(), entries)
 }
 
-// ProviderPaymentReceived: confirmação de pagamento no provedor. O valor
-// bruto sai de contas a receber para liquidação; a taxa é despesa.
+// ProviderPaymentConfirmed: confirmação de pagamento pelo provedor. O valor
+// aplicado à fatura sai de contas a receber para pagamentos confirmados no
+// provedor, onde fica até o recebimento (ProviderPaymentReceived). A taxa só é
+// reconhecida no recebimento, quando o provedor a retém do valor creditado.
+func ProviderPaymentConfirmed(id, tenant, paymentID uuid.UUID, amount money.Money, at time.Time) (Transaction, bool, error) {
+	return build(id, tenant, "payment.confirmed", "Pagamento confirmado no provedor", at, "payment", paymentID,
+		"payment.confirmed:"+paymentID.String(), pair(ProviderConfirmed, AccountsReceivable, amount))
+}
+
+// ProviderPaymentReceived: recebimento informado pelo provedor. O valor bruto
+// confirmado (gross: aplicado à fatura mais o excedente convertido em
+// crédito) passa de pagamentos confirmados para os valores em liquidação, e a
+// taxa retida pelo provedor sai dos valores em liquidação para a despesa. O
+// líquido é levado ao disponível pela liquidação (Settlement).
 func ProviderPaymentReceived(id, tenant, paymentID uuid.UUID, gross, fee money.Money, at time.Time) (Transaction, bool, error) {
-	entries := pair(ProviderClearing, AccountsReceivable, gross)
+	entries := pair(ProviderClearing, ProviderConfirmed, gross)
 	entries = append(entries, pair(ProviderFees, ProviderClearing, fee)...)
-	return build(id, tenant, "payment.confirmed", "Pagamento confirmado no provedor", at, "payment", paymentID, "payment.confirmed:"+paymentID.String(), entries)
+	return build(id, tenant, "payment.received", "Pagamento recebido pelo provedor", at, "payment", paymentID,
+		"payment.received:"+paymentID.String(), entries)
 }
 
 // ManualPaymentReceived: recebimento registrado manualmente.
@@ -227,11 +258,13 @@ func ManualPaymentReceived(id, tenant, paymentID uuid.UUID, amount money.Money, 
 		"payment.manual:"+paymentID.String(), pair(Cash, AccountsReceivable, amount))
 }
 
-// Overpayment: valor recebido além do saldo vira crédito do cliente.
+// Overpayment: valor recebido além do saldo vira crédito do cliente. Pelo
+// provedor, o excedente também fica em pagamentos confirmados até o
+// recebimento.
 func Overpayment(id, tenant, paymentID uuid.UUID, amount money.Money, viaProvider bool, at time.Time) (Transaction, bool, error) {
 	debit := Cash
 	if viaProvider {
-		debit = ProviderClearing
+		debit = ProviderConfirmed
 	}
 	return build(id, tenant, "payment.overpayment", "Pagamento excedente convertido em crédito", at, "payment", paymentID,
 		"payment.overpayment:"+paymentID.String(), pair(debit, CustomerCredits, amount))
@@ -331,13 +364,6 @@ func BadDebtRecovered(id, tenant, paymentID uuid.UUID, amount money.Money, at ti
 		"invoice.bad_debt_recovered:"+paymentID.String(), pair(AccountsReceivable, BadDebt, amount))
 }
 
-// ProviderFeeCharged: taxa do provedor sobre um recebimento que não quitou
-// saldo de fatura (por exemplo, pagamento de fatura já quitada).
-func ProviderFeeCharged(id, tenant, paymentID uuid.UUID, fee money.Money, at time.Time) (Transaction, bool, error) {
-	return build(id, tenant, "payment.provider_fee", "Taxa do provedor", at, "payment", paymentID,
-		"payment.provider_fee:"+paymentID.String(), pair(ProviderFees, ProviderClearing, fee))
-}
-
 // CreditNoteIssued: nota de crédito que reduz o saldo da fatura.
 func CreditNoteIssued(id, tenant, creditNoteID uuid.UUID, amount money.Money, at time.Time) (Transaction, bool, error) {
 	return build(id, tenant, "credit_note.issued", "Nota de crédito", at, "credit_note", creditNoteID,
@@ -350,10 +376,46 @@ func CustomerCreditGranted(id, tenant, creditID uuid.UUID, amount money.Money, a
 		"customer_credit.granted:"+creditID.String(), pair(RevenueAdjustments, CustomerCredits, amount))
 }
 
-// SettlementReceived: liquidação do provedor para o disponível.
-func SettlementReceived(id, tenant, referenceID uuid.UUID, amount money.Money, at time.Time) (Transaction, bool, error) {
-	return build(id, tenant, "settlement.received", "Liquidação recebida do provedor", at, "settlement", referenceID,
-		"settlement.received:"+referenceID.String(), pair(Cash, ProviderClearing, amount))
+// Settlement: liquidação no disponível da movimentação t com o provedor. O
+// efeito líquido de t nos valores em liquidação é transferido para o
+// disponível liquidado: débito líquido (recebimento, liberação de retenção,
+// ajuste a favor) vira crédito do provedor no disponível (settlement.received);
+// crédito líquido (taxa, reembolso, retenção de chargeback, ajuste contra)
+// vira débito do provedor no disponível (settlement.debited). A chave deriva
+// da chave de t, o que torna a liquidação idempotente como o lançamento que a
+// originou. ok=false quando t não movimenta os valores em liquidação.
+func Settlement(id uuid.UUID, t Transaction) (Transaction, bool, error) {
+	var net money.Money
+	seen := false
+	for _, e := range t.Entries {
+		if e.Account != ProviderClearing {
+			continue
+		}
+		if !seen {
+			net, seen = money.Zero(e.Amount.Currency()), true
+		}
+		var err error
+		if e.Direction == Debit {
+			net, err = net.Add(e.Amount)
+		} else {
+			net, err = net.Sub(e.Amount)
+		}
+		if err != nil {
+			return Transaction{}, false, fmt.Errorf("%w: %w", ErrInvalidEntry, err)
+		}
+	}
+	if !seen || net.IsZero() {
+		return Transaction{}, false, nil
+	}
+	kind, desc, entries := "settlement.received", "Liquidação no disponível: crédito do provedor", pair(Cash, ProviderClearing, net)
+	if net.IsNegative() {
+		abs, err := net.Abs()
+		if err != nil {
+			return Transaction{}, false, err
+		}
+		kind, desc, entries = "settlement.debited", "Liquidação no disponível: débito do provedor", pair(ProviderClearing, Cash, abs)
+	}
+	return build(id, t.TenantID, kind, desc, t.OccurredAt, t.ReferenceType, t.ReferenceID, "settlement:"+t.IdempotencyKey, entries)
 }
 
 // ReconciliationAdjustment: ajuste decidido na conciliação. Valor positivo

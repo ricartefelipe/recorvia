@@ -371,7 +371,7 @@ SELECT tenant_id, provider, count(*), min(received_at)
    nova conciliação da janela e acompanhar a execução até `completed`: ela fecha as divergências
    resolvidas pelo próprio fluxo.
 2. Resolver as restantes uma a uma: `POST /api/v1/reconciliation/discrepancies/{id}/resolve` com
-   `resolution` (`accept_provider`, `keep_local`, `adjust_ledger` ou `dismiss`) e `justification`
+   a `version` da divergência no `If-Match`, `resolution` (`accept_provider`, `keep_local`, `adjust_ledger` ou `dismiss`) e `justification`
    (mínimo de 10 caracteres). `adjust_ledger` gera lançamento compensatório; a resolução é
    auditada.
 3. Em caso de dúvida sobre valores, prevalece a confirmação do provedor para dinheiro recebido
@@ -382,3 +382,53 @@ SELECT tenant_id, provider, count(*), min(received_at)
   do tipo diminui.
 - Para `adjust_ledger`: `GET /api/v1/ledger/transactions` mostra o lançamento compensatório
   balanceado e a trilha (`GET /api/v1/audit-events`) registra quem resolveu e por quê.
+
+<a id="pagamento-confirmado-sem-recebimento"></a>
+
+## Pagamento confirmado sem recebimento
+
+### Sintomas
+- O dashboard mostra *A receber do provedor* (`pending_provider_receipt`) com valor que deveria ter sido
+  creditado (por exemplo, cartão além do prazo de recebimento do provedor).
+- No ledger, o pagamento tem `payment.confirmed` e não tem `payment.received` nem `settlement.received`.
+
+### Diagnóstico
+O recebimento é lançado quando o provedor informa a situação recebida (ou posterior, como reembolso e
+chargeback), em qualquer ordem e sem duplicidade (ADR-080). Pagamentos que ainda aguardam o recebimento,
+por tenant (como dono do banco, que não passa pela RLS):
+
+```sql
+SELECT p.tenant_id, p.id, p.charge_id, p.amount, p.paid_at,
+       sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END) AS pending
+  FROM payments p
+  JOIN ledger_transactions t ON t.tenant_id = p.tenant_id AND t.reference_type = 'payment' AND t.reference_id = p.id
+  JOIN ledger_entries e ON e.tenant_id = t.tenant_id AND e.transaction_id = t.id
+  JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id AND a.code = 'provider_confirmed'
+ GROUP BY p.tenant_id, p.id
+HAVING sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END) <> 0
+ ORDER BY p.paid_at;
+```
+
+Compare com a situação da cobrança no painel do provedor e com os webhooks recebidos da cobrança
+(`provider_webhook_events`).
+
+A conciliação aponta o caso como `payment_not_reflected` com `direction = provider_received` (valor local
+0, valor do provedor o pendente).
+
+### Mitigação
+1. Se o provedor já informa a cobrança recebida, o webhook de recebimento não chegou ou falhou: resolva a
+   divergência `payment_not_reflected` (`provider_received`) com `accept_provider`, que consulta o provedor e
+   lança o recebimento e a liquidação; ou peça ao provedor o reenvio (no simulador, ação `replay`) ou
+   reprocesse a dead letter do consumidor de webhooks. Em todos os caminhos o recebimento é lançado uma
+   única vez.
+2. Se a cobrança continua apenas confirmada no provedor, não há o que corrigir: o valor segue em
+   pagamentos confirmados até o crédito (`accept_provider` é recusado com `payment_not_applicable`).
+3. Pagamentos confirmados antes da ADR-080 não aparecem aqui: foram lançados direto nos valores em
+   liquidação e não têm pendência. O saldo que deixaram em `provider_clearing` não é liquidado
+   automaticamente, e reembolsos e chargebacks posteriores sobre eles deixam o disponível negativo nessa
+   medida. Só bancos locais de demonstração têm esses dados; recrie-os com `make reset` (limitação
+   registrada na ADR-080).
+
+### Verificação
+- O pagamento passa a ter `payment.received` e `settlement.received` (`GET /api/v1/ledger/transactions?reference_type=payment&reference_id=<pagamento>`).
+- `provider_confirmed` e `provider_clearing` do pagamento ficam zerados e *A receber do provedor* diminui.

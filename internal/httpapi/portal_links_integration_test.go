@@ -199,7 +199,8 @@ func TestPortalLinkListAndRevokeOverHTTP(t *testing.T) {
 	}
 	// Cliente arquivado: os links continuam listáveis e revogáveis.
 	archivedID, _ := newPortalLink(t, operator, cust.ID)
-	if st, body, _ := owner.do(http.MethodPost, "/api/v1/customers/"+cust.ID.String()+"/archive", nil); st != http.StatusOK {
+	if st, body, _ := owner.do(http.MethodPost, "/api/v1/customers/"+cust.ID.String()+"/archive", nil,
+		matchVersion(owner.versionOf("/api/v1/customers/"+cust.ID.String()))...); st != http.StatusOK {
 		t.Fatalf("arquivamento: %d %v", st, body)
 	}
 	if st, body, _ := operator.do(http.MethodDelete, base+"/"+archivedID, nil); st != http.StatusNoContent {

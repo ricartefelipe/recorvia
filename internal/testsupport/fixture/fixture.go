@@ -102,6 +102,17 @@ func (e *Env) NewTenant(t testing.TB, slugPrefix string) Tenant {
 	return Tenant{ID: tn.ID, Owner: u, Actor: audit.User(u.ID, u.DisplayName)}
 }
 
+// PlatformVersion lê a versão atual da assinatura da plataforma do tenant,
+// esperada pela troca de plano (If-Match).
+func (e *Env) PlatformVersion(t testing.TB, tenantID uuid.UUID) int {
+	t.Helper()
+	o, err := e.Platform.Overview(context.Background(), tenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return o.Subscription.Version
+}
+
 var docSeq = 10000000
 
 // NewCustomer cria um cliente PJ com CNPJ estruturalmente válido.

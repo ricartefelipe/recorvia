@@ -1,32 +1,39 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Alert, Badge, Button, Card, Group, List, Modal, Paper, Progress, SimpleGrid, Stack, Table, Text, Textarea, Title } from '@mantine/core';
 import { IconBuildingStore, IconCheck, IconInfoCircle } from '@tabler/icons-react';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { api } from '../../api/client';
-import type { AddonOrder, DataList, PlatformAddon, PlatformOverview, PlatformPlan, PlatformStatement } from '../../api/types';
+import type { AddonOrder, CursorPage, DataList, PlatformAddon, PlatformOverview, PlatformPlan, PlatformStatement } from '../../api/types';
 import { DateTime, Money, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
-import { confirmAction, KeyValue, PageHeader } from '../../components/ui';
-import { useApiMutation } from '../../lib/hooks';
+import { confirmAction, CursorPager, KeyValue, PageHeader } from '../../components/ui';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
+import { useIdempotencyKey } from '../../lib/idempotency';
 import { addonOrderStatusLabels, labelOf, platformSubscriptionStatusLabels } from '../../lib/labels';
 import { formatMoney } from '../../lib/money';
+import type { PageRequest } from '../../lib/pages';
 import { optionalText } from '../../lib/validation';
 import { Can, useTenant } from '../../session/SessionContext';
 
 const platformApi = {
   overview: (signal?: AbortSignal) => api.get<PlatformOverview>('/api/v1/platform/overview', { signal }),
   plans: (signal?: AbortSignal) => api.get<DataList<PlatformPlan>>('/api/v1/platform/plans', { signal }),
-  changePlan: (planCode: string) => api.put<PlatformOverview>('/api/v1/platform/plan', { plan_code: planCode }),
+  /** If-Match é a versão da assinatura da plataforma exibida (subscription.version). */
+  changePlan: (planCode: string, version: number) =>
+    api.put<PlatformOverview>('/api/v1/platform/plan', { plan_code: planCode }, { ifMatch: version }),
   addons: (signal?: AbortSignal) => api.get<DataList<PlatformAddon>>('/api/v1/platform/addons', { signal }),
-  orders: (signal?: AbortSignal) => api.get<DataList<AddonOrder>>('/api/v1/platform/addon-orders', { signal }),
-  order: (input: { addon_code: string; notes?: string }) => api.post<AddonOrder>('/api/v1/platform/addon-orders', input),
-  statements: (signal?: AbortSignal) => api.get<DataList<PlatformStatement>>('/api/v1/platform/statements', { signal }),
+  orders: (page: PageRequest, signal?: AbortSignal) =>
+    api.get<CursorPage<AddonOrder>>('/api/v1/platform/addon-orders', { query: { ...page }, signal }),
+  order: (input: { addon_code: string; notes?: string }, idempotencyKey: string) =>
+    api.post<AddonOrder>('/api/v1/platform/addon-orders', input, { idempotencyKey }),
+  statements: (page: PageRequest, signal?: AbortSignal) =>
+    api.get<CursorPage<PlatformStatement>>('/api/v1/platform/statements', { query: { ...page }, signal }),
 };
 
-function UsageBar({ label, used, max }: { label: string; used: number; max: number | null | undefined }) {
+function UsageBar({ label, used, max, detail }: { label: string; used: number; max: number | null | undefined; detail?: string }) {
   const unlimited = max === null || max === undefined;
   const pct = unlimited ? 0 : Math.min(100, Math.round((used / Math.max(1, max)) * 100));
   return (
@@ -34,12 +41,44 @@ function UsageBar({ label, used, max }: { label: string; used: number; max: numb
       <Group justify="space-between">
         <Text size="sm">{label}</Text>
         <Text size="sm" fw={600}>
-          {used} {unlimited ? '(sem limite)' : `de ${max}`}
+          {detail ?? used} {unlimited ? '(sem limite)' : `de ${max}`}
         </Text>
       </Group>
       {!unlimited && <Progress value={pct} color={pct >= 90 ? 'red' : pct >= 75 ? 'orange' : 'blue'} aria-label={`${label}: ${pct}% do limite`} />}
     </Stack>
   );
+}
+
+function usersDetail(active: number, pending: number): string {
+  const activeText = `${active} ${active === 1 ? 'ativo' : 'ativos'}`;
+  if (pending === 0) return activeText;
+  return `${activeText} + ${pending} ${pending === 1 ? 'convite pendente' : 'convites pendentes'}`;
+}
+
+function OrderProgress({ order }: { order: AddonOrder }) {
+  switch (order.status) {
+    case 'scheduled':
+      return (
+        <Text size="xs" c="dimmed">
+          Agendado para <DateTime value={order.scheduled_for} />
+        </Text>
+      );
+    case 'completed':
+      return (
+        <Text size="xs" c="dimmed">
+          Concluído em <DateTime value={order.completed_at} />
+          {order.billed ? ' · cobrado no demonstrativo' : ' · entra no próximo demonstrativo'}
+        </Text>
+      );
+    case 'canceled':
+      return order.cancel_reason ? (
+        <Text size="xs" c="dimmed">
+          Motivo: {order.cancel_reason}
+        </Text>
+      ) : null;
+    default:
+      return null;
+  }
 }
 
 function Overview({ overview }: { overview: PlatformOverview }) {
@@ -84,10 +123,16 @@ function Overview({ overview }: { overview: PlatformOverview }) {
           <Title order={2} size="h4">
             Limites e uso
           </Title>
-          <UsageBar label="Usuários ativos" used={usage.active_users} max={plan.max_users} />
+          <UsageBar
+            label="Usuários (ativos e convites pendentes)"
+            used={usage.active_users + usage.pending_invitations}
+            max={plan.max_users}
+            detail={usersDetail(usage.active_users, usage.pending_invitations)}
+          />
           <UsageBar label="Assinaturas ativas dos seus clientes" used={usage.active_subscriptions} max={plan.max_active_subscriptions} />
           <Text size="xs" c="dimmed">
-            Ao atingir um limite, novos convites ou assinaturas são recusados até a troca de plano.
+            Ao atingir um limite, novos convites ou assinaturas são recusados até a troca de plano. Convites pendentes
+            reservam vagas de usuário e contam na troca para um plano menor.
           </Text>
         </Stack>
       </Paper>
@@ -95,11 +140,13 @@ function Overview({ overview }: { overview: PlatformOverview }) {
   );
 }
 
-function PlansSection({ currentCode }: { currentCode: string }) {
+function PlansSection({ currentCode, version }: { currentCode: string; version: number }) {
   const { keys } = useTenant();
   const query = useQuery({ queryKey: keys('platform', 'plans'), queryFn: ({ signal }) => platformApi.plans(signal) });
+  // A versão é a da assinatura exibida: depois de um 412, "Recarregar dados"
+  // traz a versão atual, e a troca é refeita sobre ela.
   const change = useApiMutation<PlatformPlan, PlatformOverview>({
-    mutationFn: (p) => platformApi.changePlan(p.code),
+    mutationFn: (p) => platformApi.changePlan(p.code, version),
     invalidate: ['platform'],
     successMessage: (o) => `Plano do Recorvia alterado para ${o.plan.name}.`,
   });
@@ -118,7 +165,14 @@ function PlansSection({ currentCode }: { currentCode: string }) {
           {data.map((p) => {
             const current = p.code === currentCode;
             return (
-              <Card key={p.code} withBorder radius="md" style={current ? { borderColor: 'var(--mantine-color-blue-5)' } : undefined}>
+              <Card
+                key={p.code}
+                component="section"
+                aria-label={`Plano ${p.name}`}
+                withBorder
+                radius="md"
+                style={current ? { borderColor: 'var(--mantine-color-blue-5)' } : undefined}
+              >
                 <Stack gap="xs" h="100%">
                   <Group justify="space-between">
                     <Text fw={700}>{p.name}</Text>
@@ -164,10 +218,15 @@ function PlansSection({ currentCode }: { currentCode: string }) {
 
 const orderSchema = z.object({ notes: optionalText(2000) });
 
-function OrderAddonModal({ addon, onClose }: { addon: PlatformAddon; onClose: () => void }) {
+export function OrderAddonModal({ addon, onClose }: { addon: PlatformAddon; onClose: () => void }) {
   const form = useForm<z.input<typeof orderSchema>, unknown, z.output<typeof orderSchema>>({ resolver: zodResolver(orderSchema), defaultValues: { notes: '' } });
+  const idempotency = useIdempotencyKey();
   const mutation = useApiMutation<z.output<typeof orderSchema>, AddonOrder>({
-    mutationFn: (v) => platformApi.order({ addon_code: addon.code, notes: v.notes }),
+    mutationFn: (v) => {
+      const input = { addon_code: addon.code, notes: v.notes };
+      return platformApi.order(input, idempotency.keyFor(input));
+    },
+    idempotency,
     invalidate: ['platform'],
     successMessage: 'Pedido registrado. Nossa equipe entrará em contato.',
     onSuccess: onClose,
@@ -199,7 +258,13 @@ function AddonsSection() {
   const { keys } = useTenant();
   const [ordering, setOrdering] = useState<PlatformAddon | null>(null);
   const addons = useQuery({ queryKey: keys('platform', 'addons'), queryFn: ({ signal }) => platformApi.addons(signal) });
-  const orders = useQuery({ queryKey: keys('platform', 'orders'), queryFn: ({ signal }) => platformApi.orders(signal) });
+  const pagination = useCursorPagination('platform-orders');
+  const orders = useQuery({
+    queryKey: keys('platform', 'orders', pagination.cursor),
+    queryFn: ({ signal }) => platformApi.orders({ cursor: pagination.cursor, limit: 25 }, signal),
+    placeholderData: keepPreviousData,
+  });
+  useReturnFromEmptyPage(pagination, orders.data?.data, orders.isPlaceholderData);
   const addonName = new Map((addons.data?.data ?? []).map((a) => [a.code, a.name]));
   return (
     <Stack>
@@ -235,40 +300,51 @@ function AddonsSection() {
         Pedidos
       </Title>
       <QueryContent query={orders}>
-        {({ data }) =>
-          data.length === 0 ? (
+        {(page) =>
+          page.data.length === 0 ? (
             <Text size="sm" c="dimmed">
               Nenhum pedido.
             </Text>
           ) : (
-            <Table aria-label="Pedidos de serviços adicionais">
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Serviço</Table.Th>
-                  <Table.Th>Situação</Table.Th>
-                  <Table.Th ta="right">Valor</Table.Th>
-                  <Table.Th>Observações</Table.Th>
-                  <Table.Th>Pedido em</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {data.map((o) => (
-                  <Table.Tr key={o.id}>
-                    <Table.Td>{addonName.get(o.addon_code) ?? o.addon_code}</Table.Td>
-                    <Table.Td>
-                      <StatusBadge status={o.status} labels={addonOrderStatusLabels} />
-                    </Table.Td>
-                    <Table.Td ta="right">
-                      <Money value={o.price} currency={o.currency} />
-                    </Table.Td>
-                    <Table.Td>{o.notes || '—'}</Table.Td>
-                    <Table.Td>
-                      <DateTime value={o.created_at} />
-                    </Table.Td>
+            <>
+              <Table aria-label="Pedidos de serviços adicionais">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Serviço</Table.Th>
+                    <Table.Th>Situação</Table.Th>
+                    <Table.Th ta="right">Valor</Table.Th>
+                    <Table.Th>Observações</Table.Th>
+                    <Table.Th>Pedido em</Table.Th>
                   </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
+                </Table.Thead>
+                <Table.Tbody>
+                  {page.data.map((o) => (
+                    <Table.Tr key={o.id}>
+                      <Table.Td>{addonName.get(o.addon_code) ?? o.addon_code}</Table.Td>
+                      <Table.Td>
+                        <StatusBadge status={o.status} labels={addonOrderStatusLabels} />
+                        <OrderProgress order={o} />
+                      </Table.Td>
+                      <Table.Td ta="right">
+                        <Money value={o.price} currency={o.currency} />
+                      </Table.Td>
+                      <Table.Td>{o.notes || '—'}</Table.Td>
+                      <Table.Td>
+                        <DateTime value={o.created_at} />
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+              <CursorPager
+                page={pagination.page}
+                hasPrevious={pagination.hasPrevious}
+                hasNext={!!page.next_cursor}
+                onPrevious={pagination.previous}
+                onNext={() => page.next_cursor && pagination.next(page.next_cursor)}
+                loading={orders.isFetching}
+              />
+            </>
           )
         }
       </QueryContent>
@@ -279,47 +355,63 @@ function AddonsSection() {
 
 function StatementsSection() {
   const { keys } = useTenant();
-  const query = useQuery({ queryKey: keys('platform', 'statements'), queryFn: ({ signal }) => platformApi.statements(signal) });
+  const pagination = useCursorPagination('platform-statements');
+  const query = useQuery({
+    queryKey: keys('platform', 'statements', pagination.cursor),
+    queryFn: ({ signal }) => platformApi.statements({ cursor: pagination.cursor, limit: 25 }, signal),
+    placeholderData: keepPreviousData,
+  });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <QueryContent query={query}>
-      {({ data }) =>
-        data.length === 0 ? (
+      {(page) =>
+        page.data.length === 0 ? (
           <EmptyState title="Nenhum demonstrativo" description="Os demonstrativos mensais do Recorvia aparecem após o fechamento de cada período." />
         ) : (
-          <Table.ScrollContainer minWidth={700}>
-            <Table aria-label="Demonstrativos do Recorvia">
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Período</Table.Th>
-                  <Table.Th>Plano</Table.Th>
-                  <Table.Th ta="right">Assinatura</Table.Th>
-                  <Table.Th ta="right">Adicionais</Table.Th>
-                  <Table.Th ta="right">Total</Table.Th>
-                  <Table.Th>Situação</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {data.map((s) => (
-                  <Table.Tr key={s.id}>
-                    <Table.Td>
-                      <DateTime value={s.period_start} dateOnly /> – <DateTime value={s.period_end} dateOnly />
-                    </Table.Td>
-                    <Table.Td>{s.plan_code}</Table.Td>
-                    <Table.Td ta="right">
-                      <Money value={s.subscription_amount} currency={s.currency} />
-                    </Table.Td>
-                    <Table.Td ta="right">
-                      <Money value={s.addons_amount} currency={s.currency} />
-                    </Table.Td>
-                    <Table.Td ta="right">
-                      <Money value={s.total} currency={s.currency} strong />
-                    </Table.Td>
-                    <Table.Td>{labelOf(platformSubscriptionStatusLabels, s.status)}</Table.Td>
+          <>
+            <Table.ScrollContainer minWidth={700}>
+              <Table aria-label="Demonstrativos do Recorvia">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Período</Table.Th>
+                    <Table.Th>Plano</Table.Th>
+                    <Table.Th ta="right">Assinatura</Table.Th>
+                    <Table.Th ta="right">Adicionais</Table.Th>
+                    <Table.Th ta="right">Total</Table.Th>
+                    <Table.Th>Situação</Table.Th>
                   </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
-          </Table.ScrollContainer>
+                </Table.Thead>
+                <Table.Tbody>
+                  {page.data.map((s) => (
+                    <Table.Tr key={s.id}>
+                      <Table.Td>
+                        <DateTime value={s.period_start} dateOnly /> – <DateTime value={s.period_end} dateOnly />
+                      </Table.Td>
+                      <Table.Td>{s.plan_code}</Table.Td>
+                      <Table.Td ta="right">
+                        <Money value={s.subscription_amount} currency={s.currency} />
+                      </Table.Td>
+                      <Table.Td ta="right">
+                        <Money value={s.addons_amount} currency={s.currency} />
+                      </Table.Td>
+                      <Table.Td ta="right">
+                        <Money value={s.total} currency={s.currency} strong />
+                      </Table.Td>
+                      <Table.Td>{labelOf(platformSubscriptionStatusLabels, s.status)}</Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            </Table.ScrollContainer>
+            <CursorPager
+              page={pagination.page}
+              hasPrevious={pagination.hasPrevious}
+              hasNext={!!page.next_cursor}
+              onPrevious={pagination.previous}
+              onNext={() => page.next_cursor && pagination.next(page.next_cursor)}
+              loading={query.isFetching}
+            />
+          </>
         )
       }
     </QueryContent>
@@ -347,7 +439,7 @@ export function PlatformPage() {
               <Title order={2} size="h4">
                 Planos do Recorvia
               </Title>
-              <PlansSection currentCode={o.subscription.plan_code} />
+              <PlansSection currentCode={o.subscription.plan_code} version={o.subscription.version} />
             </Stack>
           </>
         )}

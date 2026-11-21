@@ -1720,3 +1720,851 @@ há estorno da baixa nem operação para o recebimento de valor já baixado como
 `invoice.bad_debt_recovered` das faturas), que exige decisão do financeiro sobre o lançamento compensatório;
 o recebimento da baixa entra direto no disponível liquidado, sem conciliação com extrato bancário; disputas
 perdidas antes da ADR-070 continuam sem valor a recuperar (o crédito permaneceu com o cliente).
+
+## ADR-074 Indicadores do painel: fórmulas documentadas, MRR líquido com reajuste e posições no fim do mês
+**Status:** aceita. Fórmulas completas em [`docs/arquitetura/indicadores.md`](arquitetura/indicadores.md).
+**Contexto:** uma auditoria do RF-17 encontrou, com teste: `open_discrepancies` sempre zero (a leitura nunca
+preenchia o campo); chaves de `definitions` diferentes das da interface (`open`, `churn`... no backend;
+`open_receivables`, `churn_rate_bp`... na interface), o que deixava os cards sem dica e a tabela "Como
+calculamos" com rótulos crus, além de indicadores sem definição; MRR e ARR pelo valor da versão de preço,
+ignorando o reajuste gravado na assinatura (ADR-027: fatura de 150,00 com MRR de 100,00) e os cupons, sem
+dizer se o MRR era bruto ou líquido; churn com o denominador pela situação atual e o numerador contando
+canceladas no trial e criadas no mês; e indicadores de posição sempre calculados com a data de hoje, embora a
+página diga "Indicadores de <mês>" (em `?month=2025-01`, antes da organização existir, o painel mostrava 6
+assinaturas ativas e recebíveis).
+**Decisão:**
+- **Chaves e bases.** Cada indicador da resposta tem fórmula em `definitions` e base temporal em `bases`, com a
+  chave igual ao nome do campo (`reporting.Indicators`). Bases: `month` (fluxo do mês), `month_end` (posição em
+  `position_at`, o último instante do mês ou, no mês corrente, o momento da consulta) e `current` (posição
+  atual). O contrato declara `definitions` e `bases` com as 18 chaves obrigatórias; o tipo gerado obriga a
+  interface a ter um rótulo para cada uma; `internal/httpapi/dashboard_test.go` exige fórmula e base para todo
+  indicador devolvido, no backend e no contrato.
+- **MRR líquido com reajuste.** Componente fixo com `price_override_amount` quando houver (o mesmo valor da
+  fatura), menos o desconto recorrente do cupom ativo de duração `forever` ou `repeating` (percentual sobre o
+  componente fixo; valor fixo limitado a ele, dividido por 12 nos planos anuais). O cupom `once` fica fora:
+  reduz uma fatura, não a recorrência. O MRR é líquido porque é a receita que as faturas recorrentes de fato
+  cobram; o desconto continua visível na fatura.
+- **Churn por coorte do início do mês.** Denominador: assinaturas iniciadas antes do mês, não encerradas antes
+  dele e `active`, `past_due` ou `suspended` no início do mês pelo histórico (`subscription_history`).
+  Numerador: dessas, as encerradas no mês. "Canceladas no mês" continua contando todas as encerradas.
+- **Posições no fim do mês onde há histórico fiel.** Assinaturas ativas pela situação registrada no histórico
+  até `position_at` (toda transição grava o histórico na mesma transação; início retroativo usa a situação da
+  criação). Recebíveis em aberto e vencidos, inadimplência e valores a recuperar pelo ledger até `position_at`:
+  as partidas de contas a receber apontam a fatura direta ou indiretamente (pagamento, nota de crédito), e o
+  saldo por fatura no instante atual é o `amount_due` (verificado em teste). O ledger usa o instante do
+  registro, de modo que meses encerrados não mudam (mesmo critério da ADR-073).
+- **Posição atual, rotulada.** MRR e ARR (preço, quantidade, reajuste e desconto de datas passadas só existem
+  em detalhes JSON de auditoria, sem contrato de formato, e os ciclos restantes do cupom não têm histórico),
+  divergências abertas e operações desconhecidas (filas de trabalho sem histórico de situação). A interface
+  mostra "Posição atual" nesses cards, "Posição em <data e hora>" nos de fim do mês, a base de cada indicador
+  em "Como calculamos" e um resumo das bases no topo, derivado de `bases`.
+- **Novas no mês** passam a contar pelo início do contrato (`started_at`), não pela criação do registro: a
+  migração de contratos com início retroativo não infla o mês da importação e fica coerente com a coorte do
+  churn.
+**Alternativas:** reconstruir o MRR histórico a partir dos detalhes do histórico da assinatura foi descartado
+pela fragilidade (formato de auditoria, sem ciclos restantes do cupom); uma tabela de movimentos de MRR ou um
+retrato mensal resolveria e fica como evolução (exige migration e preenchimento retroativo aproximado). Esconder
+MRR e ARR em meses passados foi descartado: o valor atual rotulado é útil e não engana. Calcular os recebíveis
+de meses passados pelas tabelas de pagamentos, notas e baixas foi descartado: o ledger já tem todos esses
+movimentos com instante e soma zero por construção. MRR bruto com o desconto à parte foi descartado nesta
+versão para não criar um segundo número de recorrência sem pedido do negócio.
+**Consequências:** a resposta ganha `position_at` e `bases`; `definitions` muda de chaves (`open`, `overdue`,
+`delinquency`, `churn` e `recoverables` passam a `open_receivables`, `overdue_receivables`,
+`delinquency_rate_bp`, `churn_rate_bp` e `open_recoverables`) e ganha as que faltavam; `billed_recurring`,
+`billed_usage`, `open_discrepancies` e `unknown_operations` passam a obrigatórios no contrato. Mês futuro em
+`GET /api/v1/dashboard` responde 422 (`future_month`). Limitações: a exclusão das faturas canceladas em "Receita
+faturada" usa a situação atual; a situação de trial encerrado passa a valer quando o motor fatura o primeiro
+ciclo (minutos depois do fim do trial); a posição dos recebíveis segue o registro no ledger, não a data
+informada num recebimento manual retroativo; "Novas no mês" e "Assinaturas ativas" de um mês encerrado mudam
+quando uma assinatura com início retroativo é cadastrada depois.
+**Desempenho (revisão):** a primeira versão somava todas as partidas de contas a receber do tenant a cada
+abertura do painel (65 ms com 4.000 faturas, crescendo com o histórico) e lia o histórico de todas as
+assinaturas já encerradas. Agora:
+- no mês corrente, os recebíveis vêm da soma de `amount_due` das faturas em aberto, equivalente ao saldo do
+  ledger no instante atual;
+- num mês encerrado, só entram as faturas que podiam ter saldo na posição (emitidas até ela e ainda em aberto,
+  ou pagas, canceladas ou baixadas depois dela), e as partidas delas são achadas pela referência do lançamento.
+  A migration `00023` cria os índices `payments (tenant_id, invoice_id)`, um por instante de encerramento
+  (`paid_at`, `voided_at`, `uncollectible_at`, parciais em `IS NOT NULL`) e `invoices (tenant_id, due_at)` das
+  emitidas (base da inadimplência). São índices de coluna, não de expressão: sob RLS, só comparações simples de
+  coluna (operadores leakproof) viram condição de índice, e uma expressão como `COALESCE(paid_at, ...)` deixava
+  a consulta em varredura sequencial;
+- a contagem de assinaturas ignora as encerradas antes do mês;
+- as listas ganham filtros com a mesma regra dos cards: `GET /api/v1/invoices?open_balance=true` (abertas ou
+  parcialmente pagas, como "Recebíveis em aberto"; "Recebíveis vencidos" já coincidia com `overdue=true`) e
+  `GET /api/v1/subscriptions?in_force=true` (em trial, ativas ou em atraso, como "Assinaturas ativas"). Os
+  links dos cards ainda apontam para os filtros antigos: a troca na interface, com o aviso de que a lista é a
+  atual num mês encerrado, fica pendente;
+- sem registro de histórico até o instante (início retroativo), a situação é derivada das datas do contrato
+  (`trialing` até `trial_ends_at`, `active` depois), e não da situação da criação, que subestimava o churn de
+  uma assinatura retroativa com trial.
+
+Testes de equivalência comparam as duas formas dos recebíveis com a soma de todas as partidas, e um teste com
+3.000 faturas no histórico exige, pelo plano e pelas estatísticas da transação, que a consulta não faça
+varredura do histórico. Os índices são criados sem `CONCURRENTLY` (a migration roda em transação), com bloqueio
+de escrita em `invoices` e `payments` durante a criação, curto nos volumes atuais.
+
+## ADR-075 Operações financeiras de criação: lista, critério e impressão do pedido
+**Status:** aceita (completa a ADR-022 e o RF-09).
+**Contexto:** o RF-09 exige `Idempotency-Key` nas operações financeiras de criação, mas a lista não estava
+escrita. Uma auditoria encontrou quatro rotas sem a exigência: `POST /api/v1/subscriptions` (a repetição de
+rede duplicava a assinatura e o faturamento), `POST /api/v1/platform/addon-orders`,
+`POST /api/v1/subscriptions/{id}/price-adjustments` e `POST /api/v1/subscriptions/{id}/discounts`. Também não
+estava documentado o que compõe a impressão do pedido nem o escopo da chave.
+**Decisão:**
+- **Critério.** É operação financeira de criação todo `POST` que cria um registro do qual decorre valor a
+  receber, recebido, devolvido ou abatido, ou faturamento futuro, e cuja repetição criaria um segundo efeito
+  (outro registro ou outra cobrança). Atos irreversíveis ou execuções que não podem ser repetidos sem efeito
+  também exigem a chave. Alterações de recursos existentes protegidas por `If-Match` (troca de plano e de
+  quantidade, cancelamento, suspensão) e operações sem efeito financeiro (cadastros, catálogo, cupons,
+  endpoints de webhook) ficam fora: a versão já impede a repetição ou a repetição não cria valor.
+- **Lista.** Exigem `Idempotency-Key`: pagamento manual (`POST /invoices/{id}/payments`), nota de crédito
+  (`POST /invoices/{id}/credit-notes`), nova cobrança (`POST /invoices/{id}/charges`), reembolso
+  (`POST /charges/{id}/refunds`), baixa de valor a recuperar (`POST /disputes/{id}/recovery-settlements`),
+  crédito do cliente (`POST /customers/{id}/credits`), criação de assinatura (`POST /subscriptions`), reajuste
+  programado (`POST /subscriptions/{id}/price-adjustments`), aplicação de cupom
+  (`POST /subscriptions/{id}/discounts`), pedido de serviço adicional (`POST /platform/addon-orders`) e
+  execução de faturamento (`POST /billing-runs`); fora do critério financeiro, também a execução de
+  conciliação (`POST /reconciliation/runs`) e a anonimização de cliente (`POST /customers/{id}/anonymize`). A
+  lista é a de `idempotencyRequiredRoutes` em `internal/httpapi/contract_test.go`; o teste falha se uma rota
+  ganhar ou perder a exigência sem a lista mudar, e o teste de contrato exige o parâmetro `IdempotencyKey`
+  nas mesmas operações do `api/openapi.yaml`.
+- **Chave de negócio onde não há chave natural.** A assinatura não tem chave natural (um cliente pode ter
+  várias assinaturas do mesmo plano): a criação grava a chave de negócio da ADR-022 em
+  `subscriptions.request_key` (migration `00022`, única por tenant) junto da impressão dos campos de negócio
+  do pedido (`subscriptions.request_fingerprint`: SHA-256 de cliente, plano, quantidade, com vazio valendo 1,
+  data de início, dias de avaliação e prazo de pagamento). A repetição depois de um processamento interrompido
+  (lease expirado antes do registro da resposta) ou da validade do registro HTTP devolve a mesma assinatura
+  quando a impressão confere; com outro conteúdo de negócio responde `409 request_key_reused`. Duas
+  transações com a mesma chave não disputam com erro: o `INSERT ... ON CONFLICT DO NOTHING` espera a outra
+  terminar e a perdedora relê e devolve a assinatura confirmada. `subscription_in_progress` (a assinatura
+  confirmada ainda não visível) e `credit_note_in_progress` (o mesmo caso na nota de crédito) passam a ser
+  conflitos transitórios, com `Retry-After`, e não ficam registrados na chave.
+- **Posse da execução.** Cada pedido HTTP com `Idempotency-Key` usa um token próprio
+  (`idempotency_keys.lease_token`, migration `00022`), gravado ao vencer a disputa ou ao assumir um
+  processamento interrompido. Registrar o resultado e liberar a chave exigem o mesmo token e a chave ainda
+  em processamento: a execução antiga, cujo lease outra assumiu, não sobrescreve o resultado da nova nem
+  apaga o processamento dela (antes, a última escrita vencia, e a chave podia repetir por 24 horas a
+  resposta da execução antiga). A regra vale para todas as rotas idempotentes. Reajuste e cupom
+  têm chave natural no banco (um reajuste programado por assinatura e data, um desconto ativo por
+  assinatura): a reexecução depois de uma interrupção é recusada com `adjustment_date_taken` ou
+  `discount_already_active`, sem segundo efeito, e não ganham coluna nova. O pedido de serviço adicional é
+  atendido manualmente pela equipe da plataforma e não gera cobrança automática; o registro HTTP basta.
+- **Impressão do pedido.** É o SHA-256 do método, do caminho e dos **bytes do corpo como enviados**. O JSON não
+  é normalizado: o mesmo conteúdo com outra ordem de campos, outros espaços ou um campo opcional explícito com
+  o valor padrão (por exemplo `"quantity": 1`) é outro pedido e responde `409 idempotency_key_reused`. Quem
+  repete um pedido deve reenviar exatamente os mesmos bytes; a interface serializa o mesmo objeto.
+- **Escopo.** O registro é por organização, cliente da API (usuário ou credencial) e operação (método e rota
+  do roteador, por exemplo `POST /api/v1/subscriptions/{id}/discounts`). A mesma chave em outra operação, ou
+  enviada por outro usuário, é independente. Na mesma rota, outro recurso no caminho muda a
+  impressão e a chave já usada é recusada.
+- **Interface.** Criação de assinatura, reajuste, cupom e pedido de serviço adicional passam a enviar a chave
+  pelo `useIdempotencyKey`, com a regra de descarte da ADR-022. O cliente HTTP serializa todo corpo em JSON
+  canônico (campos em ordem fixa, em qualquer nível): a mesma chave acompanha sempre os mesmos bytes.
+
+**Alternativas:** normalizar o JSON antes da impressão foi descartado: aceitaria como repetição corpos que o
+decodificador interpreta de forma diferente (campos duplicados, números fora da faixa) e exigiria definir uma
+forma canônica no contrato. Gravar a chave de negócio também em reajustes, descontos e pedidos de serviço
+adicional foi descartado: as constraints de unicidade já impedem o segundo efeito.
+**Consequências:** clientes da API precisam enviar `Idempotency-Key` nas quatro rotas novas na lista (`422
+idempotency_key_required` sem ela). A repetição registrada de `POST /subscriptions` sai sem `ETag` (a chave
+guarda status, corpo, `Content-Type` e `Location`); a versão continua no corpo. Na reexecução de reajuste ou
+cupom depois de uma interrupção, o cliente recebe o conflito de negócio em vez da resposta original. Chaves em
+processamento gravadas antes da migration `00022` ficam sem token e só são concluídas depois de assumidas por
+nova tentativa, após o lease (um minuto).
+
+## ADR-076 Consumidores de cobrança: inbox e cobrança na mesma transação
+**Status:** aceita (corrige a aplicação da ADR-009 em `payments.invoice_issued` e `payments.invoice_credited`).
+**Contexto:** os dois consumidores solicitavam a cobrança (`RequestCharge`, com transação própria) e só depois
+marcavam o inbox, em outra transação, sem olhar se a mensagem já tinha sido processada. A idempotência por
+fatura de `RequestCharge` só cobre a cobrança em andamento: depois de uma recusa do provedor, a cobrança fica
+`failed` e uma reentrega da mesma mensagem (confirmação perdida, republicação do relay depois do lease,
+reprocessamento da DLQ) criava uma nova tentativa no provedor.
+**Decisão:**
+- A marcação do inbox é a primeira escrita da transação do consumidor; mensagem já registrada encerra o
+  tratamento sem efeito. Na mesma transação: em `invoice_credited`, o cancelamento local das cobranças
+  divergentes com sua auditoria e as operações de cancelamento no provedor; nos dois, a cobrança pelo saldo e
+  a operação persistida que a cria no provedor (`chargeForInvoice`).
+- As chamadas ao provedor (cancelamentos e criação) acontecem depois do commit, como nas demais operações
+  externas; se falharem, a operação gravada é retomada pela recuperação agendada (`RecoverOperations`), não
+  pela reentrega da mensagem.
+- Nova tentativa depois de recusa é pedido explícito (`POST /invoices/{id}/charges`, "Nova tentativa de
+  cobrança" na interface), nunca efeito de uma reentrega.
+
+**Alternativas:** manter as transações separadas e consultar o inbox antes de `RequestCharge` foi descartado:
+a falha entre a cobrança e a marcação continuaria permitindo a duplicidade.
+**Consequências:** falha em qualquer passo desfaz também o inbox e o cancelamento local, e a reentrega refaz o
+ajuste inteiro (antes, o cancelamento local ficava confirmado sem o restante). Os testes de integração de
+`internal/pgstore/payments_redelivery_integration_test.go` provam que a reentrega depois de recusa e depois de
+sucesso não cria cobrança nem operação nova, e `internal/app/dlq_replay_integration_test.go` prova o
+reprocessamento da DLQ de ponta a ponta (ADR-024): reentrega direcionada à fila do consumidor que falhou, com
+o id original no inbox, sem chegar aos demais consumidores do evento.
+
+## ADR-077 Limites do plano da plataforma serializados na assinatura e implantação assistida atendida pela equipe
+**Status:** aceita (RF-16).
+**Contexto:** uma auditoria de RF-16 encontrou três furos nos limites do plano da plataforma e um serviço
+adicional que nunca era cobrado. (1) A troca de plano contava só os membros ativos e o aceite de convite não
+conferia o limite: descer de plano com convites pendentes e aceitá-los depois passava do limite de usuários.
+(2) Assinaturas suspensas não contam como contratos ativos e a reativação não conferia o limite: suspender,
+criar novas e reativar passava do limite de contratos. (3) Convites e criações de assinatura liam plano e
+contagem sem bloqueio, em READ COMMITTED: requisições simultâneas contavam o mesmo consumo e passavam do
+limite. Por fim, o pedido de implantação assistida (`POST /api/v1/platform/addon-orders`) ficava para sempre
+`requested`: ninguém o atendia, e o demonstrativo só somava pedidos `completed`.
+**Decisão:**
+- **Serialização.** Toda checagem de limite lê o plano com `LockPlatformPlan`, que bloqueia (`FOR UPDATE`) a
+  linha de `tenant_platform_subscriptions` do tenant até o fim da transação: convite, aceite de convite,
+  criação e reativação de assinatura. A troca de plano e o fechamento do demonstrativo já liam a mesma linha
+  com bloqueio. Assim, quem conta o consumo espera quem está gravando, como as credenciais de API (que
+  bloqueiam a linha do tenant). A ordem de bloqueio é sempre a assinatura da plataforma antes dos demais
+  registros da operação, exceto na reativação, que bloqueia a assinatura do cliente (passo comum das
+  mutações) e depois a da plataforma; nenhum caminho bloqueia na ordem inversa.
+- **Usuários.** Convites pendentes (não aceitos, não revogados e não expirados) reservam vagas:
+  `Usage.PendingInvitations` entra no convite (`CheckUserLimit`), na troca de plano (`CanChangeTo`, código
+  `platform_downgrade_users`) e na visão geral (`usage.pending_invitations`). O aceite confere de novo, só com
+  os membros ativos (`CheckJoinLimit`, 403 `platform_user_limit`): a vaga reservada pelo próprio convite deixa
+  de ser pendente, e o plano pode ter mudado por outro caminho depois do convite. Membro removido que volta
+  por convite também ocupa vaga.
+- **Contratos.** Suspensas continuam fora da contagem de contratos ativos (o plano limita contratos em
+  vigor); a reativação manual (`subscriptions.Reactivate`) ocupa uma vaga e confere o limite, como a criação.
+  A reativação automática pela régua de cobrança (pagamento regularizado, ADR-041) não é bloqueada: só
+  acontece para suspensão da própria régua, que o tenant não provoca à vontade, e bloqueá-la manteria
+  suspenso um cliente que pagou.
+- **Atendimento pela equipe da plataforma.** Rotas `PlatformStaff` (como `GET /api/v1/admin/tenants`):
+  `GET /api/v1/admin/addon-orders` (paginada por cursor; em aberto por padrão, do mais antigo para o mais
+  recente; agendados pela data do atendimento; concluídos e cancelados do encerramento mais recente para o
+  mais antigo; o cursor vale só para o mesmo filtro) e
+  `POST /api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/schedule|complete|cancel`. Agendar exige instante
+  futuro em até um ano (reagendar é permitido); concluir vale com ou sem agendamento; cancelar exige
+  justificativa (3 a 500 caracteres). Concluído e cancelado são finais. Cada transição ocorre na transação do
+  tenant do pedido (o tenant do caminho delimita o pedido: outro tenant responde 404) e grava auditoria na
+  trilha do tenant (`platform.addon_scheduled`, `platform.addon_completed`, `platform.addon_canceled`, ator
+  usuário com `platform_staff: true`). A lista usa as funções `SECURITY DEFINER` `app_platform_addon_orders`
+  e `app_platform_tenant_names`, sem dados dos clientes dos tenants. Tela "Atendimento de serviços"
+  (`/admin/servicos`) para a equipe, fora da organização ativa: quem é da equipe e não tem organização é
+  levado a ela (e não ao onboarding). A auditoria do tenant identifica o autor como "equipe da plataforma
+  Recorvia", já que ele não é membro da organização.
+- **Equipe no ambiente local.** O realm embutido tem o usuário de demonstração `equipe@recorvia.test` (ID
+  fixo, sem organização). O `migrate up`, que já roda como dono das tabelas, inclui esse usuário em
+  `platform_staff` quando `RECORVIA_DEMO_STAFF_SUBJECT` está definido (serviço `migrate` do `compose.yaml`);
+  a variável é recusada em produção, e a equipe real é mantida pelo runbook
+  `docs/operacao/runbooks/equipe-da-plataforma.md` (o papel da aplicação só lê `platform_staff`).
+- **Cobrança.** Migration `00021`: colunas `scheduled_for`, `completed_at`, `canceled_at`, `cancel_reason`,
+  `handled_by`, `statement_id` e `version`, constraints de coerência por situação e o gatilho
+  `platform_addon_orders_guard`, que impede reabrir pedido encerrado, mudar organização, serviço, preço ou
+  autor e desfazer ou refazer o vínculo com o demonstrativo. O fechamento soma os pedidos concluídos antes do
+  fim do período e ainda sem demonstrativo e, ao gravar o demonstrativo, vincula esses pedidos a ele
+  (`statement_id`), na mesma transação. O pedido entra, portanto, no demonstrativo do período em que a
+  conclusão ocorreu; concluído depois do fim de um período ainda não fechado, entra no do período seguinte.
+  A conclusão bloqueia a assinatura da plataforma antes do pedido, na ordem do fechamento: conclusão e
+  fechamento não se cruzam, e uma conclusão confirmada depois do fechamento do seu período (por exemplo,
+  com o relógio da API atrás do worker) entra no demonstrativo seguinte, sem ser perdida nem cobrada duas
+  vezes. A avaliação do plano não isenta o serviço adicional.
+- **Pedidos anteriores à migration.** O fechamento antigo somava os pedidos concluídos com `updated_at`
+  dentro do período. A `00021` vincula cada pedido concluído ao demonstrativo existente do tenant cujo
+  período contém o `updated_at` (o que o cobrou), antes de criar o gatilho; sem isso, o fechamento novo
+  cobraria esses pedidos de novo. O Down faz o inverso para o código anterior: os pedidos já cobrados passam
+  a ter `updated_at` no início do período do demonstrativo que os cobrou (não são cobrados de novo e são
+  revinculados por um Up seguinte), e os concluídos ainda não cobrados, no período corrente da assinatura.
+- **Assinatura da plataforma cancelada.** O fechamento não roda para assinaturas canceladas: a conclusão
+  de um pedido nessa situação é recusada com 409 `platform_subscription_canceled`, e o pedido deve ser
+  cancelado. Nenhum pedido fica concluído sem cobrança possível.
+**Alternativas:** contar as suspensas como contratos ativos fecharia o furo da reativação sem checagem nova,
+mas mudaria o significado do limite e bloquearia criações por contratos parados. `SERIALIZABLE` nas
+transações de limite exigiria retentativa em todos os casos de uso; o bloqueio da linha da assinatura da
+plataforma é pontual e já era usado pela troca de plano. Somar os pedidos pelo instante da conclusão dentro do
+período, sem vínculo, perderia a cobrança de conclusões confirmadas depois do fechamento.
+**Consequências:** convites, aceites e criações de assinatura de um mesmo tenant passam a se serializar (no
+volume esperado por tenant, imperceptível); planos já rebaixados acima do limite pelo comportamento anterior
+não perdem membros nem contratos, mas não aceitam novos até voltarem ao limite. Limitações: não há estorno
+de pedido concluído nem reabertura de pedido cancelado (um novo pedido é registrado); o tenant acompanha o
+agendamento pela tela da plataforma, sem notificação por e-mail.
+
+## ADR-078 Logout sem tokens no navegador e revogação das sessões
+**Status:** aceita (RF-14; complementa a ADR-012).
+**Contexto:** o logout devolvia ao navegador, em `redirect_url`, o ID token como `id_token_hint`, contrariando
+a regra de que os tokens do provedor ficam no servidor. A revogação em massa (`RevokeAll`/`DeleteAllForUser`)
+existia sem uso: não havia "encerrar todas as minhas sessões", o membro removido mantinha a sessão com a
+organização ativa (o acesso era negado a cada requisição, mas a sessão seguia válida) e o usuário desativado
+só perdia a sessão da requisição em que era detectado.
+**Decisão:**
+- **Logout.** `POST /auth/logout` remove a sessão do Redis, revoga pelo servidor o refresh token da sessão no
+  endpoint de revogação do provedor (RFC 7009, cliente confidencial, quando anunciado na descoberta) e devolve
+  o endereço de encerramento com `client_id` e `post_logout_redirect_uri`, sem `id_token_hint`. Sem a dica, o
+  Keycloak pede confirmação antes de encerrar a sessão do navegador. A falha na revogação no provedor é
+  registrada em log e não impede o logout local: o token expira sozinho.
+- **Encerrar todas as sessões.** `POST /auth/logout-all` (sessão de usuário, CSRF) remove todas as sessões do
+  usuário pelo índice por usuário do Redis e revoga no provedor o refresh token de cada uma; o navegador atual
+  segue para o encerramento no provedor como no logout. Menu do usuário: "Encerrar todas as sessões".
+- **Membro removido.** Depois de confirmada a remoção, as sessões do usuário com aquela organização ativa
+  são encerradas (`RevokeTenantSessions`); as demais continuam (ele pode participar de outras organizações).
+  Se o Redis falhar nesse passo, a remoção vale e o acesso continua negado em toda requisição
+  (`ResolveAccess`).
+- **Usuário desativado.** A primeira requisição que encontra o usuário desativado encerra todas as sessões
+  dele, não só a da requisição.
+- O `SessionStore` ganha `ListForUser`, que lê as sessões pelo índice por usuário e descarta do índice as
+  entradas de sessões já expiradas.
+- **Gerações de sessão.** Uma requisição em voo que lê a sessão antes de "encerrar todas as sessões" e a
+  regrava depois (toque, renovação de tokens, troca de organização) ressuscitaria a sessão. Por isso cada
+  sessão guarda a geração do usuário (e a do usuário no tenant ativo) em que foi criada. Encerrar todas as
+  sessões incrementa a geração do usuário e remove as sessões do índice e o índice num único script Lua
+  (nenhuma gravação se intercala entre a leitura do índice e a remoção); remover o membro incrementa a
+  geração do usuário naquele tenant. A gravação é condicional e atômica (script Lua): `Create` só grava se as
+  gerações informadas são as correntes, e `Save` exige ainda que a chave exista. A leitura recusa sessão de
+  geração antiga. O login usa a geração corrente; a troca de organização herda a da sessão anterior (se as
+  sessões foram encerradas no meio da troca, a nova não é gravada e o usuário entra de novo). As gerações
+  duram 48 horas, renovadas a cada sessão criada e a cada revogação: mais que a sessão mais longa.
+- **Revogação no provedor em paralelo.** "Encerrar todas as sessões" revoga os refresh tokens distintos em
+  paralelo, com prazo total de 5 segundos (`Policy.RevokeTimeout`): com o provedor fora do ar, a resposta não
+  soma o prazo de cada sessão.
+**Alternativas:** encerrar a sessão no Keycloak pelo endpoint de logout com o refresh token é específico do
+Keycloak e usa a URL pública anunciada na descoberta, inacessível ao backend no ambiente local
+(`KC_HOSTNAME_BACKCHANNEL_DYNAMIC` só torna internos os endpoints de canal de retorno, como o de revogação).
+Manter o `id_token_hint` evitaria a confirmação no Keycloak ao custo de expor o ID token ao navegador.
+**Consequências:** o logout passa por uma confirmação do Keycloak; "encerrar todas as sessões" não encerra
+sessões do navegador no provedor em outros dispositivos além do que a revogação dos refresh tokens provoca no
+Keycloak; quem ainda tiver sessão no provedor entra de novo sem senha, com sessão nova no Recorvia.
+
+## ADR-079 Fatura comercial completa, emissão congelada, cancelada sem saldo e exportação CSV em partes
+**Status:** aceita.
+**Contexto:** a auditoria de RF-03 a RF-06 encontrou lacunas na fatura comercial. O quadro de totais do
+documento HTML omitia o total, as notas de crédito e o valor baixado: com nota de crédito ou baixa, a conta
+exibida não fechava com o saldo. O gatilho `app_invoice_guard` (00006) não congelava a observação (`memo`)
+da fatura emitida, e o documento usava os dados atuais da organização como emitente, de modo que mudar a
+razão social alterava documentos já emitidos. A fatura cancelada mantinha saldo devedor (o total menos o
+crédito aplicado), embora o cancelamento devolva esse crédito ao cliente: o documento, visível no portal,
+e o CSV mostravam um saldo que ninguém deve. A exportação CSV parava em 50 mil linhas sem avisar, e as
+colunas não traziam desconto, créditos, notas de crédito, baixa nem período.
+**Decisão:**
+- **Documento.** O quadro de totais segue a ordem da conta: subtotal, descontos, total, créditos aplicados,
+  notas de crédito, pago, valor baixado e saldo; os abatimentos aparecem com sinal negativo e a soma fecha com
+  `amount_due`. O teste confere o fechamento em sequências reais de operações do domínio (emissão com
+  desconto e crédito, pagamentos, notas, baixa e sua recuperação, cancelamento), fixas e pseudoaleatórias com
+  semente fixa, e pela API com desconto, crédito, nota de crédito, pagamento parcial e baixa. No portal, a
+  baixa aparece como "Saldo encerrado pela organização", coerente com a situação "Encerrada". O documento
+  traz o aviso "Este documento é uma fatura comercial e não é documento fiscal. Não substitui a nota
+  fiscal." (o mesmo texto aparece na tela de detalhe da fatura), o emitente, o documento e o endereço de
+  cobrança do cliente copiados na emissão, o período de faturamento e o de cada item (primeiro e último dia
+  incluídos), o vencimento e as condições de pagamento calculadas das datas gravadas na emissão (não do prazo
+  atual da organização, que pode mudar), e a observação, quando houver.
+- **Emitente gravado na emissão.** A emissão (motor, prorrata e correção de consumo, todas por `issueDraft`)
+  grava em `invoices.issuer_snapshot` o nome, a razão social e o CNPJ da organização naquele momento, e o
+  gatilho recusa alterá-los ou removê-los depois. O documento do painel e o do portal usam esses dados.
+  Faturas emitidas antes da migration `00019` ficam com `issuer_snapshot` nulo e continuam usando os dados
+  atuais da organização (não há como reconstituir os dados da época).
+- **Observação congelada.** A migration `00019` recria `app_invoice_guard` para recusar, em fatura emitida, a
+  alteração de `memo`, `issuer_snapshot`, `tenant_id` e `created_at`, além dos campos que já eram congelados.
+  O teste do gatilho roda como dono das tabelas (que tem todos os privilégios e não está sujeito ao RLS) e
+  confere a mensagem do próprio gatilho, inclusive no ramo de exclusão; o papel da aplicação continua sem
+  privilégio de `DELETE`.
+- **Cancelada sem saldo.** `Invoice.Void` zera `amount_due`; `credit_applied` continua registrando o crédito
+  aplicado na emissão e devolvido no cancelamento (`Service.Void`). A constraint `invoices_due_consistency`
+  passa a exigir saldo zero na fatura cancelada e a conta antiga nas demais; a `00019` corrige as faturas já
+  canceladas. Os consumidores de `amount_due` (painel, régua de cobrança, portal, notificações, cobranças e
+  conciliação) já filtram por fatura em aberto ou tratam a cancelada à parte, e não mudam. O documento da
+  cancelada informa o cancelamento (com o motivo somente no painel), e o quadro mostra o crédito devolvido ao
+  cliente e o valor cancelado, fechando com saldo zero; o CSV exporta saldo zero.
+- **Exportação em partes.** Cada arquivo tem no máximo 50 mil faturas. Antes do primeiro byte, a API localiza
+  o corte com a mesma ordenação e os mesmos filtros da listagem (`InvoiceListPosition`, `OFFSET` sobre o
+  índice novo `invoices_tenant_created_idx (tenant_id, created_at DESC, id DESC)`, que também atende a
+  listagem) e informa nos cabeçalhos `X-Recorvia-Export-Limit`, `X-Recorvia-Export-Truncated` e, quando há
+  corte, `X-Recorvia-Export-Next-Cursor` e `X-Recorvia-Export-Next-Part`; a parte seguinte é pedida com os
+  mesmos filtros, `cursor` e `part`, e o arquivo de cada parte se chama `faturas-parte-N.csv`. O streaming para
+  na última fatura incluída (pela chave de ordenação, não pela contagem), e a parte seguinte começa
+  exatamente depois dela: nenhuma fatura que continua no filtro se repete nem é pulada entre partes, mesmo com
+  faturas novas emitidas durante a exportação (elas entram no início da listagem, fora das partes seguintes).
+  As partes são consultas independentes, sem uma fotografia única do conjunto: uma fatura alterada entre uma
+  parte e outra de modo a entrar ou sair do filtro (por exemplo, de situação ou de vencida) pode faltar ou
+  aparecer numa parte, e os valores de cada linha são os do momento em que a parte foi gerada. A interface
+  avisa o corte e oferece a próxima parte. A auditoria `invoices.exported` registra o filtro de situação, a
+  parte, se é continuação e se houve corte. Novas colunas: `periodo_inicio`, `periodo_fim`, `subtotal`,
+  `desconto`, `creditos_aplicados`, `valor_creditado` e `valor_baixado`.
+- **CORS.** Para as origens de `RECORVIA_ALLOWED_ORIGINS`, a resposta expõe ao navegador
+  (`Access-Control-Expose-Headers`) `ETag`, `Location`, `X-Request-ID`, `Idempotent-Replayed` e os cabeçalhos da exportação;
+  sem isso, o `fetch` de outra origem lê esses cabeçalhos como nulos e o corte voltaria a ser silencioso.
+- **Clientes.** O histórico do cliente (`GET /customers/{id}/history`) passa a ser paginado por cursor
+  (`limit` e `cursor`, padrão de 25 eventos), em vez de cortar em 100. `customer.address_updated` informa os
+  nomes dos campos alterados (`fields`) e se o endereço foi cadastrado agora (`created`), nunca os valores
+  (ADR-061); regravar o mesmo endereço não gera evento. Contatos ganham edição
+  (`PATCH /customers/{id}/contacts/{contact_id}`, auditada como `customer.contact_updated` com os nomes dos
+  campos) com semântica de alteração parcial: campo omitido mantém o valor atual, de modo que a preferência
+  de e-mail de cobrança desligada pelo cliente no portal não volta ao padrão em silêncio.
+
+**Alternativas:** contar as faturas do filtro antes da exportação informaria o corte, mas não daria o ponto
+exato de continuação; acrescentar ao fim do CSV uma linha de aviso misturaria texto com dados; trailers HTTP
+não são lidos pelo `fetch` do navegador; uma fotografia única (transação longa ou tabela temporária entre
+partes) foi descartada por segurar recursos do banco entre requisições. Guardar o arquivo para download
+posterior foi descartado: a exportação continua sob demanda e sem arquivos armazenados (multitenancy). Na
+fatura cancelada, manter o saldo e só escondê-lo na apresentação deixaria o dado da API e do CSV errado;
+zerar `credit_applied` foi descartado porque é campo de emissão congelado e registra o crédito que existiu.
+Versionar contatos para concorrência otimista exigiria coluna nova e mudaria a inclusão e a exclusão; a edição
+bloqueia o cliente na transação, como a inclusão, e vale a última gravação.
+**Consequências:** migration `00019` (função do gatilho, coluna `issuer_snapshot`, constraint de saldo,
+correção das canceladas e índice; o Down devolve o esquema da 00006 e o saldo antigo das canceladas e remove
+os emitentes gravados); consulta `InvoiceListPosition` e método `ListCutoff` no faturamento;
+`Deps.InvoiceExportMaxRows` permite reduzir o limite em testes. `amount_due` da fatura cancelada passa a ser
+zero na API. A resposta de `GET /customers/{id}/history` ganha `next_cursor` e passa a devolver 25 eventos por
+padrão (clientes que liam somente a primeira resposta precisam seguir o cursor). Limitações: o `OFFSET` do
+corte percorre até 50 mil entradas do índice por parte; o CSV não traz itens nem notas de crédito
+individualmente; faturas anteriores à `00019` mostram o emitente atual.
+
+## ADR-080 Ciclo do pagamento pelo provedor: confirmação, recebimento e liquidação em contas distintas
+**Status:** aceita.
+**Contexto:** o RF-12 pede contas distintas para faturamento, contas a receber, confirmação, taxas, valores
+em liquidação, reembolso e chargeback. As situações `CONFIRMED` e `RECEIVED` do Asaas (e `paid` do simulador,
+o único estado pago até então) caíam no mesmo lançamento `payment.confirmed`, com débito em
+`provider_clearing` e a taxa reconhecida na confirmação; `ledger.SettlementReceived`, a passagem para o
+disponível, não era chamada fora de testes. Os valores em liquidação só acumulavam, a confirmação não
+tinha conta própria e o pagamento de cartão ainda não creditado pelo provedor aparecia como se estivesse
+liquidado.
+**Decisão:**
+- **Plano de contas do provedor.** Nova conta `provider_confirmed` ("Pagamentos confirmados no provedor",
+  ativo): o valor bruto que o provedor confirmou e ainda não creditou (a confirmação). `provider_clearing`
+  ("Valores em liquidação no provedor", ativo) passa a ser a conta de passagem de toda movimentação com o
+  provedor, liquidada no disponível. `cash` ("Disponível liquidado", ativo) recebe o líquido creditado pelo
+  provedor, além dos recebimentos manuais e das baixas recebidas (ADR-073). Faturamento
+  (`billed_revenue`), contas a receber (`accounts_receivable`), taxas (`provider_fees`), reembolsos
+  (`refunds`) e chargebacks (`chargebacks`) continuam como estavam. A conta nova é criada com o plano no
+  primeiro lançamento do tenant que a usa (como as demais), sem migration.
+- **Situações.** Confirmado é a situação paga e ainda não creditada (Asaas `CONFIRMED`, simulador
+  `confirmed`, nova ação `confirm`). Recebido é qualquer situação paga além da confirmada
+  (`ProviderStatus.IsReceived`): Asaas `RECEIVED`, `RECEIVED_IN_CASH` e `DUNNING_RECEIVED`, simulador `paid`
+  (ações `pay` e `receive`), e as situações posteriores ao recebimento (reembolso, chargeback). Reembolso e
+  chargeback pressupõem valor processado pelo provedor: o pagamento ainda só confirmado é dado como recebido
+  antes da movimentação (`postChargeMovement`), para que essas movimentações usem sempre os valores em
+  liquidação e nada fique esquecido em `provider_confirmed`.
+- **Confirmação** (`payment.confirmed`, chave `payment.confirmed:<pagamento>`): D `provider_confirmed` /
+  C `accounts_receivable` pelo valor aplicado à fatura; o excedente (`payment.overpayment`) debita
+  `provider_confirmed` em vez de `provider_clearing`. A taxa não é lançada na confirmação: o provedor a retém
+  do valor creditado. O pagamento de fatura já quitada ou cancelada vira crédito integral do cliente, também
+  em `provider_confirmed`; o lançamento `payment.provider_fee` deixa de existir.
+- **Recebimento** (`payment.received`, chave `payment.received:<pagamento>`): D `provider_clearing` /
+  C `provider_confirmed` pelo valor ainda confirmado do pagamento (saldo de `provider_confirmed` nos
+  lançamentos que referenciam o pagamento) e D `provider_fees` / C `provider_clearing` pela taxa registrada
+  no pagamento. O valor ainda confirmado vem do próprio ledger (`GetChargePaymentPendingReceipt`): depois do
+  primeiro recebimento ele é zero, o que torna o recebimento idempotente e independente da ordem dos
+  webhooks, e um retrato antigo (confirmado depois de recebido) não tem efeito.
+- **Liquidação** (`ledger.Settlement`, chave `settlement:<chave do lançamento de origem>`, mesma referência
+  e mesmo instante): o efeito líquido de cada movimentação com o provedor nos valores em liquidação vai para
+  o disponível. Débito líquido vira `settlement.received` (D `cash` / C `provider_clearing`: recebimento,
+  liberação de retenção, estorno do chargeback na disputa ganha, ajuste a favor); crédito líquido vira
+  `settlement.debited` (D `provider_clearing` / C `cash`: reembolso, retenção de chargeback, chargeback de
+  reembolso recusado, ajuste contra). Os provedores integrados creditam e debitam o saldo no momento do
+  evento, por isso a liquidação acompanha cada movimentação e `provider_clearing` volta a zero; saldo nessa
+  conta indica movimentação ainda não liquidada.
+- **Reembolsos, disputas e conciliação.** `refund.succeeded`, `dispute.opened`, `dispute.hold_released`,
+  `dispute.hold_restored`, o estorno de `dispute.opened` (disputa ganha) e `reconciliation.adjustment` mantêm
+  as partidas contra `provider_clearing` e ganham a liquidação correspondente. `dispute.credit_reversed` não
+  movimenta o provedor e não tem liquidação. O ajuste de conciliação é liquidado na hora mesmo antes do
+  recebimento: o disponível fica com a diferença até o recebimento creditar o líquido local, e a soma final
+  é o líquido informado pelo provedor.
+- **Painel.** "Receita recebida" continua sendo a soma dos pagamentos confirmados no mês (o cliente pagou),
+  e o novo indicador `pending_provider_receipt` ("A receber do provedor") mostra o saldo de
+  `provider_confirmed` na posição do mês consultado, a parte ainda não creditada pelo provedor.
+
+**Exemplo** (bruto R$ 100,00, taxa R$ 3,48, reembolso de R$ 30,00):
+
+| Lançamento | Débito | Crédito |
+|---|---|---|
+| `invoice.issued` | contas a receber 100,00 | receita faturada 100,00 |
+| `payment.confirmed` (cartão confirmado) | pagamentos confirmados 100,00 | contas a receber 100,00 |
+| `payment.received` (crédito do provedor) | valores em liquidação 100,00; taxas 3,48 | pagamentos confirmados 100,00; valores em liquidação 3,48 |
+| `settlement.received` | disponível 96,52 | valores em liquidação 96,52 |
+| `refund.succeeded` | reembolsos 30,00 | valores em liquidação 30,00 |
+| `settlement.debited` | valores em liquidação 30,00 | disponível 30,00 |
+
+No Pix ou boleto (recebido direto), `payment.confirmed`, `payment.received` e `settlement.received` são
+gravados no mesmo processamento. Saldo final: receita faturada 100,00, reembolsos 30,00, taxas 3,48,
+disponível 66,52 e as demais contas zeradas.
+
+**Alternativas:** fundir confirmação e valores em liquidação (o recebimento seria só a transferência para o
+disponível) foi descartado: o RF-12 pede contas distintas, e a confirmação ainda não creditada precisa
+aparecer separada do que já está em liquidação. Manter os valores em liquidação como saldo no provedor até um
+repasse ao banco foi descartado: os provedores integrados não informam repasses, a conta só acumularia e o
+saldo creditado no provedor, que o tenant já pode usar, não apareceria como disponível. Reconhecer a taxa na
+confirmação foi descartado: o provedor a retém no crédito, e a confirmação de cartão pode ser estornada antes
+dele. Uma coluna ou tabela de recebimento por pagamento foi descartada: o saldo de `provider_confirmed` por
+pagamento já é a informação, sem estado duplicado (e `payments` é imutável).
+**Consequências:** cada pagamento pelo provedor gera três lançamentos e cada movimentação com o provedor,
+dois.
+- **Recebimento perdido na conciliação.** A conciliação carrega em lote, para as cobranças comparadas, o valor
+  ainda em `provider_confirmed` (`ListChargesPendingReceipt`). Cobrança paga aqui, com valor pendente, e
+  recebida no provedor gera `payment_not_reflected` na direção `provider_received` (chave
+  `payment_not_reflected:<cobrança>:provider_received`, valor local 0 e do provedor o pendente). A resolução
+  `accept_provider` exige o provedor recebido na consulta, lança o recebimento e a liquidação
+  (`ensureReceived`) e confere que a divergência deixou de existir; a execução seguinte não a encontra mais, e
+  o webhook atrasado não lança nada de novo.
+
+**Limitações.** Dados anteriores a esta decisão não são reescritos (o ledger é imutável) nem recebem
+lançamento de transição: pagamentos confirmados antes dela não têm valor em `provider_confirmed`, e o
+recebimento posterior não lança nada; o saldo que eles deixaram em `provider_clearing` permanece, e reembolsos
+e chargebacks posteriores sobre eles são liquidados no disponível, que pode ficar negativo enquanto o saldo
+antigo continua nos valores em liquidação. Não há ambiente de produção com esses dados (só bancos locais de
+demonstração, que podem ser recriados com `make reset`), por isso a liquidação de recuperação desses
+lançamentos (por cobrança e por tenant) foi adiada; se for necessária, cada lançamento antigo que movimenta
+`provider_clearing` sem liquidação pode receber `settlement:<chave original>` de forma idempotente, pelo
+mesmo `ledger.Settlement`. Reembolso ou chargeback de pagamento só confirmado é tratado como posterior ao
+recebimento, inclusive a taxa: se o provedor devolver a taxa nesse caso, a diferença aparece na conciliação.
+
+## ADR-081 Aviso de suspensão na janela da régua; motivo e linha do tempo do histórico de envio
+**Status:** aceita.
+**Contexto:** o RF-13 pede a régua com "janela de horário e fuso do tenant", mas só os lembretes
+(notificações com `policy_id`) passavam pela janela no envio (ADR-040): o aviso de assinatura suspensa,
+composto na mesma execução da régua que suspende, saía no instante da suspensão, inclusive de madrugada no
+fuso do tenant. O histórico de envio também estava incompleto: a listagem não trazia o motivo da situação
+(`status_reason`), que ainda ficava vazio nos adiamentos, e a linha do tempo gravada em `notification_events`
+e as tentativas de `webhook_delivery_attempts` não eram expostas.
+**Decisão:**
+- **Janela no aviso de suspensão.** O aviso de suspensão faz parte da régua e respeita a janela
+  `[início, fim)` da política que aplicou a suspensão, no fuso do tenant, verificada no envio como nos
+  lembretes: fora da janela é adiado para a abertura seguinte (`outside_send_window`, com o instante no
+  detalhe do evento). A política vem da suspensão identificada pela chave de negócio
+  `subscription_suspended:<suspensão>` (consulta `GetSuspensionSendWindow`, `collection_suspensions` com
+  `collection_policies`), sem coluna nova: `policy_id` continua exclusivo dos lembretes, porque a constraint
+  `notifications_step` o amarra ao passo da régua e as contagens de lembretes usam `policy_id IS NOT NULL`. A
+  janela vale também para alterações da política depois da suspensão e para as retentativas. Aviso sem
+  suspensão identificável não tem janela.
+- **Aviso da suspensão encerrada.** O aviso é da suspensão da chave: antes do envio, a suspensão precisa estar
+  ativa em `collection_suspensions` (`GetSuspensionActive`). Encerrada (pagamento regularizado, reativação ou
+  cancelamento), o aviso adiado é cancelado com `subscription_not_suspended`, mesmo que a assinatura tenha
+  sido suspensa de novo: a nova suspensão tem aviso próprio, com a sua chave.
+- **Sem limite de frequência no aviso.** O limite diário de mensagens por cliente continua só nos lembretes: o
+  aviso de suspensão é único por suspensão e informa uma consequência já aplicada; adiá-lo para o dia seguinte
+  por causa de lembretes do mesmo dia atrasaria a informação de que o serviço foi suspenso. Ele também não
+  entra na contagem dos lembretes.
+- **Motivo da situação atual.** `status_reason` passa a acompanhar a situação corrente: além de cancelamento,
+  supressão e falha, registra o adiamento (`outside_send_window`, `frequency_limit`) e a nova tentativa agendada
+  (`retry_scheduled`); é limpo na reivindicação da tentativa e no envio. A listagem
+  (`GET /api/v1/notifications`) expõe `status_reason` (código estável, vazio sem motivo) e a interface traduz
+  os códigos na aba "Histórico de envios".
+- **Linha do tempo.** `GET /api/v1/notifications/{id}/events` devolve os eventos em ordem cronológica
+  (situação, motivo, tentativa, detalhe e instante), com a mesma permissão da listagem (`collections.read`): os
+  eventos não contêm dados além dos já exibidos na listagem (destinatários e último erro). Notificação de
+  outro tenant ou inexistente: 404.
+- **Tentativas de webhooks enviados.** `GET /api/v1/webhook-deliveries/{id}/attempts` devolve cada tentativa
+  (número, início, duração, código HTTP ou ausência de resposta, erro e quantidade de assinaturas), com
+  `webhooks.read`. Entrega de endpoint removido responde 404, como a listagem de entregas.
+
+**Alternativas:** gravar `policy_id` no aviso de suspensão foi descartado por misturá-lo aos lembretes
+(substituição por passo posterior, cancelamento na quitação e limite diário passariam a valer para ele). Usar
+a política padrão vigente no envio foi descartado: a suspensão registra a política que a aplicou, e a janela
+deve ser a dela mesmo que a padrão mude. Uma descrição em português no contrato foi descartada em favor de
+códigos estáveis traduzidos na interface, como nos demais enums.
+**Consequências:** avisos de suspensão compostos fora da janela passam a sair na abertura seguinte. Não há
+migration: a regra é aplicada no envio, inclusive a avisos já agendados. Os eventos e as tentativas expostos
+seguem as regras de expurgo da ADR-060.
+
+## ADR-082 Correlação de logs, encerramento ordenado, saneamento de credenciais e verificações automáticas de contrato e fixação
+**Status:** aceita.
+**Contexto:** uma auditoria dos requisitos não funcionais e do RF-15 encontrou lacunas na infraestrutura
+transversal. Rota inexistente e método não permitido respondiam fora da RFC 9457. Os logs das tarefas
+agendadas não tinham o nome da tarefa, trace_id e span_id não entravam nos logs e o log de acesso saía sem
+tenant e usuário. Não havia teste de ciclo de vida da API e do worker. A redação de segredos era só por nome
+de chave: a URL do Redis malformada, com a senha, chegava inteira ao log de erro. Nada na CI impedia
+regressões na fixação de versões. As respostas HTTP não eram conferidas contra o contrato.
+**Decisão:**
+- **404, 405 e HEAD.** O roteador registra `NotFound` e `MethodNotAllowed` com o `writeError` padrão:
+  `application/problem+json`, códigos `route_not_found` e `method_not_allowed`, `request_id` no corpo
+  (documentados no contrato). O 405 informa em `Allow` os métodos da rota; o chi não os repassa a um
+  handler personalizado, por isso eles são obtidos consultando o roteador (`Routes.Match`). O chi também
+  chama o handler de 405 com método desconhecido (`PROPFIND`) em qualquer caminho: sem nenhum método que
+  atenda o caminho, a resposta é 404. `HEAD` em rota `GET` responde como o `GET`, sem corpo
+  (`middleware.GetHead`), e aparece em `Allow` junto com `GET`.
+- **Correlação.** O handler de log acrescenta `trace_id` e `span_id` do span ativo do contexto. Esses dois
+  nomes nunca são redigidos, embora `span_id` contenha o termo sensível `pan`. O agendador põe `job` no
+  contexto de cada execução: os logs dos casos de uso e o de falha levam o nome da tarefa. O executor de
+  conciliações registradas usa `job=payments.registered_reconciliations`. O log de acesso é escrito pelo
+  middleware externo; para que ele veja o tenant, o usuário e o principal identificados pelas etapas
+  internas, `logging.Collect` cria um coletor no contexto, `WithAttrs` registra nele os atributos dos
+  contextos derivados e `logging.Collected` os devolve. O consumidor registra cada mensagem em debug
+  (`mensagem processada` ou `falha no processamento da mensagem`) com consumer, message_id, tenant_id, o
+  `request_id` gravado na outbox pela requisição de origem (omitido quando o evento não veio de uma
+  requisição) e o span de consumo; a auditoria gravada pelo consumidor recebe o mesmo `request_id`. O aviso
+  de falha é um só: o do consumidor RabbitMQ, que registra a decisão (retentativa, DLQ ou devolução) com
+  message_id, tipo, tenant_id e request_id.
+- **Encerramento.** `app.SignalContext` (SIGINT e SIGTERM) e `app.Serve` foram extraídos de `cmd/api`.
+  `Serve` fecha os listeners, espera as requisições em andamento até `RECORVIA_SHUTDOWN_TIMEOUT` e encerra
+  os servidores em ordem, de modo que as métricas seguem disponíveis durante a drenagem da API. Um segundo
+  sinal durante a drenagem força a saída imediata (código 1). No worker, `app.RunWorker` mantém o servidor
+  de saúde e métricas no ar enquanto o worker drena: `/livez` continua 200 e `/readyz` responde 503 com
+  `worker=shutting_down`; o servidor fecha depois que o worker termina. O teste de ciclo de vida do worker
+  revelou dois defeitos. Primeiro, a conexão com o RabbitMQ fechava junto com o cancelamento, antes de a
+  mensagem em processamento terminar, e o ack falhava (a mensagem era reentregue e só não duplicava efeitos
+  por causa do inbox). Segundo, o consumidor fechava o canal enquanto o `basic.cancel` disparado pelo fim do
+  contexto ainda estava em curso; o broker respondia com `CHANNEL_ERROR` (504) e derrubava a conexão de
+  todos os consumidores. Agora a conexão usa um contexto próprio e fecha só depois que agendador, executor,
+  relay e consumidores terminam. O consumidor espera a confirmação do cancelamento (`drain`, limitada a 5 s)
+  antes de esperar as mensagens em andamento e de fechar o canal; as entregas recebidas nesse intervalo e a
+  que aguardava vaga são devolvidas à fila na hora (nack com requeue). O `stop_grace_period` do worker no
+  compose é de 2 min 30 s: confirmação do cancelamento, mensagem em andamento (timeout de 2 min) e
+  encerramento do servidor de saúde, com folga.
+- **Credenciais em erros.** `internal/infra/redact` mascara a senha de URLs, inclusive as malformadas, que
+  `net/url` não interpreta. Só a autoridade (o trecho antes do primeiro `/`, `?`, `#`, espaço ou aspas) é
+  tratada como credenciais, de modo que `https://api.test:443/v1/x?email=a@b.com` fica intacta. Quando a
+  autoridade tem `:` seguido de algo que não é porta numérica e não tem `@` (`usuario:Ab3/Cd@host`), a senha
+  contém caracteres reservados sem codificação e as credenciais vão até o primeiro `@` seguinte na mesma
+  linha; na dúvida, mascara-se mais do que o necessário. Segredos literais (senha SMTP, senha extraída da
+  URL) são substituídos onde aparecerem apenas com 8 caracteres ou mais, para não corromper trechos comuns
+  (a senha `p` em `amqps://`); os mais curtos são mascarados na posição da URL. `password=` das strings
+  chave=valor também é removido. As mensagens são saneadas na origem: `redisstore.Open`, `postgres.Open`,
+  `rabbit.Conn` (a cada tentativa de conexão), `migrate` (Up, DownTo, Status e Bootstrap, incluindo as senhas
+  dos papéis) e `mailer` (endereço SMTP configurado com credenciais, senha e token `AUTH PLAIN` repetidos
+  pelo servidor). Para falhas de interpretação de URL, `redact.ParseError` não repete o texto da biblioteca
+  quando a URL tem credenciais (o motivo pode conter trechos da senha: `invalid URL escape "%zz"`, ou a parte
+  depois de um `/` lida como porta, `invalid port ":Ab3dEf"`): a mensagem traz a URL mascarada e a
+  orientação de codificar os caracteres reservados; sem credenciais, o motivo é anexado. A causa original
+  não é encadeada. Nos demais casos, a causa continua acessível por `errors.Is/As`. Como defesa adicional, o
+  handler de log mascara, em qualquer chave, senhas de URLs contidas em textos, erros, valores com
+  `String()` e listas de textos.
+- **Fixação de versões.** `tools/pincheck` (`make pin-check`, passo da CI em `go-quality` e teste que roda
+  contra o próprio repositório em `make test`) falha com: action sem SHA de 40 caracteres, dependência do
+  `package.json` sem versão exata, imagem sem tag fixa e `go.mod` sem `toolchain goX.Y.Z`. As imagens são
+  verificadas em todos os arquivos do Compose (qualquer prefixo, como `deploy/backup/dr.compose.yaml`, com
+  `${VAR:-padrão}` resolvido pelo padrão e variável sem padrão recusada), nos Dockerfiles (com `ARG`
+  resolvido e estágios ignorados) e nos Testcontainers (texto ou constante resolvida pelo AST). A tag precisa
+  começar por uma versão com ao menos major.minor (`18.7-alpine`, `v1.33.1`): `latest`, ausente e tags
+  flutuantes como `18`, `18-alpine`, `alpine`, `lts` ou `stable` são recusadas (nenhuma estava em uso). Isso
+  aceita `1.27` em imagens cuja versão tem três componentes, o que fica a cargo da revisão. As imagens
+  `recorvia-*` sem registro são as construídas pelos Dockerfiles do repositório: basta uma tag explícita
+  diferente de `latest` (`local`, `dr`). As imagens continuam fixadas por tag, sem digest. A fixação por
+  digest exigiria consultar os registros para confirmar cada imagem e mudaria a atualização das versões,
+  por isso ficou de fora desta decisão.
+- **Contrato nas respostas.** `internal/testsupport/contract` valida, nos testes de integração HTTP, cada
+  resposta (status, Content-Type, headers declarados e corpo) contra o schema da operação. Um erro 4xx/5xx
+  não declarado na operação é aceito somente como `application/problem+json` válido contra `Problem`, com
+  `status` igual ao da resposta. Sucesso ou redirecionamento não declarados são divergência.
+**Alternativas:** pôr o nome da tarefa no contexto somente em `internal/app` deixaria o log de falha do
+agendador sem correlação de contexto. Repassar o contexto enriquecido ao log de acesso por um valor mutável
+específico do HTTP exigiria que cada middleware de autenticação o atualizasse; o coletor genérico cobre
+qualquer atributo novo. A redação somente no handler de log foi descartada como solução única porque erros
+também são gravados (última falha de notificação) e devolvidos por comandos. Validar o contrato com um
+middleware em produção foi descartado: custo por requisição e falhas que só apareceriam em execução.
+**Consequências:** o log de acesso e os logs das tarefas, consumidores e requisições levam a correlação
+completa. O encerramento do worker passa a confirmar a mensagem em andamento na mesma conexão e a sinalizar
+a drenagem na readiness. As senhas deixam de aparecer nas falhas de configuração e conexão. Regressões de
+fixação e de contrato falham na CI. O validador de contrato só confere as operações exercitadas pelos testes
+de integração.
+
+## ADR-083 Concorrência otimista nas alterações versionadas e listagens por cursor com ordenação em allowlist
+**Status:** aceita. Substitui, na ADR-046, a listagem de credenciais sem cursor limitada a 200 itens.
+**Contexto:** o RF-15 pede paginação com limite, filtros e ordenação em allowlist, ordenação determinística e
+concorrência otimista (If-Match/version). Cerca de dez alterações de recursos com coluna `version` não exigiam
+`If-Match` (papel e remoção de membro, templates de e-mail, resolução de divergência, endereço de cobrança,
+arquivamento de cliente e de cupom, rotação do segredo e remoção de endpoint de webhook, nova versão de preço,
+provedor de pagamento, rotação e revogação de credencial): a última gravação vencia em silêncio. Oito listagens que
+crescem com a operação cortavam em 100 ou 200 itens sem `next_cursor` (disputas, divergências e execuções de
+conciliação, operações de pagamento, mensagens não processadas, convites, movimentos de crédito e credenciais de
+API), e `sort` fora da allowlist só era recusado na listagem de clientes; nas demais era ignorado.
+**Decisão:**
+- **Exigência central do If-Match.** As alterações versionadas ficam em `versionedRoutes`
+  (`internal/httpapi/versioning.go`): sem `If-Match`, a requisição é recusada com 428 `if_match_required` antes do
+  handler (depois da autenticação e da permissão). O handler lê a versão e o caso de uso a usa na condição da
+  gravação (`WHERE ... AND version = @version`), na mesma transação, sobre a linha bloqueada: versão divergente
+  responde 412 `version_mismatch` e nada é gravado nem auditado. Nos caminhos sem gravação (cliente ou cupom já
+  arquivado, credencial já revogada, endereço igual ao atual), a versão da linha bloqueada é conferida com a do
+  `If-Match`. A resposta de sucesso com corpo traz o `ETag` da versão gravada; as remoções respondem 204 sem `ETag`.
+- **Partes de outro recurso.** O endereço de cobrança faz parte da ficha do cliente (`CustomerDetails`, com o `ETag`
+  do cliente): o `If-Match` é a versão do cliente e a gravação gera a versão seguinte do cliente
+  (`BumpCustomerVersion`), sem coluna nova em `customer_billing_addresses`. A nova versão de preço troca o preço
+  vigente do plano (o que já gravava o plano): o `If-Match` e o `ETag` são a versão do plano. Os segredos fazem parte
+  do endpoint de webhook: a rotação passa a gerar a versão seguinte do endpoint.
+- **Versão 0 dos recursos ainda não gravados.** O template padrão (não personalizado) é exposto com `version` 0 e o
+  provedor ainda não configurado (somente em `available`) também tem versão 0: `If-Match: "0"` cria a
+  personalização ou a configuração com `INSERT ... ON CONFLICT DO NOTHING`, e a criação concorrente (que já gravou a
+  versão 1) recebe 412. Acima de 0, a gravação é um `UPDATE` condicionado à versão.
+- **Casos de uso em duas fases.** A resolução de divergência e a configuração do provedor consultam o provedor fora
+  da transação: a versão é conferida antes da chamada (recusa antecipada, sem chamar o provedor) e a condição da
+  gravação decide. Uma nova detecção da divergência durante a consulta gera outra versão e a resolução é recusada.
+- **Efeitos sobre outro registro versionado.** Tornar uma conta de provedor a padrão tira o padrão da outra conta, e
+  isso dá à outra conta uma versão nova, como já acontecia com as políticas de cobrança: quem a leu antes da troca
+  recebe 412 ao gravá-la, em vez de desfazer em silêncio a escolha feita por outra pessoa.
+- **412 na interface.** O aviso de alteração concorrente oferece "Recarregar dados". Os modais de edição que guardam o
+  recurso aberto (produto, política, template, endpoint, rotação de segredo e provedor) fecham nessa escolha, e a
+  alteração é refeita sobre a versão recarregada. A versão do formulário aberto nunca é trocada por uma recarga
+  automática, que anularia a proteção. Uma página da lista depois da primeira que fica vazia, por exemplo depois de
+  uma ação que tira da lista filtrada os seus últimos itens, volta à página anterior.
+- **Paginação por keyset.** As oito listagens aceitam `limit` (1 a 100, padrão 25) e `cursor` e devolvem
+  `next_cursor` (nulo na última página), ordenadas por colunas que não mudam depois da gravação, com desempate pelo
+  identificador: disputas por `(opened_at, id)`, divergências e operações por `(created_at, id)` (as operações
+  ordenavam por `updated_at`, que muda a cada tentativa e as deslocaria entre as páginas), execuções por
+  `(started_at, id)`, mensagens não processadas por `(failed_at, id)`, convites e movimentos de crédito por
+  `(created_at, id)`. A resposta dos créditos (`CreditBalance`) mantém o saldo e traz em `entries` a página dos
+  movimentos, com `next_cursor`. As credenciais continuam com as ativas primeiro: a posição é `(ativa, criação, id)`
+  e a situação é avaliada no instante da primeira página, levado no cursor (com tipo e aceito somente na forma
+  canônica), para que uma credencial que expira durante a navegação não seja repetida nem pulada. Cursor inválido
+  responde 422 `invalid_cursor`. A reexecução de operação deixa de procurar a operação na listagem e a lê pelo
+  identificador.
+- **Ordenação em allowlist.** `listRoutes` (`internal/httpapi/listing.go`) lista todas as listagens com a allowlist
+  de `sort` de cada uma (hoje só clientes ordena por parâmetro): `sort` fora da allowlist, repetido ou numa listagem
+  sem ordenação por parâmetro é recusado com 422 `invalid_sort` antes do handler.
+- **Contrato.** Os testes de contrato exigem que o parâmetro `IfMatch` apareça exatamente nas operações de
+  `versionedRoutes`, com as respostas 412 e 428 e o header `ETag` (componente `headers/ETag`) nas respostas de
+  sucesso com corpo; que toda listagem do contrato esteja em `listRoutes`, com o enum de `sort` igual à allowlist e
+  a resposta 422; e que as listagens com `next_cursor` declarem `limit` e `cursor`. Membros, credenciais,
+  divergências, contas de provedor e templates expõem `version`.
+
+**Alternativas:** opções por rota (como `idempotent()`) foram descartadas em favor das duas listas centrais, que
+valem também para as rotas da equipe e do portal e mantêm a regra num único ponto de `handle`. `If-None-Match: *`
+para criar o template personalizado e a conta do provedor foi descartado: seriam dois mecanismos de pré-condição, e o
+template padrão já é exposto com versão própria. Uma coluna `version` em `customer_billing_addresses` (migration) foi
+descartada: o endereço é lido e gravado como parte da ficha do cliente.
+**Consequências:** clientes da API passam a enviar `If-Match` nas alterações listadas (sem ele, 428) e a seguir
+`next_cursor` nas oito listagens, que devolvem 25 itens por padrão em vez de até 100 ou 200; as operações de
+pagamento passam a vir pela criação, não pela última atualização; `sort` não previsto passa a 422. Rotações
+concorrentes da mesma credencial na mesma versão não são mais todas gravadas: uma vence e as demais recebem 412. Quem
+perde a corrida da configuração do provedor depois de chamá-lo recebe 412 com o webhook já registrado no provedor
+com o token não gravado; a repetição com a versão atual registra o webhook de novo. Não há migration: todas as
+tabelas envolvidas já tinham `version`. Ficam sem `If-Match` as alterações de tabelas sem versão, que são transições
+de situação protegidas pela situação atual (409) ou atualizações parciais por campo (revogação de convite,
+cancelamento de reajuste programado, remoção de desconto, contatos do cliente, links do portal, reprocessamento de
+mensagens e de operações, reenvio de webhook), e, por ora, a troca do plano da plataforma e o atendimento dos
+pedidos de serviços adicionais, que têm versão mas não exigem `If-Match`. As listagens de catálogo e configuração
+(produtos, planos, cupons, métricas, membros, endpoints de webhook, políticas e templates) continuam sem cursor, com
+os limites atuais. A listagem de operações por criação não tem índice próprio, como a anterior por atualização. A
+interface envia o `If-Match` com a versão exibida e percorre as listagens pelo `next_cursor`.
+
+## ADR-084 Acabamento da auditoria: aviso fiscal, endereço do emitente, links do painel, simulador e contrato
+**Status:** aceita (RF-06, RF-15, RF-17 e RNF-07; complementa as ADR-074, ADR-078, ADR-079, ADR-080 e ADR-082).
+**Contexto:** depois das frentes de correção, a auditoria de requisitos deixou itens menores. O portal do
+cliente só mostrava o aviso de que a fatura comercial não é documento fiscal dentro do modal do documento, e o
+e-mail de fatura emitida não o trazia. O documento da fatura não tinha o endereço do emitente, porque a
+organização não tinha endereço. Os cards do painel levavam a listas que não correspondiam ao número (saldo em
+aberto contava `partially_paid`, a lista filtrava `open`; assinaturas ativas contavam trial e atraso, a lista
+filtrava `active`; reembolsos, chargebacks e valores a recuperar levavam a listas sem o filtro do mês ou do
+valor) e apareciam sem a permissão de leitura da lista. O simulador recusava reembolso e chargeback de cobrança
+só confirmada, o que o provedor real aceita, e reaproveitava o pagador pela referência externa de outro
+comerciante. O fake de testes do ledger não via estornos no histórico completo. O validador de contrato
+aceitava qualquer 5xx não declarado. O log de acesso da requisição recusada antes da validação do tenant não
+identificava o tenant pedido. `identity.Service.RevokeAll` não tinha uso.
+**Decisão:**
+- **Aviso fiscal.** O aviso ("Este documento é uma fatura comercial e não é documento fiscal. Não substitui a
+  nota fiscal.") é um componente comum (`FiscalNotice`, papel `note`, rótulo "Aviso fiscal") na página da
+  fatura do painel e, agora, na página da fatura do portal, fora do modal; o visualizador do documento mantém a
+  linha própria. O e-mail padrão de fatura emitida ganha a frase "A fatura comercial não é documento fiscal e
+  não substitui a nota fiscal." (`notifications.InvoiceFiscalNotice`). O padrão do sistema só é usado quando o
+  tenant não tem template personalizado, e o personalizado é enviado como foi gravado: a mudança não altera
+  nem invalida os modelos editados, e não há migração de dados.
+- **Endereço da organização e do emitente.** Nova tabela `tenant_addresses` (migration 00024), no formato e com
+  as mesmas restrições de `customer_billing_addresses`, com RLS por tenant e sem `DELETE` para o papel da
+  aplicação. O tipo e as regras (normalização, validação e campos alterados) passam para
+  `internal/kernel/address`; `customers.Address` é um alias, sem mudança no endereço de cobrança. O endereço é
+  editado no perfil da organização: `PATCH /api/v1/organization` aceita `address` (mesma permissão
+  `organization.update` e o mesmo `If-Match` da organização); ausente, mantém o atual; o endereço não é
+  removido, como o de cobrança. Campos inválidos voltam em `invalid_organization` como `address.<campo>`. A
+  mudança registra `organization.address_updated` com os nomes dos campos alterados e se o endereço foi
+  cadastrado agora, nunca os valores, além do `organization.updated` de sempre. A emissão copia o endereço para
+  `invoices.issuer_snapshot.address` (cópia do valor, não referência). O documento mostra "Endereço do
+  emitente" somente quando o endereço foi gravado na emissão: a fatura emitida antes da 00024 ou sem endereço
+  cadastrado sai sem a linha, e o endereço atual da organização nunca a substitui, nem na fatura anterior à
+  ADR-079, que continua usando o nome, a razão social e o CNPJ atuais. A tela da organização ganha a seção
+  "Endereço da organização", opcional enquanto não houver cadastro.
+- **Links do painel.** O card leva à lista só quando a lista e o filtro já existem na API e mostram o mesmo
+  conjunto que o número conta: `/faturas?open_balance=true`, `/faturas?overdue=true`,
+  `/assinaturas?in_force=true`, `/conciliacao?aba=divergencias` e `/operacoes-pagamento?status=unknown`. Os
+  filtros `open_balance` e `in_force` já existiam na API; as telas de faturas e de assinaturas passaram a
+  lê-los da URL e a exibi-los como filtro ligado. Reembolsos, chargebacks e valores a recuperar perderam o
+  link: nenhuma lista filtra o mês nem o valor a recuperar. O link exige a permissão de leitura da lista
+  (`invoices.read`, `subscriptions.read`, `reconciliation.read`, `payments.read`); sem ela, o número aparece
+  sem link. Num mês encerrado, os cards de posição (fim do mês ou atual) com link avisam que a lista mostra a
+  posição de hoje.
+- **Simulador.** Reembolso e chargeback são aceitos nas situações `paid`, `confirmed` e `partially_refunded`.
+  A disputa ganha devolve a cobrança a `paid`: o Recorvia já dá o pagamento como recebido antes da
+  movimentação (ADR-080). O pagador é idempotente pela referência externa dentro do comerciante; o vínculo é
+  persistido em `customer_merchant`, e pagadores de estados gravados antes dele não são reaproveitados por
+  nenhum comerciante. O caminho completo no Recorvia (pagamento confirmado e não recebido, reembolsado, e
+  chargeback com disputa ganha) é coberto com o simulador real, conta a conta: `provider_confirmed` e
+  `provider_clearing` terminam zerados e `cash` fica com o líquido menos a movimentação.
+- **Fake do ledger.** `ReverseLedger` procura o lançamento original em todo o histórico gravado e grava o
+  estorno no histórico e nos lançamentos observados, com a mesma idempotência de `PostLedger`, como o banco; a
+  consulta do excedente do fake também lê o histórico completo. Nenhum teste existente dependia do defeito.
+- **Contrato.** Um 5xx não declarado na operação passa a ser divergência, como um sucesso não declarado. As
+  operações que carregam as credenciais do provedor na própria requisição declaram o 503
+  `components/responses/ProviderUnavailable` (`provider_credentials_unreadable` e, na resolução de divergência,
+  `provider_unavailable`): `retryInvoiceCharge`, `retryPaymentOperation`, `runReconciliation`,
+  `resolveDiscrepancy` e `receiveProviderWebhook`. Falhas de infraestrutura que qualquer operação pode ter
+  (500 `internal_error`, 503 do armazenamento de sessões ou do provedor de identidade) não são declaradas
+  operação a operação; o teste que provoca uma delas de propósito registra a exceção explícita
+  `contract.AllowUndeclared(t, método, caminho, status)`, restrita ao teste que montou o servidor, ao método, ao
+  caminho concreto e ao status 5xx, e a resposta continua obrigada a ser `problem+json` válido. É o caso da
+  falha simulada na gravação da auditoria da dead letter (500). O servidor com o limite de exportação reduzido
+  também passa pelo validador, que confere a exportação cortada e os headers `X-Recorvia-Export-*`.
+- **Log de acesso.** O tenant pedido no header `X-Recorvia-Tenant` vai ao log de acesso como
+  `requested_tenant_id`, inclusive no 401 e no 403 de permissão, que saem antes de `tenant_id`; o pedido não foi
+  validado, por isso não ocupa a chave `tenant_id`, reservada ao tenant validado. Só identificadores válidos
+  são registrados, na forma canônica.
+- **Código morto.** `identity.Service.RevokeAll` não tinha chamador e foi removido com o teste próprio; a
+  revogação em massa continua em `SessionStore.DeleteAllForUser`, usada por `LogoutAll` (encerrar todas as
+  sessões) e pela desativação do usuário, e a remoção de membro revoga as sessões da organização
+  (`RevokeTenantSessions`), como na ADR-078.
+- **Roteiros E2E.** Onboarding (06, inclusive o endereço da organização), política de cobrança (07), endpoint
+  de webhook (08) e convite com aceite (09). O convite e o webhook usam a Beta: a Acme já tem os três usuários
+  do plano Essencial, e o webhook exige o Profissional, que o roteiro 08 contrata se preciso. O aceite usa o
+  novo usuário de demonstração `gabi.convidada@exemplo.test`, sem organização no seed. O destino do webhook é
+  o simulador de pagamentos, que resolve dentro do ambiente e está na rede privada permitida.
+**Alternativas:** guardar o endereço em colunas de `tenants` mudaria a linha lida por todas as consultas da
+organização e se afastaria do formato do endereço de cobrança. Mostrar o endereço atual na fatura antiga
+contrariaria o emitente congelado na emissão (ADR-079). Acrescentar o aviso fiscal aos templates editados
+alteraria o texto gravado pelo tenant sem o consentimento dele. Declarar 500 e 503 em todas as operações do
+contrato documentaria falhas de infraestrutura como respostas de negócio e mudaria cada operação; aceitar 5xx
+não declarado escondia o 503 do provedor fora do contrato.
+**Consequências:** as faturas emitidas depois do cadastro do endereço trazem o endereço do emitente; as
+anteriores continuam como foram emitidas.
+Cada 503 novo de regra de negócio precisa ser declarado na operação, e cada teste que provoca falha de
+infraestrutura declara a exceção na própria requisição. O ambiente local já em execução só terá o usuário
+`gabi.convidada@exemplo.test` depois que o Keycloak reimportar o realm (`make reset`).
+
+## ADR-085 If-Match na troca do plano da plataforma e no atendimento dos serviços adicionais; catálogo, pedidos, demonstrativos e reajustes por cursor
+**Status:** aceita. Completa a ADR-083 no RF-15: deixam de valer, nas consequências dela, a troca do plano da plataforma
+e o atendimento dos pedidos de serviços adicionais sem `If-Match` e as listagens de catálogo sem cursor.
+**Contexto:** a troca do plano da plataforma (`PUT /api/v1/platform/plan`) e o atendimento dos pedidos de serviços
+adicionais pela equipe da plataforma (agendar, concluir e cancelar) gravam linhas com `version`, mas sem `If-Match`: a
+última gravação vencia em silêncio. Seis listagens ainda cortavam com `LIMIT` fixo e sem `next_cursor`: produtos,
+planos, cupons e métricas (500), pedidos de serviços adicionais da organização (100), demonstrativos da plataforma (36)
+e reajustes de uma assinatura (200, da vigência mais antiga para a mais recente, de modo que o corte esconderia os
+reajustes mais novos, inclusive os programados). As listas do catálogo alimentam campos de seleção na interface
+(plano da assinatura, produto do plano, métrica do preço, planos do cupom), que precisam de todos os itens.
+**Decisão:**
+- **If-Match.** As quatro rotas entram em `versionedRoutes`, com 428 sem o header e 412 com versão divergente. A
+  versão da assinatura da plataforma passa a ser exposta em `subscription.version` da visão geral, que também traz o
+  `ETag`. O caso de uso confere a versão da linha bloqueada antes de qualquer outra regra (inclusive na troca para o
+  plano atual, que não tem efeito, e no pedido já encerrado) e a gravação é condicionada a ela, na mesma transação:
+  divergente, nada é gravado nem auditado. O fechamento mensal do demonstrativo também gera uma versão nova da
+  assinatura: quem leu a visão geral antes do fechamento recebe 412 e troca o plano sobre a versão recarregada. A
+  versão do pedido é a `version` da lista; as respostas trazem o `ETag` da versão gravada.
+- **Interface.** A troca de plano envia a versão exibida; não há modal que guarde a assinatura (a confirmação já se
+  fechou quando a resposta chega), e "Recarregar dados" traz a visão geral com a versão atual. A tela da equipe não
+  tem organização ativa e por isso não usa `useApiMutation`: a mutation dela ganhou o mesmo comportamento de
+  `onConcurrentReload` (recarrega a fila e fecha os modais de agendamento e de cancelamento, que guardam o pedido).
+- **Paginação por keyset.** As seis listagens aceitam `limit` (1 a 100, padrão 25) e `cursor`, devolvem `next_cursor`
+  e recusam cursor inválido com 422 `invalid_cursor`, como na ADR-083, ordenadas por colunas que não mudam depois da
+  gravação, com desempate pelo identificador: produtos e planos por `(created_at, id)`, do mais recente para o mais
+  antigo (eram ordenados pelo nome, que muda na edição e deslocaria o item entre as páginas); cupons por
+  `(created_at, id)`, como antes; métricas por `(code, id)` (o código é único no tenant e não muda); pedidos de
+  serviços adicionais por `(created_at, id)`; demonstrativos por `(period_start, id)`, do período mais recente; e
+  reajustes por `(effective_date, created_at, id)`, da vigência mais antiga para a mais recente, como antes. Elas já
+  estavam em `listRoutes`, sem ordenação por parâmetro; o contrato declara `limit`, `cursor` e `next_cursor`.
+- **Campos de seleção.** `fetchAllPages` (`web/src/lib/pages.ts`) percorre as páginas pelo `next_cursor` com `limit`
+  100; `useProducts`, `usePlans` e `useMetrics` usam esse auxiliar, e produtos e planos são ordenados pelo nome no
+  navegador, como os campos mostravam. As telas de catálogo, cupons, métricas, plano Recorvia e reajustes paginam
+  com `CursorPager` e `useReturnFromEmptyPage`.
+- **Limites naturais mantidos.** A agenda de mudanças da assinatura (`ListScheduledChanges`, 50 mais recentes) não é
+  uma listagem: faz parte da ficha da assinatura. Há no máximo uma mudança pendente por assinatura (índice único), e
+  ela é sempre a criada mais recentemente (uma mudança nova cancela a pendente), de modo que o corte nunca a esconde;
+  as mudanças antigas, aplicadas ou canceladas, continuam no histórico da assinatura. Os segredos válidos de um
+  endpoint de webhook (5) são limitados pela retenção na rotação e não são expostos como listagem. Não sobrou outra
+  listagem da API com `LIMIT` fixo e sem cursor; as que não têm cursor também não têm corte e são limitadas pelo
+  domínio (papéis, provedores, templates, tipos de evento, contas do ledger, planos e serviços da plataforma, tentativas
+  de uma entrega, recuperações de uma disputa, eventos de uma notificação, endpoints de webhook, até 20) ou devolvem
+  tudo sem corte silencioso (membros, políticas de cobrança, organizações da equipe e histórico da assinatura).
+
+**Alternativas:** keyset pelo nome em produtos e planos, para manter a ordem alfabética das telas, foi descartado: a
+renomeação deslocaria o item entre as páginas, o critério da ADR-083. O cursor por deslocamento (como na ordenação
+de clientes por nome) também desloca itens quando há inclusões durante a navegação. Uma listagem sem limite para os
+campos de seleção (por exemplo, `limit` acima de 100) traria de volta respostas sem limite; o auxiliar segue o cursor
+com o limite máximo. A busca no servidor dentro do campo, como em `CustomerSelect`, fica para quando os catálogos
+crescerem: hoje eles são pequenos e o filtro do próprio campo basta.
+**Consequências:** clientes da API passam a enviar `If-Match` nas quatro rotas (sem ele, 428) e a seguir
+`next_cursor` nas seis listagens, que devolvem 25 itens por padrão em vez de até 500, 100 ou 36; produtos e planos
+passam a vir do mais recente para o mais antigo; um campo de seleção faz uma requisição a cada 100 itens. O exercício
+de recuperação (`deploy/backup/dr-check.sh`) lê a versão da assinatura antes de trocar o plano. Não há migration:
+todas as tabelas envolvidas já tinham `version`; as listagens do catálogo pela criação não têm índice próprio, como as
+anteriores pelo nome, e cada tenant tem poucos itens.

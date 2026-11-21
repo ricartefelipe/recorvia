@@ -26,6 +26,16 @@ type catalogState struct {
 	productFilter Status
 	planFilter    Status
 	planProduct   *uuid.UUID
+	// page é o limite e o cursor recebidos pela última listagem; nextCursor
+	// é o cursor devolvido por ela.
+	page       pageRequest
+	nextCursor string
+}
+
+// pageRequest é o pedido de página recebido pelo armazenamento.
+type pageRequest struct {
+	limit  int
+	cursor string
 }
 
 func newCatalogState() *catalogState {
@@ -119,11 +129,11 @@ func (t *catalogTx) UpdateProduct(_ context.Context, p Product) error {
 	return nil
 }
 
-func (t *catalogTx) Products(_ context.Context, status Status) ([]Product, error) {
+func (t *catalogTx) Products(_ context.Context, status Status, limit int, cursor string) (Page[Product], error) {
 	if err := t.s.hit("Products"); err != nil {
-		return nil, err
+		return Page[Product]{}, err
 	}
-	t.st.productFilter = status
+	t.st.productFilter, t.st.page = status, pageRequest{limit, cursor}
 	var out []Product
 	for _, p := range t.st.products {
 		if status == "" || p.Status == status {
@@ -131,7 +141,7 @@ func (t *catalogTx) Products(_ context.Context, status Status) ([]Product, error
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
+	return Page[Product]{Items: out, NextCursor: t.st.nextCursor}, nil
 }
 
 func (t *catalogTx) InsertMetric(_ context.Context, m Metric) error {
@@ -153,11 +163,12 @@ func (t *catalogTx) Metric(_ context.Context, id uuid.UUID) (Metric, error) {
 	return m, nil
 }
 
-func (t *catalogTx) Metrics(context.Context) ([]Metric, error) {
+func (t *catalogTx) Metrics(_ context.Context, limit int, cursor string) (Page[Metric], error) {
 	if err := t.s.hit("Metrics"); err != nil {
-		return nil, err
+		return Page[Metric]{}, err
 	}
-	return slices.Collect(maps.Values(t.st.metrics)), nil
+	t.st.page = pageRequest{limit, cursor}
+	return Page[Metric]{Items: slices.Collect(maps.Values(t.st.metrics)), NextCursor: t.st.nextCursor}, nil
 }
 
 func (t *catalogTx) InsertPlan(_ context.Context, p Plan) error {
@@ -191,18 +202,18 @@ func (t *catalogTx) UpdatePlan(_ context.Context, p Plan) error {
 	return nil
 }
 
-func (t *catalogTx) Plans(_ context.Context, status Status, productID *uuid.UUID) ([]Plan, error) {
+func (t *catalogTx) Plans(_ context.Context, status Status, productID *uuid.UUID, limit int, cursor string) (Page[Plan], error) {
 	if err := t.s.hit("Plans"); err != nil {
-		return nil, err
+		return Page[Plan]{}, err
 	}
-	t.st.planFilter, t.st.planProduct = status, productID
+	t.st.planFilter, t.st.planProduct, t.st.page = status, productID, pageRequest{limit, cursor}
 	var out []Plan
 	for _, p := range t.st.plans {
 		if (status == "" || p.Status == status) && (productID == nil || p.ProductID == *productID) {
 			out = append(out, p)
 		}
 	}
-	return out, nil
+	return Page[Plan]{Items: out, NextCursor: t.st.nextCursor}, nil
 }
 
 func (t *catalogTx) InsertPriceVersion(_ context.Context, pv PriceVersion) error {

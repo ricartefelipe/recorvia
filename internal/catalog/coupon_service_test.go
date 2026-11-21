@@ -198,26 +198,26 @@ func TestCouponServiceList(t *testing.T) {
 	if _, err := e.svc.Create(context.Background(), uuid.New(), e.actor, couponWith(func(in *CouponInput) { in.Code = "ALHEIO" })); err != nil {
 		t.Fatal(err)
 	}
-	list, err := e.svc.List(context.Background(), e.tenantID)
+	list, err := e.svc.List(context.Background(), e.tenantID, 10, "cursor")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 2 || list[0].ID != newer.ID || list[1].ID != older.ID {
-		t.Fatalf("lista inesperada: %+v", list)
+	if len(list.Items) != 2 || list.Items[0].ID != newer.ID || list.Items[1].ID != older.ID || e.st().page != (pageRequest{10, "cursor"}) {
+		t.Fatalf("lista inesperada: %+v (página pedida %+v)", list, e.st().page)
 	}
 }
 
 func TestCouponServiceListEmptyAndErrors(t *testing.T) {
 	e := newCouponEnv()
-	list, err := e.svc.List(context.Background(), e.tenantID)
-	if err != nil || len(list) != 0 {
+	list, err := e.svc.List(context.Background(), e.tenantID, 25, "")
+	if err != nil || len(list.Items) != 0 || list.NextCursor != "" {
 		t.Fatalf("lista = %v, erro = %v", list, err)
 	}
 	for _, op := range []string{"InCouponTx", "Coupons"} {
 		t.Run(op, func(t *testing.T) {
 			e := newCouponEnv()
 			e.store.fail[op] = errBoom
-			if _, err := e.svc.List(context.Background(), e.tenantID); !errors.Is(err, errBoom) {
+			if _, err := e.svc.List(context.Background(), e.tenantID, 25, ""); !errors.Is(err, errBoom) {
 				t.Fatalf("erro = %v, esperado a falha simulada", err)
 			}
 		})
@@ -229,7 +229,7 @@ func TestCouponServiceArchive(t *testing.T) {
 	plan := e.seedPlans(e.tenantID, 1)[0]
 	created := e.create(t, nil)
 	e.clock.Advance(24 * time.Hour)
-	c, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID)
+	c, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,12 +254,12 @@ func TestCouponServiceArchive(t *testing.T) {
 func TestCouponServiceArchiveIsIdempotent(t *testing.T) {
 	e := newCouponEnv()
 	created := e.create(t, nil)
-	first, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID)
+	first, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	audits := len(e.st().audits)
-	second, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID)
+	second, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID, first.Version)
 	if err != nil {
 		t.Fatalf("arquivar de novo deve ser aceito: %v", err)
 	}
@@ -271,6 +271,25 @@ func TestCouponServiceArchiveIsIdempotent(t *testing.T) {
 	}
 	if len(e.st().audits) != audits {
 		t.Fatal("arquivar um cupom já arquivado não deve gerar auditoria")
+	}
+	// Já arquivado, a versão do If-Match ainda é conferida.
+	_, err = e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID, 1)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+}
+
+// A versão do If-Match vai na condição da gravação: divergente, o cupom não é
+// arquivado nem auditado.
+func TestCouponServiceArchiveVersionMismatch(t *testing.T) {
+	e := newCouponEnv()
+	created := e.create(t, nil)
+	audits := len(e.st().audits)
+	_, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID, 7)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	if n := e.store.calls["ArchiveCoupon"]; n != 1 {
+		t.Fatalf("ArchiveCoupon chamado %d vezes: a versão é conferida na gravação", n)
+	}
+	if stored := e.st().coupons[created.ID]; stored.Status != Active || stored.Version != 1 || len(e.st().audits) != audits {
+		t.Fatalf("o cupom não deve ser alterado: %+v", stored)
 	}
 }
 
@@ -310,7 +329,7 @@ func TestCouponServiceArchiveRejected(t *testing.T) {
 			if tc.fail != "" {
 				e.store.fail[tc.fail] = errBoom
 			}
-			_, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, id)
+			_, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, id, 1)
 			if tc.check != nil {
 				tc.check(t, err)
 			} else if !errors.Is(err, errBoom) {

@@ -92,7 +92,7 @@ func (q *Queries) GetPendingScheduledChangeForUsage(ctx context.Context, arg Get
 }
 
 const getSubscriptionForShare = `-- name: GetSubscriptionForShare :one
-SELECT id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date, trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at, cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days, created_at, updated_at, version, price_override_amount, price_override_adjustment_id, pending_usage_starts FROM subscriptions WHERE tenant_id = $1 AND id = $2 FOR SHARE
+SELECT id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date, trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at, cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days, created_at, updated_at, version, price_override_amount, price_override_adjustment_id, pending_usage_starts, request_key, request_fingerprint FROM subscriptions WHERE tenant_id = $1 AND id = $2 FOR SHARE
 `
 
 type GetSubscriptionForShareParams struct {
@@ -137,6 +137,8 @@ func (q *Queries) GetSubscriptionForShare(ctx context.Context, arg GetSubscripti
 		&i.PriceOverrideAmount,
 		&i.PriceOverrideAdjustmentID,
 		&i.PendingUsageStarts,
+		&i.RequestKey,
+		&i.RequestFingerprint,
 	)
 	return i, err
 }

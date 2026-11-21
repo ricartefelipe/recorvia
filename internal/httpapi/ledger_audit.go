@@ -124,7 +124,12 @@ func (a *API) listDeadLetters(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, invalidField("status", "Situação desconhecida."))
 		return
 	}
-	items, err := a.Store.DeadLetters(r.Context(), mustPrincipal(r).TenantID, status)
+	limit, cursor, err := pageParams(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	items, next, err := a.Store.DeadLetters(r.Context(), mustPrincipal(r).TenantID, status, limit, cursor)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -133,7 +138,7 @@ func (a *API) listDeadLetters(w http.ResponseWriter, r *http.Request) {
 	for _, d := range items {
 		out = append(out, deadLetterDTO(d))
 	}
-	a.writeJSON(w, r, http.StatusOK, list(out))
+	a.writeJSON(w, r, http.StatusOK, newPage(out, next))
 }
 
 // resolveDeadLetter reprocessa (reentrega direcionada à fila do consumidor
@@ -187,12 +192,23 @@ func (a *API) dashboard(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, r, http.StatusOK, dashboardDTO(d))
 }
 
+// dashboardDTO monta a resposta do painel: um campo por indicador
+// (reporting.Indicators), a fórmula e a base temporal de cada um e o instante
+// das posições.
 func dashboardDTO(d reporting.Dashboard) map[string]any {
-	return map[string]any{"month": d.Month, "currency": d.Currency, "mrr": d.MRR, "arr": d.ARR, "billed": d.Billed, "billed_recurring": d.BilledRecurring,
+	out := dashboardIndicators(d)
+	out["month"], out["currency"], out["position_at"] = d.Month, d.Currency, d.PositionAt.UTC()
+	out["definitions"], out["bases"] = d.Definitions, d.Bases
+	return out
+}
+
+func dashboardIndicators(d reporting.Dashboard) map[string]any {
+	return map[string]any{"mrr": d.MRR, "arr": d.ARR, "billed": d.Billed, "billed_recurring": d.BilledRecurring,
 		"billed_usage": d.BilledUsage, "received": d.Received, "open_receivables": d.OpenReceivables, "overdue_receivables": d.OverdueReceivables,
 		"delinquency_rate_bp": d.DelinquencyRateBP, "churn_rate_bp": d.ChurnRateBP, "active_subscriptions": d.ActiveSubscriptions,
 		"new_subscriptions": d.NewSubscriptions, "canceled_subscriptions": d.CanceledSubscriptions, "refunds": d.Refunds, "chargebacks": d.Chargebacks,
-		"open_recoverables": d.OpenRecoverables, "open_discrepancies": d.OpenDiscrepancies, "unknown_operations": d.UnknownOperations, "definitions": d.Definitions}
+		"open_recoverables": d.OpenRecoverables, "pending_provider_receipt": d.PendingProviderReceipt,
+		"open_discrepancies": d.OpenDiscrepancies, "unknown_operations": d.UnknownOperations}
 }
 
 // structToMap converte um DTO em mapa para compor respostas.

@@ -1,18 +1,20 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Alert, Badge, Button, Code, Group, Modal, NumberInput, Radio, SimpleGrid, Stack, Table, Text, TextInput, Tooltip } from '@mantine/core';
 import { IconInfoCircle, IconPlus } from '@tabler/icons-react';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
 import type { Aggregation, Metric, MetricInput } from '../../api/types';
 import { StatusBadge } from '../../components/format';
 import { EmptyState, QueryContent } from '../../components/states';
-import { useApiMutation } from '../../lib/hooks';
+import { CursorPager } from '../../components/ui';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
 import { aggregationHelp, aggregationLabels, catalogStatusLabels, labelOf } from '../../lib/labels';
 import { formatQuantity } from '../../lib/money';
 import { optionalInt, quantityField, requiredText } from '../../lib/validation';
-import { Can } from '../../session/SessionContext';
-import { catalogApi, useMetrics } from './api';
+import { Can, useTenant } from '../../session/SessionContext';
+import { catalogApi } from './api';
 
 const AGGREGATIONS: Aggregation[] = ['sum', 'max', 'unique_count', 'last'];
 
@@ -109,7 +111,14 @@ function MetricModal({ opened, onClose }: { opened: boolean; onClose: () => void
 }
 
 export function MetricsPage() {
-  const query = useMetrics();
+  const { keys } = useTenant();
+  const pagination = useCursorPagination('metrics');
+  const query = useQuery({
+    queryKey: keys('metrics', 'page', pagination.cursor),
+    queryFn: ({ signal }) => catalogApi.listMetrics({ cursor: pagination.cursor, limit: 25 }, signal),
+    placeholderData: keepPreviousData,
+  });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   const [creating, setCreating] = useState(false);
   return (
     <Stack>
@@ -125,50 +134,60 @@ export function MetricsPage() {
         </Can>
       </Group>
       <QueryContent query={query}>
-        {({ data }) =>
-          data.length === 0 ? (
+        {(page) =>
+          page.data.length === 0 ? (
             <EmptyState title="Nenhuma métrica" description="Crie uma métrica para cobrar por consumo, como chamadas de API ou armazenamento." />
           ) : (
-            <Table.ScrollContainer minWidth={760}>
-              <Table aria-label="Métricas de consumo">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Código</Table.Th>
-                    <Table.Th>Nome</Table.Th>
-                    <Table.Th>Unidade</Table.Th>
-                    <Table.Th>Agregação</Table.Th>
-                    <Table.Th ta="right">Máximo por evento</Table.Th>
-                    <Table.Th ta="right">Carência</Table.Th>
-                    <Table.Th>Situação</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {data.map((m) => (
-                    <Table.Tr key={m.id}>
-                      <Table.Td>
-                        <Code>{m.code}</Code>
-                      </Table.Td>
-                      <Table.Td>{m.name}</Table.Td>
-                      <Table.Td>{m.unit}</Table.Td>
-                      <Table.Td>
-                        <Tooltip label={aggregationHelp[m.aggregation]} multiline w={300} events={{ hover: true, focus: true, touch: true }}>
-                          <Badge variant="light" tabIndex={0}>
-                            {labelOf(aggregationLabels, m.aggregation)}
-                          </Badge>
-                        </Tooltip>
-                      </Table.Td>
-                      <Table.Td ta="right" className="numeric">
-                        {formatQuantity(m.max_quantity_per_event)}
-                      </Table.Td>
-                      <Table.Td ta="right">{m.late_grace_hours} h</Table.Td>
-                      <Table.Td>
-                        <StatusBadge status={m.status} labels={catalogStatusLabels} />
-                      </Table.Td>
+            <>
+              <Table.ScrollContainer minWidth={760}>
+                <Table aria-label="Métricas de consumo">
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Código</Table.Th>
+                      <Table.Th>Nome</Table.Th>
+                      <Table.Th>Unidade</Table.Th>
+                      <Table.Th>Agregação</Table.Th>
+                      <Table.Th ta="right">Máximo por evento</Table.Th>
+                      <Table.Th ta="right">Carência</Table.Th>
+                      <Table.Th>Situação</Table.Th>
                     </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            </Table.ScrollContainer>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {page.data.map((m) => (
+                      <Table.Tr key={m.id}>
+                        <Table.Td>
+                          <Code>{m.code}</Code>
+                        </Table.Td>
+                        <Table.Td>{m.name}</Table.Td>
+                        <Table.Td>{m.unit}</Table.Td>
+                        <Table.Td>
+                          <Tooltip label={aggregationHelp[m.aggregation]} multiline w={300} events={{ hover: true, focus: true, touch: true }}>
+                            <Badge variant="light" tabIndex={0}>
+                              {labelOf(aggregationLabels, m.aggregation)}
+                            </Badge>
+                          </Tooltip>
+                        </Table.Td>
+                        <Table.Td ta="right" className="numeric">
+                          {formatQuantity(m.max_quantity_per_event)}
+                        </Table.Td>
+                        <Table.Td ta="right">{m.late_grace_hours} h</Table.Td>
+                        <Table.Td>
+                          <StatusBadge status={m.status} labels={catalogStatusLabels} />
+                        </Table.Td>
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
+              <CursorPager
+                page={pagination.page}
+                hasPrevious={pagination.hasPrevious}
+                hasNext={!!page.next_cursor}
+                onPrevious={pagination.previous}
+                onNext={() => page.next_cursor && pagination.next(page.next_cursor)}
+                loading={query.isFetching}
+              />
+            </>
           )
         }
       </QueryContent>

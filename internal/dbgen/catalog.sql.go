@@ -14,16 +14,17 @@ import (
 )
 
 const archiveCoupon = `-- name: ArchiveCoupon :execrows
-UPDATE coupons SET status = 'archived', version = version + 1 WHERE tenant_id = $1 AND id = $2
+UPDATE coupons SET status = 'archived', version = version + 1 WHERE tenant_id = $1 AND id = $2 AND version = $3
 `
 
 type ArchiveCouponParams struct {
 	TenantID uuid.UUID
 	ID       uuid.UUID
+	Version  int32
 }
 
 func (q *Queries) ArchiveCoupon(ctx context.Context, arg ArchiveCouponParams) (int64, error) {
-	result, err := q.db.Exec(ctx, archiveCoupon, arg.TenantID, arg.ID)
+	result, err := q.db.Exec(ctx, archiveCoupon, arg.TenantID, arg.ID, arg.Version)
 	if err != nil {
 		return 0, err
 	}
@@ -539,11 +540,28 @@ func (q *Queries) InsertProduct(ctx context.Context, arg InsertProductParams) er
 }
 
 const listCoupons = `-- name: ListCoupons :many
-SELECT id, tenant_id, code, name, discount_type, percent_off_bp, amount_off, currency, duration, duration_cycles, max_redemptions, redemptions_count, valid_from, valid_until, applies_to_plan_ids, status, created_at, updated_at, version FROM coupons WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT 500
+SELECT id, tenant_id, code, name, discount_type, percent_off_bp, amount_off, currency, duration, duration_cycles, max_redemptions, redemptions_count, valid_from, valid_until, applies_to_plan_ids, status, created_at, updated_at, version FROM coupons
+ WHERE tenant_id = $1
+   AND ($2::timestamptz IS NULL OR (created_at, id) < ($2::timestamptz, $3::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT $4
 `
 
-func (q *Queries) ListCoupons(ctx context.Context, tenantID uuid.UUID) ([]Coupon, error) {
-	rows, err := q.db.Query(ctx, listCoupons, tenantID)
+type ListCouponsParams struct {
+	TenantID uuid.UUID
+	CursorTs *time.Time
+	CursorID *uuid.UUID
+	RowLimit int32
+}
+
+// Paginação por keyset em (created_at, id), que não mudam depois da criação.
+func (q *Queries) ListCoupons(ctx context.Context, arg ListCouponsParams) ([]Coupon, error) {
+	rows, err := q.db.Query(ctx, listCoupons,
+		arg.TenantID,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -583,11 +601,28 @@ func (q *Queries) ListCoupons(ctx context.Context, tenantID uuid.UUID) ([]Coupon
 }
 
 const listMetrics = `-- name: ListMetrics :many
-SELECT id, tenant_id, code, name, unit, aggregation, max_quantity_per_event, late_grace_hours, status, created_at FROM billable_metrics WHERE tenant_id = $1 ORDER BY code LIMIT 500
+SELECT id, tenant_id, code, name, unit, aggregation, max_quantity_per_event, late_grace_hours, status, created_at FROM billable_metrics
+ WHERE tenant_id = $1
+   AND ($2::text IS NULL OR (code, id) > ($2::text, $3::uuid))
+ ORDER BY code, id
+ LIMIT $4
 `
 
-func (q *Queries) ListMetrics(ctx context.Context, tenantID uuid.UUID) ([]BillableMetric, error) {
-	rows, err := q.db.Query(ctx, listMetrics, tenantID)
+type ListMetricsParams struct {
+	TenantID   uuid.UUID
+	CursorCode *string
+	CursorID   *uuid.UUID
+	RowLimit   int32
+}
+
+// Paginação por keyset em (code, id): o código é único no tenant e não muda.
+func (q *Queries) ListMetrics(ctx context.Context, arg ListMetricsParams) ([]BillableMetric, error) {
+	rows, err := q.db.Query(ctx, listMetrics,
+		arg.TenantID,
+		arg.CursorCode,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -622,17 +657,31 @@ SELECT id, tenant_id, product_id, code, name, description, billing_interval, cur
  WHERE tenant_id = $1
    AND ($2::text IS NULL OR status = $2)
    AND ($3::uuid IS NULL OR product_id = $3)
- ORDER BY lower(name), id LIMIT 500
+   AND ($4::timestamptz IS NULL OR (created_at, id) < ($4::timestamptz, $5::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT $6
 `
 
 type ListPlansParams struct {
 	TenantID  uuid.UUID
 	Status    *string
 	ProductID *uuid.UUID
+	CursorTs  *time.Time
+	CursorID  *uuid.UUID
+	RowLimit  int32
 }
 
+// Paginação por keyset em (created_at, id), que não mudam depois da criação
+// (o nome muda na edição e deslocaria o plano entre as páginas).
 func (q *Queries) ListPlans(ctx context.Context, arg ListPlansParams) ([]Plan, error) {
-	rows, err := q.db.Query(ctx, listPlans, arg.TenantID, arg.Status, arg.ProductID)
+	rows, err := q.db.Query(ctx, listPlans,
+		arg.TenantID,
+		arg.Status,
+		arg.ProductID,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -709,17 +758,31 @@ func (q *Queries) ListPriceVersions(ctx context.Context, arg ListPriceVersionsPa
 }
 
 const listProducts = `-- name: ListProducts :many
-SELECT id, tenant_id, name, description, status, created_at, updated_at, version FROM products WHERE tenant_id = $1 AND ($2::text IS NULL OR status = $2)
- ORDER BY lower(name), id LIMIT 500
+SELECT id, tenant_id, name, description, status, created_at, updated_at, version FROM products
+ WHERE tenant_id = $1 AND ($2::text IS NULL OR status = $2)
+   AND ($3::timestamptz IS NULL OR (created_at, id) < ($3::timestamptz, $4::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT $5
 `
 
 type ListProductsParams struct {
 	TenantID uuid.UUID
 	Status   *string
+	CursorTs *time.Time
+	CursorID *uuid.UUID
+	RowLimit int32
 }
 
+// Paginação por keyset em (created_at, id), que não mudam depois da criação
+// (o nome muda na edição e deslocaria o produto entre as páginas).
 func (q *Queries) ListProducts(ctx context.Context, arg ListProductsParams) ([]Product, error) {
-	rows, err := q.db.Query(ctx, listProducts, arg.TenantID, arg.Status)
+	rows, err := q.db.Query(ctx, listProducts,
+		arg.TenantID,
+		arg.Status,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

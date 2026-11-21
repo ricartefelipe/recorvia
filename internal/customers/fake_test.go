@@ -166,6 +166,19 @@ func (t *memTx) InsertContact(_ context.Context, c Contact) error {
 	return nil
 }
 
+func (t *memTx) UpdateContact(_ context.Context, c Contact) error {
+	if err := t.s.hit("UpdateContact"); err != nil {
+		return err
+	}
+	list := t.st.contacts[c.CustomerID]
+	i := slices.IndexFunc(list, func(x Contact) bool { return x.ID == c.ID })
+	if i < 0 {
+		return apperr.NotFound("contact_not_found", "Contato não encontrado.")
+	}
+	list[i] = c
+	return nil
+}
+
 func (t *memTx) DeleteContact(_ context.Context, customerID, contactID uuid.UUID) error {
 	if err := t.s.hit("DeleteContact"); err != nil {
 		return err
@@ -195,6 +208,20 @@ func (t *memTx) UpsertAddress(_ context.Context, customerID uuid.UUID, a Address
 		return err
 	}
 	t.st.addresses[customerID] = a
+	return nil
+}
+
+// BumpVersion reproduz o UPDATE condicionado à versão.
+func (t *memTx) BumpVersion(_ context.Context, customerID uuid.UUID, version int) error {
+	if err := t.s.hit("BumpVersion"); err != nil {
+		return err
+	}
+	cur, ok := t.st.customers[customerID]
+	if !ok || cur.Version != version {
+		return apperr.PreconditionFailed("version_mismatch", "O cliente foi alterado por outra pessoa.")
+	}
+	cur.Version++
+	t.st.customers[customerID] = cur
 	return nil
 }
 

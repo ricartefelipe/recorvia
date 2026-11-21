@@ -45,11 +45,8 @@ func (a *Notifications) TenantsWithDueNotifications(ctx context.Context, now tim
 func (a *Notifications) NotificationEvents(ctx context.Context, tenantID, id uuid.UUID) ([]notifications.Event, error) {
 	var out []notifications.Event
 	err := a.s.inTenant(ctx, tenantID, func(b base) error {
-		rows, err := b.q.ListNotificationEvents(ctx, dbgen.ListNotificationEventsParams{TenantID: tenantID, NotificationID: id})
-		for _, r := range rows {
-			out = append(out, notifications.Event{Status: notifications.Status(r.Status), Reason: r.Reason, Attempt: int(r.Attempt),
-				Detail: deref(r.Detail), At: r.OccurredAt})
-		}
+		var err error
+		out, err = notificationsTx{b}.NotificationEvents(ctx, id)
 		return err
 	})
 	return out, err
@@ -88,13 +85,24 @@ func (tx notificationsTx) CustomTemplates(ctx context.Context) ([]notifications.
 	return out, nil
 }
 
-func (tx notificationsTx) UpsertTemplate(ctx context.Context, t notifications.Template, updatedBy *uuid.UUID, now time.Time) (notifications.Template, error) {
-	r, err := tx.q.UpsertNotificationTemplate(ctx, dbgen.UpsertNotificationTemplateParams{TenantID: tx.tenantID, TemplateKey: string(t.Key),
-		Subject: t.Subject, Body: t.Body, UpdatedBy: updatedBy, Now: now})
+func (tx notificationsTx) SaveTemplate(ctx context.Context, t notifications.Template, updatedBy *uuid.UUID, now time.Time,
+	expectedVersion int) (notifications.Template, error) {
+	var rows []dbgen.NotificationTemplate
+	var err error
+	if expectedVersion == 0 {
+		rows, err = tx.q.InsertNotificationTemplate(ctx, dbgen.InsertNotificationTemplateParams{TenantID: tx.tenantID, TemplateKey: string(t.Key),
+			Subject: t.Subject, Body: t.Body, UpdatedBy: updatedBy, Now: now})
+	} else {
+		rows, err = tx.q.UpdateNotificationTemplate(ctx, dbgen.UpdateNotificationTemplateParams{TenantID: tx.tenantID, TemplateKey: string(t.Key),
+			Subject: t.Subject, Body: t.Body, UpdatedBy: updatedBy, Now: now, Version: int32(expectedVersion)})
+	}
 	if err != nil {
 		return notifications.Template{}, err
 	}
-	return templateFromRow(r), nil
+	if err := versionConflict(int64(len(rows)), "O template foi alterado por outra pessoa."); err != nil {
+		return notifications.Template{}, err
+	}
+	return templateFromRow(rows[0]), nil
 }
 
 // --- notificações ---
@@ -295,6 +303,31 @@ func (tx notificationsTx) ReminderRules(ctx context.Context, policyID uuid.UUID)
 		MaxPerDay: int(r.MaxMessagesPerDay)}, nil
 }
 
+func (tx notificationsTx) SuspensionWindow(ctx context.Context, suspensionID uuid.UUID) (notifications.Window, bool, error) {
+	r, err := tx.q.GetSuspensionSendWindow(ctx, dbgen.GetSuspensionSendWindowParams{TenantID: tx.tenantID, ID: suspensionID})
+	if postgres.IsNoRows(err) {
+		return notifications.Window{}, false, nil
+	}
+	if err != nil {
+		return notifications.Window{}, false, err
+	}
+	return notifications.Window{StartHour: int(r.SendWindowStartHour), EndHour: int(r.SendWindowEndHour)}, true, nil
+}
+
+// NotificationEvents devolve o histórico da notificação em ordem cronológica.
+func (tx notificationsTx) NotificationEvents(ctx context.Context, id uuid.UUID) ([]notifications.Event, error) {
+	rows, err := tx.q.ListNotificationEvents(ctx, dbgen.ListNotificationEventsParams{TenantID: tx.tenantID, NotificationID: id})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]notifications.Event, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, notifications.Event{Status: notifications.Status(r.Status), Reason: r.Reason, Attempt: int(r.Attempt),
+			Detail: deref(r.Detail), At: r.OccurredAt})
+	}
+	return out, nil
+}
+
 // cancelReminders cancela os lembretes agendados de uma fatura.
 func (b base) cancelReminders(ctx context.Context, invoiceID uuid.UUID, reason string, now time.Time) (int, error) {
 	rows, err := b.q.CancelScheduledReminders(ctx, dbgen.CancelScheduledRemindersParams{Reason: &reason, Now: now, TenantID: b.tenantID,
@@ -385,6 +418,16 @@ func (tx notificationsTx) Invitation(ctx context.Context, id uuid.UUID, now time
 	inv := tenancy.Invitation{ID: r.ID, ExpiresAt: r.ExpiresAt, AcceptedAt: r.AcceptedAt, RevokedAt: r.RevokedAt}
 	return notifications.InvitationInfo{ID: r.ID, Email: r.Email, Role: tenancy.Role(r.Role), ExpiresAt: r.ExpiresAt,
 		Pending: inv.State(now) == tenancy.InvitationPending}, nil
+}
+
+// SuspensionActive informa se a suspensão está ativa; found=false quando
+// ela não existe.
+func (tx notificationsTx) SuspensionActive(ctx context.Context, suspensionID uuid.UUID) (bool, bool, error) {
+	active, err := tx.q.GetSuspensionActive(ctx, dbgen.GetSuspensionActiveParams{TenantID: tx.tenantID, ID: suspensionID})
+	if postgres.IsNoRows(err) {
+		return false, false, nil
+	}
+	return active, err == nil, err
 }
 
 func (tx notificationsTx) SubscriptionSuspended(ctx context.Context, id uuid.UUID) (bool, error) {

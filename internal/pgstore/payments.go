@@ -127,7 +127,7 @@ func (tx paymentsTx) AccountByProvider(ctx context.Context, provider string) (pa
 	return accountMetadata(r), nil
 }
 
-func (tx paymentsTx) SaveAccount(ctx context.Context, a payments.ProviderAccount, endpointTokenHash []byte) error {
+func (tx paymentsTx) SaveAccount(ctx context.Context, a payments.ProviderAccount, endpointTokenHash []byte, expectedVersion int) error {
 	kr := tx.store.keyring
 	keyCT, keyID, err := kr.Encrypt([]byte(a.APIKey), aad(tx.tenantID, a.Provider, "api_key"))
 	if err != nil {
@@ -142,9 +142,21 @@ func (tx paymentsTx) SaveAccount(ctx context.Context, a payments.ProviderAccount
 			return err
 		}
 	}
-	return tx.q.UpsertProviderAccount(ctx, dbgen.UpsertProviderAccountParams{ID: a.ID, TenantID: tx.tenantID, Provider: a.Provider,
-		Environment: a.Environment, IsDefault: a.IsDefault, ApiKeyCiphertext: keyCT, ApiKeyKeyID: &keyID, ApiKeyHint: strPtr(a.APIKeyHint),
-		WebhookSecretCiphertext: secCT, WebhookSecretKeyID: &secID, WebhookEndpointTokenHash: endpointTokenHash, CreatedAt: a.CreatedAt})
+	var n int64
+	if expectedVersion == 0 {
+		n, err = tx.q.InsertProviderAccount(ctx, dbgen.InsertProviderAccountParams{ID: a.ID, TenantID: tx.tenantID, Provider: a.Provider,
+			Environment: a.Environment, IsDefault: a.IsDefault, ApiKeyCiphertext: keyCT, ApiKeyKeyID: &keyID, ApiKeyHint: strPtr(a.APIKeyHint),
+			WebhookSecretCiphertext: secCT, WebhookSecretKeyID: &secID, WebhookEndpointTokenHash: endpointTokenHash, CreatedAt: a.CreatedAt})
+	} else {
+		n, err = tx.q.UpdateProviderAccount(ctx, dbgen.UpdateProviderAccountParams{TenantID: tx.tenantID, Provider: a.Provider,
+			Environment: a.Environment, IsDefault: a.IsDefault, ApiKeyCiphertext: keyCT, ApiKeyKeyID: &keyID, ApiKeyHint: strPtr(a.APIKeyHint),
+			WebhookSecretCiphertext: secCT, WebhookSecretKeyID: &secID, WebhookEndpointTokenHash: endpointTokenHash,
+			Version: int32(expectedVersion)})
+	}
+	if err != nil {
+		return err
+	}
+	return versionConflict(n, "A configuração do provedor foi alterada por outra pessoa.")
 }
 
 func (tx paymentsTx) Accounts(ctx context.Context) ([]payments.ProviderAccount, error) {
@@ -379,6 +391,20 @@ func (tx paymentsTx) PaymentByRequestKey(ctx context.Context, key string) (payme
 		return payments.Payment{}, notFound(err, "payment_not_found", "Pagamento não encontrado.")
 	}
 	return paymentFromRow(r), nil
+}
+
+// PaymentPendingReceipt devolve o pagamento da cobrança e o valor dele ainda
+// em pagamentos confirmados no provedor.
+func (tx paymentsTx) PaymentPendingReceipt(ctx context.Context, chargeID uuid.UUID) (payments.Payment, money.Money, bool, error) {
+	r, err := tx.q.GetChargePaymentPendingReceipt(ctx, dbgen.GetChargePaymentPendingReceiptParams{TenantID: tx.tenantID, ChargeID: &chargeID})
+	if postgres.IsNoRows(err) {
+		return payments.Payment{}, money.Money{}, false, nil
+	}
+	if err != nil {
+		return payments.Payment{}, money.Money{}, false, err
+	}
+	pay := paymentFromRow(r.Payment)
+	return pay, money.New(r.PendingReceipt, pay.Amount.Currency()), true, nil
 }
 
 func (tx paymentsTx) GrantCustomerCredit(ctx context.Context, customerID uuid.UUID, amount money.Money, kind string, invoiceID *uuid.UUID, reason string, _ time.Time) error {

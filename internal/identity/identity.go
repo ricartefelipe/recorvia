@@ -62,7 +62,14 @@ type IdentityProvider interface {
 	Exchange(ctx context.Context, code, pkceVerifier string) (Tokens, error)
 	VerifyIDToken(ctx context.Context, rawIDToken, expectedNonce string) (Claims, error)
 	Refresh(ctx context.Context, refreshToken string) (Tokens, error)
-	EndSessionURL(idTokenHint, postLogoutRedirect string) string
+	// EndSessionURL monta o endereço de encerramento da sessão no provedor
+	// (RP-Initiated Logout) com client_id e post_logout_redirect_uri. Nunca
+	// inclui tokens: o endereço vai para o navegador.
+	EndSessionURL(postLogoutRedirect string) string
+	// RevokeTokens revoga no provedor, pelo servidor, o refresh token da
+	// sessão (RFC 7009). Sem refresh token ou sem endpoint de revogação, não
+	// faz nada.
+	RevokeTokens(ctx context.Context, tokens Tokens) error
 	NewPKCEVerifier() string
 }
 
@@ -85,6 +92,14 @@ type Session struct {
 	LastSeenAt     time.Time
 	ExpiresAt      time.Time
 	Tokens         Tokens
+	// Generation é a geração das sessões do usuário quando esta foi criada;
+	// revogar todas as sessões dele incrementa a geração corrente, e sessões
+	// de geração anterior deixam de valer, mesmo se regravadas por uma
+	// requisição em voo.
+	Generation int64
+	// TenantGeneration é a mesma proteção para a organização ativa
+	// (membro removido).
+	TenantGeneration int64
 }
 
 // SessionStore persiste sessões e fluxos de login.
@@ -92,10 +107,27 @@ type SessionStore interface {
 	SaveLoginFlow(ctx context.Context, f LoginFlow, ttl time.Duration) error
 	// TakeLoginFlow lê e remove atomicamente (uso único).
 	TakeLoginFlow(ctx context.Context, state string) (LoginFlow, error)
+	// Create grava uma sessão nova com as gerações informadas; se elas não
+	// forem mais as correntes (revogação no intervalo), devolve
+	// ErrSessionNotFound sem gravar.
+	Create(ctx context.Context, s Session, ttl time.Duration) error
+	// Save regrava uma sessão existente e corrente; sessão removida ou
+	// revogada depois de lida não é recriada (ErrSessionNotFound).
 	Save(ctx context.Context, s Session, ttl time.Duration) error
+	// Get lê a sessão; sessão revogada equivale a inexistente.
 	Get(ctx context.Context, id string) (Session, error)
 	Delete(ctx context.Context, id string) error
+	// Generations devolve as gerações correntes do usuário e, se informado,
+	// do usuário no tenant.
+	Generations(ctx context.Context, userID uuid.UUID, tenantID *uuid.UUID) (user, tenant int64, err error)
+	// ListForUser devolve as sessões vigentes do usuário.
+	ListForUser(ctx context.Context, userID uuid.UUID) ([]Session, error)
+	// DeleteAllForUser revoga todas as sessões do usuário (incrementa a
+	// geração e remove as sessões, atomicamente).
 	DeleteAllForUser(ctx context.Context, userID uuid.UUID) error
+	// InvalidateTenant revoga as sessões do usuário com o tenant ativo
+	// (incrementa a geração do usuário no tenant).
+	InvalidateTenant(ctx context.Context, userID, tenantID uuid.UUID) error
 }
 
 // UserStore persiste usuários.
