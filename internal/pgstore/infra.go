@@ -310,8 +310,11 @@ type IdempotencyRecord struct {
 	ResponseStatus int
 	ResponseBody   []byte
 	ResponseCT     string
-	CreatedAt      time.Time
-	ExpiresAt      time.Time
+	// ResponseLocation é o header Location da resposta registrada (vazio
+	// quando a resposta não o trazia).
+	ResponseLocation string
+	CreatedAt        time.Time
+	ExpiresAt        time.Time
 }
 
 // IdempotencyKey identifica a chave no escopo de tenant, cliente e operação.
@@ -344,7 +347,8 @@ func (s *Store) IdempotencyBegin(ctx context.Context, k IdempotencyKey, hash []b
 			return err
 		}
 		rec = &IdempotencyRecord{RequestHash: r.RequestHash, Completed: r.Status == "completed", LockedUntil: r.LockedUntil,
-			ResponseBody: r.ResponseBody, ResponseCT: deref(r.ResponseContentType), CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt}
+			ResponseBody: r.ResponseBody, ResponseCT: deref(r.ResponseContentType), ResponseLocation: deref(r.ResponseLocation),
+			CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt}
 		if r.ResponseStatus != nil {
 			rec.ResponseStatus = int(*r.ResponseStatus)
 		}
@@ -367,13 +371,24 @@ func (s *Store) IdempotencyTakeOver(ctx context.Context, k IdempotencyKey, lease
 	return ok, err
 }
 
-// IdempotencyComplete grava o resultado.
-func (s *Store) IdempotencyComplete(ctx context.Context, k IdempotencyKey, status int, body []byte, contentType string) error {
+// maxIdempotencyLocation é o tamanho máximo do header Location guardado com
+// o resultado (constraint idempotency_keys_response_location_length).
+const maxIdempotencyLocation = 2048
+
+// IdempotencyComplete grava o resultado: status, corpo, Content-Type e o
+// header Location da resposta (vazio quando ela não o traz), que a repetição
+// reproduz. Um Location acima do limite da coluna não é guardado, para não
+// perder o registro do resultado.
+func (s *Store) IdempotencyComplete(ctx context.Context, k IdempotencyKey, status int, body []byte, contentType, location string) error {
 	return s.inTenant(ctx, k.TenantID, func(b base) error {
 		st := int32(status)
+		var loc *string
+		if location != "" && len(location) <= maxIdempotencyLocation {
+			loc = &location
+		}
 		return b.q.CompleteIdempotencyKey(ctx, dbgen.CompleteIdempotencyKeyParams{ResponseStatus: &st, ResponseBody: body,
-			ResponseContentType: &contentType, Now: ptrTime(s.clock.Now()), TenantID: k.TenantID, ClientID: k.ClientID, Operation: k.Operation,
-			IdempotencyKey: k.Key})
+			ResponseContentType: &contentType, ResponseLocation: loc, Now: ptrTime(s.clock.Now()), TenantID: k.TenantID, ClientID: k.ClientID,
+			Operation: k.Operation, IdempotencyKey: k.Key})
 	})
 }
 
