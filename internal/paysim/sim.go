@@ -2,6 +2,7 @@ package paysim
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -258,7 +259,8 @@ func (s *Sim) emit(c *Charge, eventType string) {
 		s.log.Error("serialização do evento falhou", slog.String("error", err.Error()))
 		return
 	}
-	ev := &Event{ID: s.st.nextID("evt"), Type: eventType, CreatedAt: s.now(), Data: data, ChargeID: c.ID, Merchant: c.MerchantKey}
+	seq := s.st.nextSeq("evt")
+	ev := &Event{ID: fmt.Sprintf("evt_%06d", seq), Type: eventType, CreatedAt: s.now(), Data: data, ChargeID: c.ID, Merchant: c.MerchantKey, Seq: seq}
 	s.st.s.Events[ev.ID] = ev
 	if c.OutOfOrder && eventType == "charge.created" {
 		c.HeldEvents = append(c.HeldEvents, ev.ID)
@@ -363,10 +365,18 @@ func (s *Sim) Apply(id string, a Action) (Charge, error) {
 		}
 		c.NetAmount, c.UpdatedAt = c.PaidAmount-c.Fee, now
 	case "replay":
+		// Ordem de criação dos eventos (sequência numérica, não o relógio nem
+		// o texto do id), para que a mesma sequência de comandos produza as
+		// mesmas entregas.
+		var evs []*Event
 		for _, e := range s.st.s.Events {
 			if e.ChargeID == c.ID {
-				s.enqueue(e)
+				evs = append(evs, e)
 			}
+		}
+		slices.SortFunc(evs, func(a, b *Event) int { return cmp.Compare(a.Seq, b.Seq) })
+		for _, e := range evs {
+			s.enqueue(e)
 		}
 	default:
 		return *c, fmt.Errorf("ação desconhecida")
