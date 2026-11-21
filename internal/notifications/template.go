@@ -103,9 +103,16 @@ type Template struct {
 	Version   int
 }
 
+// InvoiceFiscalNotice é o aviso do e-mail padrão de fatura emitida (RF-06):
+// a fatura comercial não substitui a nota fiscal, como no documento da
+// fatura. Fica no padrão do sistema; o template editado pelo tenant é
+// enviado como foi gravado.
+const InvoiceFiscalNotice = "A fatura comercial não é documento fiscal e não substitui a nota fiscal."
+
 var defaults = map[TemplateKey]Template{
 	KeyInvoiceIssued: {Subject: "Fatura {{invoice_number}} emitida", Body: "Olá, {{customer_name}}.\n\n" +
 		"A fatura {{invoice_number}} de {{organization_name}} foi emitida no valor de {{amount_due}}, com vencimento em {{due_date}}.\n\n" +
+		InvoiceFiscalNotice + "\n\n" +
 		"Em caso de dúvidas, entre em contato com {{organization_name}}."},
 	KeyReminderBeforeDue: {Subject: "Lembrete: a fatura {{invoice_number}} vence em {{due_date}}", Body: "Olá, {{customer_name}}.\n\n" +
 		"Lembramos que a fatura {{invoice_number}} de {{organization_name}}, com saldo em aberto de {{amount_due}}, vence em {{due_date}}.\n\n" +

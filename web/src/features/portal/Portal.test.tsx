@@ -200,6 +200,20 @@ describe('portal do cliente', () => {
     expect(frame.getAttribute('srcdoc')).toContain('Fatura ACME-000123');
   });
 
+  it('detalhe da fatura avisa na própria página que a fatura comercial não é documento fiscal', async () => {
+    server.use(
+      http.get('/api/portal/v1/session', () => HttpResponse.json(session)),
+      http.get('/api/portal/v1/invoices/:id', () => HttpResponse.json(invoice)),
+    );
+    renderPortal('/portal/faturas/f1');
+    expect(await screen.findByRole('heading', { name: 'Fatura ACME-000123' })).toBeInTheDocument();
+    // Sem abrir o documento: o aviso está na página, fora do modal.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('note', { name: 'Aviso fiscal' })).toHaveTextContent(
+      'Este documento é uma fatura comercial e não é documento fiscal. Não substitui a nota fiscal.',
+    );
+  });
+
   it('fatura de outro cliente responde como inexistente', async () => {
     server.use(
       http.get('/api/portal/v1/session', () => HttpResponse.json(session)),
