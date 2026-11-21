@@ -78,6 +78,9 @@ func (r *Reporting) Raw(ctx context.Context, tenantID uuid.UUID, from, to, now t
 		if raw.OpenRecoverables, err = b.q.DashboardRecoverables(ctx, tenantID); err != nil {
 			return err
 		}
+		if raw.PendingProviderReceipt, err = b.q.DashboardPendingProviderReceipt(ctx, tenantID); err != nil {
+			return err
+		}
 		unknown, err := b.q.DashboardUnknownOperations(ctx, tenantID)
 		raw.UnknownOperations = int(unknown)
 		return err

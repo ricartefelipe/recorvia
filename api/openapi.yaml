@@ -1347,6 +1347,15 @@ paths:
         - { name: invoice_id, in: query, schema: { type: string, format: uuid } }
       responses:
         "200": { description: Histórico de envio, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Notification" } }, next_cursor: { type: string, nullable: true } } } } } }
+  /api/v1/notifications/{id}/events:
+    get:
+      tags: [collections]
+      operationId: listNotificationEvents
+      summary: Linha do tempo de uma notificação (agendamento, adiamentos, tentativas, envio, falha, cancelamento ou supressão)
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Eventos em ordem cronológica, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/NotificationEvent" } } } } } } }
+        "404": { $ref: "#/components/responses/Problem" }
 
   /api/v1/webhook-event-types:
     get:
@@ -1413,6 +1422,15 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
         "200": { description: Entregas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/WebhookDelivery" } }, next_cursor: { type: string, nullable: true } } } } } }
+  /api/v1/webhook-deliveries/{id}/attempts:
+    get:
+      tags: [webhooks]
+      operationId: listWebhookDeliveryAttempts
+      summary: Tentativas individuais de uma entrega, da primeira à mais recente
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Tentativas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/WebhookDeliveryAttempt" } } } } } } }
+        "404": { $ref: "#/components/responses/Problem" }
   /api/v1/webhook-deliveries/{id}/retry:
     post:
       tags: [webhooks]
@@ -2824,7 +2842,7 @@ components:
         updated_at: { type: string, format: date-time, nullable: true }
     Notification:
       type: object
-      required: [id, business_key, template_key, channel, recipient, subject, status, send_after, attempts, created_at]
+      required: [id, business_key, template_key, channel, recipient, subject, status, status_reason, send_after, attempts, created_at]
       properties:
         id: { type: string, format: uuid }
         business_key: { type: string }
@@ -2835,11 +2853,32 @@ components:
         recipient: { type: string }
         subject: { type: string }
         status: { type: string, enum: [scheduled, sending, sent, failed, canceled, suppressed] }
+        status_reason:
+          type: string
+          description: >-
+            Código estável do motivo da situação atual; vazio quando não há motivo (em envio ou enviada).
+            Cancelamento: invoice_paid, invoice_credited, invoice_voided, invoice_uncollectible, superseded,
+            due_date_passed, subscription_not_suspended, invitation_not_pending, feature_unavailable.
+            Supressão: no_recipient, invitation_link_unavailable. Adiamento: outside_send_window,
+            frequency_limit, retry_scheduled. Falha: permanent_failure, attempts_exhausted, content_unavailable.
         send_after: { type: string, format: date-time }
         attempts: { type: integer }
         last_error: { type: string }
         sent_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
+    NotificationEvent:
+      type: object
+      required: [status, reason, attempt, detail, occurred_at]
+      properties:
+        status: { type: string, enum: [scheduled, sending, sent, failed, canceled, suppressed] }
+        reason:
+          type: string
+          description: >-
+            Código estável do evento: scheduled, attempt, sent, retry_scheduled e os motivos de status_reason
+            da notificação.
+        attempt: { type: integer, description: Número da tentativa corrente quando o evento ocorreu }
+        detail: { type: string, description: Complemento (erro da tentativa ou instante do adiamento); vazio sem complemento }
+        occurred_at: { type: string, format: date-time }
 
     WebhookEndpointInput:
       type: object
@@ -2889,6 +2928,16 @@ components:
         last_error: { type: string }
         delivered_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
+    WebhookDeliveryAttempt:
+      type: object
+      required: [attempt, started_at, duration_ms, status_code, error, signature_count]
+      properties:
+        attempt: { type: integer, minimum: 1 }
+        started_at: { type: string, format: date-time }
+        duration_ms: { type: integer, minimum: 0 }
+        status_code: { type: integer, nullable: true, description: Código HTTP da resposta; nulo quando não houve resposta }
+        error: { type: string, description: Erro da tentativa; vazio quando o destino respondeu 2xx }
+        signature_count: { type: integer, minimum: 0, description: Assinaturas enviadas (mais de uma durante a rotação do segredo) }
 
     ApiCredential:
       type: object
@@ -2943,7 +2992,7 @@ components:
       type: object
       required: [month, currency, mrr, arr, billed, received, open_receivables, overdue_receivables, delinquency_rate_bp,
                  churn_rate_bp, active_subscriptions, new_subscriptions, canceled_subscriptions, refunds, chargebacks, open_recoverables,
-                 definitions]
+                 pending_provider_receipt, definitions]
       properties:
         month: { type: string }
         currency: { type: string }
@@ -2952,7 +3001,12 @@ components:
         billed: { type: integer, format: int64, description: Total emitido no mês }
         billed_recurring: { type: integer, format: int64 }
         billed_usage: { type: integer, format: int64 }
-        received: { type: integer, format: int64, description: Pagamentos recebidos no mês }
+        received:
+          type: integer
+          format: int64
+          description: >-
+            Pagamentos confirmados no mês, pela data de pagamento, via provedor ou registro manual. Inclui os pagamentos
+            confirmados pelo provedor e ainda não creditados por ele (pending_provider_receipt).
         open_receivables: { type: integer, format: int64 }
         overdue_receivables: { type: integer, format: int64 }
         delinquency_rate_bp: { type: integer, description: Pontos-base }
@@ -2975,6 +3029,13 @@ components:
           description: >-
             Saldo atual dos valores a recuperar de clientes (conta customer_recoverables): crédito de pagamento excedente já usado
             e estornado por chargeback, menos as baixas recebidas e perdidas. Não depende do mês consultado.
+        pending_provider_receipt:
+          type: integer
+          format: int64
+          description: >-
+            Saldo atual dos pagamentos confirmados pelo provedor e ainda não creditados por ele (conta provider_confirmed), por
+            exemplo cartão no prazo de recebimento. No recebimento, o bruto passa aos valores em liquidação, a taxa é reconhecida
+            e o líquido vai para o disponível liquidado (ADR-080). Não depende do mês consultado.
         open_discrepancies: { type: integer }
         unknown_operations: { type: integer }
         definitions: { type: object, additionalProperties: { type: string } }

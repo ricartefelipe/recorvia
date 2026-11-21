@@ -433,6 +433,23 @@ func (tx paymentsTx) RefundsForCharges(ctx context.Context, chargeIDs []uuid.UUI
 	return refundsFromRows(rows)
 }
 
+// PendingReceipts devolve o valor ainda em pagamentos confirmados no
+// provedor das cobranças com pendência de recebimento.
+func (tx paymentsTx) PendingReceipts(ctx context.Context, chargeIDs []uuid.UUID) (map[uuid.UUID]money.Money, error) {
+	out := map[uuid.UUID]money.Money{}
+	if len(chargeIDs) == 0 {
+		return out, nil
+	}
+	rows, err := tx.q.ListChargesPendingReceipt(ctx, dbgen.ListChargesPendingReceiptParams{TenantID: tx.tenantID, ChargeIds: chargeIDs})
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.ChargeID] = brl(r.PendingReceipt)
+	}
+	return out, nil
+}
+
 func (tx paymentsTx) UnknownOperations(ctx context.Context, now time.Time, limit int) ([]payments.Operation, error) {
 	rows, err := tx.q.ListUnknownOperations(ctx, dbgen.ListUnknownOperationsParams{TenantID: tx.tenantID, Now: &now, RowLimit: int32(limit)})
 	if err != nil {

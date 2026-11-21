@@ -381,6 +381,20 @@ func (tx paymentsTx) PaymentByRequestKey(ctx context.Context, key string) (payme
 	return paymentFromRow(r), nil
 }
 
+// PaymentPendingReceipt devolve o pagamento da cobrança e o valor dele ainda
+// em pagamentos confirmados no provedor.
+func (tx paymentsTx) PaymentPendingReceipt(ctx context.Context, chargeID uuid.UUID) (payments.Payment, money.Money, bool, error) {
+	r, err := tx.q.GetChargePaymentPendingReceipt(ctx, dbgen.GetChargePaymentPendingReceiptParams{TenantID: tx.tenantID, ChargeID: &chargeID})
+	if postgres.IsNoRows(err) {
+		return payments.Payment{}, money.Money{}, false, nil
+	}
+	if err != nil {
+		return payments.Payment{}, money.Money{}, false, err
+	}
+	pay := paymentFromRow(r.Payment)
+	return pay, money.New(r.PendingReceipt, pay.Amount.Currency()), true, nil
+}
+
 func (tx paymentsTx) GrantCustomerCredit(ctx context.Context, customerID uuid.UUID, amount money.Money, kind string, invoiceID *uuid.UUID, reason string, _ time.Time) error {
 	return tx.addCredit(ctx, customerID, amount.Amount(), kind, invoiceID, reason, nil)
 }

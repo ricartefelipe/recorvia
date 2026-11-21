@@ -252,21 +252,25 @@ func (a *API) updateNotificationTemplate(w http.ResponseWriter, r *http.Request)
 
 // --- histórico de notificações ---
 
+// notificationDTO é uma notificação do histórico. status_reason é o código
+// estável do motivo da situação atual (cancelamento, supressão, falha ou
+// adiamento), vazio quando não há motivo.
 type notificationDTO struct {
-	ID          uuid.UUID  `json:"id"`
-	BusinessKey string     `json:"business_key"`
-	CustomerID  *uuid.UUID `json:"customer_id"`
-	InvoiceID   *uuid.UUID `json:"invoice_id"`
-	TemplateKey string     `json:"template_key"`
-	Channel     string     `json:"channel"`
-	Recipient   string     `json:"recipient"`
-	Subject     string     `json:"subject"`
-	Status      string     `json:"status"`
-	SendAfter   time.Time  `json:"send_after"`
-	Attempts    int        `json:"attempts"`
-	LastError   string     `json:"last_error"`
-	SentAt      *time.Time `json:"sent_at"`
-	CreatedAt   time.Time  `json:"created_at"`
+	ID           uuid.UUID  `json:"id"`
+	BusinessKey  string     `json:"business_key"`
+	CustomerID   *uuid.UUID `json:"customer_id"`
+	InvoiceID    *uuid.UUID `json:"invoice_id"`
+	TemplateKey  string     `json:"template_key"`
+	Channel      string     `json:"channel"`
+	Recipient    string     `json:"recipient"`
+	Subject      string     `json:"subject"`
+	Status       string     `json:"status"`
+	StatusReason string     `json:"status_reason"`
+	SendAfter    time.Time  `json:"send_after"`
+	Attempts     int        `json:"attempts"`
+	LastError    string     `json:"last_error"`
+	SentAt       *time.Time `json:"sent_at"`
+	CreatedAt    time.Time  `json:"created_at"`
 }
 
 func notificationView(n notifications.Notification) notificationDTO {
@@ -276,7 +280,8 @@ func notificationView(n notifications.Notification) notificationDTO {
 	}
 	return notificationDTO{ID: n.ID, BusinessKey: n.BusinessKey, CustomerID: n.CustomerID, InvoiceID: n.InvoiceID,
 		TemplateKey: string(n.TemplateKey), Channel: channel, Recipient: strings.Join(n.Recipients, ", "), Subject: n.Subject,
-		Status: string(n.Status), SendAfter: n.SendAfter, Attempts: n.Attempts, LastError: n.LastError, SentAt: n.SentAt, CreatedAt: n.CreatedAt}
+		Status: string(n.Status), StatusReason: n.StatusReason, SendAfter: n.SendAfter, Attempts: n.Attempts, LastError: n.LastError,
+		SentAt: n.SentAt, CreatedAt: n.CreatedAt}
 }
 
 func (a *API) listNotifications(w http.ResponseWriter, r *http.Request) {
@@ -302,4 +307,32 @@ func (a *API) listNotifications(w http.ResponseWriter, r *http.Request) {
 		out = append(out, notificationView(n))
 	}
 	a.writeJSON(w, r, http.StatusOK, newPage(out, page.NextCursor))
+}
+
+type notificationEventDTO struct {
+	Status     string    `json:"status"`
+	Reason     string    `json:"reason"`
+	Attempt    int       `json:"attempt"`
+	Detail     string    `json:"detail"`
+	OccurredAt time.Time `json:"occurred_at"`
+}
+
+// listNotificationEvents devolve a linha do tempo de uma notificação, em
+// ordem cronológica.
+func (a *API) listNotificationEvents(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	events, err := a.Notifications.Events(r.Context(), mustPrincipal(r).TenantID, id)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	out := make([]notificationEventDTO, 0, len(events))
+	for _, e := range events {
+		out = append(out, notificationEventDTO{Status: string(e.Status), Reason: e.Reason, Attempt: e.Attempt, Detail: e.Detail, OccurredAt: e.At})
+	}
+	a.writeJSON(w, r, http.StatusOK, list(out))
 }
