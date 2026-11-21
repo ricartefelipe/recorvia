@@ -27,6 +27,9 @@ type TenantSettings struct {
 	Location         *time.Location
 	InvoicePrefix    string
 	PaymentTermsDays int
+	// Issuer são os dados atuais da organização, gravados em cada fatura
+	// emitida.
+	Issuer Issuer
 }
 
 // UsageLine é o consumo agregado de uma métrica num período.
@@ -800,6 +803,8 @@ func issueDraft(ctx context.Context, tx IssueTx, inv *Invoice, termsDays int, se
 	if err := inv.Issue(number, now, DueAt(now, termsDays, settings.Location)); err != nil {
 		return err
 	}
+	issuer := settings.Issuer
+	inv.Issuer = &issuer
 	if err := tx.InsertInvoice(ctx, inv); err != nil {
 		return err
 	}
