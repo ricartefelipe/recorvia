@@ -131,6 +131,33 @@ ON CONFLICT DO NOTHING;
 -- name: GetPaymentByRequestKey :one
 SELECT * FROM payments WHERE tenant_id = @tenant_id AND request_key = @request_key;
 
+-- name: GetChargePaymentPendingReceipt :one
+-- Pagamento da cobrança e o valor dele ainda em pagamentos confirmados no
+-- provedor (saldo de provider_confirmed nos lançamentos que referenciam o
+-- pagamento: confirmação, excedente e recebimento), à espera do recebimento.
+SELECT sqlc.embed(p),
+       COALESCE((SELECT sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END)
+                   FROM ledger_transactions t
+                   JOIN ledger_entries e ON e.tenant_id = t.tenant_id AND e.transaction_id = t.id
+                   JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+                  WHERE t.tenant_id = p.tenant_id AND t.reference_type = 'payment' AND t.reference_id = p.id
+                    AND a.code = 'provider_confirmed'), 0)::bigint AS pending_receipt
+  FROM payments p
+ WHERE p.tenant_id = @tenant_id AND p.charge_id = @charge_id;
+
+-- name: ListChargesPendingReceipt :many
+-- Valor ainda em pagamentos confirmados no provedor por cobrança, em lote
+-- para a conciliação: só as cobranças com pendência de recebimento.
+SELECT p.charge_id::uuid AS charge_id,
+       sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END)::bigint AS pending_receipt
+  FROM payments p
+  JOIN ledger_transactions t ON t.tenant_id = p.tenant_id AND t.reference_type = 'payment' AND t.reference_id = p.id
+  JOIN ledger_entries e ON e.tenant_id = t.tenant_id AND e.transaction_id = t.id
+  JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+ WHERE p.tenant_id = @tenant_id AND p.charge_id = ANY (@charge_ids::uuid[]) AND a.code = 'provider_confirmed'
+ GROUP BY p.charge_id
+HAVING sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END) <> 0;
+
 -- name: ListPayments :many
 SELECT * FROM payments
  WHERE tenant_id = @tenant_id

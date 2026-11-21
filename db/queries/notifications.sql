@@ -86,6 +86,18 @@ SELECT count(*)::int FROM notifications
 SELECT send_window_start_hour, send_window_end_hour, max_messages_per_day
   FROM collection_policies WHERE tenant_id = @tenant_id AND id = @id;
 
+-- name: GetSuspensionSendWindow :one
+-- Janela de envio da política que aplicou a suspensão (aviso de suspensão).
+SELECT p.send_window_start_hour, p.send_window_end_hour
+  FROM collection_suspensions s
+  JOIN collection_policies p ON p.tenant_id = s.tenant_id AND p.id = s.policy_id
+ WHERE s.tenant_id = @tenant_id AND s.id = @id;
+
+-- name: GetSuspensionActive :one
+-- Situação da suspensão do aviso de suspensão: o aviso só sai enquanto a
+-- própria suspensão estiver ativa.
+SELECT (status = 'active')::boolean AS active FROM collection_suspensions WHERE tenant_id = @tenant_id AND id = @id;
+
 -- name: CancelScheduledReminders :many
 UPDATE notifications
    SET status = 'canceled', status_reason = @reason, lease_until = NULL, updated_at = @now
