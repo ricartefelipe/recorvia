@@ -247,7 +247,8 @@ func (s *Store) Ping(ctx context.Context) error { return s.rdb.Ping(ctx).Err() }
 
 // PortalSessions implementa portal.SessionStore com o mesmo mecanismo das
 // sessões do painel (conteúdo cifrado, chave pelo hash do identificador),
-// em namespace próprio.
+// em namespace próprio. Cada sessão é indexada pelo link que a originou,
+// para que a revogação do link remova as sessões abertas com ele.
 type PortalSessions struct{ s *Store }
 
 // NewPortalSessions cria o armazenamento de sessões do portal. O Store
@@ -256,12 +257,31 @@ func NewPortalSessions(s *Store) *PortalSessions { return &PortalSessions{s: s} 
 
 const portalSessionKind = "portal_session"
 
-// Save grava a sessão com expiração.
+// linkKey é o índice das sessões abertas a partir de um link: um conjunto
+// com os hashes dos identificadores de sessão (nunca os identificadores).
+func (p *PortalSessions) linkKey(linkID uuid.UUID) string {
+	return prefix + p.s.ns + ":link_sessions:" + linkID.String()
+}
+
+// Save grava a sessão com expiração e a indexa pelo link de origem. O
+// índice expira junto com a sessão de maior validade: a expiração só é
+// estendida, nunca encurtada, por uma gravação posterior.
 func (p *PortalSessions) Save(ctx context.Context, sess portal.Session, ttl time.Duration) error {
 	if ttl <= 0 {
 		return portal.ErrSessionNotFound
 	}
-	return p.s.PutJSON(ctx, portalSessionKind, sess.ID, sess, ttl)
+	b, err := p.s.seal(sess, portalSessionKind)
+	if err != nil {
+		return err
+	}
+	lk := p.linkKey(sess.LinkID)
+	pipe := p.s.rdb.TxPipeline()
+	pipe.Set(ctx, p.s.key(portalSessionKind, sess.ID), b, ttl)
+	pipe.SAdd(ctx, lk, hashID(sess.ID))
+	pipe.ExpireNX(ctx, lk, ttl)
+	pipe.ExpireGT(ctx, lk, ttl)
+	_, err = pipe.Exec(ctx)
+	return err
 }
 
 // Get lê a sessão; ausente, expirada ou ilegível equivale a inexistente.
@@ -277,7 +297,25 @@ func (p *PortalSessions) Get(ctx context.Context, id string) (portal.Session, er
 	return sess, nil
 }
 
-// Delete remove a sessão.
+// Delete remove a sessão. A entrada no índice do link fica até expirar;
+// ela aponta para uma chave que não existe mais.
 func (p *PortalSessions) Delete(ctx context.Context, id string) error {
 	return p.s.DeleteKey(ctx, portalSessionKind, id)
+}
+
+// DeleteByLink remove as sessões abertas a partir do link e o índice. É
+// idempotente: sem sessões indexadas, nada é removido.
+func (p *PortalSessions) DeleteByLink(ctx context.Context, linkID uuid.UUID) error {
+	lk := p.linkKey(linkID)
+	hashes, err := p.s.rdb.SMembers(ctx, lk).Result()
+	if err != nil {
+		return err
+	}
+	pipe := p.s.rdb.TxPipeline()
+	for _, h := range hashes {
+		pipe.Del(ctx, prefix+p.s.ns+":"+portalSessionKind+":"+h)
+	}
+	pipe.Del(ctx, lk)
+	_, err = pipe.Exec(ctx)
+	return err
 }

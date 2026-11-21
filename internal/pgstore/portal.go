@@ -86,6 +86,53 @@ func (tx portalTx) RevokeActiveLinks(ctx context.Context, customerID uuid.UUID, 
 		RevokedAt: &at, RevokeReason: &reason})
 }
 
+func (tx portalTx) RevokeLink(ctx context.Context, customerID, id uuid.UUID, at time.Time, reason string) error {
+	n, err := tx.q.RevokePortalLink(ctx, dbgen.RevokePortalLinkParams{TenantID: tx.tenantID, CustomerID: customerID, ID: id,
+		RevokedAt: &at, RevokeReason: &reason})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return apperr.Conflict("portal_link_unavailable", "O link já foi revogado ou não pertence a este cliente.")
+	}
+	return nil
+}
+
+// portalCursor converte a posição da página anterior nos parâmetros de
+// keyset das consultas do portal.
+func portalCursor(after *portal.Position) (*time.Time, *uuid.UUID) {
+	if after == nil {
+		return nil, nil
+	}
+	return &after.At, &after.ID
+}
+
+// portalRowLimit limita a consulta a uma página mais o item que indica a
+// existência da seguinte.
+func portalRowLimit(limit int) int32 {
+	return int32(min(max(limit, 1), portal.MaxPageSize+1)) //nolint:gosec // limitado ao tamanho máximo de página
+}
+
+func (tx portalTx) Links(ctx context.Context, customerID uuid.UUID, after *portal.Position, limit int) ([]portal.LinkSummary, error) {
+	ts, id := portalCursor(after)
+	rows, err := tx.q.ListPortalLinks(ctx, dbgen.ListPortalLinksParams{TenantID: tx.tenantID, CustomerID: customerID, CursorTs: ts, CursorID: id,
+		RowLimit: portalRowLimit(limit)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]portal.LinkSummary, 0, len(rows))
+	for _, r := range rows {
+		l := portal.LinkSummary{Link: portal.Link{ID: r.ID, TenantID: r.TenantID, CustomerID: r.CustomerID, CreatedByUser: r.CreatedByUserID,
+			CreatedByCredential: r.CreatedByCredentialID, CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt, UsedAt: r.UsedAt, RevokedAt: r.RevokedAt,
+			RevokeReason: deref(r.RevokeReason)}, CreatorName: deref(r.CreatedByUserName)}
+		if r.CreatedByCredentialID != nil {
+			l.CreatorName = deref(r.CreatedByCredentialName)
+		}
+		out = append(out, l)
+	}
+	return out, nil
+}
+
 func (tx portalTx) Link(ctx context.Context, id uuid.UUID, forUpdate bool) (portal.Link, error) {
 	var r dbgen.CustomerPortalLink
 	var err error
@@ -111,9 +158,10 @@ func (tx portalTx) MarkLinkUsed(ctx context.Context, id uuid.UUID, at time.Time)
 	return nil
 }
 
-func (tx portalTx) Invoices(ctx context.Context, customerID uuid.UUID, limit int) ([]billing.Invoice, error) {
-	rows, err := tx.q.ListPortalInvoices(ctx, dbgen.ListPortalInvoicesParams{TenantID: tx.tenantID, CustomerID: customerID,
-		RowLimit: int32(min(max(limit, 1), portal.MaxInvoices))})
+func (tx portalTx) Invoices(ctx context.Context, customerID uuid.UUID, after *portal.Position, limit int) ([]billing.Invoice, error) {
+	ts, id := portalCursor(after)
+	rows, err := tx.q.ListPortalInvoices(ctx, dbgen.ListPortalInvoicesParams{TenantID: tx.tenantID, CustomerID: customerID, CursorTs: ts,
+		CursorID: id, RowLimit: portalRowLimit(limit)})
 	if err != nil {
 		return nil, err
 	}

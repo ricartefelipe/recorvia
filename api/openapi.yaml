@@ -466,6 +466,22 @@ paths:
       responses:
         "201": { description: Crédito concedido, content: { application/json: { schema: { $ref: "#/components/schemas/CreditBalance" } } } }
   /api/v1/customers/{id}/portal-links:
+    get:
+      tags: [customers]
+      operationId: listPortalLinks
+      summary: Lista os links do portal de um cliente, dos mais novos para os mais antigos
+      description: >-
+        Exige a permissão `customers.portal_links`, a mesma da geração e da revogação. A resposta nunca traz o token
+        nem o hash do token: o link só é exibido na resposta da geração.
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/ID" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { description: Links do portal do cliente, content: { application/json: { schema: { $ref: "#/components/schemas/PortalLinkPage" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [customers]
       operationId: createPortalLink
@@ -477,10 +493,30 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [url, expires_at]
+                required: [id, url, expires_at]
                 properties:
+                  id: { type: string, format: uuid, description: Identificador do link (usado para revogá-lo) }
                   url: { type: string }
                   expires_at: { type: string, format: date-time }
+  /api/v1/customers/{id}/portal-links/{link_id}:
+    delete:
+      tags: [customers]
+      operationId: revokePortalLink
+      summary: Revoga um link do portal e encerra as sessões abertas com ele
+      description: >-
+        O link pendente deixa de poder ser trocado por sessão e as sessões do portal abertas com um link já usado são
+        encerradas. A operação é idempotente: repetir a chamada para um link já revogado responde 204 sem alterar o
+        link nem gerar nova auditoria. Link inexistente, de outro cliente ou de outra organização responde 404
+        `portal_link_not_found`. Aceita credenciais de API com o escopo `customers.portal_links`; quem revogou fica
+        registrado na auditoria (`customer.portal_link_revoked`).
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/CSRF" }
+        - { $ref: "#/components/parameters/ID" }
+        - { name: link_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Link revogado (ou já revogado) }
+        "404": { $ref: "#/components/responses/Problem" }
 
   /api/v1/products:
     get:
@@ -1419,8 +1455,18 @@ paths:
       tags: [portal]
       operationId: portalListInvoices
       security: [ { portalSession: [] } ]
+      summary: Lista em páginas as faturas emitidas do cliente da sessão, das mais recentes para as mais antigas
+      description: >-
+        O cliente e a organização vêm sempre da sessão do portal. O cursor guarda apenas a posição da última fatura
+        da página anterior (emissão e identificador): faturas emitidas durante a navegação não deslocam as páginas
+        seguintes.
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
       responses:
-        "200": { description: Faturas do cliente, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PortalInvoice" } } } } } } }
+        "200": { description: Faturas do cliente, content: { application/json: { schema: { $ref: "#/components/schemas/PortalInvoicePage" } } } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/portal/v1/invoices/{id}:
     get:
       tags: [portal]
@@ -2745,6 +2791,46 @@ components:
             name: { type: string }
         csrf_token: { type: string }
         contacts: { type: array, items: { $ref: "#/components/schemas/Contact" } }
+    PortalInvoicePage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/PortalInvoice" } }
+        next_cursor: { type: string, nullable: true }
+    PortalLinkPage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/PortalLink" } }
+        next_cursor: { type: string, nullable: true }
+    PortalLink:
+      type: object
+      description: Link do portal como a organização o vê; nunca inclui o token nem o hash do token.
+      required: [id, status, created_at, expires_at, created_by]
+      properties:
+        id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [pending, used, expired, revoked]
+          description: >-
+            Situação no instante da consulta: `pending` (ainda não aberto), `used` (trocado por sessão), `expired`
+            (venceu sem uso) ou `revoked` (revogado; prevalece sobre as demais).
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        used_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        revoke_reason:
+          type: string
+          nullable: true
+          enum: [superseded, revoked, null]
+          description: "`superseded`: substituído por um link mais novo do mesmo cliente; `revoked`: revogação explícita."
+        created_by:
+          type: object
+          required: [type, id]
+          properties:
+            type: { type: string, enum: [user, api_credential] }
+            id: { type: string, format: uuid }
+            name: { type: string, nullable: true, description: Nome do membro ou da credencial de API }
     PortalInvoice:
       type: object
       required: [id, number, status, currency, total, amount_due, items]

@@ -128,6 +128,9 @@ e2e/            Playwright
   mensagens de validação associados aos campos.
 - **Portal do cliente** em `/portal`, com layout, cliente HTTP e sessão próprios
   (`/api/portal/v1/*` com o CSRF da sessão do portal). Sem sessão, orienta o
-  acesso pelo link recebido em vez de levar ao login interno.
+  acesso pelo link recebido em vez de levar ao login interno. A lista de
+  faturas é paginada por cursor ("Carregar mais faturas"). Na ficha do
+  cliente, a aba Portal lista os links gerados e permite revogá-los, com
+  confirmação (permissão `customers.portal_links`).
 - **Documento da fatura** exibido em iframe `sandbox="allow-same-origin
   allow-modals"` (sem scripts), com imprimir e baixar.

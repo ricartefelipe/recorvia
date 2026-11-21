@@ -335,8 +335,15 @@ func createPortalLink(t *testing.T, c *client, customerID uuid.UUID) string {
 	if want := c.a.env.Clock.Now().Add(portal.DefaultPolicy().LinkTTL); !exp.Equal(want) {
 		t.Fatalf("expiração do link %v, esperado %v", exp, want)
 	}
-	u, err := url.Parse(body["url"].(string))
-	if err != nil || u.Path != "/portal/access" {
+	return portalToken(t, body)
+}
+
+// portalToken extrai o token da URL devolvida na geração do link.
+func portalToken(t *testing.T, body map[string]any) string {
+	t.Helper()
+	raw, _ := body["url"].(string)
+	u, err := url.Parse(raw)
+	if err != nil || u.Path != "/portal/access" || u.Query().Get("token") == "" {
 		t.Fatalf("URL do link: %v %v", body["url"], err)
 	}
 	return u.Query().Get("token")
