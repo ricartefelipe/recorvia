@@ -30,7 +30,7 @@ import { AuditEventList } from '../../components/AuditEventList';
 import { DateTime, ShortId, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { confirmAction, CursorPager, KeyValue, PageHeader } from '../../components/ui';
-import { useApiMutation, useCursorPagination, useUrlFilters } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import { useIdempotencyKey } from '../../lib/idempotency';
 import {
   actorTypeLabels,
@@ -134,6 +134,7 @@ export function RunsTab({ pollIntervalMs = RUN_POLL_INTERVAL_MS }: { pollInterva
     // lista é atualizada até ela terminar.
     refetchInterval: (q) => (q.state.data?.data.some((r) => r.status === 'running') ? pollIntervalMs : false),
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   const tracked = useQuery({
     queryKey: keys('reconciliation', 'run', trackedId),
     queryFn: ({ signal }) => reconciliationApi.getRun(trackedId ?? '', signal),
@@ -279,6 +280,7 @@ function DiscrepanciesTab() {
     queryFn: ({ signal }) => reconciliationApi.discrepancies({ status, kind, cursor: pagination.cursor, limit: 25 }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <Stack>
       <Group align="flex-end">

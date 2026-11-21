@@ -9,7 +9,7 @@ import type { ApiCredential, ApiCredentialWithSecret } from '../../api/types';
 import { DateTime } from '../../components/format';
 import { EmptyState, QueryContent } from '../../components/states';
 import { confirmAction, CursorPager, SecretRevealModal } from '../../components/ui';
-import { useApiMutation, useCursorPagination } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
 import { optionalInt, requiredText } from '../../lib/validation';
 import { PERMISSIONS, permissionLabel, type Permission } from '../../session/permissions';
 import { usePermission, useTenant } from '../../session/SessionContext';
@@ -181,6 +181,7 @@ export function CredentialsTab() {
     enabled: canManage,
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   const rotate = useApiMutation<ApiCredential, ApiCredentialWithSecret>({
     mutationFn: (c) => integrationsApi.rotateCredential(c),
     invalidate: ['api-credentials'],

@@ -47,6 +47,7 @@ function ConfigureProviderModal({
       onClose();
       onConfigured(result);
     },
+    onConcurrentReload: onClose,
   });
   return (
     <Modal opened onClose={onClose} title={`Configurar ${labelOf(providerLabels, provider)}`} size="lg">

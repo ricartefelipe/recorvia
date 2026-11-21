@@ -7,7 +7,7 @@ import type { ChargeStatus } from '../../api/types';
 import { CivilDate, DateTime, Money, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { CursorPager, KeyValue, PageHeader } from '../../components/ui';
-import { useCursorPagination, useUrlFilters } from '../../lib/hooks';
+import { useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import { stableStringify } from '../../lib/idempotency';
 import { chargeStatusLabels, labelOf, optionsOf, providerLabels } from '../../lib/labels';
 import { Can, useTenant } from '../../session/SessionContext';
@@ -25,6 +25,7 @@ export function ChargesPage() {
     queryFn: ({ signal }) => paymentsApi.listCharges({ ...params, cursor: pagination.cursor }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <Stack gap={0}>
       <PageHeader

@@ -5,7 +5,7 @@ import type { CustomerDetails, PortalLink } from '../../api/types';
 import { DateTime, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { confirmAction, CursorPager } from '../../components/ui';
-import { useApiMutation, useCursorPagination } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
 import { actorTypeLabels, labelOf, portalLinkStatusLabels } from '../../lib/labels';
 import { useTenant } from '../../session/SessionContext';
 import { customersApi } from './api';
@@ -44,6 +44,7 @@ export function PortalLinksPanel({ customer }: { customer: CustomerDetails }) {
     queryFn: ({ signal }) => customersApi.portalLinks(customer.id, { cursor: pagination.cursor }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   const revoke = useApiMutation<PortalLink, unknown>({
     mutationFn: (link) => customersApi.revokePortalLink(customer.id, link.id),
     invalidate: ['customers'],

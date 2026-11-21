@@ -10,7 +10,7 @@ import type { CursorPage, DeadLetter } from '../../api/types';
 import { DateTime, StatusBadge } from '../../components/format';
 import { EmptyState, QueryContent } from '../../components/states';
 import { confirmAction, CursorPager, PageHeader } from '../../components/ui';
-import { useApiMutation, useCursorPagination, useUrlFilters } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import { deadLetterStatusLabels, optionsOf } from '../../lib/labels';
 import { reasonField } from '../../lib/validation';
 import { usePermission, useTenant } from '../../session/SessionContext';
@@ -88,6 +88,7 @@ export function OperationsPage() {
     queryFn: ({ signal }) => operationsApi.list({ status, cursor: pagination.cursor, limit: 25 }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <Stack gap={0}>
       <PageHeader

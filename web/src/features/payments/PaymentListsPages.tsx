@@ -7,7 +7,7 @@ import type { Dispute, PaymentOperation } from '../../api/types';
 import { DateTime, Money, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { confirmAction, CursorPager, PageHeader } from '../../components/ui';
-import { useApiMutation, useCursorPagination, useUrlFilters } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import {
   disputeStatusLabels,
   labelOf,
@@ -38,6 +38,7 @@ export function PaymentsPage() {
     queryFn: ({ signal }) => paymentsApi.listPayments({ cursor: pagination.cursor, limit: 25 }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <Stack gap={0}>
       <PageHeader title="Recebimentos" description="Pagamentos confirmados pelo provedor ou registrados manualmente, com as taxas descontadas." />
@@ -113,6 +114,7 @@ export function RefundsPage() {
     queryFn: ({ signal }) => paymentsApi.listRefunds({ cursor: pagination.cursor, limit: 25 }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <Stack gap={0}>
       <PageHeader title="Reembolsos" description="Reembolsos solicitados ao provedor. Resultado desconhecido é resolvido por reconsulta ou conciliação." />
@@ -182,6 +184,7 @@ export function DisputesPage() {
     queryFn: ({ signal }) => paymentsApi.listDisputes({ cursor: pagination.cursor, limit: 25 }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <Stack gap={0}>
       <PageHeader
@@ -280,6 +283,7 @@ export function PaymentOperationsPage() {
     queryFn: ({ signal }) => paymentsApi.listOperations({ status, cursor: pagination.cursor, limit: 25 }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   // Aviso das operações com resultado desconhecido: a primeira página com o
   // limite máximo; havendo mais, o aviso informa que são pelo menos essas.
   const unknownQuery = useQuery({

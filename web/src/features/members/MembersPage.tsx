@@ -10,7 +10,7 @@ import type { CursorPage, DataList, Invitation, InvitationCreated, Member, Role,
 import { DateTime, StatusBadge } from '../../components/format';
 import { EmptyState, QueryContent } from '../../components/states';
 import { confirmAction, CursorPager, PageHeader, SecretRevealModal } from '../../components/ui';
-import { useApiMutation, useCursorPagination, useUrlFilters } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import { invitationStateLabels, labelOf, memberStatusLabels, roleLabels } from '../../lib/labels';
 import { requiredEmail } from '../../lib/validation';
 import { PERMISSIONS, permissionLabel } from '../../session/permissions';
@@ -209,6 +209,7 @@ function InvitationsTab() {
     queryFn: ({ signal }) => membersApi.invitations({ cursor: pagination.cursor, limit: 25 }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   const revoke = useApiMutation<Invitation, unknown>({
     mutationFn: (i) => membersApi.revoke(i.id),
     invalidate: ['invitations'],

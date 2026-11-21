@@ -10,7 +10,7 @@ import { LoadingState, QueryContent } from '../../components/states';
 import { confirmAction, CopyField, CursorPager, KeyValue, PageHeader } from '../../components/ui';
 import { formatDateTime } from '../../lib/dates';
 import { formatDocument } from '../../lib/documents';
-import { useApiMutation, useCursorPagination, useUrlFilters } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import { customerKindLabels, customerStatusLabels, labelOf } from '../../lib/labels';
 import { Can, usePermission, useTenant } from '../../session/SessionContext';
 import { AddressPanel } from './AddressPanel';
@@ -32,6 +32,7 @@ function HistoryPanel({ customerId }: { customerId: string }) {
     queryFn: ({ signal }) => customersApi.history(customerId, { cursor: pagination.cursor }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <QueryContent query={query}>
       {(page) => (

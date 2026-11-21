@@ -85,6 +85,38 @@ describe('templates de e-mail', () => {
     await waitFor(() => expect(versions).toEqual(['"3"']));
   });
 
+  it('depois do 412, recarregar fecha o modal e a nova edição usa a versão atual', async () => {
+    const versions: (string | null)[] = [];
+    let current: NotificationTemplate = { ...template, is_default: true, version: 0 };
+    server.use(
+      http.get('/api/v1/notification-templates', () => HttpResponse.json({ data: [current] })),
+      http.put('/api/v1/notification-templates/:key', async ({ request }) => {
+        const ifMatch = request.headers.get('If-Match');
+        versions.push(ifMatch);
+        if (versions.length === 1) {
+          // Outra pessoa personalizou o template enquanto o modal estava aberto.
+          current = { ...template, is_default: false, version: 1 };
+          return HttpResponse.json(
+            { type: 'about:blank', title: 'Versão divergente', status: 412, code: 'version_mismatch' },
+            { status: 412, headers: { 'Content-Type': 'application/problem+json' } },
+          );
+        }
+        const body = (await request.json()) as { subject: string; body: string };
+        return HttpResponse.json({ ...current, ...body, version: 2 }, { headers: { ETag: '"2"' } });
+      }),
+    );
+    const { user } = renderPage(<CollectionsPage />, { route: '/?aba=templates' });
+    await user.click(await screen.findByRole('button', { name: 'Editar' }));
+    let dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Salvar template' }));
+    await user.click(await screen.findByRole('button', { name: 'Recarregar dados' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await user.click(await screen.findByRole('button', { name: 'Editar' }));
+    dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Salvar template' }));
+    await waitFor(() => expect(versions).toEqual(['"0"', '"1"']));
+  });
+
   it('auditor consulta sem editar', async () => {
     server.use(http.get('/api/v1/notification-templates', () => HttpResponse.json({ data: [template] })));
     renderPage(<CollectionsPage />, { route: '/?aba=templates', session: makeSession({ permissions: AUDITOR_PERMISSIONS }) });

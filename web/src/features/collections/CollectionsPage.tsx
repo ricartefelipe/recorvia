@@ -39,7 +39,7 @@ import type {
 import { DateTime, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { CursorPager, PageHeader } from '../../components/ui';
-import { useApiMutation, useCursorPagination, useUrlFilters } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import { stableStringify } from '../../lib/idempotency';
 import { channelLabels, labelOf, notificationReasonLabels, notificationStatusLabels, optionsOf, templateKeyLabels } from '../../lib/labels';
 import { requiredText } from '../../lib/validation';
@@ -173,6 +173,7 @@ function PolicyModal({ policy, opened, onClose }: { policy: CollectionPolicy | n
     form,
     fieldMap: { reminder_offsets_days: 'offsets' },
     onSuccess: onClose,
+    onConcurrentReload: onClose,
   });
   const offsetsError = form.formState.errors.offsets;
   return (
@@ -366,6 +367,7 @@ function TemplateModal({ template, onClose }: { template: NotificationTemplate; 
     successMessage: 'Template gravado.',
     form,
     onSuccess: onClose,
+    onConcurrentReload: onClose,
   });
   const { ref, ...bodyField } = form.register('body');
   const insert = (name: string) => {
@@ -575,6 +577,7 @@ function NotificationsTab() {
     queryFn: ({ signal }) => collectionsApi.notifications({ ...params, cursor: pagination.cursor }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <Stack>
       <Group align="flex-end">

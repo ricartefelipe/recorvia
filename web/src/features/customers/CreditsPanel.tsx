@@ -11,7 +11,7 @@ import { DateTime, Money, StatusBadge } from '../../components/format';
 import { MoneyInput } from '../../components/inputs';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { confirmAction, CursorPager } from '../../components/ui';
-import { useApiMutation, useCursorPagination } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
 import { useIdempotencyKey } from '../../lib/idempotency';
 import { creditKindLabels } from '../../lib/labels';
 import { formatMoney } from '../../lib/money';
@@ -74,6 +74,7 @@ export function CreditsPanel({ customer }: { customer: CustomerDetails }) {
     queryFn: ({ signal }) => customersApi.credits(customer.id, { cursor: pagination.cursor, limit: 25 }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.entries, query.isPlaceholderData);
   return (
     <QueryContent query={query} loading={<LoadingState />}>
       {(credits) => (
