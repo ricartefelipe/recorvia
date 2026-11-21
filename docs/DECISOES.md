@@ -913,7 +913,7 @@ instante: o inbox não deduplica o que foi processado depois do backup. A recupe
 mantém o worker parado até conciliar a janela perdida com o provedor (ADR-058).
 
 ## ADR-056 Retenção limitada aos expurgos técnicos existentes
-**Status:** aceita.
+**Status:** substituída pelas ADR-060 (expurgo por idade) e ADR-061 (anonimização de clientes).
 **Decisão:** a política de retenção (`docs/operacao/retencao-e-anonimizacao.md`) descreve o que o
 sistema faz hoje: expurgo diário dos eventos da outbox publicados há mais de 7 dias, expurgo
 horário das chaves de idempotência expiradas (24 h), expiração das sessões e dos fluxos de login
@@ -1068,3 +1068,179 @@ toda rota com permissão não delegável; o teste de contrato confere o esquema 
 integração exercitam cada rota afetada com uma credencial real pela pilha Bearer (autoria nula e
 auditoria com ator `api_credential` e, nas dead letters, com a justificativa; ou 403 sem efeito) e
 as leituras que continuam disponíveis à credencial.
+
+## ADR-060 Expurgo por idade dos dados técnicos, por tenant e em lotes, com as regras no banco
+**Status:** aceita. Substitui a ADR-056 no que trata dos expurgos.
+**Contexto:** só a outbox publicada e as chaves de idempotência expiradas eram removidas (ADR-056).
+Inbox, dead letters tratadas, entregas e eventos de webhooks enviados, corpos de webhooks recebidos
+dos provedores, notificações e o conteúdo delas, links do portal, convites vencidos e eventos de
+consumo cresciam sem limite, parte deles com dados pessoais (destinatários, conteúdo de e-mails,
+dados do pagador enviados pelo provedor, `properties` de consumo).
+**Decisão:**
+1. Uma tarefa agendada do worker, `retention.purge` (horária, com lease em `scheduled_jobs`, como as
+   demais), executa o pacote `internal/retention`, que percorre onze tipos de dado: `inbox_messages`,
+   `dead_letters`, `webhook_deliveries`, `webhook_events`, `webhook_endpoint_secrets`,
+   `provider_webhook_payloads`, `notification_contents`, `notifications`, `portal_links`,
+   `usage_events` e `invitations`. `outbox.purge` e `idempotency.purge` permanecem como estavam.
+2. O **que pode sair** é decidido no banco, nas funções `SECURITY DEFINER` da migration `00014`:
+   `app_retention_tenants(tipo, corte, após, limite)` devolve somente IDs de tenants com dados
+   vencidos (descoberta paginada, como as demais), e `app_retention_purge(tipo, tenant, corte,
+   agora, limite)` remove um lote e recusa a chamada fora da transação do próprio tenant
+   (`app_current_tenant()`), com corte no futuro, com lote fora de 1 a 10000 ou com tipo
+   desconhecido. Nenhum chamador consegue remover o que ainda é necessário: dead letter aberta,
+   entrega pendente ou em andamento (e o evento que ela referencia), segredo de webhook válido,
+   webhook recebido ainda não processado, notificação agendada ou em envio, notificação de fatura
+   em aberto (o registro do lembrete é o que impede o reenvio; ADR-040), link do portal dentro da
+   validade, convite aceito ou com e-mail por enviar e consumo não faturado. Os eventos de consumo
+   saem por agregado fechado, somente depois da tolerância de atraso da métrica
+   (`late_grace_hours`) e sem correção pendente no período: a correção de consumo atrasado
+   recalcula o período a partir de todos os eventos (ADR-028), e depois da tolerância a ingestão
+   não aceita mais eventos dele.
+3. O **quando e o quanto** ficam no pacote `internal/retention`: o corte de cada tipo é
+   `agora - prazo`, com o relógio injetado; cada lote é uma transação do tenant (`InTenantTx`) de no
+   máximo `RECORVIA_RETENTION_BATCH_SIZE` registros (padrão 500), com `FOR UPDATE SKIP LOCKED`; a
+   execução tem orçamento de 2 minutos, dividido igualmente entre os tipos, e até 20 lotes por
+   tenant e tipo; os tenants são visitados em rodízio (`tenantscan`), e o que sobra continua na
+   execução seguinte. Falha de um tenant ou de um tipo não interrompe os demais.
+4. Prazos em dias por variável de ambiente (`RECORVIA_RETENTION_*_DAYS`), com padrões conservadores
+   (90 dias para inbox, webhooks, corpos de webhooks recebidos, conteúdo de notificações, links e
+   convites; 180 para dead letters tratadas; 365 para notificações; 400 para consumo faturado) e
+   mínimos validados na partida da API e do worker (14 dias para o inbox, o dobro da retenção da
+   outbox publicada; 30 para dead letters, notificações e consumo; 1 para links do portal; 7 para
+   os demais; máximo de 3650). O prazo das notificações não pode ser menor que o do conteúdo, e o
+   dos links do portal não pode ser menor que a duração máxima da sessão do portal.
+5. Conteúdo sai antes da linha: o corpo dos webhooks recebidos é trocado por `{}` (a linha continua
+   deduplicando reenvios do provedor) e o conteúdo cifrado das notificações é anulado
+   (`content_purged_at`), meses antes de a notificação sair. O agregado de consumo permanece, com
+   `events_purged_at`.
+6. Os históricos `notification_events`, `webhook_events` e `webhook_delivery_attempts` e os links
+   do portal continuam imutáveis para a aplicação, que não tem `DELETE` neles: os gatilhos
+   (`app_reject_mutation_unless_purge` e `app_portal_links_guard`) aceitam somente `DELETE`, e
+   somente enquanto a função de retenção mantém `app.retention_purge` ligada com
+   `set_config(..., true)`, local à transação e desligada antes do retorno. `UPDATE` continua
+   recusado sempre.
+7. **Registros financeiros e de auditoria não têm tipo de retenção e não são expurgados**: ledger,
+   faturas e itens, histórico de situação, pagamentos, notas de crédito, créditos do cliente,
+   prorratas, histórico de assinaturas, versões de preço, eventos de disputa e `audit_log`
+   continuam com `app_reject_mutation` (ou `app_invoice_guard`), que não tem exceção. A guarda é
+   deliberada: rastreabilidade financeira e de auditoria.
+**Justificativa:** as regras no banco valem para qualquer versão do worker e para erros de
+configuração; o corte calculado pela aplicação mantém o relógio injetável e os testes
+determinísticos; lotes pequenos com `SKIP LOCKED` não seguram bloqueios nem competem com o
+faturamento, e o orçamento por execução limita o atraso das outras tarefas, que o agendador executa
+em sequência. A exceção dos gatilhos por variável local à transação não abre caminho para a
+aplicação (falta o privilégio) e evita desabilitar gatilhos, que exigiria bloqueio da tabela. A
+atribuição da variável na definição da função (`SET` da função) exigiria superusuário para um
+parâmetro personalizado; por isso a função a liga e desliga explicitamente.
+**Consequências:** depois dos prazos, entregas de webhook não podem mais ser reenviadas, o corpo de
+um webhook recebido não está mais disponível para diagnóstico, o histórico de notificações e os
+eventos de consumo individuais deixam de ser listados, e o reenvio de um evento de consumo expurgado
+é rejeitado em vez de respondido como duplicado. Uma mensagem reentregue depois da retenção do inbox
+seria processada de novo (por isso o mínimo de 14 dias e as chaves de negócio permanentes da
+ADR-022). A segurança do expurgo de consumo depende de a tolerância de atraso da métrica não
+aumentar depois do fechamento (hoje a métrica não é alterável): se passar a ser, a ingestão precisa
+recusar eventos de períodos com `events_purged_at`. Dead letters abertas sem tenant, chaves de
+idempotência em processamento que nunca concluíram e os dados fora do PostgreSQL (backups, logs,
+Keycloak) continuam sem expurgo automático. Num banco com muito histórico, a primeira passagem leva
+várias execuções. O Down da migration restaura os gatilhos e a regra `notifications_deliverable` sem
+validar as linhas cujo conteúdo já foi expurgado (o conteúdo não pode ser restaurado). Nenhuma
+afirmação de conformidade legal é feita: os prazos são configuração de quem opera.
+
+## ADR-061 Anonimização de clientes: irreversível, por pessoa identificada, sem reescrever faturas emitidas
+**Status:** aceita. Substitui a ADR-056 no que trata da anonimização.
+**Contexto:** a coluna `customers.anonymized_at` existia sem caso de uso; os pedidos eram tratados
+por procedimento manual, sem garantia de que todos os lugares com dados pessoais fossem alcançados.
+**Decisão:**
+1. `POST /api/v1/customers/{id}/anonymize` (`customers.Service.Anonymize`), com permissão própria
+   `customers.anonymize` (proprietário e administrador), `Idempotency-Key` e justificativa
+   obrigatória de 10 a 500 caracteres. A permissão **não é delegável** a credenciais de API e a
+   rota aceita apenas a sessão de um usuário (ADR-059): a anonimização é irreversível e responde a
+   um pedido que a organização precisa avaliar, com uma pessoa que responde pela decisão.
+2. Só para cliente sem assinatura ativa (em avaliação, ativa, inadimplente ou suspensa) nem fatura
+   em aberto, a mesma regra do arquivamento, **e sem faturamento pendente**: assinatura com
+   fechamento ainda agendado (`next_billing_at`, como o consumo final de uma assinatura cancelada),
+   item pendente sem fatura, consumo atrasado ou sem agregado ainda por corrigir, ou período de
+   consumo fechado ainda dentro da tolerância de atraso da métrica (até lá a ingestão aceita consumo
+   atrasado, que vira correção e fatura). Caso contrário, 409 `customer_has_obligations`. Sem essa
+   regra, a fatura nasceria depois da anonimização, com o cadastro neutro, ou seria gravada depois
+   com os dados pessoais lidos antes. Numa única transação, com o cliente bloqueado:
+   nome, documento, razão social, e-mail, telefone e identificador externo recebem valores neutros
+   (`Cliente anonimizado`; documento de zeros, que a coluna obrigatória exige e que não passa na
+   validação de dígitos); contatos (com as preferências de e-mail), endereço de cobrança e
+   identificadores no provedor são excluídos; os links do portal são revogados, o que encerra as
+   sessões na requisição seguinte; as notificações do cliente são excluídas com o histórico; o
+   corpo dos webhooks recebidos das cobranças do cliente é esvaziado; o cliente fica arquivado com
+   `anonymized_at`. A auditoria (`customer.anonymized`) e o evento `customer.updated`
+   (`anonymized: true`) são gravados na mesma transação.
+3. **Irreversível:** o gatilho `customers_anonymized_guard` rejeita qualquer `UPDATE` da linha
+   depois de `anonymized_at`, a constraint `customers_anonymized_archived` exige a situação
+   arquivada, os gatilhos `subscriptions_customer_guard` e `invoices_customer_guard` recusam
+   assinaturas e faturas novas (esperando uma anonimização em andamento e lendo o resultado dela),
+   a ingestão rejeita consumo do cliente (lendo-o com bloqueio compartilhado; o reenvio de um evento
+   já gravado continua respondido como duplicata) e o caso de uso recusa novos contatos e endereço
+   (`customer_anonymized`). Notificações compostas antes da anonimização e gravadas depois são
+   descartadas (a gravação relê o cliente sob bloqueio compartilhado).
+4. **Idempotente:** repetida para um cliente já anonimizado, devolve o estado atual com
+   `already_anonymized` e os identificadores no provedor registrados na anonimização, sem alterar
+   nada nem auditar de novo. A resposta traz o cliente como ficou gravado (versão e `updated_at`).
+5. **Faturas emitidas não são reescritas.** O `customer_snapshot` (nome, razão social, documento,
+   e-mail e endereço do momento da emissão) permanece, protegido por `app_invoice_guard`. A fatura
+   emitida é o documento comercial da cobrança, referenciado pelo ledger, pelos pagamentos e pelo
+   que foi enviado ao cliente e ao provedor; reescrevê-la exigiria abrir uma exceção no gatilho
+   que sustenta a ADR-014 e uma decisão sobre obrigações de guarda que não cabe ao software.
+   Depois da anonimização, esses dados só aparecem nas faturas emitidas, para quem tem
+   `invoices.read`.
+6. **Notificações são excluídas, não mantidas sem dados.** Destinatários e assunto ficam em claro,
+   o conteúdo cifrado traz dados do cliente e o histórico imutável pode trazer endereços de e-mail
+   em mensagens de erro do servidor SMTP; nenhuma delas é registro financeiro. A exclusão usa a
+   função `app_customer_delete_notifications`, que só atua na transação do tenant e para cliente já
+   anonimizado.
+7. **Identificador no provedor:** é excluído do cadastro (`customer_provider_refs`), devolvido na
+   resposta para que o cadastro seja tratado no provedor e **registrado nos detalhes de
+   `customer.anonymized`** (`provider_customers`), na mesma transação. A resposta é gravada na
+   chave de idempotência só depois da confirmação da transação: se a API cair nesse intervalo, a
+   repetição reexecuta o caso de uso e precisa devolver os mesmos identificadores, que já não estão
+   no cadastro; por isso a repetição os relê da auditoria. É um identificador opaco emitido pelo
+   provedor, não um dado cadastral, e já é alcançável pelas cobranças do cliente, que permanecem; a
+   auditoria continua sem valores pessoais. O evento `customer.updated` não o leva. O Recorvia não
+   altera o cadastro no provedor.
+8. A justificativa vai para a auditoria, que é imutável: por isso é recusada quando contém o nome,
+   o documento, o e-mail ou o telefone do próprio cliente (verificação de melhor esforço), e a
+   interface orienta a informar o protocolo do pedido.
+**Justificativa:** o desenho da auditoria já evitava valores pessoais nos detalhes, de modo que a
+anonimização não precisa reescrevê-la; a irreversibilidade no banco evita que uma rota futura
+regrave dados num cliente anonimizado; excluir o que não é financeiro é mais simples e mais seguro
+do que manter linhas com campos neutros.
+**Consequências:** os dados pessoais permanecem nas faturas emitidas, nos backups até expirarem,
+nos logs conforme a retenção de quem opera, no provedor de pagamento e, por até 24 horas, na
+resposta registrada na chave de idempotência da própria anonimização (os identificadores do
+provedor); os identificadores do provedor permanecem na auditoria, que não é expurgada.
+`usage_events.properties` segue o expurgo por idade. Um saldo de crédito do cliente permanece
+registrado. Uma notificação em envio no instante da anonimização pode ser entregue. A anonimização
+de um cliente com consumo medido só é aceita depois da tolerância de atraso da métrica (72 h por
+padrão, até 720 h) contada do fim do último período fechado ou do encerramento da assinatura. Não
+há anonimização de usuários, membros ou organizações, nem operação para remover as cópias das
+faturas emitidas: ficam documentadas como limitações.
+
+## ADR-062 Métricas e alertas do expurgo por idade
+**Status:** aceita.
+**Decisão:** o expurgo exporta três contadores com o rótulo `kind` (os onze tipos da ADR-060, sem
+rótulo de tenant), criados com zero na partida: `recorvia_retention_purged_total` (registros
+removidos ou esvaziados), `recorvia_retention_purge_failures_total` (execuções em que o tipo falhou
+em algum tenant ou na descoberta) e `recorvia_retention_purge_incomplete_total` (execuções
+interrompidas pelo orçamento ou pelo limite de lotes com registros vencidos restantes). Dois
+alertas, na área `retencao`, com runbook próprio (`docs/operacao/runbooks/retencao.md`):
+`RecorviaRetentionPurgeStale` (a tarefa `retention.purge` sem sucesso há mais de três intervalos,
+ou sem nenhum sucesso desde a partida do worker, pela idade do processo) e
+`RecorviaRetentionPurgeBacklog` (20 ou mais execuções incompletas do mesmo tipo em 24 horas). A
+tarefa sai do alerta genérico `RecorviaScheduledTaskStale`, para não alertar duas vezes; as tarefas
+`outbox.purge` e `idempotency.purge` continuam nele.
+**Justificativa:** a falha do expurgo de qualquer tipo faz a execução terminar sem sucesso, de modo
+que o último sucesso da tarefa cobre "expurgo parado" e "expurgo falhando" com uma regra; o
+contador de falhas por tipo aponta onde. Execuções incompletas são contadas, e não expostas como
+gauge, porque a tarefa pode rodar em instâncias diferentes do worker e um gauge ficaria com o valor
+da última execução de cada instância. O volume vencido por tenant é consultado por SQL no runbook:
+uma métrica por tenant violaria a regra de cardinalidade (ADR-053).
+**Consequências:** não há métrica do volume vencido restante nem da idade do registro mais antigo;
+o acúmulo é inferido pelas execuções incompletas. Os limites (3 horas, 20 execuções em 24 horas) são
+pontos de partida, a calibrar com o volume real.

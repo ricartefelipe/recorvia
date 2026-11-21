@@ -72,8 +72,9 @@ Todas as métricas da aplicação têm o prefixo `recorvia_` e o rótulo constan
 `instance`) for declarado, e os rótulos alimentados por dados externos têm conjunto fechado: o
 método HTTP fora da lista padronizada vira `_OTHER` e o provedor de webhook fora da lista vira
 `other` (`TestArbitraryHTTPMethodsDoNotCreateSeries`). Os contadores de consumidores, tarefas,
-falhas de cobrança, webhooks recebidos, envios de notificações, entregas de webhooks e ações da
-régua são criados com zero na partida, para que `increase()` detecte a primeira ocorrência.
+falhas de cobrança, webhooks recebidos, envios de notificações, entregas de webhooks, ações da
+régua e do expurgo por retenção são criados com zero na partida, para que `increase()` detecte a
+primeira ocorrência.
 `TestMetricsCatalogDocumentsEveryMetricAndLabelValue` confere que toda métrica declarada está na
 tabela abaixo, com os valores dos rótulos de conjunto fechado.
 
@@ -99,6 +100,9 @@ tabela abaixo, com os valores dos rótulos de conjunto fechado.
 | `recorvia_notifications_dispatched_total` | contador | `outcome` | worker, tarefa `notifications.dispatch`: `sent` (aceita pelo SMTP), `retried` (falha transitória, nova tentativa agendada), `failed` (encerrada sem envio: recusa permanente, fim das tentativas ou conteúdo indisponível), `deferred` (fora da janela de envio ou do limite de frequência), `skipped` (cancelada ou suprimida antes do envio) e `lost_lease` (outra execução assumiu a tentativa) |
 | `recorvia_webhook_deliveries_total` | contador | `outcome` | worker, tarefa `webhooks.deliver`: `succeeded` (resposta 2xx), `retrying` (falha, nova tentativa agendada), `exhausted` (tentativas esgotadas ou destino bloqueado pela proteção SSRF), `lost_lease` e `deferred` (devolvida à fila sem consumir tentativa: orçamento da execução ou endpoint sem resposta) |
 | `recorvia_collection_actions_total` | contador | `action` | worker, tarefa `collections.run`: `reminder_scheduled`, `invoice_overdue`, `subscription_suspended` e `subscription_reactivated` |
+| `recorvia_retention_purged_total` | contador | `kind` | worker, tarefa `retention.purge` (a cada hora): registros removidos ou esvaziados pelo expurgo por idade, por tipo de dado: `inbox_messages`, `dead_letters`, `webhook_deliveries`, `webhook_events`, `webhook_endpoint_secrets`, `provider_webhook_payloads`, `notification_contents`, `notifications`, `portal_links`, `usage_events` e `invitations` |
+| `recorvia_retention_purge_failures_total` | contador | `kind` | worker, tarefa `retention.purge`: execuções em que o expurgo do tipo falhou em algum tenant ou na descoberta (`inbox_messages`, `dead_letters`, `webhook_deliveries`, `webhook_events`, `webhook_endpoint_secrets`, `provider_webhook_payloads`, `notification_contents`, `notifications`, `portal_links`, `usage_events` e `invitations`); a tarefa termina sem sucesso |
+| `recorvia_retention_purge_incomplete_total` | contador | `kind` | worker, tarefa `retention.purge`: execuções interrompidas pelo orçamento de tempo ou pelo limite de lotes com registros vencidos restantes do tipo (`inbox_messages`, `dead_letters`, `webhook_deliveries`, `webhook_events`, `webhook_endpoint_secrets`, `provider_webhook_payloads`, `notification_contents`, `notifications`, `portal_links`, `usage_events` e `invitations`) |
 | `recorvia_reconciliation_open_discrepancies` | gauge | `kind` | declarada nesta etapa; alimentada pela tarefa `metrics.collect` da etapa 5 (recebíveis e conciliação) |
 | `recorvia_db_pool_connections` | gauge | `state` | API e worker, pool pgx lido a cada coleta (`acquired`, `idle`, `constructing`) |
 | `recorvia_db_pool_max_connections` | gauge | — | API e worker |
@@ -192,6 +196,8 @@ anotação `runbook` de cada regra aponta para uma seção existente (conferido 
 | `RecorviaScheduledTaskFailing` | 3 ou mais falhas de uma tarefa em 30 min (tarefas frequentes) | warning |
 | `RecorviaScheduledTaskStale` | tarefa sem sucesso há mais de três intervalos (mínimo de 15 min), inclusive desde a partida do worker; cobre as tarefas horárias e a diária | warning |
 | `RecorviaMetricsCollectionStale` | `metrics.collect` sem sucesso há mais de 2 min, ou sem nenhum sucesso desde a partida do worker | warning |
+| `RecorviaRetentionPurgeStale` | `retention.purge` sem sucesso há mais de 3 h, ou sem nenhum sucesso desde a partida do worker (há mais de 3 h) | warning |
+| `RecorviaRetentionPurgeBacklog` | 20 ou mais execuções do expurgo em 24 h interrompidas com registros vencidos restantes do mesmo tipo | warning |
 | `RecorviaEmailDeliveryStalled` | tentativas de envio falhando e nenhum e-mail aceito em 15 min, por 15 min | warning |
 | `RecorviaNotificationsFailed` | mais de 5 notificações com falha definitiva em 30 min | warning |
 | `RecorviaWebhookDeliveriesFailing` | 10 ou mais tentativas de entrega falhando e nenhuma bem-sucedida em 30 min, por 15 min | warning |
@@ -203,12 +209,14 @@ anotação `runbook` de cada regra aponta para uma seção existente (conferido 
 
 O último sucesso de uma tarefa só existe depois de um sucesso real; num reinício do worker com a
 tarefa falhando, ou com a reivindicação falhando a cada ciclo (sem execução registrada), a série
-não existe. `RecorviaBillingCycleStale`, `RecorviaMetricsCollectionStale` e
-`RecorviaScheduledTaskStale` cobrem esse caso pela idade do processo mais antigo do worker
-(`process_start_time_seconds`), que é o mínimo do tempo sem sucesso. A próxima execução de uma
-tarefa é agendada um intervalo depois, mesmo após falha: `RecorviaScheduledTaskFailing` só alcança
-tarefas de até 10 minutos de intervalo, e as horárias (`platform.close_statements`,
-`idempotency.purge`) e a diária (`outbox.purge`) ficam com o alerta proporcional ao intervalo.
+não existe. `RecorviaBillingCycleStale`, `RecorviaMetricsCollectionStale`,
+`RecorviaRetentionPurgeStale` e `RecorviaScheduledTaskStale` cobrem esse caso pela idade do
+processo mais antigo do worker (`process_start_time_seconds`), que é o mínimo do tempo sem sucesso.
+A próxima execução de uma tarefa é agendada um intervalo depois, mesmo após falha:
+`RecorviaScheduledTaskFailing` só alcança tarefas de até 10 minutos de intervalo, e as horárias
+(`platform.close_statements`, `idempotency.purge`) e a diária (`outbox.purge`) ficam com o alerta
+proporcional ao intervalo. O expurgo por retenção (`retention.purge`, horário) tem alerta próprio,
+com runbook de retenção, e fica fora do alerta genérico.
 
 A quantidade de dead letters registradas e ainda não resolvidas por tenant é consultada pela API
 (`GET /api/v1/dead-letters`); não há métrica global para ela (ADR-053).
@@ -223,7 +231,7 @@ são salvas; edite o JSON e reconstrua a imagem). A fonte de dados é o Promethe
 |---|---|
 | Recorvia: visão geral (página inicial) | indicadores dos alertas (outbox, operações desconhecidas, divergências, faturamento, DLQs), API, faturamento e cobrança (inclusive operações esgotadas), conciliação e dependências, régua de cobrança, notificações e entregas de webhooks |
 | Recorvia: mensageria | filas principais (prontas, atraso, não confirmadas, consumidores), retentativas, DLQs, resultado e duração por consumidor, saturação e outbox |
-| Recorvia: banco e processos | pool de conexões por processo, conexões do servidor, tarefas agendadas (resultado, duração, último sucesso) e recursos dos processos |
+| Recorvia: banco e processos | pool de conexões por processo, conexões do servidor, tarefas agendadas (resultado, duração, último sucesso), registros expurgados por tipo e recursos dos processos |
 
 Os rastros são consultados na interface do Jaeger: a fonte de dados Jaeger do Grafana usa a API
 HTTP v1, que o Jaeger 2.23 não expõe mais.

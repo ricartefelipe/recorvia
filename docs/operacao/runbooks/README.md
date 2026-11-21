@@ -11,6 +11,7 @@ verificação.
 | [Filas e DLQ](filas-e-dlq.md) | `RecorviaTargetDown`, `RecorviaOutboxBacklog`, `RecorviaOutboxStalled`, `RecorviaOutboxPublishFailures`, `RecorviaQueueBacklog`, `RecorviaQueueLag`, `RecorviaQueueWithoutConsumer`, `RecorviaDeadLetterQueueNotDrained`, `RecorviaMessagesDeadLettered`, `RecorviaConsumerRetryRate`, `RecorviaMessagesRequeued`, `RecorviaWorkerSaturated`, `RecorviaDependencyUnavailable` |
 | [Conciliação](conciliacao.md) | `RecorviaPaymentOperationsUnknown`, `RecorviaPaymentOperationsExhausted`, `RecorviaRefundsUnknown`, `RecorviaRefundsFailed`, `RecorviaReconciliationDiscrepanciesOpen`, `RecorviaReconciliationDiscrepanciesHigh` |
 | [Notificações e webhooks enviados](notificacoes-e-webhooks.md) | `RecorviaEmailDeliveryStalled`, `RecorviaNotificationsFailed`, `RecorviaWebhookDeliveriesFailing` |
+| [Expurgo por retenção](retencao.md) | `RecorviaRetentionPurgeStale`, `RecorviaRetentionPurgeBacklog` |
 | [Isolamento de dados](isolamento-de-dados.md) | sem alerta automático (incidente aberto por suspeita ou relato) |
 
 ## Convenções dos comandos

@@ -77,7 +77,8 @@ erDiagram
 - `notifications`: identidade de negócio (`business_key`), template, destinatários e assunto em
   claro; conteúdo (texto e HTML) cifrado com o keyring (`content_ciphertext`, `content_key_id`,
   AAD com tenant e notificação); situação, motivo, tentativas, lease, `message_id` e envio.
-- `notification_events`: histórico imutável de cada mudança de situação, com motivo e tentativa.
+- `notification_events`: histórico imutável de cada mudança de situação, com motivo e tentativa
+  (removido junto com a notificação pelo expurgo por idade ou pela anonimização do cliente).
 - `webhook_endpoint_secrets`: segredo cifrado (AAD com tenant, endpoint e segredo) e `expires_at`
   (nulo no segredo corrente).
 - `webhook_events`: o evento de domínio entregue (`id` = id da mensagem da outbox, usado em
@@ -153,12 +154,15 @@ transacional por cobrança (`pg_advisory_xact_lock`), sem bloquear a linha da co
 | Uma suspensão da política ativa por assinatura | `collection_suspensions_active_key` |
 | Um segredo corrente por endpoint; aplicação só altera a validade | `webhook_endpoint_secrets_current_key`, `GRANT UPDATE (expires_at)` |
 | Uma entrega por endpoint e evento | `webhook_deliveries_event_key` |
-| Históricos de notificação e de entrega imutáveis | `app_reject_mutation` em `notification_events`, `webhook_events` e `webhook_delivery_attempts` |
+| Históricos de notificação e de entrega imutáveis para a aplicação; exclusão somente pelo expurgo por idade | `app_reject_mutation_unless_purge` em `notification_events`, `webhook_events` e `webhook_delivery_attempts` (`UPDATE` nunca; `DELETE` só dentro de `app_retention_purge` e `app_customer_delete_notifications`) |
+| Expurgo por idade restrito ao tenant da transação e ao que não é mais necessário | funções `app_retention_tenants` e `app_retention_purge` (ADR-060) |
+| Cliente anonimizado arquivado, sem alteração posterior e sem novas assinaturas nem faturas | `customers_anonymized_archived`, gatilhos `customers_anonymized_guard`, `subscriptions_customer_guard` e `invoices_customer_guard` (ADR-061) |
+| Notificação enviada sem conteúdo somente depois do expurgo; webhook recebido sem corpo somente depois de processado | `notifications_deliverable`, `notifications_content_purged`, `provider_webhook_events_payload_purged` |
 | Total da fatura coerente | `total = subtotal - desconto`; `saldo = total - crédito - pago - creditado - baixado` |
 | Credencial guarda só o hash do segredo; identificador único global | `api_credentials_key_id_key`, `secret_hash` de 32 bytes |
 | Escopos, nome, autoria e validade da credencial imutáveis; revogada não muda | gatilho `app_api_credentials_guard` |
 | Segredo anterior só existe com janela de validade e após rotação | `api_credentials_previous_secret` |
-| Um link do portal não revogado por cliente; uso único dentro da validade | `customer_portal_links_active_key`, `customer_portal_links_use_window`, gatilho `app_portal_links_guard` |
+| Um link do portal não revogado por cliente; uso único dentro da validade; exclusão somente pelo expurgo por idade | `customer_portal_links_active_key`, `customer_portal_links_use_window`, gatilho `app_portal_links_guard` |
 | Link do portal com exatamente um autor (membro ou credencial do mesmo tenant) | `customer_portal_links_creator`, FKs compostas |
 
 ## Dados do portal do cliente

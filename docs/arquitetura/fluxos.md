@@ -160,15 +160,30 @@ referências às cobranças.
    fechado com agregado da métrica aceita o evento como `late` (dentro da tolerância), ainda que o
    plano tenha mudado. Período cujo fechamento já passou sem agregado da métrica, ou que nunca
    será fechado (inteiramente suspenso), rejeita o evento; o período em que a suspensão começou
-   continua aberto depois da reativação até o primeiro faturamento após ela. Rejeições valem por
+   continua aberto depois da reativação até o primeiro faturamento após ela. Cliente anonimizado
+   (ADR-061): todo evento novo é rejeitado com "Cliente anonimizado: consumo não é mais aceito.",
+   antes das demais validações que dependem do estado atual; como a deduplicação vem antes, o
+   reenvio de um evento já gravado continua respondido como `duplicate`. Rejeições valem por
    evento e não desfazem o lote.
 4. O fechamento agrega por período conforme a métrica (`sum`, `max`, `unique_count`, `last`) e
    vincula o agregado ao item da fatura.
 5. Ordem de bloqueio: no início da transação do lote, antes de qualquer outra leitura ou
    gravação, a ingestão bloqueia com `FOR SHARE` as assinaturas distintas do lote, uma vez cada e
-   em ordem crescente de ID; só depois consulta métrica, mudança agendada, deduplicação e
-   fechamento e grava os eventos. A mudança agendada é lida sem bloqueio: o agendamento e a
-   aplicação pelo motor bloqueiam a assinatura com `FOR UPDATE` antes de alterá-la. O motor
+   em ordem crescente de ID; só depois consulta métrica, deduplicação, cliente, mudança agendada
+   e fechamento e grava os eventos. O cliente da assinatura é lido com `FOR KEY SHARE` (o mesmo
+   bloqueio da chave estrangeira do evento), sempre depois dos bloqueios das assinaturas, uma vez
+   por cliente no lote, no primeiro evento dele que passa pela deduplicação: é a primeira
+   verificação de estado, feita antes das demais e da gravação, de modo que o bloqueio é tomado
+   também quando o evento acaba rejeitado por outra regra (só não o tomam os eventos recusados
+   antes disso: conteúdo inválido, assinatura ou métrica inexistente e reenvio de evento já
+   gravado). A anonimização mantém o cliente com `FOR UPDATE` até confirmar e não bloqueia
+   assinaturas: um lote que chega durante a anonimização espera nessa leitura, enxerga o cliente
+   anonimizado e rejeita o evento, em vez de gravá-lo como `late` com a situação lida antes (a
+   correção de consumo tentaria faturá-lo e a fatura seria recusada por
+   `invoices_customer_guard`); uma anonimização que chega durante o lote espera o commit dele e
+   avalia o faturamento pendente já com os eventos gravados. A mudança agendada é lida sem
+   bloqueio: o agendamento e a aplicação pelo motor bloqueiam a assinatura com `FOR UPDATE` antes
+   de alterá-la. O motor
    reivindica a assinatura com `FOR UPDATE SKIP LOCKED` e fecha o período na mesma transação:
    enquanto um lote mantém a assinatura, a reivindicação a pula (ela é faturada numa reivindicação
    seguinte); um lote que chega durante o fechamento espera o commit e classifica o evento como
