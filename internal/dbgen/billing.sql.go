@@ -715,23 +715,25 @@ SELECT i.id, i.tenant_id, i.customer_id, i.subscription_id, i.number, i.status, 
    AND ($5::timestamptz IS NULL OR i.issued_at >= $5)
    AND ($6::timestamptz IS NULL OR i.issued_at < $6)
    AND (NOT $7::boolean OR (i.status IN ('open', 'partially_paid') AND i.due_at <= $8))
-   AND ($9::timestamptz IS NULL OR (i.created_at, i.id) < ($9::timestamptz, $10::uuid))
+   AND (NOT $9::boolean OR i.status IN ('open', 'partially_paid'))
+   AND ($10::timestamptz IS NULL OR (i.created_at, i.id) < ($10::timestamptz, $11::uuid))
  ORDER BY i.created_at DESC, i.id DESC
- LIMIT $11
+ LIMIT $12
 `
 
 type ListInvoicesParams struct {
-	TenantID       uuid.UUID
-	Status         *string
-	CustomerID     *uuid.UUID
-	SubscriptionID *uuid.UUID
-	IssuedFrom     *time.Time
-	IssuedTo       *time.Time
-	OnlyOverdue    bool
-	Now            *time.Time
-	CursorTs       *time.Time
-	CursorID       *uuid.UUID
-	RowLimit       int32
+	TenantID        uuid.UUID
+	Status          *string
+	CustomerID      *uuid.UUID
+	SubscriptionID  *uuid.UUID
+	IssuedFrom      *time.Time
+	IssuedTo        *time.Time
+	OnlyOverdue     bool
+	Now             *time.Time
+	OnlyOpenBalance bool
+	CursorTs        *time.Time
+	CursorID        *uuid.UUID
+	RowLimit        int32
 }
 
 type ListInvoicesRow struct {
@@ -778,6 +780,7 @@ func (q *Queries) ListInvoices(ctx context.Context, arg ListInvoicesParams) ([]L
 		arg.IssuedTo,
 		arg.OnlyOverdue,
 		arg.Now,
+		arg.OnlyOpenBalance,
 		arg.CursorTs,
 		arg.CursorID,
 		arg.RowLimit,

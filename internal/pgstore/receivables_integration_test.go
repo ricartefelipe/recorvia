@@ -678,11 +678,20 @@ func TestReconciliationWithSimulator(t *testing.T) {
 	if n := h.sum(t, `SELECT count(*) FROM reconciliation_discrepancies WHERE tenant_id = $1`); n != 2 {
 		t.Fatalf("divergências após nova execução = %d", n)
 	}
+	// O painel conta as divergências abertas (posição atual, qualquer mês).
+	for _, month := range []string{"", "2025-01"} {
+		if d := h.dashboard(t, month); d.OpenDiscrepancies != 2 {
+			t.Fatalf("painel %q: divergências abertas = %d, esperado 2", month, d.OpenDiscrepancies)
+		}
+	}
 	// Resoluções: pagamento aplicado e taxa aceita com ajuste no ledger.
 	just := "Conferido com o extrato do simulador."
 	if _, err := h.pay.ResolveDiscrepancy(ctx, h.tn.ID, h.tn.Actor, &h.tn.Owner.ID, payments.ResolveInput{ID: payD.ID,
 		Resolution: payments.ResolutionAcceptProvider, Justification: just}); err != nil {
 		t.Fatal(err)
+	}
+	if d := h.dashboard(t, ""); d.OpenDiscrepancies != 1 {
+		t.Fatalf("painel: divergências abertas depois de uma resolução = %d", d.OpenDiscrepancies)
 	}
 	paidInv, err := h.env.Billing.Get(ctx, h.tn.ID, silentInv.ID)
 	if err != nil || paidInv.Status != billing.Paid {

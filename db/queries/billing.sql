@@ -84,6 +84,7 @@ SELECT i.*, c.name AS customer_name
    AND (sqlc.narg(issued_from)::timestamptz IS NULL OR i.issued_at >= sqlc.narg(issued_from))
    AND (sqlc.narg(issued_to)::timestamptz IS NULL OR i.issued_at < sqlc.narg(issued_to))
    AND (NOT @only_overdue::boolean OR (i.status IN ('open', 'partially_paid') AND i.due_at <= @now))
+   AND (NOT @only_open_balance::boolean OR i.status IN ('open', 'partially_paid'))
    AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (i.created_at, i.id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
  ORDER BY i.created_at DESC, i.id DESC
  LIMIT @row_limit;

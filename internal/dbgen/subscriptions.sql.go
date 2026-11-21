@@ -991,19 +991,21 @@ SELECT s.id, s.tenant_id, s.customer_id, s.plan_id, s.price_version_id, s.status
   JOIN plans p ON p.tenant_id = s.tenant_id AND p.id = s.plan_id
  WHERE s.tenant_id = $1
    AND ($2::text IS NULL OR s.status = $2)
-   AND ($3::uuid IS NULL OR s.customer_id = $3)
-   AND ($4::timestamptz IS NULL OR (s.created_at, s.id) < ($4::timestamptz, $5::uuid))
+   AND (NOT $3::boolean OR s.status IN ('trialing', 'active', 'past_due'))
+   AND ($4::uuid IS NULL OR s.customer_id = $4)
+   AND ($5::timestamptz IS NULL OR (s.created_at, s.id) < ($5::timestamptz, $6::uuid))
  ORDER BY s.created_at DESC, s.id DESC
- LIMIT $6
+ LIMIT $7
 `
 
 type ListSubscriptionsParams struct {
-	TenantID   uuid.UUID
-	Status     *string
-	CustomerID *uuid.UUID
-	CursorTs   *time.Time
-	CursorID   *uuid.UUID
-	RowLimit   int32
+	TenantID    uuid.UUID
+	Status      *string
+	OnlyInForce bool
+	CustomerID  *uuid.UUID
+	CursorTs    *time.Time
+	CursorID    *uuid.UUID
+	RowLimit    int32
 }
 
 type ListSubscriptionsRow struct {
@@ -1046,6 +1048,7 @@ func (q *Queries) ListSubscriptions(ctx context.Context, arg ListSubscriptionsPa
 	rows, err := q.db.Query(ctx, listSubscriptions,
 		arg.TenantID,
 		arg.Status,
+		arg.OnlyInForce,
 		arg.CustomerID,
 		arg.CursorTs,
 		arg.CursorID,

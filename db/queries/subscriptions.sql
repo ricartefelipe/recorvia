@@ -55,6 +55,7 @@ SELECT s.*, c.name AS customer_name, p.name AS plan_name
   JOIN plans p ON p.tenant_id = s.tenant_id AND p.id = s.plan_id
  WHERE s.tenant_id = @tenant_id
    AND (sqlc.narg(status)::text IS NULL OR s.status = sqlc.narg(status))
+   AND (NOT @only_in_force::boolean OR s.status IN ('trialing', 'active', 'past_due'))
    AND (sqlc.narg(customer_id)::uuid IS NULL OR s.customer_id = sqlc.narg(customer_id))
    AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (s.created_at, s.id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
  ORDER BY s.created_at DESC, s.id DESC

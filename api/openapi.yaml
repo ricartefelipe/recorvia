@@ -879,6 +879,10 @@ paths:
         - { $ref: "#/components/parameters/Limit" }
         - { $ref: "#/components/parameters/Cursor" }
         - { name: status, in: query, schema: { $ref: "#/components/schemas/SubscriptionStatus" } }
+        - name: in_force
+          in: query
+          description: Somente assinaturas em trial, ativas ou em atraso, as das assinaturas ativas do painel.
+          schema: { type: boolean }
         - { name: customer_id, in: query, schema: { type: string, format: uuid } }
       responses:
         "200": { description: Assinaturas, content: { application/json: { schema: { $ref: "#/components/schemas/SubscriptionPage" } } } }
@@ -1106,6 +1110,10 @@ paths:
         - { name: issued_from, in: query, schema: { type: string, format: date } }
         - { name: issued_to, in: query, schema: { type: string, format: date } }
         - { name: overdue, in: query, schema: { type: boolean } }
+        - name: open_balance
+          in: query
+          description: Somente faturas com saldo em aberto (abertas ou parcialmente pagas), as dos recebíveis em aberto do painel.
+          schema: { type: boolean }
       responses:
         "200": { description: Faturas (ordenadas por emissão decrescente), content: { application/json: { schema: { $ref: "#/components/schemas/InvoicePage" } } } }
   /api/v1/invoices/export:
@@ -1743,9 +1751,15 @@ paths:
       operationId: getDashboard
       parameters:
         - { $ref: "#/components/parameters/Tenant" }
-        - { name: month, in: query, description: Mês de referência (AAAA-MM) no fuso da organização, schema: { type: string, pattern: '^\d{4}-\d{2}$' } }
+        - name: month
+          in: query
+          description: >-
+            Mês de referência (AAAA-MM) no fuso da organização; padrão, o mês corrente. Mês inválido (invalid_month) ou futuro
+            (future_month) responde 422.
+          schema: { type: string, pattern: '^\d{4}-\d{2}$' }
       responses:
         "200": { description: Indicadores financeiros, content: { application/json: { schema: { $ref: "#/components/schemas/Dashboard" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
 
   /webhooks/providers/{provider}/{token}:
     post:
@@ -3242,30 +3256,46 @@ components:
 
     Dashboard:
       type: object
-      required: [month, currency, mrr, arr, billed, received, open_receivables, overdue_receivables, delinquency_rate_bp,
-                 churn_rate_bp, active_subscriptions, new_subscriptions, canceled_subscriptions, refunds, chargebacks, open_recoverables,
-                 pending_provider_receipt, definitions]
+      description: >-
+        Indicadores do painel financeiro (RF-17). Cada indicador tem a fórmula em definitions e a base temporal em bases:
+        month (fluxo do mês consultado), month_end (posição em position_at) ou current (posição atual, seja qual for o mês).
+        Fórmulas detalhadas em docs/arquitetura/indicadores.md.
+      required: [month, currency, position_at, mrr, arr, billed, billed_recurring, billed_usage, received,
+                 open_receivables, overdue_receivables, delinquency_rate_bp, churn_rate_bp, active_subscriptions,
+                 new_subscriptions, canceled_subscriptions, refunds, chargebacks, open_recoverables, pending_provider_receipt,
+                 open_discrepancies, unknown_operations, definitions, bases]
       properties:
         month: { type: string }
         currency: { type: string }
-        mrr: { type: integer, format: int64, description: Receita recorrente mensal fixa (exclui consumo) }
-        arr: { type: integer, format: int64 }
+        position_at:
+          type: string
+          format: date-time
+          description: >-
+            Instante das posições de base month_end: o último instante do mês consultado ou, no mês corrente, o momento da
+            consulta.
+        mrr:
+          type: integer
+          format: int64
+          description: >-
+            Receita recorrente mensal fixa na posição atual, com o reajuste vigente e líquida de descontos recorrentes (exclui
+            consumo)
+        arr: { type: integer, format: int64, description: MRR × 12 na posição atual }
         billed: { type: integer, format: int64, description: Total emitido no mês }
-        billed_recurring: { type: integer, format: int64 }
-        billed_usage: { type: integer, format: int64 }
+        billed_recurring: { type: integer, format: int64, description: Parte faturada nos itens de mensalidade }
+        billed_usage: { type: integer, format: int64, description: Parte faturada nos itens de consumo e excedente }
         received:
           type: integer
           format: int64
           description: >-
             Pagamentos confirmados no mês, pela data de pagamento, via provedor ou registro manual. Inclui os pagamentos
             confirmados pelo provedor e ainda não creditados por ele (pending_provider_receipt).
-        open_receivables: { type: integer, format: int64 }
-        overdue_receivables: { type: integer, format: int64 }
-        delinquency_rate_bp: { type: integer, description: Pontos-base }
-        churn_rate_bp: { type: integer, description: Pontos-base }
-        active_subscriptions: { type: integer }
-        new_subscriptions: { type: integer }
-        canceled_subscriptions: { type: integer }
+        open_receivables: { type: integer, format: int64, description: Saldo a receber em position_at }
+        overdue_receivables: { type: integer, format: int64, description: Saldo a receber vencido em position_at }
+        delinquency_rate_bp: { type: integer, description: "Pontos-base, em position_at" }
+        churn_rate_bp: { type: integer, description: "Pontos-base, sobre as assinaturas vigentes fora de trial no início do mês" }
+        active_subscriptions: { type: integer, description: "Em trial, ativas ou em atraso em position_at" }
+        new_subscriptions: { type: integer, description: Iniciadas no mês }
+        canceled_subscriptions: { type: integer, description: Encerradas no mês }
         refunds: { type: integer, format: int64, description: Movimento líquido da conta de reembolsos no mês }
         chargebacks:
           type: integer
@@ -3279,18 +3309,76 @@ components:
           type: integer
           format: int64
           description: >-
-            Saldo atual dos valores a recuperar de clientes (conta customer_recoverables): crédito de pagamento excedente já usado
-            e estornado por chargeback, menos as baixas recebidas e perdidas. Não depende do mês consultado.
+            Saldo dos valores a recuperar de clientes (conta customer_recoverables) em position_at: crédito de pagamento
+            excedente já usado e estornado por chargeback, menos as baixas recebidas e perdidas.
         pending_provider_receipt:
           type: integer
           format: int64
           description: >-
-            Saldo atual dos pagamentos confirmados pelo provedor e ainda não creditados por ele (conta provider_confirmed), por
-            exemplo cartão no prazo de recebimento. No recebimento, o bruto passa aos valores em liquidação, a taxa é reconhecida
-            e o líquido vai para o disponível liquidado (ADR-080). Não depende do mês consultado.
-        open_discrepancies: { type: integer }
-        unknown_operations: { type: integer }
-        definitions: { type: object, additionalProperties: { type: string } }
+            Saldo, em position_at, dos pagamentos confirmados pelo provedor e ainda não creditados por ele (conta
+            provider_confirmed), por exemplo cartão no prazo de recebimento. No recebimento, o bruto passa aos valores em
+            liquidação, a taxa é reconhecida e o líquido vai para o disponível liquidado (ADR-080).
+        open_discrepancies: { type: integer, description: Divergências de conciliação abertas na posição atual }
+        unknown_operations: { type: integer, description: Operações de pagamento com resultado desconhecido na posição atual }
+        definitions:
+          type: object
+          description: Fórmula de cada indicador, com a chave igual ao nome do campo.
+          required: [mrr, arr, billed, billed_recurring, billed_usage, received, open_receivables, overdue_receivables,
+                     delinquency_rate_bp, churn_rate_bp, active_subscriptions, new_subscriptions,
+                     canceled_subscriptions, refunds, chargebacks, open_recoverables, pending_provider_receipt,
+                     open_discrepancies, unknown_operations]
+          properties:
+            mrr: { type: string }
+            arr: { type: string }
+            billed: { type: string }
+            billed_recurring: { type: string }
+            billed_usage: { type: string }
+            received: { type: string }
+            open_receivables: { type: string }
+            overdue_receivables: { type: string }
+            delinquency_rate_bp: { type: string }
+            churn_rate_bp: { type: string }
+            active_subscriptions: { type: string }
+            new_subscriptions: { type: string }
+            canceled_subscriptions: { type: string }
+            refunds: { type: string }
+            chargebacks: { type: string }
+            open_recoverables: { type: string }
+            pending_provider_receipt: { type: string }
+            open_discrepancies: { type: string }
+            unknown_operations: { type: string }
+        bases:
+          type: object
+          description: Base temporal de cada indicador, com a chave igual ao nome do campo.
+          required: [mrr, arr, billed, billed_recurring, billed_usage, received, open_receivables, overdue_receivables,
+                     delinquency_rate_bp, churn_rate_bp, active_subscriptions, new_subscriptions,
+                     canceled_subscriptions, refunds, chargebacks, open_recoverables, pending_provider_receipt,
+                     open_discrepancies, unknown_operations]
+          properties:
+            mrr: { $ref: "#/components/schemas/DashboardBasis" }
+            arr: { $ref: "#/components/schemas/DashboardBasis" }
+            billed: { $ref: "#/components/schemas/DashboardBasis" }
+            billed_recurring: { $ref: "#/components/schemas/DashboardBasis" }
+            billed_usage: { $ref: "#/components/schemas/DashboardBasis" }
+            received: { $ref: "#/components/schemas/DashboardBasis" }
+            open_receivables: { $ref: "#/components/schemas/DashboardBasis" }
+            overdue_receivables: { $ref: "#/components/schemas/DashboardBasis" }
+            delinquency_rate_bp: { $ref: "#/components/schemas/DashboardBasis" }
+            churn_rate_bp: { $ref: "#/components/schemas/DashboardBasis" }
+            active_subscriptions: { $ref: "#/components/schemas/DashboardBasis" }
+            new_subscriptions: { $ref: "#/components/schemas/DashboardBasis" }
+            canceled_subscriptions: { $ref: "#/components/schemas/DashboardBasis" }
+            refunds: { $ref: "#/components/schemas/DashboardBasis" }
+            chargebacks: { $ref: "#/components/schemas/DashboardBasis" }
+            open_recoverables: { $ref: "#/components/schemas/DashboardBasis" }
+            pending_provider_receipt: { $ref: "#/components/schemas/DashboardBasis" }
+            open_discrepancies: { $ref: "#/components/schemas/DashboardBasis" }
+            unknown_operations: { $ref: "#/components/schemas/DashboardBasis" }
+    DashboardBasis:
+      type: string
+      enum: [month, month_end, current]
+      description: >-
+        month: fluxo do mês consultado; month_end: posição em position_at; current: posição atual, que não muda com o mês.
 
     PortalSession:
       type: object

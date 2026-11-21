@@ -1721,6 +1721,89 @@ há estorno da baixa nem operação para o recebimento de valor já baixado como
 o recebimento da baixa entra direto no disponível liquidado, sem conciliação com extrato bancário; disputas
 perdidas antes da ADR-070 continuam sem valor a recuperar (o crédito permaneceu com o cliente).
 
+## ADR-074 Indicadores do painel: fórmulas documentadas, MRR líquido com reajuste e posições no fim do mês
+**Status:** aceita. Fórmulas completas em [`docs/arquitetura/indicadores.md`](arquitetura/indicadores.md).
+**Contexto:** uma auditoria do RF-17 encontrou, com teste: `open_discrepancies` sempre zero (a leitura nunca
+preenchia o campo); chaves de `definitions` diferentes das da interface (`open`, `churn`... no backend;
+`open_receivables`, `churn_rate_bp`... na interface), o que deixava os cards sem dica e a tabela "Como
+calculamos" com rótulos crus, além de indicadores sem definição; MRR e ARR pelo valor da versão de preço,
+ignorando o reajuste gravado na assinatura (ADR-027: fatura de 150,00 com MRR de 100,00) e os cupons, sem
+dizer se o MRR era bruto ou líquido; churn com o denominador pela situação atual e o numerador contando
+canceladas no trial e criadas no mês; e indicadores de posição sempre calculados com a data de hoje, embora a
+página diga "Indicadores de <mês>" (em `?month=2025-01`, antes da organização existir, o painel mostrava 6
+assinaturas ativas e recebíveis).
+**Decisão:**
+- **Chaves e bases.** Cada indicador da resposta tem fórmula em `definitions` e base temporal em `bases`, com a
+  chave igual ao nome do campo (`reporting.Indicators`). Bases: `month` (fluxo do mês), `month_end` (posição em
+  `position_at`, o último instante do mês ou, no mês corrente, o momento da consulta) e `current` (posição
+  atual). O contrato declara `definitions` e `bases` com as 18 chaves obrigatórias; o tipo gerado obriga a
+  interface a ter um rótulo para cada uma; `internal/httpapi/dashboard_test.go` exige fórmula e base para todo
+  indicador devolvido, no backend e no contrato.
+- **MRR líquido com reajuste.** Componente fixo com `price_override_amount` quando houver (o mesmo valor da
+  fatura), menos o desconto recorrente do cupom ativo de duração `forever` ou `repeating` (percentual sobre o
+  componente fixo; valor fixo limitado a ele, dividido por 12 nos planos anuais). O cupom `once` fica fora:
+  reduz uma fatura, não a recorrência. O MRR é líquido porque é a receita que as faturas recorrentes de fato
+  cobram; o desconto continua visível na fatura.
+- **Churn por coorte do início do mês.** Denominador: assinaturas iniciadas antes do mês, não encerradas antes
+  dele e `active`, `past_due` ou `suspended` no início do mês pelo histórico (`subscription_history`).
+  Numerador: dessas, as encerradas no mês. "Canceladas no mês" continua contando todas as encerradas.
+- **Posições no fim do mês onde há histórico fiel.** Assinaturas ativas pela situação registrada no histórico
+  até `position_at` (toda transição grava o histórico na mesma transação; início retroativo usa a situação da
+  criação). Recebíveis em aberto e vencidos, inadimplência e valores a recuperar pelo ledger até `position_at`:
+  as partidas de contas a receber apontam a fatura direta ou indiretamente (pagamento, nota de crédito), e o
+  saldo por fatura no instante atual é o `amount_due` (verificado em teste). O ledger usa o instante do
+  registro, de modo que meses encerrados não mudam (mesmo critério da ADR-073).
+- **Posição atual, rotulada.** MRR e ARR (preço, quantidade, reajuste e desconto de datas passadas só existem
+  em detalhes JSON de auditoria, sem contrato de formato, e os ciclos restantes do cupom não têm histórico),
+  divergências abertas e operações desconhecidas (filas de trabalho sem histórico de situação). A interface
+  mostra "Posição atual" nesses cards, "Posição em <data e hora>" nos de fim do mês, a base de cada indicador
+  em "Como calculamos" e um resumo das bases no topo, derivado de `bases`.
+- **Novas no mês** passam a contar pelo início do contrato (`started_at`), não pela criação do registro: a
+  migração de contratos com início retroativo não infla o mês da importação e fica coerente com a coorte do
+  churn.
+**Alternativas:** reconstruir o MRR histórico a partir dos detalhes do histórico da assinatura foi descartado
+pela fragilidade (formato de auditoria, sem ciclos restantes do cupom); uma tabela de movimentos de MRR ou um
+retrato mensal resolveria e fica como evolução (exige migration e preenchimento retroativo aproximado). Esconder
+MRR e ARR em meses passados foi descartado: o valor atual rotulado é útil e não engana. Calcular os recebíveis
+de meses passados pelas tabelas de pagamentos, notas e baixas foi descartado: o ledger já tem todos esses
+movimentos com instante e soma zero por construção. MRR bruto com o desconto à parte foi descartado nesta
+versão para não criar um segundo número de recorrência sem pedido do negócio.
+**Consequências:** a resposta ganha `position_at` e `bases`; `definitions` muda de chaves (`open`, `overdue`,
+`delinquency`, `churn` e `recoverables` passam a `open_receivables`, `overdue_receivables`,
+`delinquency_rate_bp`, `churn_rate_bp` e `open_recoverables`) e ganha as que faltavam; `billed_recurring`,
+`billed_usage`, `open_discrepancies` e `unknown_operations` passam a obrigatórios no contrato. Mês futuro em
+`GET /api/v1/dashboard` responde 422 (`future_month`). Limitações: a exclusão das faturas canceladas em "Receita
+faturada" usa a situação atual; a situação de trial encerrado passa a valer quando o motor fatura o primeiro
+ciclo (minutos depois do fim do trial); a posição dos recebíveis segue o registro no ledger, não a data
+informada num recebimento manual retroativo; "Novas no mês" e "Assinaturas ativas" de um mês encerrado mudam
+quando uma assinatura com início retroativo é cadastrada depois.
+**Desempenho (revisão):** a primeira versão somava todas as partidas de contas a receber do tenant a cada
+abertura do painel (65 ms com 4.000 faturas, crescendo com o histórico) e lia o histórico de todas as
+assinaturas já encerradas. Agora:
+- no mês corrente, os recebíveis vêm da soma de `amount_due` das faturas em aberto, equivalente ao saldo do
+  ledger no instante atual;
+- num mês encerrado, só entram as faturas que podiam ter saldo na posição (emitidas até ela e ainda em aberto,
+  ou pagas, canceladas ou baixadas depois dela), e as partidas delas são achadas pela referência do lançamento.
+  A migration `00023` cria os índices `payments (tenant_id, invoice_id)`, um por instante de encerramento
+  (`paid_at`, `voided_at`, `uncollectible_at`, parciais em `IS NOT NULL`) e `invoices (tenant_id, due_at)` das
+  emitidas (base da inadimplência). São índices de coluna, não de expressão: sob RLS, só comparações simples de
+  coluna (operadores leakproof) viram condição de índice, e uma expressão como `COALESCE(paid_at, ...)` deixava
+  a consulta em varredura sequencial;
+- a contagem de assinaturas ignora as encerradas antes do mês;
+- as listas ganham filtros com a mesma regra dos cards: `GET /api/v1/invoices?open_balance=true` (abertas ou
+  parcialmente pagas, como "Recebíveis em aberto"; "Recebíveis vencidos" já coincidia com `overdue=true`) e
+  `GET /api/v1/subscriptions?in_force=true` (em trial, ativas ou em atraso, como "Assinaturas ativas"). Os
+  links dos cards ainda apontam para os filtros antigos: a troca na interface, com o aviso de que a lista é a
+  atual num mês encerrado, fica pendente;
+- sem registro de histórico até o instante (início retroativo), a situação é derivada das datas do contrato
+  (`trialing` até `trial_ends_at`, `active` depois), e não da situação da criação, que subestimava o churn de
+  uma assinatura retroativa com trial.
+
+Testes de equivalência comparam as duas formas dos recebíveis com a soma de todas as partidas, e um teste com
+3.000 faturas no histórico exige, pelo plano e pelas estatísticas da transação, que a consulta não faça
+varredura do histórico. Os índices são criados sem `CONCURRENTLY` (a migration roda em transação), com bloqueio
+de escrita em `invoices` e `payments` durante a criação, curto nos volumes atuais.
+
 ## ADR-075 Operações financeiras de criação: lista, critério e impressão do pedido
 **Status:** aceita (completa a ADR-022 e o RF-09).
 **Contexto:** o RF-09 exige `Idempotency-Key` nas operações financeiras de criação, mas a lista não estava
@@ -2075,8 +2158,8 @@ liquidado.
   recebimento: o disponível fica com a diferença até o recebimento creditar o líquido local, e a soma final
   é o líquido informado pelo provedor.
 - **Painel.** "Receita recebida" continua sendo a soma dos pagamentos confirmados no mês (o cliente pagou),
-  e o novo indicador `pending_provider_receipt` ("A receber do provedor") mostra o saldo atual de
-  `provider_confirmed`, a parte ainda não creditada pelo provedor.
+  e o novo indicador `pending_provider_receipt` ("A receber do provedor") mostra o saldo de
+  `provider_confirmed` na posição do mês consultado, a parte ainda não creditada pelo provedor.
 
 **Exemplo** (bruto R$ 100,00, taxa R$ 3,48, reembolso de R$ 30,00):
 

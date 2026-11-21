@@ -24,9 +24,12 @@ type ListFilter struct {
 	IssuedFrom     *time.Time
 	IssuedTo       *time.Time
 	Overdue        bool
-	Now            time.Time
-	Limit          int
-	Cursor         string
+	// OpenBalance restringe às faturas com saldo em aberto (abertas ou
+	// parcialmente pagas), as mesmas dos recebíveis em aberto do painel.
+	OpenBalance bool
+	Now         time.Time
+	Limit       int
+	Cursor      string
 }
 
 // Page é uma página de faturas.
