@@ -182,6 +182,11 @@ api_call() {
   if [[ $method != GET ]]; then
     args+=(-H "Idempotency-Key: dr-$(openssl rand -hex 12)")
   fi
+  # Alterações de recursos versionados exigem a versão atual (ADR-083):
+  # if_match=<versão> api MÉTODO CAMINHO [CORPO].
+  if [[ -n ${if_match:-} ]]; then
+    args+=(-H "If-Match: \"$if_match\"")
+  fi
   if [[ -n $body ]]; then
     args+=(-H 'Content-Type: application/json' -d "$body")
   fi
@@ -421,7 +426,8 @@ ok "login OIDC, plano com webhooks e credencial de API da organização acme"
 # as da organização beta, criadas pelo seed, continuam cifradas com dr1.
 provider_key="sim_dr_$(openssl rand -hex 8)"
 provider_secret=$(openssl rand -hex 24)
-api PUT /api/v1/payment-providers/simulator "$(jq -n --arg k "$provider_key" --arg s "$provider_secret" \
+provider_version=$(api GET /api/v1/payment-providers | jq -r '[.data[] | select(.provider == "simulator") | .version] | first // 0')
+if_match=$provider_version api PUT /api/v1/payment-providers/simulator "$(jq -n --arg k "$provider_key" --arg s "$provider_secret" \
   '{environment: "local", api_key: $k, webhook_secret: $s, make_default: true}')" >/dev/null
 event_types=$(api GET /api/v1/webhook-event-types | jq -c .data)
 api POST /api/v1/webhook-endpoints "$(jq -n --argjson e "$event_types" \
@@ -700,21 +706,22 @@ timeout 900 docker compose -p "$project" --env-file "$env_file" -f "$root/compos
 }
 api GET "/api/v1/reconciliation/runs/$run_id" >"$work/conciliacao.json"
 [[ $(jq -r .status "$work/conciliacao.json") == completed ]] || die "conciliação não concluída"
-api GET "/api/v1/reconciliation/discrepancies?status=open" >"$work/divergencias.json"
+api GET "/api/v1/reconciliation/discrepancies?status=open&limit=100" >"$work/divergencias.json"
 paid_discrepancy=$(jq -r --arg c "$provider_charge_a" '.data[] | select(.kind == "payment_not_reflected" and .provider_charge_id == $c) | .id' "$work/divergencias.json")
 orphan_discrepancy=$(jq -r --arg c "$lost_provider_charge_b" '.data[] | select(.kind == "missing_local" and .provider_charge_id == $c) | .id' "$work/divergencias.json")
 [[ -n $paid_discrepancy ]] || die "a conciliação não apontou o pagamento da fatura A recebido na janela"
 [[ -n $orphan_discrepancy ]] || die "a conciliação não apontou a cobrança criada na janela sem registro local"
 # Pagamento recebido na janela: adota o provedor (dinheiro recebido não é descartado).
-api POST "/api/v1/reconciliation/discrepancies/$paid_discrepancy/resolve" \
+version_of() { jq -r --arg id "$1" '.data[] | select(.id == $id) | .version' "$work/divergencias.json"; }
+if_match=$(version_of "$paid_discrepancy") api POST "/api/v1/reconciliation/discrepancies/$paid_discrepancy/resolve" \
   '{"resolution":"accept_provider","justification":"Pagamento recebido no provedor durante a janela perdida na recuperação de desastre."}' >/dev/null
 # Cobrança criada na janela, não paga e sem registro local: cancelada no
 # provedor, porque a fatura será emitida de novo ao religar o worker.
 provider DELETE "/v1/charges/$lost_provider_charge_b" >/dev/null
-api POST "/api/v1/reconciliation/discrepancies/$orphan_discrepancy/resolve" \
+if_match=$(version_of "$orphan_discrepancy") api POST "/api/v1/reconciliation/discrepancies/$orphan_discrepancy/resolve" \
   '{"resolution":"dismiss","justification":"Cobrança da janela perdida cancelada no provedor; a fatura será emitida de novo."}' >/dev/null
 invoice_is "$invoice_a" paid || die "a fatura A deveria estar paga depois da conciliação"
-[[ $(api GET "/api/v1/reconciliation/discrepancies?status=open" | jq '.data | length') == 0 ]] || die "restaram divergências abertas"
+[[ $(api GET "/api/v1/reconciliation/discrepancies?status=open&limit=100" | jq '.data | length') == 0 ]] || die "restaram divergências abertas"
 reconciled_at=$(now_s)
 ok "janela conciliada antes de religar o worker: pagamento da fatura A adotado do provedor; cobrança $lost_provider_charge_b cancelada no provedor; nenhuma divergência aberta"
 
@@ -810,7 +817,7 @@ diff -u "$dr_dir/restaurado-final.efeitos" "$work/efeitos-depois.txt" >&2 || die
 ledger_balanced || die "ledger desbalanceado depois dos ciclos posteriores"
 done_at=$(now_s)
 ok "sem efeitos duplicados: faturas, cobranças, pagamentos e lançamentos iguais depois de mais dois ciclos; ledger balanceado; nenhuma dead letter"
-open_after=$(api GET "/api/v1/reconciliation/discrepancies?status=open" | jq -r '[.data[].kind] | join(", ")')
+open_after=$(api GET "/api/v1/reconciliation/discrepancies?status=open&limit=100" | jq -r '[.data[].kind] | join(", ")')
 note "Divergências de conciliação abertas ao final: ${open_after:-nenhuma}."
 
 # ---------- Relatório ----------

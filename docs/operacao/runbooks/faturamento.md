@@ -154,7 +154,8 @@ SELECT tenant_id, provider, count(*) FROM charges
    tarefa `payments.recover_operations` (backoff exponencial até 30 minutos, 6 tentativas); as
    `unknown` são consultadas pela referência externa antes de qualquer nova criação (ADR-008).
 2. Credencial inválida: o tenant reconfigura o provedor
-   (`PUT /api/v1/payment-providers/{provider}`, permissão `integrations.write`); depois, nova
+   (`PUT /api/v1/payment-providers/{provider}`, permissão `integrations.write`, com a `version` da
+   conta no `If-Match`); depois, nova
    tentativa por fatura com `POST /api/v1/invoices/{id}/charges` (permissão `payments.charge`,
    com `Idempotency-Key`).
 3. Operação específica, sem esperar o backoff: `POST /api/v1/payment-operations/{id}/retry`
