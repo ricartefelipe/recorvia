@@ -655,7 +655,7 @@ tests:
         alertname: RecorviaWebhookDeliveriesFailing
         exp_alerts: []
 
-  # Reembolsos (métricas da etapa 5): resultado desconhecido por 30 minutos e
+  # Reembolsos: resultado desconhecido por 30 minutos e
   # recusa do provedor.
   - interval: 1m
     input_series:

@@ -1,9 +1,7 @@
 # Regras de alerta do Recorvia. Somente métricas existentes no código
 # (internal/infra/telemetry), no plugin rabbitmq_prometheus, o "up" e o
 # process_start_time_seconds das coletas; nenhum rótulo identifica tenant,
-# cliente ou fatura. As regras de reembolso usam métricas que chegam com a
-# etapa 5 (recebíveis e conciliação) e ficam sem dados até a integração. Os limites são
-# pontos de partida para o ambiente local e devem ser calibrados com o
+# cliente ou fatura. Os limites são pontos de partida para o ambiente local e devem ser calibrados com o
 # volume real. Catálogo e justificativas: docs/operacao/observabilidade.md.
 #
 # Convenções: severity=critical exige ação imediata (perda de processamento
@@ -263,7 +261,7 @@ groups:
           description: "Volume de divergências indica falha sistêmica (webhooks não processados, provedor ou relatório de liquidação)."
           runbook: docs/operacao/runbooks/conciliacao.md#divergencias-abertas
       # recorvia_refunds_in_progress e recorvia_refunds_total são exportadas
-      # pela etapa 5 (recebíveis e conciliação), ainda não integrada.
+      # pelo worker (metrics.collect), a partir dos totais do banco.
       - alert: RecorviaRefundsUnknown
         expr: max(recorvia_refunds_in_progress{status="unknown"}) > 0
         for: 30m

@@ -111,7 +111,7 @@ tabela abaixo, com os valores dos rótulos de conjunto fechado.
 | `recorvia_dead_letters_open` / `recorvia_dead_letters_oldest_open_seconds` | gauge | `consumer` | worker, `metrics.collect`: dead letters registradas em `dead_letters` e ainda não resolvidas, em todos os tenants e as sem tenant, e a idade da mais antiga (tempo desde a falha; zero sem dead letters abertas); `consumer` é um consumidor do worker ou `other` (registros de consumidores removidos ou renomeados) |
 | `recorvia_notifications_backlog` / `recorvia_notifications_backlog_oldest_seconds` | gauge | `state` | worker, `metrics.collect`: fila de notificações de todos os tenants. `due`: agendadas com o horário de envio vencido (idade: atraso em relação a esse horário); `sending`: reivindicadas para envio (idade: tempo desde a reivindicação); `failed`: falha definitiva nas últimas 24 horas (idade: tempo desde a mais antiga da janela). Agendamentos futuros não contam |
 | `recorvia_webhook_deliveries_backlog` / `recorvia_webhook_deliveries_backlog_oldest_due_seconds` | gauge | `state` | worker, `metrics.collect`: fila de entregas de webhooks enviados de todos os tenants, em `pending` (aguardando a primeira tentativa ou um reenvio) e `retrying` (aguardando nova tentativa, inclusive em backoff); o atraso considera somente as entregas com o horário da tentativa vencido, a partir desse horário |
-| `recorvia_reconciliation_open_discrepancies` | gauge | `kind` | declarada nesta etapa; alimentada pela tarefa `metrics.collect` da etapa 5 (recebíveis e conciliação) |
+| `recorvia_reconciliation_open_discrepancies` | gauge | `kind` | worker, `metrics.collect`: divergências de conciliação abertas por tipo |
 | `recorvia_reconciliation_runs_in_progress` | gauge | `state` | worker (`metrics.collect`) e API (lida do banco a cada coleta do Prometheus, com prazo de 2 s; se a leitura falhar, mantém o último valor): execuções de conciliação em andamento, de todos os tenants: `queued` (registrada, aguardando um worker), `executing` (lease vigente) e `stalled` (lease expirado, aguardando a retomada) |
 | `recorvia_reconciliation_oldest_waiting_seconds` | gauge | — | worker (`metrics.collect`) e API (a cada coleta, como a métrica anterior): espera mais longa entre as execuções sem worker, desde o registro (`queued`) ou desde o fim do lease (`stalled`); zero quando não há nenhuma. A API a exporta porque registra os pedidos e continua em execução quando o worker para |
 | `recorvia_db_pool_connections` | gauge | `state` | API e worker, pool pgx lido a cada coleta (`acquired`, `idle`, `constructing`) |
@@ -119,16 +119,14 @@ tabela abaixo, com os valores dos rótulos de conjunto fechado.
 | `recorvia_db_pool_acquires_total`, `recorvia_db_pool_empty_acquires_total`, `recorvia_db_pool_canceled_acquires_total`, `recorvia_db_pool_empty_acquire_wait_seconds_total` | contador | — | API e worker |
 | `recorvia_db_server_connections` / `recorvia_db_server_max_connections` | gauge | — | worker, `metrics.collect`: sessões de clientes de todo o servidor e limite para papéis comuns (`max_connections` menos as reservadas) |
 
-Métricas da etapa 5 (recebíveis e conciliação, ainda não integrada nesta branch): as regras de
-alerta `RecorviaRefundsUnknown` e `RecorviaRefundsFailed` já as usam e ficam sem dados até a
-integração; nenhum painel as consulta ainda.
+Métricas de reembolsos, usadas pelos alertas `RecorviaRefundsUnknown` e `RecorviaRefundsFailed`:
 
 | Métrica | Tipo | Rótulos | Origem |
 |---|---|---|---|
-| `recorvia_refunds_total` | contador | `outcome` | worker, `metrics.collect` da etapa 5: reembolsos concluídos (`succeeded`, `failed`), com totais mantidos no banco |
-| `recorvia_refunds_in_progress` | gauge | `status` | worker, `metrics.collect` da etapa 5: reembolsos sem conclusão (`requested`, `unknown`) |
+| `recorvia_refunds_total` | contador | `outcome` | worker, `metrics.collect`: reembolsos concluídos (`succeeded`, `failed`), com totais mantidos no banco |
+| `recorvia_refunds_in_progress` | gauge | `status` | worker, `metrics.collect`: reembolsos sem conclusão (`requested`, `unknown`) |
 
-Avaliação das métricas da régua de cobrança, das notificações e dos webhooks enviados (etapa 6):
+Avaliação das métricas da régua de cobrança, das notificações e dos webhooks enviados:
 
 - `recorvia_notifications_dispatched_total`: alertas `RecorviaEmailDeliveryStalled` (tentativas
   falhando sem nenhum envio aceito, sinal de SMTP indisponível) e `RecorviaNotificationsFailed`
@@ -231,8 +229,8 @@ nome e os mesmos rótulos; enquanto a crítica dispara, o Alertmanager inibe a d
 | `RecorviaReconciliationDiscrepanciesOpen` | divergência aberta por 4 h | warning |
 | `RecorviaReconciliationDiscrepanciesHigh` | mais de 25 divergências abertas por 30 min | critical |
 | `RecorviaReconciliationRunsWaiting` | execução de conciliação sem worker (aguardando ou interrompida) há mais de 5 min, por 5 min; a métrica sai do worker e da API, e o alerta dispara mesmo sem nenhum worker em execução | warning |
-| `RecorviaRefundsUnknown` | reembolso com resultado desconhecido por 30 min (métrica da etapa 5) | warning |
-| `RecorviaRefundsFailed` | reembolso recusado pelo provedor na última hora (métrica da etapa 5) | warning |
+| `RecorviaRefundsUnknown` | reembolso com resultado desconhecido por 30 min | warning |
+| `RecorviaRefundsFailed` | reembolso recusado pelo provedor na última hora | warning |
 | `RecorviaBillingCycleStale` | `billing.run_cycle` sem sucesso há mais de 15 min, ou sem nenhum sucesso desde a partida do worker (há mais de 15 min) | critical |
 | `RecorviaScheduledTaskFailing` | 3 ou mais falhas de uma tarefa em 30 min (tarefas frequentes) | warning |
 | `RecorviaScheduledTaskStale` | tarefa sem sucesso há mais de três intervalos (mínimo de 15 min), inclusive desde a partida do worker; cobre as tarefas horárias e a diária | warning |
@@ -480,9 +478,6 @@ referência para ele é o job `observability-stack` da CI.
   compartilhadas com outros projetos): o perfil completo é exercitado pelo job
   `observability-stack` da CI; as imagens e as regras, também localmente
   (`make test-integration` e `promtool`).
-- `recorvia_reconciliation_open_discrepancies`, `recorvia_refunds_total` e
-  `recorvia_refunds_in_progress` são alimentadas pela etapa 5 (recebíveis e conciliação); até a
-  integração, os painéis e alertas de divergências e de reembolsos ficam sem dados.
 - As contagens globais (`recorvia_payment_operations`, `recorvia_payment_operations_exhausted`,
   outbox) são gravadas pela instância do worker que executou a tarefa; com várias instâncias, os
   alertas usam `max` e o valor de uma instância que deixou de executar a tarefa só muda na próxima
