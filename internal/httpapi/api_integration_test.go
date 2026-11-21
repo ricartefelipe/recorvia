@@ -31,6 +31,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/portal"
 	"github.com/ricartefelipe/recorvia/internal/reporting"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
+	"github.com/ricartefelipe/recorvia/internal/testsupport/contract"
 	"github.com/ricartefelipe/recorvia/internal/testsupport/fixture"
 )
 
@@ -98,7 +99,7 @@ func newAPI(t *testing.T, opts ...func(*apiSetup)) *apiEnv {
 		Catalog: env.Catalog, Subscriptions: env.Subscriptions, Billing: env.Billing, Payments: pay,
 		Metering: metering.NewService(env.Store.Metering(), env.Clock), Reporting: reporting.NewService(env.Store.Reporting(), env.Clock),
 		Portal: portalSvc, Credentials: credentials})
-	srv := httptest.NewServer(router)
+	srv := httptest.NewServer(contract.Wrap(t, router))
 	t.Cleanup(srv.Close)
 	return &apiEnv{t: t, env: env, sessions: sessions, rdb: rdb, srv: srv}
 }
