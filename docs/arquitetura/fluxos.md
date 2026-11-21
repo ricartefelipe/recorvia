@@ -117,7 +117,8 @@ um pagamento já confirmado. Inserções com chave estrangeira para `customers` 
 cliente nessa ordem.
 
 Reembolsos, disputas e conciliação seguem a mesma ordem: o pedido e a confirmação de reembolso bloqueiam a
-cobrança, depois o reembolso, a fatura (histórico) e por último o cliente (consumo de crédito). O registro
+cobrança, depois o reembolso, a fatura (histórico) e por último o cliente (consumo de crédito); a disputa
+perdida que estorna crédito do excedente bloqueia a cobrança, a fatura e o cliente, nessa ordem. O registro
 do resultado de uma operação externa bloqueia a operação e depois a cobrança; a sincronização feita sob o
 bloqueio da cobrança (webhook) só altera operações que não estão em execução. A resolução de divergência
 bloqueia a divergência antes da cobrança, e a execução da conciliação bloqueia as divergências antes de gravar
@@ -258,7 +259,7 @@ sequenceDiagram
   else ganha
     P->>DB: disputa won; estorno da retenção; cobrança paid, partially_refunded ou refunded (conforme os reembolsos); dispute.closed
   else perdida
-    P->>DB: disputa lost; amount_charged_back pelo saldo não reembolsado nem reservado; ledger dispute.hold_released (parte reembolsada); cobrança charged_back; histórico da fatura (chargeback); dispute.closed
+    P->>DB: disputa lost; amount_charged_back pelo saldo não reembolsado nem reservado; ledger dispute.hold_released (parte reembolsada); crédito do excedente consumido ou a recuperar (dispute.credit_reversed); cobrança charged_back; histórico da fatura (chargeback); dispute.closed
   end
 ```
 
@@ -268,7 +269,19 @@ fatura. O estorno não inclui o que foi devolvido ao pagador por reembolso confi
 nem o que está reservado por reembolso em andamento; essa parte da retenção volta a `provider_clearing`
 (`dispute.hold_released`), e a confirmação posterior do reembolso reservado cabe no saldo; se o reembolso
 reservado for recusado depois da perda, o valor passa ao chargeback (`dispute.hold_restored`). Assim,
-`chargebacks` e `refunds` nunca somam mais que o pago. Webhook
+`chargebacks` e `refunds` nunca somam mais que o pago.
+
+Quando o pagamento contestado gerou crédito do cliente por excedente, a disputa perdida estorna também esse
+crédito, com a mesma base do reembolso (ADR-070): a parte do valor estornado que corresponde ao excedente
+ainda não devolvido ao pagador (por reembolso ou chargeback anterior) sai de `chargebacks` pelo lançamento
+`dispute.credit_reversed`. O crédito ainda disponível é consumido (`customer_credit_entries`, débito em
+`customer_credits`, `disputes.credit_amount`); o que o cliente já usou em outras faturas não deixa o saldo
+negativo e vira valor a recuperar dele (débito em `customer_recoverables`, `disputes.recovery_amount`). O
+mesmo vale para o valor de um reembolso reservado recusado depois da perda (lançamento por reembolso). A
+disputa ganha não mexe no crédito. Ordem de bloqueio: cobrança, fatura e cliente (crédito), como no
+reembolso.
+
+Webhook
 da decisão que chega antes do da abertura abre e decide a disputa na mesma transação; o da abertura, que
 chega depois com retrato anterior, é ignorado. Eventos repetidos, fora de ordem ou anteriores ao
 encerramento não reabrem disputas (ADR-036). Durante a disputa e depois do chargeback a cobrança não aceita
@@ -412,17 +425,24 @@ destino informado.
 ```mermaid
 sequenceDiagram
   autonumber
-  participant J as Job payments.reconcile ou usuário (reconciliation.run)
-  participant P as Pagamentos
+  participant U as Usuário ou credencial (reconciliation.run)
+  participant A as API
   participant DB as PostgreSQL
+  participant W as Worker (executor de conciliações)
   participant G as Provedor
-  J->>P: RunReconciliation(janela)
-  P->>DB: tx: execução running (uma por conta, lease); encerra execuções interrompidas
-  P->>G: ListCharges paginado (sem transação, dentro do prazo da coleta)
-  P->>DB: cobranças listadas e depois as da janela (até o limite), cobranças do rodízio, reembolsos, operações unknown
-  P->>G: GetCharge das locais ausentes da listagem e das cobranças do rodízio
-  P->>P: Compare (pura): divergências por tipo e chave de deduplicação
-  P->>DB: tx: grava/atualiza/reabre divergências; resolve automaticamente as não constatadas; registra as cobranças verificadas; conclui a execução
+  U->>A: POST /api/v1/reconciliation/runs (Idempotency-Key)
+  A->>DB: tx: execução running sem lease (uma por conta; chave do pedido); auditoria
+  A-->>U: 202 + Location (execução em andamento)
+  loop a cada 2 s, em cada worker
+    W->>DB: execuções running sem lease ou com lease expirado (app_claimable_reconciliation_runs)
+    W->>DB: tx: FOR UPDATE; lease de 15 min e tentativa + 1 (ou failed depois de 3 tentativas)
+  end
+  W->>G: ListCharges paginado (sem transação, dentro do prazo da coleta)
+  W->>DB: cobranças listadas e depois as da janela (até o limite), cobranças do rodízio, reembolsos, operações unknown
+  W->>G: GetCharge das locais ausentes da listagem e das cobranças do rodízio
+  W->>W: Compare (pura): divergências por tipo e chave de deduplicação
+  W->>DB: tx: confere a tentativa; grava/atualiza/reabre divergências; resolve automaticamente as não constatadas; registra as cobranças verificadas; conclui a execução
+  U->>A: GET /api/v1/reconciliation/runs/{id} até completed ou failed
 ```
 
 A conciliação compara cobranças, pagamentos, reembolsos e chargebacks locais com o provedor na janela e
@@ -436,15 +456,24 @@ listagem pela data de criação). O rodízio é de melhor esforço: a consulta q
 volta na próxima execução, e o prazo da coleta, o cancelamento ou três falhas seguidas de provedor
 indisponível interrompem só o rodízio, sem tornar a execução parcial nem fazê-la falhar.
 
-- **Execução manual.** `POST /api/v1/reconciliation/runs` (`reconciliation.run`, `Idempotency-Key`) executa
-  na requisição a janela padrão de 30 dias do provedor padrão e devolve a execução encerrada. A coleta não
-  depende do prazo da requisição: tem prazo próprio de 40 segundos e, esgotado o prazo, a execução é
-  concluída com o que foi coletado e com aviso de execução parcial em `error`. Falha do provedor encerra a
-  execução como `failed`, com a causa em `error` (resposta 200); a repetição com a mesma chave devolve a
-  mesma execução. Sem provedor padrão, 409 `provider_not_configured`; com outra execução em andamento na
-  conta, 409 `reconciliation_running`, conflito transitório com `Retry-After` que não fica registrado na
-  `Idempotency-Key` (a repetição com a mesma chave executa a conciliação depois que a outra execução
-  terminar). Com credencial de API, `requested_by` fica nulo e a autoria fica na auditoria.
+- **Execução manual (assíncrona, ADR-071).** `POST /api/v1/reconciliation/runs` (`reconciliation.run`,
+  `Idempotency-Key`) registra a execução da janela padrão de 30 dias do provedor padrão e responde `202`
+  com a execução em andamento e o header `Location`, sem chamar o provedor. O executor do worker (duas
+  instâncias por processo, fora do agendador) descobre a cada 2 segundos as execuções que aguardam, assume
+  uma por vez com lease de 15 minutos, coleta com prazo de 13 minutos por tentativa e a encerra; quem pediu
+  acompanha por `GET /api/v1/reconciliation/runs/{id}`. Falha do provedor encerra a execução como `failed`,
+  com a causa em `error`. A repetição com a mesma chave devolve a mesma execução na situação atual: `202`
+  enquanto está em andamento (a resposta 202 não fica registrada na `Idempotency-Key`) e `200` depois de
+  encerrada. Sem provedor padrão, 409 `provider_not_configured`; com outra execução em andamento na conta
+  (inclusive aguardando o worker ou a retomada), 409 `reconciliation_running`, conflito transitório com
+  `Retry-After` que também não fica registrado na chave. Com credencial de API, `requested_by` fica nulo e
+  a autoria fica na auditoria.
+- **Retomada.** A execução cujo worker foi interrompido fica com o lease até ele expirar e então é assumida
+  de novo, por qualquer instância, e reexecutada do início (`reconciliation.run_resumed`); o worker que
+  encerra normalmente devolve a execução (`reconciliation.run_released`) e ela é retomada de imediato. As
+  divergências só são gravadas na transação que encerra a execução, pela chave de deduplicação, e só a
+  tentativa que ainda detém a execução (contagem de tentativas) pode encerrá-la: a retomada não duplica
+  divergências. Depois de três tentativas interrompidas, a execução é encerrada como `failed`, com a causa.
 - **Execução parcial.** Limite de páginas da listagem ou de consultas individuais, prazo da coleta,
   limite de cobranças locais da janela (5000; as cobranças listadas pelo provedor vêm primeiro e nunca ficam
   de fora) ou de operações com resultado desconhecido (500) concluem a execução com aviso de execução
@@ -453,8 +482,10 @@ indisponível interrompem só o rodízio, sem tornar a execução parcial nem fa
   deixa de ter resultado desconhecido.
 - **Execução agendada.** O job `payments.reconcile` (a cada hora, com lease do agendador) concilia, com
   janela de 7 dias, os tenants cujo plano da plataforma tem `reconciliation_automation`, com provedor padrão
-  ativo e sem execução agendada nas últimas 24 horas.
-- **Consulta.** `GET /api/v1/reconciliation/runs` e `GET /api/v1/reconciliation/discrepancies` (filtros
+  ativo e sem execução agendada nas últimas 24 horas. A execução é registrada já assumida e executada na
+  própria tarefa; se a tarefa for interrompida, a execução é retomada pelo executor do worker.
+- **Consulta.** `GET /api/v1/reconciliation/runs`, `GET /api/v1/reconciliation/runs/{id}` e
+  `GET /api/v1/reconciliation/discrepancies` (filtros
   `status` e `kind`) exigem `reconciliation.read`; o detalhe traz o histórico de auditoria da divergência
   (detecção, reabertura, resolução automática e resolução).
 - **Resolução.** `POST /api/v1/reconciliation/discrepancies/{id}/resolve` exige `reconciliation.resolve`,
@@ -476,7 +507,9 @@ indisponível interrompem só o rodízio, sem tornar a execução parcial nem fa
 | `payments.invoice_voided`, `payments.invoice_credited` | cancelam a cobrança em aberto no Recorvia e, depois do commit, no provedor |
 | `payments.recover_operations` (1 min) | retoma operações `create_charge`, `refund` e `cancel_charge` pendentes, desconhecidas ou com lease expirado, sempre consultando o provedor antes de repetir |
 | `payments.reconcile` (1 h) | conciliação agendada dos tenants elegíveis |
-| `metrics.collect` (15 s) | `recorvia_reconciliation_open_discrepancies{kind}`, `recorvia_refunds_total{outcome}` e `recorvia_refunds_in_progress{status}` a partir de contagens agregadas do banco (ADR-039) |
+| executor de conciliações (laço próprio, a cada 2 s, 2 instâncias por worker) | assume com lease e executa as conciliações registradas pela API e retoma as interrompidas (ADR-071) |
+| `metrics.collect` (15 s) | `recorvia_reconciliation_open_discrepancies{kind}`, `recorvia_reconciliation_runs_in_progress{state}`, `recorvia_reconciliation_oldest_waiting_seconds`, `recorvia_refunds_total{outcome}` e `recorvia_refunds_in_progress{status}` a partir de contagens agregadas do banco (ADR-039) |
+| API, a cada coleta do Prometheus | `recorvia_reconciliation_runs_in_progress{state}` e `recorvia_reconciliation_oldest_waiting_seconds`, lidas das mesmas contagens agregadas: a execução registrada que nenhum worker assumiu aparece nas métricas mesmo sem worker em execução (ADR-071) |
 
 Os eventos `refund.succeeded`, `refund.failed`, `dispute.opened`, `dispute.closed` e
 `reconciliation.discrepancy_detected` são gravados na outbox na mesma transação dos efeitos e publicados no

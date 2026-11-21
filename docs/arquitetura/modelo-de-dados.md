@@ -110,15 +110,22 @@ erDiagram
 | `charges.amount_refund_pending` | valor reservado por reembolsos ainda não confirmados; a confirmação o move para `amount_refunded` e a recusa o libera. O saldo reembolsável é `amount_paid - amount_refunded - amount_charged_back - amount_refund_pending` |
 | `refunds` | reembolso total ou parcial (`requested`, `succeeded`, `failed`, `unknown`); `origin` distingue pedido do Recorvia (`recorvia`, com `request_key` e `requested_by`) de reembolso feito no provedor (`provider`); `credit_amount` é a parte que devolveu crédito do cliente gerado pelo excedente do próprio pagamento; `provider_refund_id` é único por cobrança |
 | `payment_operations` (`kind = 'refund'`, `'cancel_charge'`) | chamada externa do reembolso (vinculada por `refund_id`, referência externa = ID do reembolso) e do cancelamento no provedor (uma por cobrança) |
-| `disputes`, `dispute_events` | disputa por cobrança (`opened`, `under_review`, `won`, `lost`) com o valor contestado e o histórico imutável de transições com a situação informada pelo provedor |
-| `reconciliation_runs` | execução manual ou agendada (`trigger_type`) sobre a janela `[window_start, window_end)` da conta do provedor, com `lease_until` para encerrar execuções interrompidas e `request_key` derivada do `Idempotency-Key` |
+| `disputes`, `dispute_events` | disputa por cobrança (`opened`, `under_review`, `won`, `lost`) com o valor contestado e o histórico imutável de transições com a situação informada pelo provedor. Na disputa perdida de pagamento com excedente, `credit_amount` é o crédito do cliente consumido pelo chargeback e `recovery_amount` é a parte do excedente que o cliente já havia usado e passa a ser valor a recuperar (ADR-070); as duas ficam em zero fora da disputa perdida e somam, no máximo, o valor contestado |
+| `reconciliation_runs` | execução manual ou agendada (`trigger_type`) sobre a janela `[window_start, window_end)` da conta do provedor, com `request_key` derivada do `Idempotency-Key`. A execução manual é registrada em `running` com `lease_until` nulo (aguardando um worker) e `attempts = 0`; o worker que a assume grava o lease e soma uma tentativa. Com o lease expirado (worker interrompido) ou devolvido (lease nulo de novo), a execução continua em `running` e é retomada; ao ser assumida depois de três tentativas interrompidas, é encerrada como `failed` (ADR-071). Há no máximo uma execução em `running` por conta do provedor |
 | `reconciliation_charge_checks` | última verificação de cada cobrança por uma execução de conciliação concluída; orienta o rodízio das cobranças fora da janela que ainda podem mudar no provedor (nunca verificadas e verificadas há mais tempo primeiro) |
 | `reconciliation_discrepancies` | divergência deduplicada por `dedupe_key` (tipo, objeto e valores) com primeira e última execução, ocorrências, valores inteiros usados na resolução (`local_amount`, `provider_amount`), retratos exibidos (`local_value`, `provider_value`), resolução, justificativa, responsável e lançamento de ajuste |
 
 Funções `SECURITY DEFINER` da etapa: `app_tenants_due_reconciliation` (tenants elegíveis à conciliação
-agendada, somente IDs), `app_open_discrepancy_stats` e `app_refund_stats` (contagens agregadas para
-métricas, sem identificar tenants). A reivindicação de operações de reembolso usa um bloqueio consultivo
-transacional por cobrança (`pg_advisory_xact_lock`), sem bloquear a linha da cobrança.
+agendada, somente IDs), `app_claimable_reconciliation_runs` (execuções em `running` sem lease ou com o lease
+expirado, que um worker pode assumir: somente os IDs do tenant e da execução), `app_open_discrepancy_stats`,
+`app_refund_stats` e `app_reconciliation_run_stats` (contagens agregadas para métricas, sem identificar
+tenants; a última conta as execuções em andamento por estado, `queued`, `executing` e `stalled`, com a espera
+mais longa de cada um). A reivindicação de operações de reembolso usa um bloqueio consultivo transacional por
+cobrança (`pg_advisory_xact_lock`), sem bloquear a linha da cobrança.
+
+`idempotency_keys.response_location` guarda o header `Location` da resposta registrada pela
+`Idempotency-Key` (nulo quando a resposta não o traz), reproduzido nas repetições com status, corpo e
+`Content-Type` (ADR-072).
 
 ## Invariantes no banco
 

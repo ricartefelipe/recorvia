@@ -393,30 +393,8 @@ reconhecido quando aparece. Webhooks de reembolso repetidos ou fora de ordem nã
 cumulativos e confirmação idempotente).
 
 ## ADR-036 Disputas e chargebacks
-**Status:** aceita.
-**Decisão:** a situação de chargeback informada pelo provedor (webhook ou consulta) abre a disputa
-(`disputes`, situação `opened`) pelo saldo ainda não reembolsado nem estornado e lança `dispute.opened`
-(débito em `chargebacks`, crédito nos valores em liquidação): o valor fica retido. A análise passa a
-`under_review`; a disputa ganha (`won`) estorna o lançamento de abertura e devolve a cobrança à situação dos
-reembolsos confirmados (`paid`, `partially_refunded` ou, com reembolso confirmado durante a disputa que
-completa o pago, `refunded`); a perdida (`lost`) registra `amount_charged_back` e a cobrança passa a `charged_back`, sem
-reabrir a fatura (histórico com `reason = 'chargeback'`). O estorno da disputa perdida é limitado ao saldo
-elegível: não inclui o reembolsado durante a disputa nem o reservado por reembolso em andamento (que,
-confirmado depois, cabe no saldo), e o lançamento `dispute.hold_released` (débito nos valores em
-liquidação, crédito em `chargebacks`) libera essa parte da retenção. Se o reembolso reservado for recusado
-depois da perda, o valor passa ao chargeback (`amount_charged_back` e `dispute.hold_restored`, um por
-reembolso), porque o valor contestado foi debitado pelo provedor. Assim, `chargebacks` registra o valor
-estornado e, com `refunds`, nunca soma mais que o pago. O painel financeiro mostra o movimento líquido das
-duas contas no mês (débitos menos créditos): a retenção liberada e a disputa ganha reduzem o chargeback do
-mês em que ocorrem, que fica negativo quando a disputa aberta em mês anterior é ganha. Há no máximo uma
-disputa aberta por cobrança (`disputes_open_key`), e cada transição fica em `dispute_events` (imutável).
-Retratos do provedor anteriores ao último registrado ou ao encerramento da disputa não alteram nem reabrem
-disputas.
-**Consequências:** a decisão por situação explícita vale para o simulador (`chargeback_requested`, `won`,
-`lost`). A documentação do Asaas não descreve situação de chargeback perdido; a decisão ganha corresponde a
-`AWAITING_CHARGEBACK_REVERSAL`, e, num retrato obtido por consulta ao provedor (por exemplo, na resolução da
-conciliação), a cobrança novamente recebida sem chargeback encerra a disputa aberta como ganha; eventos sem
-chargeback não decidem disputas. O chargeback não consome crédito do cliente.
+**Status:** aceita; a limitação "o chargeback não consome crédito do cliente" foi resolvida pela
+ADR-070: a disputa perdida passa a consumir o crédito gerado pelo excedente do pagamento.
 
 ## ADR-037 Cancelamento da cobrança no provedor
 **Status:** aceita (resolve a limitação registrada nas ADR-029 e ADR-030).
@@ -432,59 +410,8 @@ em andamento é cancelada no provedor quando a criação termina.
 pagamento antes do cancelamento (ou o cancelamento falha); a confirmação continua prevalecendo.
 
 ## ADR-038 Conciliação com o provedor
-**Status:** aceita.
-**Decisão:** cada execução (`reconciliation_runs`) cobre uma janela `[início, fim)` da conta padrão do
-provedor: lista as cobranças do provedor (`ListCharges`, paginada), carrega as cobranças locais criadas ou
-atualizadas na janela ou presentes na listagem, consulta individualmente (`GetCharge`) as locais ausentes da
-listagem e compara. As chamadas ao provedor ocorrem sem transação aberta; há no máximo uma execução em
-andamento por conta (índice único parcial), com lease que permite encerrar execuções interrompidas. Tipos de
-divergência: cobrança do provedor sem correspondência local, cobrança local inexistente no provedor, valor
-divergente (cobrado ou pago), taxa divergente, pagamento não refletido (pago em um lado e não no outro),
-reembolso pendente (sem confirmação há mais de uma hora ou totais divergentes), chargeback pendente e operação
-com resultado desconhecido.
-**Deduplicação:** a chave da divergência combina tipo, objeto e valores. Divergência repetida atualiza o
-registro (ocorrências, última execução); divergência aberta não constatada numa execução que verificou o mesmo
-objeto é resolvida automaticamente (`auto_resolved`) e é reaberta se voltar com os mesmos valores; divergência
-resolvida manualmente não é reaberta pelos mesmos valores (valores novos geram nova divergência).
-**Resolução:** exige permissão `reconciliation.resolve`, justificativa de 10 a 2000 caracteres e registra
-responsável, data, histórico (auditoria) e, quando houver, o lançamento `reconciliation.adjustment`. O
-responsável fica sempre na auditoria (usuário da sessão ou credencial de API); `resolved_by` guarda somente
-o usuário e fica nulo com credencial de API e na resolução automática.
-`dismiss` registra como explicada; `keep_local` mantém o registro local; `adjust_ledger` lança o ajuste pela
-diferença de taxa (taxa do provedor menos a local) ou de valor pago (local menos o do provedor);
-`accept_provider` adota o provedor: aceita a taxa (cobrança e ledger), ajusta o valor pago, aplica o
-pagamento não refletido, sincroniza reembolso ou chargeback pela consulta atual (reembolso sem registro no
-provedor é encerrado e a reserva liberada), reconsulta a operação desconhecida ou cancela localmente a cobrança
-em aberto inexistente no provedor. Cobrança do provedor sem correspondência local não é importada.
-**Agendamento:** o job `payments.reconcile` (horário, com lease do agendador) executa a conciliação dos
-tenants cujo plano da plataforma tem `reconciliation_automation`, com provedor padrão ativo e sem execução
-agendada nas últimas 24 horas (janela de 7 dias). A execução manual é sempre permitida (janela padrão de 30
-dias, até 93 dias).
-**Rodízio:** a listagem do Asaas filtra pela data de criação (`dateCreated`), e a leitura local cobre o
-criado ou atualizado na janela; uma cobrança antiga com chargeback, reembolso ou pagamento tardio e webhook
-perdido ficaria fora dos dois lados. Por isso cada execução consulta individualmente até 100 cobranças fora
-da janela, vinculadas ao provedor, criadas nos últimos 180 dias e ainda sujeitas a mudança (aguardando
-pagamento, pagas, parcialmente reembolsadas ou em disputa), a começar pelas nunca verificadas e pelas
-verificadas há mais tempo (`reconciliation_charge_checks`, gravada ao concluir a execução). O rodízio é de
-melhor esforço: não torna a execução parcial nem a faz falhar. A consulta que falha é pulada (a cobrança não
-é comparada nem registrada como verificada e volta primeiro na próxima execução); o prazo da coleta
-esgotado, o cancelamento da execução e três falhas seguidas que indicam provedor indisponível (sem
-resposta, limite de taxa ou erro 5xx; a recusa definitiva, própria da cobrança consultada, não conta)
-interrompem o rodízio. O que não couber ou não for consultado fica para as próximas execuções; as falhas
-ficam no log e na auditoria da execução (`rotation_failures`).
-**Limites e prazo:** a leitura local traz primeiro as cobranças presentes na listagem do provedor e depois
-as da janela, até 5000; as listadas sempre cabem (a listagem tem no máximo 2000 cobranças, e cada uma
-corresponde a no máximo duas locais, pelo ID do provedor e pela referência), de modo que o corte nunca gera
-divergência `missing_local` falsa. A coleta tem prazo próprio: 40 segundos na execução manual, que
-responde na requisição sem depender do prazo nem do cancelamento dela (abaixo do limite de escrita da
-resposta da API, de 60 segundos), e o lease menos 2 minutos na agendada. Esgotado o prazo, a coleta para e a
-comparação usa o que foi obtido.
-**Consequências:** a ordem de bloqueio na resolução é divergência e depois cobrança; a execução bloqueia as
-divergências antes de gravar referências às cobranças. Execuções com limite de páginas, de consultas
-individuais, de cobranças locais ou de operações com resultado desconhecido (500) atingido, ou com o prazo
-da coleta esgotado, terminam concluídas com aviso de execução parcial, que cita os motivos. O que não foi
-comparado não gera divergência nem tem divergência resolvida automaticamente; a divergência de operação que
-ficou fora da leitura limitada só é resolvida quando a operação deixa de ter resultado desconhecido.
+**Status:** aceita; a execução manual deixou de rodar dentro da requisição (prazo de 40 segundos) e
+passou a ser registrada e executada pelo worker, conforme as ADR-071 e ADR-072.
 
 ## ADR-039 Métricas de recebíveis a partir de totais do banco
 **Status:** aceita.
@@ -1068,3 +995,148 @@ toda rota com permissão não delegável; o teste de contrato confere o esquema 
 integração exercitam cada rota afetada com uma credencial real pela pilha Bearer (autoria nula e
 auditoria com ator `api_credential` e, nas dead letters, com a justificativa; ou 403 sem efeito) e
 as leituras que continuam disponíveis à credencial.
+
+## ADR-070 Chargeback consome o crédito do pagamento excedente
+**Status:** aceita (resolve a limitação registrada na ADR-036: "o chargeback não consome crédito do cliente").
+**Contexto:** o pagamento acima do saldo da fatura (ou de fatura já quitada ou cancelada) vira crédito do
+cliente (`payment.overpayment`, ADR-030). O reembolso já devolve esse crédito antes de reduzir a receita
+(ADR-034), mas a disputa perdida estornava o valor pago inteiro e deixava o crédito com o cliente: ele
+recebia o dinheiro de volta pelo chargeback e ainda podia abater faturas futuras com o crédito, e o ledger
+registrava como chargeback (redução de receita) um valor que nunca foi receita.
+**Decisão:** o valor estornado por chargeback consome o crédito do excedente com a mesma base do reembolso.
+A base é única para os dois (`overpaymentPortion`): o excedente do pagamento da cobrança menos o que já foi
+devolvido ao pagador, por reembolsos (`refunds.credit_amount`) e por chargebacks
+(`disputes.credit_amount + disputes.recovery_amount` das disputas perdidas). O valor devolvido sai primeiro
+dessa base, em qualquer ordem dos eventos, de modo que cada centavo do excedente é devolvido uma única vez.
+Na disputa perdida (e no aumento do chargeback pelo reembolso reservado recusado depois dela, ADR-036), a
+parte do valor estornado dentro da base é dividida em duas, sob o bloqueio do crédito do cliente:
+- **crédito consumido** (`disputes.credit_amount`): o que ainda está no saldo é consumido
+  (`customer_credit_entries`, tipo `consumption`);
+- **valor a recuperar do cliente** (`disputes.recovery_amount`): o que o cliente já usou em outras faturas
+  não deixa o saldo negativo; fica registrado como valor a recuperar.
+
+O lançamento `dispute.credit_reversed` (um por disputa e um por reembolso recusado depois da perda) tira as
+duas partes de `chargebacks`: débito em `customer_credits` pelo crédito consumido e em
+`customer_recoverables` (conta nova de ativo, "Valores a recuperar de clientes") pelo valor a recuperar,
+crédito em `chargebacks`. Com `dispute.opened` e `dispute.hold_released`, `chargebacks` fica com o valor
+estornado menos o excedente, isto é, a receita efetivamente perdida. As duas partes aparecem na disputa
+(`GET /api/v1/disputes`), no histórico da disputa e da fatura, na auditoria (`dispute.lost`,
+`dispute.chargeback_increased`) e no evento `dispute.closed`.
+
+| Momento | Efeito no crédito |
+|---|---|
+| Reembolso antes da disputa | consome o crédito primeiro (ADR-034); a disputa perdida usa só o excedente restante |
+| Reembolso confirmado durante a disputa | idem; o valor reembolsado não é estornado de novo (ADR-036) |
+| Reembolso reservado, confirmado depois da perda | o chargeback já levou o excedente; o reembolso reduz só a receita |
+| Reembolso reservado, recusado depois da perda | o valor passa ao chargeback e leva o excedente restante (lançamento por reembolso) |
+| Disputa ganha | nenhum efeito no crédito; uma nova disputa perdida da mesma cobrança consome o crédito uma vez |
+| Webhook repetido ou fora de ordem | nenhum efeito: a decisão é registrada uma vez (ADR-036) e os lançamentos têm chave de idempotência |
+
+**Justificativa:** no reembolso, a parte do crédito que o cliente já usou reduz a receita (ADR-034): a
+devolução é decisão do tenant, que conhece o saldo. No chargeback a devolução é imposta pelo pagador: o
+crédito que ele já abateu de outra fatura deixou de ter lastro, e essa fatura foi quitada com um valor que
+voltou a ele. Registrar a diferença como receita perdida esconderia que o cliente deve o valor; deixar o
+saldo negativo quebraria a regra de que crédito só é consumido do que existe (o banco recusa o consumo acima
+do saldo) e contaminaria a emissão das próximas faturas. A conta `customer_recoverables` separa esse valor de
+`accounts_receivable`, que continua igual ao saldo devedor das faturas.
+**Consequências:** migration `00017` (colunas `credit_amount` e `recovery_amount` em `disputes`, limitadas ao
+valor contestado e permitidas só em disputa perdida); a conta nova é criada sob demanda, como as demais do
+plano. O indicador de chargebacks do painel (movimento líquido da conta) passa a excluir o excedente. A ordem
+de bloqueio é a do reembolso: cobrança, fatura e cliente (crédito). A cobrança do valor a recuperar é
+decisão do tenant (por exemplo, fatura avulsa); **não há operação de baixa da conta
+`customer_recoverables`** (recebimento ou perda), que fica como pendência. Disputas perdidas antes desta
+versão não são reprocessadas: o crédito daqueles pagamentos permanece com o cliente.
+
+## ADR-071 Conciliação manual executada pelo worker como tarefa com lease
+**Status:** aceita (resolve a limitação "a conciliação manual executa dentro da requisição"; complementa a
+ADR-038).
+**Contexto:** a execução manual coletava no provedor dentro da requisição HTTP, com prazo de 40 segundos
+para caber no limite de escrita da resposta; em contas grandes terminava como parcial pelo prazo, e a
+requisição ficava presa por dezenas de segundos.
+**Decisão:** o pedido só registra a execução; quem executa é o worker.
+- **Registro.** `StartReconciliation` grava `reconciliation_runs` em `running`, sem lease e com
+  `attempts = 0`, na mesma transação da auditoria. A execução registrada é o próprio registro da tarefa: não
+  há mensagem que possa se perder nem segunda fonte de verdade. O índice único das execuções em andamento
+  continua garantindo uma por conta, agora também enquanto ela aguarda o worker ou a retomada.
+- **Executor.** Cada worker roda duas instâncias de um laço próprio, fora do agendador (que executa uma
+  tarefa por vez e seria bloqueado por uma conciliação longa). A cada 2 segundos o laço descobre, entre
+  todos os tenants, as execuções `running` sem lease ou com lease expirado
+  (`app_claimable_reconciliation_runs`, `SECURITY DEFINER`, só identificadores) e assume uma por vez na
+  transação do tenant: `FOR UPDATE`, nova verificação, lease de 15 minutos e `attempts + 1`. Instâncias
+  concorrentes se serializam na linha; a segunda encontra o lease vigente e desiste.
+- **Execução.** A coleta tem prazo de 13 minutos por tentativa (o lease menos a folga da comparação e do
+  registro), sem relação com prazo HTTP; os limites de páginas, consultas e cobranças da ADR-038 continuam
+  valendo e, com o prazo esgotado, a execução é concluída como parcial com o motivo. Falha do provedor ou da
+  leitura encerra como `failed`, com a causa.
+- **Retomada.** O worker interrompido deixa a execução com o lease; quando ele expira, qualquer instância a
+  assume de novo e a executa do início (`reconciliation.run_resumed`). O worker que encerra normalmente (ou a
+  tarefa agendada cancelada) devolve a execução, removendo o lease (`reconciliation.run_released`), e ela é
+  retomada de imediato. As divergências só são gravadas na transação que encerra a execução, pela chave de
+  deduplicação, e essa transação exige que a tentativa ainda detenha a execução (mesma contagem de
+  `attempts`): a instância cujo lease expirou e foi substituída não conclui nem encerra como falha a
+  execução retomada. Por isso a retomada não duplica divergências nem ocorrências.
+- **Limite.** Depois de três tentativas interrompidas, a execução é encerrada como `failed` ao ser assumida,
+  com a causa ("interrompida 3 vezes"), e a conta volta a aceitar pedidos.
+- **Agendada.** O job `payments.reconcile` continua executando na própria tarefa (o resultado alimenta as
+  métricas da tarefa), mas registra a execução já assumida (`attempts = 1`, com lease): se for
+  interrompida, segue o mesmo caminho de retomada. Execuções com lease expirado deixam de ser encerradas
+  como falha no início da execução seguinte.
+
+**Alternativas:** evento na outbox com consumidor e inbox foi descartado porque o consumidor tem prazo de
+processamento de 2 minutos e redelivery por tentativa: uma conciliação de vários minutos manteria a
+mensagem sem confirmação, e a execução interrompida dependeria de reentrega com esperas fixas e de DLQ, sem
+dispensar o lease para impedir duas execuções simultâneas. Uma tarefa do agendador com intervalo curto foi
+descartada porque o agendador executa uma tarefa por vez. A tarefa com lease é o mecanismo que o projeto já
+usa para operações externas (`payment_operations`), notificações e entregas de webhooks.
+**Consequências:** migration `00017` (`reconciliation_runs.attempts` e as funções de descoberta e de
+contagem); `Config.ManualReconciliationBudget` deu lugar a `Config.ReconciliationBudget` (padrão e máximo de
+13 minutos). Sem worker em execução, o pedido fica registrado e a conta fica ocupada até um worker partir: as
+métricas `recorvia_reconciliation_runs_in_progress{state}` (`queued`, `executing`, `stalled`) e
+`recorvia_reconciliation_oldest_waiting_seconds` e o alerta `RecorviaReconciliationRunsWaiting` (mais de 5
+minutos sem worker) cobrem esse caso, descrito no runbook de conciliação. Para que o alerta não dependa do
+processo que parou, as duas métricas são exportadas também pela API, que registra os pedidos e continua em
+execução sem o worker: ela lê as contagens agregadas do banco a cada coleta (prazo de 2 segundos; se a
+leitura falhar, as séries mantêm o último valor e a falha vai para o log), enquanto o worker as publica pela
+tarefa `metrics.collect`. A regra usa `max()` sobre todas as instâncias: com as séries do worker obsoletas, a
+da API sustenta o alerta, que dispara junto com `RecorviaTargetDown`. Com a API e o worker sem acesso ao
+banco, as séries ficam congeladas e o sinal é `RecorviaDependencyUnavailable`. Um worker executa no máximo duas
+conciliações ao mesmo tempo; mais instâncias do worker aumentam a vazão. A retomada refaz a coleta do início:
+o progresso parcial não é persistido.
+
+## ADR-072 Contrato do pedido assíncrono de conciliação e a Idempotency-Key
+**Status:** aceita.
+**Contexto:** com a ADR-071, `POST /api/v1/reconciliation/runs` deixa de devolver a execução encerrada. O
+contrato precisa dizer como acompanhar a execução e o que a `Idempotency-Key` devolve enquanto ela não
+termina, sem que a chave fique presa a um retrato "em andamento".
+**Decisão:**
+- `POST /api/v1/reconciliation/runs` responde `202 Accepted` com a execução em `running` e o header
+  `Location: /api/v1/reconciliation/runs/{id}`. A operação nova `GET /api/v1/reconciliation/runs/{id}`
+  (`reconciliation.read`) devolve a execução na situação atual; a execução ganhou `trigger` e `attempts`
+  (0 enquanto aguarda o worker, mais que 1 quando foi retomada).
+- A `Idempotency-Key` continua obrigatória e identifica o pedido pela chave de negócio (`request_key`,
+  ADR-022): a repetição devolve sempre a mesma execução, **na situação atual**. Para isso, a resposta `202`
+  não fica registrada na chave (como já ocorre com 5xx, 429 e conflitos com `Retry-After`): a repetição volta
+  ao caso de uso, que encontra a execução pela chave de negócio e responde `202` enquanto ela está em
+  andamento e `200` depois de encerrada; o `200` é resultado definitivo e fica registrado. Mesma chave com a
+  execução interrompida e retomada continua apontando para a mesma execução.
+- O `200` também traz o `Location`, e ele faz parte do resultado registrado: a chave guarda o header junto
+  de status, corpo e `Content-Type` (`idempotency_keys.response_location`), e toda repetição do resultado
+  (`Idempotent-Replayed: true`) o reproduz. O cliente que segue o `Location` recebe a mesma resposta em
+  qualquer repetição do pedido.
+- `409 reconciliation_running` (outra execução da conta em andamento) mantém o `Retry-After` e não prende a
+  chave.
+- **Interface.** A tela envia o pedido uma vez, descarta a chave assim que a API o aceita (a intenção
+  terminou) e acompanha a execução por consulta, a cada 2 segundos, até `completed` ou `failed`, quando
+  informa o resultado; não repete o `POST` para acompanhar. A lista de execuções é atualizada enquanto houver
+  execução em andamento, inclusive agendada ou pedida por outra pessoa.
+
+**Justificativa:** registrar o `202` na chave faria a repetição devolver para sempre "em andamento", mesmo
+depois de a execução terminar ou falhar; liberar a chave só é seguro porque o caso de uso é idempotente pela
+chave de negócio, na mesma transação que registra a execução.
+**Consequências:** clientes da API que esperavam a execução encerrada na resposta do `POST` precisam
+acompanhar pelo `Location`; o roteiro `web/e2e/04-conciliacao.spec.ts` verifica o `202` e o acompanhamento
+pela interface. A regra do `202` vale para qualquer rota idempotente que venha a aceitar pedidos
+assíncronos, desde que o caso de uso reconheça o pedido pela chave de negócio. A migration `00017` acrescenta
+`idempotency_keys.response_location` (nulo nas respostas sem o header e nos resultados registrados antes
+dela, cuja repetição continua saindo sem `Location` até a chave expirar, em 24 horas); o registro vale para
+qualquer rota idempotente que responda com `Location`.
