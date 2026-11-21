@@ -549,23 +549,32 @@ sequenceDiagram
   C->>A: /api/portal/v1/* com o cookie (X-CSRF-Token nos métodos que alteram estado)
   A->>R: sessão (expiração absoluta e por inatividade)
   A->>DB: tx do tenant da sessão: link não revogado, cliente e organização ativos
-  C->>A: GET /api/portal/v1/invoices, /invoices/{id}, /invoices/{id}/document
-  A->>DB: tx do tenant da sessão: faturas emitidas do cliente da sessão (tenant_id e customer_id), itens e link de pagamento em aberto
-  A-->>C: faturas do cliente (outro cliente, outro tenant ou rascunho: 404)
+  C->>A: GET /api/portal/v1/invoices?limit=…&cursor=…, /invoices/{id}, /invoices/{id}/document
+  A->>DB: tx do tenant da sessão: faturas emitidas do cliente da sessão (tenant_id e customer_id) depois da posição do cursor, itens e link de pagamento em aberto
+  A-->>C: página de faturas do cliente e next_cursor (outro cliente, outro tenant ou rascunho: 404)
   C->>A: PUT /api/portal/v1/contact-preferences (X-CSRF-Token)
   A->>DB: tx: cliente bloqueado; contatos do próprio cliente; grava só o que mudou; auditoria (customer_portal)
   C->>A: POST /api/portal/v1/logout (X-CSRF-Token)
   A->>DB: auditoria do encerramento
   A->>R: remove a sessão
   A-->>C: 204 + cookie expirado
+  U->>A: GET /api/v1/customers/{id}/portal-links
+  A-->>U: links do cliente (situação, datas, quem gerou; sem token nem hash)
+  U->>A: DELETE /api/v1/customers/{id}/portal-links/{link_id}
+  A->>DB: tx: cliente FOR NO KEY UPDATE; link FOR UPDATE (do cliente e do tenant); revoked_at; auditoria
+  A->>R: remove as sessões abertas com o link (índice por link)
+  A-->>U: 204 (também para link já revogado, sem nova auditoria)
 ```
 
-Um novo link para o mesmo cliente revoga o anterior e encerra a sessão aberta com ele; arquivar o
-cliente ou suspender a organização também encerra o acesso. O portal não aceita a sessão do painel
-nem credenciais de API.
+Um novo link para o mesmo cliente revoga o anterior e encerra a sessão aberta com ele; a organização
+também lista os links do cliente e revoga um link de forma explícita (ADR-068), com a mesma
+permissão da geração (`customers.portal_links`). Arquivar o cliente ou suspender a organização
+também encerra o acesso. O portal não aceita a sessão do painel nem credenciais de API.
 
-O cliente vê as 100 faturas emitidas mais recentes, sem histórico, cobranças ou identificadores
-internos; os itens aparecem pelo valor líquido do desconto. O botão de pagamento usa o link do
+O cliente vê as faturas emitidas em páginas de até 100 (25 por padrão), das mais recentes para as
+mais antigas, com cursor por emissão e identificador (ADR-069): o cursor é só uma posição, e a
+organização e o cliente consultados vêm sempre da sessão. A lista não traz histórico, cobranças ou
+identificadores internos; os itens aparecem pelo valor líquido do desconto. O botão de pagamento usa o link do
 pagamento hospedado da cobrança mais recente aguardando pagamento e só aparece para fatura em
 aberto com saldo. O documento comercial é o mesmo HTML do painel, exibido em `iframe` isolado; a
 baixa como incobrável aparece ao cliente como "Encerrada". Nas
