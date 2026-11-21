@@ -289,8 +289,8 @@ func (t *fakeTx) DefaultPlatformPlan(context.Context) (platformbilling.Plan, err
 	return t.store.defaultPlan, nil
 }
 
-func (t *fakeTx) PlatformPlan(context.Context) (platformbilling.Plan, error) {
-	if err := t.store.hit("PlatformPlan"); err != nil {
+func (t *fakeTx) LockPlatformPlan(context.Context) (platformbilling.Plan, error) {
+	if err := t.store.hit("LockPlatformPlan"); err != nil {
 		return platformbilling.Plan{}, err
 	}
 	return t.d.plan, nil
