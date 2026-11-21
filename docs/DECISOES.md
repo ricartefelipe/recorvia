@@ -1261,8 +1261,9 @@ positivos dos dois tipos;
 trabalho depois do backup (janela perdida); remoção da API, do worker, do banco, do broker e do
 Redis com os volumes; restauração num servidor novo (bootstrap, `pg_restore`, `migrate up`,
 `restore-check`, manifesto idêntico e ledger balanceado); recusa de chave errada e de chave ausente
-e aceitação da chave declarada perdida, sem alteração do banco (ADR-063); API no ar com o worker parado; conciliação da janela pela API do
-produto (`payment_not_reflected` com `accept_provider`; `missing_local` cancelada no provedor e
+e aceitação da chave declarada perdida, sem alteração do banco (ADR-063); API no ar com o worker parado; conciliação da janela pedida pela
+API do produto e executada pelo subcomando `reconcile-pending` do worker, que termina sem iniciar o
+agendador, os consumidores nem o publicador da outbox (o pedido é assíncrono desde a ADR-071) (`payment_not_reflected` com `accept_provider`; `missing_local` cancelada no provedor e
 resolvida com `dismiss`); worker religado e conferência de readiness, decifragem real dos segredos
 (cobrança criada no provedor, webhooks do provedor autenticados, entregas assinadas conferidas com
 `openssl` e e-mail pendente enviado), ausência de efeitos duplicados depois de mais dois ciclos dos

@@ -213,8 +213,10 @@ o Redis, a API e o worker.
    `keyring-check` responde `keyring compatível com o banco`.
 7. **API e conciliação, com o worker parado.** A API sobe com as chaves do cofre: `GET /readyz`
    200 (PostgreSQL e Redis), a credencial de API emitida antes do backup continua valendo, a
-   sessão anterior é recusada (o Redis se perdeu) e um novo login funciona. A conciliação pela API
-   (`POST /api/v1/reconciliation/runs`) aponta as duas diferenças da janela: `payment_not_reflected`
+   sessão anterior é recusada (o Redis se perdeu) e um novo login funciona. A conciliação é pedida
+   pela API (`POST /api/v1/reconciliation/runs`, que registra a execução e responde 202) e executada
+   pelo subcomando `reconcile-pending` do worker, que termina sem iniciar o agendador, os consumidores
+   nem o publicador da outbox. Ela aponta as duas diferenças da janela: `payment_not_reflected`
    (fatura paga no provedor), resolvida com `accept_provider`, e `missing_local` (cobrança criada na
    janela, sem registro local), cancelada no provedor e resolvida com `dismiss`.
 8. **Worker religado.** `GET /readyz` do worker 200 (PostgreSQL e RabbitMQ). O exercício confere:
@@ -402,8 +404,13 @@ delas com novas referências externas.
 
 Com a API no ar sobre o banco restaurado e o worker parado, a conciliação da organização
 (`POST /api/v1/reconciliation/runs`, permissão `reconciliation.run`, com `Idempotency-Key`)
-consulta o provedor e compara com o banco restaurado; a janela padrão cobre os últimos 30 dias. A
-execução ocorre dentro da requisição e não depende do worker. As divergências
+consulta o provedor e compara com o banco restaurado; a janela padrão cobre os últimos 30 dias. O
+pedido só registra a execução (202, ADR-071). Para executá-la sem religar o worker, rode uma vez o
+subcomando `reconcile-pending` com a mesma configuração do worker (por exemplo,
+`docker compose run --rm --no-deps worker reconcile-pending`): ele confere as chaves, executa as
+conciliações registradas de todas as organizações e termina, sem iniciar o agendador, os consumidores
+nem o publicador da outbox. Termina com erro se alguma execução falhar ou ficar sem terminar; nesse
+caso, consulte a causa em `GET /api/v1/reconciliation/runs/{id}` antes de seguir. As divergências
 (`GET /api/v1/reconciliation/discrepancies?status=open`) trazem o que aconteceu na janela:
 
 | Divergência | Significado na janela | Resolução (`POST .../discrepancies/{id}/resolve`, `reconciliation.resolve`) |

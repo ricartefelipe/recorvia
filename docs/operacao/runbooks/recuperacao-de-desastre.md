@@ -75,11 +75,19 @@ Regras que valem em todos os passos:
    ```bash
    API=https://api-restrita.example            # endereço restrito da API, fora do balanceador público
    TOKEN=rcv_credencial_da_organizacao         # credencial de API da organização a conciliar
-   # Execução da conciliação (a API consulta o provedor; o worker continua parado).
+   # Pedido da conciliação: registra a execução e responde 202 (o worker continua parado).
    curl -X POST -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: $(uuidgen)" \
      "$API/api/v1/reconciliation/runs"
+   ```
+   Depois de registrar os pedidos de todas as organizações, execute-os uma vez, sem religar o
+   worker, com o subcomando `reconcile-pending` e a mesma configuração do worker (o agendador, os
+   consumidores e o publicador da outbox não iniciam):
+   ```bash
+   docker compose run --rm --no-deps worker reconcile-pending   # ou: /app reconcile-pending no container do worker
    curl -H "Authorization: Bearer $TOKEN" "$API/api/v1/reconciliation/discrepancies?status=open"
    ```
+   O subcomando termina com erro se alguma conciliação falhar ou ficar sem terminar: consulte a causa
+   em `GET /api/v1/reconciliation/runs/{id}` e repita antes de seguir.
    - `payment_not_reflected` (pago no provedor na janela): resolver com `accept_provider`;
    - `missing_local` (cobrança criada na janela, sem registro local): se não foi paga, cancelar no
      provedor e resolver com `dismiss`; se foi paga, não cancelar e seguir a tabela do guia;

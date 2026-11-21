@@ -40,6 +40,19 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == app.ReconcilePendingCommand {
+		// Executa uma vez as conciliações registradas e termina, sem
+		// agendador, consumidores nem publicador da outbox (recuperação de
+		// desastre: a janela perdida é conciliada antes de religar o worker).
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err := app.RunReconcilePending(ctx, os.Getenv, os.Stdout)
+		stop()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "erro:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(log); err != nil {
 		log.Error("worker encerrado com erro", slog.String("error", err.Error()))
 		os.Exit(1)

@@ -683,9 +683,19 @@ restored_invoices_b=$(api GET "/api/v1/invoices?subscription_id=$sub_b" | jq '.d
 [[ $restored_invoices_b == 0 ]] || die "a fatura B não deveria existir no banco restaurado"
 invoice_is "$invoice_a" open || die "a fatura A deveria estar em aberto no banco restaurado"
 
-# Conciliação pela API, com o worker parado: o provedor é a fonte do que
-# aconteceu na janela.
+# Conciliação pedida pela API, com o worker parado: o provedor é a fonte do
+# que aconteceu na janela. O pedido só registra a execução (ADR-071); quem a
+# executa é o subcomando reconcile-pending, que termina sem iniciar o
+# agendador, os consumidores nem o publicador da outbox.
 api POST /api/v1/reconciliation/runs >"$work/conciliacao.json"
+[[ $(jq -r .status "$work/conciliacao.json") == running ]] || die "pedido de conciliação não registrado"
+run_id=$(jq -r .id "$work/conciliacao.json")
+timeout 900 docker compose -p "$project" --env-file "$env_file" -f "$root/compose.yaml" -f "$root/deploy/backup/dr.compose.yaml" \
+  run --rm -T --no-deps worker reconcile-pending >"$dr_dir/conciliacao-da-janela.txt" 2>&1 || {
+  cat "$dr_dir/conciliacao-da-janela.txt" >&2
+  die "reconcile-pending não concluiu a conciliação da janela"
+}
+api GET "/api/v1/reconciliation/runs/$run_id" >"$work/conciliacao.json"
 [[ $(jq -r .status "$work/conciliacao.json") == completed ]] || die "conciliação não concluída"
 api GET "/api/v1/reconciliation/discrepancies?status=open" >"$work/divergencias.json"
 paid_discrepancy=$(jq -r --arg c "$provider_charge_a" '.data[] | select(.kind == "payment_not_reflected" and .provider_charge_id == $c) | .id' "$work/divergencias.json")

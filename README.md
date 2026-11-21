@@ -144,7 +144,9 @@ iniciam com chave errada ou ausente (`RECORVIA_ENCRYPTION_STARTUP_CHECK`: `enfor
 declarada em `RECORVIA_ENCRYPTION_LOST_KEYS`, e a rotação é feita em duas fases (distribuir a
 chave a todos os processos, conferir cada processo em execução com
 `docker compose exec -T <serviço> /app keyring-check` e só depois ativá-la):
-`docs/operacao/backup-e-restauracao.md`.
+`docs/operacao/backup-e-restauracao.md`. Na recuperação de desastre, as conciliações pedidas pela
+API são executadas sem religar o worker por
+`docker compose run --rm --no-deps worker reconcile-pending`.
 
 ## Limitações conhecidas
 
