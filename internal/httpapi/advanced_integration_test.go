@@ -34,6 +34,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/reporting"
 	"github.com/ricartefelipe/recorvia/internal/subscriptions"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
+	"github.com/ricartefelipe/recorvia/internal/testsupport/contract"
 	"github.com/ricartefelipe/recorvia/internal/testsupport/fixture"
 )
 
@@ -62,7 +63,7 @@ func newAdvancedAPI(t *testing.T) *apiEnv {
 		Metering:    metering.NewService(env.Store.Metering(), env.Clock),
 		Reporting:   reporting.NewService(env.Store.Reporting(), env.Clock),
 		Credentials: apicredentials.NewService(env.Store.APICredentials(), a.sessions, env.Clock, apicredentials.DefaultPolicy())})
-	srv := httptest.NewServer(router)
+	srv := httptest.NewServer(contract.Wrap(t, router))
 	t.Cleanup(srv.Close)
 	a.srv = srv
 	return a

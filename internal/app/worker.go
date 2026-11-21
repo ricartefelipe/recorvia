@@ -226,14 +226,35 @@ func (w *Worker) handlers() map[string]rabbit.Handler {
 }
 
 // instrument acrescenta correlação de logs e contexto de rastreamento (span
-// de consumo filho do contexto propagado no evento).
-func instrument(consumer string, h rabbit.Handler) rabbit.Handler {
-	traced := traceConsumer(consumer, h)
+// de consumo filho do contexto propagado no evento). Os logs do handler e o
+// registro do processamento de cada mensagem levam consumer, message_id,
+// tenant_id, o request_id da requisição que originou o evento (gravado na
+// outbox) e trace_id e span_id do span de consumo; a auditoria gravada pelo
+// consumidor recebe o mesmo request_id. O registro de cada mensagem é em
+// debug, nos dois desfechos: o aviso de falha é do consumidor (rabbit).
+func instrument(consumer string, h rabbit.Handler, log *slog.Logger) rabbit.Handler {
+	logged := func(ctx context.Context, m rabbit.Message) error {
+		start := time.Now()
+		err := h(ctx, m)
+		if err != nil {
+			// Em debug: o aviso da falha, com a decisão (retentativa, DLQ ou
+			// devolução), é registrado uma vez pelo consumidor (rabbit).
+			log.DebugContext(ctx, "falha no processamento da mensagem", slog.String("event_type", m.Type), slog.Int("attempt", m.Attempt),
+				slog.String("error", err.Error()))
+			return err
+		}
+		log.DebugContext(ctx, "mensagem processada", slog.String("event_type", m.Type), slog.Int("attempt", m.Attempt),
+			slog.Duration("duration", time.Since(start)))
+		return nil
+	}
+	traced := traceConsumer(consumer, logged)
 	return func(ctx context.Context, m rabbit.Message) error {
 		ctx = telemetry.ExtractContext(ctx, m.Headers)
-		ctx = logging.WithAttrs(ctx, slog.String("consumer", consumer), slog.String("message_id", m.ID), slog.String("tenant_id", m.TenantID),
-			slog.String("request_id", m.Headers["request_id"]))
-		return traced(ctx, m)
+		attrs := []slog.Attr{slog.String("consumer", consumer), slog.String("message_id", m.ID), slog.String("tenant_id", m.TenantID)}
+		if rid := m.Headers["request_id"]; rid != "" {
+			attrs = append(attrs, slog.String("request_id", rid))
+		}
+		return traced(logging.WithAttrs(ctx, attrs...), m)
 	}
 }
 
@@ -332,6 +353,8 @@ const (
 	// reconciliationPoll é o intervalo entre as consultas por execuções a
 	// assumir: limita a espera de quem pediu a conciliação manual.
 	reconciliationPoll = 2 * time.Second
+	// JobRegisteredReconciliations identifica o executor nos logs (job).
+	JobRegisteredReconciliations = "payments.registered_reconciliations"
 )
 
 // reconciliationPass assume e executa as conciliações registradas que
@@ -570,7 +593,13 @@ func (w *Worker) initMetrics(jobs []scheduler.Job) {
 	w.Metrics.InitRetention()
 }
 
-// Run inicia conexão, relay, consumidores e agendador até ctx terminar.
+// Run inicia conexão, relay, consumidores e agendador até ctx terminar. No
+// encerramento, o cancelamento chega ao agendador (e à tarefa em execução),
+// ao executor de conciliações, ao relay e aos consumidores, que param de
+// receber mensagens; Run só retorna depois que todos terminam. A conexão com
+// o broker fecha por último: as mensagens em processamento terminam e são
+// confirmadas (ou encaminhadas à retentativa) na mesma conexão em que
+// chegaram.
 func (w *Worker) Run(ctx context.Context) error {
 	cfg := w.Core.Config
 	log := w.Core.Log
@@ -578,8 +607,14 @@ func (w *Worker) Run(ctx context.Context) error {
 	topologyReady := make(chan struct{})
 	var once sync.Once
 	var wg sync.WaitGroup
-	wg.Go(func() {
-		w.Conn.Run(ctx, func(conn *amqp.Connection) error {
+	connCtx, closeConn := context.WithCancel(context.WithoutCancel(ctx))
+	var connDone sync.WaitGroup
+	defer func() {
+		closeConn()
+		connDone.Wait()
+	}()
+	connDone.Go(func() {
+		w.Conn.Run(connCtx, func(conn *amqp.Connection) error {
 			if err := rabbit.DeclareTopology(conn, dlqSpecs); err != nil {
 				return err
 			}
@@ -601,12 +636,14 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 	})
 	// As conciliações registradas não dependem do RabbitMQ: o executor
-	// parte com o agendador.
+	// parte com o agendador. Os logs do executor levam o nome da tarefa,
+	// como os das tarefas agendadas.
+	recCtx := logging.WithAttrs(ctx, slog.String("job", JobRegisteredReconciliations))
 	for range reconciliationRunners {
 		wg.Go(func() {
 			t := time.NewTicker(reconciliationPoll)
 			defer t.Stop()
-			w.runReconciliations(ctx, t.C)
+			w.runReconciliations(recCtx, t.C)
 		})
 	}
 	select {
@@ -622,7 +659,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		spec.MaxAttempts = cfg.ConsumerMaxAttempts
 		w.Metrics.ConsumerConcurrency.WithLabelValues(spec.Name).Set(float64(ccfg.Concurrency))
 		w.Metrics.InitConsumer(spec.Name)
-		c := rabbit.NewConsumer(w.Conn, pub, spec, ccfg, instrument(spec.Name, handlers[spec.Name]), log, w.Metrics)
+		c := rabbit.NewConsumer(w.Conn, pub, spec, ccfg, instrument(spec.Name, handlers[spec.Name], log), log, w.Metrics)
 		wg.Go(func() { c.Run(ctx) })
 		dlq := rabbit.NewConsumer(w.Conn, pub, rabbit.DLQConsumerSpec(spec.Name), rabbit.ConsumerConfig{Prefetch: 4, Concurrency: 1},
 			w.dlqRecorder(spec.Name), log, w.Metrics)

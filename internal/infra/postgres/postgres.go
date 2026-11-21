@@ -14,6 +14,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ricartefelipe/recorvia/internal/infra/redact"
 )
 
 // ErrMissingTenant indica tentativa de abrir transação de tenant sem tenant.
@@ -36,9 +38,11 @@ type DB struct {
 
 // Open cria e verifica o pool.
 func Open(ctx context.Context, url string, opts Options) (*DB, error) {
+	// O pgx já mascara a senha ao interpretar a URL; o saneamento cobre
+	// também as mensagens de conexão e mudanças futuras da biblioteca.
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: configuração inválida: %w", err)
+		return nil, redact.Error(fmt.Errorf("postgres: configuração inválida: %w", err), url)
 	}
 	if opts.MaxConns > 0 {
 		cfg.MaxConns = opts.MaxConns
@@ -56,13 +60,13 @@ func Open(ctx context.Context, url string, opts Options) (*DB, error) {
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: criação do pool: %w", err)
+		return nil, redact.Error(fmt.Errorf("postgres: criação do pool: %w", err), url, cfg.ConnConfig.Password)
 	}
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := pool.Ping(pingCtx); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("postgres: conexão: %w", err)
+		return nil, redact.Error(fmt.Errorf("postgres: conexão: %w", err), url, cfg.ConnConfig.Password)
 	}
 	return &DB{pool: pool}, nil
 }

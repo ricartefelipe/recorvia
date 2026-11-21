@@ -3,13 +3,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 	_ "time/tzdata"
 
@@ -53,7 +50,7 @@ func main() {
 }
 
 func run(log *slog.Logger) error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := app.SignalContext(context.Background())
 	defer stop()
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
@@ -135,19 +132,8 @@ func run(log *slog.Logger) error {
 	metricsSrv := &http.Server{Addr: cfg.MetricsAddr, Handler: promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}),
 		ReadHeaderTimeout: 5 * time.Second}
 
-	errc := make(chan error, 2)
-	go func() { errc <- srv.ListenAndServe() }()
-	go func() { errc <- metricsSrv.ListenAndServe() }()
 	log.Info("api ouvindo", slog.String("addr", cfg.HTTPAddr), slog.String("metrics", cfg.MetricsAddr))
-	select {
-	case err := <-errc:
-		if !errors.Is(err, http.ErrServerClosed) {
-			return err
-		}
-	case <-ctx.Done():
-	}
-	log.Info("encerrando api")
-	sctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer cancel()
-	return errors.Join(srv.Shutdown(sctx), metricsSrv.Shutdown(sctx))
+	// Com SIGTERM, as requisições em andamento terminam dentro de
+	// RECORVIA_SHUTDOWN_TIMEOUT (app.Serve).
+	return app.Serve(ctx, log, "api", cfg.ShutdownTimeout, app.HTTPServer{Server: srv}, app.HTTPServer{Server: metricsSrv})
 }

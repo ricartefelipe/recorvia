@@ -19,6 +19,7 @@ Referência rápida de comandos, convenções e decisões. Detalhes em
 | `make sqlc` / `make sqlc-check` | gera/verifica `internal/dbgen` (sqlc v1.31.1; exige gcc para cgo) |
 | `make vulncheck` | govulncheck |
 | `make secrets-scan` | gitleaks |
+| `make pin-check` | falha com action sem SHA, dependência npm sem versão exata, imagem sem tag fixa ou go.mod sem toolchain (`tools/pincheck`) |
 | `make up` / `make down` / `make reset` | ambiente local com Docker Compose |
 | `make up-obs` | ambiente local com Prometheus, Grafana, Jaeger e OTel Collector |
 
@@ -60,8 +61,10 @@ ambiente funcional também com Docker Desktop e diretórios não compartilhados.
 - **Interfaces:** pequenas e declaradas no pacote consumidor.
 - **Testes:** tabelas de casos, fakes pequenos, `httptest`. Integração com a
   tag `integration`. Sem `time.Sleep` para sincronizar.
-- **Logs:** `slog` com contexto (`logging.WithAttrs`); chaves sensíveis são
-  redigidas automaticamente.
+- **Logs:** `slog` com contexto (`logging.WithAttrs`); chaves sensíveis e
+  senhas de URLs são redigidas automaticamente; trace_id e span_id vêm do
+  span do contexto. Erros de configuração e conexão que citam URLs ou
+  credenciais passam por `internal/infra/redact` na origem.
 - **Métricas:** sem rótulos com IDs de tenant, cliente ou fatura.
 - **Idioma:** interface, mensagens e documentação em português; identificadores
   de código em inglês.

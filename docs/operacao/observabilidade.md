@@ -380,6 +380,31 @@ HTTP v1, que o Jaeger 2.23 não expõe mais.
   exporta um span pelo Collector real e confere, no Jaeger, que nada disso chega ao
   armazenamento.
 
+## Correlação de logs
+
+Os logs são JSON (`slog`) e levam, quando existem no contexto (ADR-082):
+
+- `trace_id` e `span_id` do span ativo: do log se chega ao rastro no Jaeger;
+- na API, `request_id` em todos os logs da requisição; o log de acesso (`msg=requisição`) leva também
+  `tenant_id`, `user_id` ou `principal` identificados pela autenticação, além de método, rota, status
+  e duração. Rota inexistente e método não permitido respondem `application/problem+json`
+  (`route_not_found`, `method_not_allowed`, com `Allow`) e também têm `request_id`;
+- no worker, `consumer`, `message_id`, `tenant_id` e o `request_id` da requisição que originou o
+  evento (gravado na outbox e propagado nas mensagens); cada mensagem gera, em nível debug,
+  `mensagem processada` ou `falha no processamento da mensagem`, e a falha tem um único aviso, do
+  consumidor, com a decisão (retentativa agendada, DLQ ou devolução à fila) e os mesmos campos. A
+  auditoria gravada pelo consumidor tem o mesmo `request_id`;
+- nas tarefas agendadas, `job` com o nome da tarefa em todos os logs da execução; o executor de
+  conciliações registradas usa `job=payments.registered_reconciliations`.
+
+Senhas de URLs (Redis, RabbitMQ, PostgreSQL) e credenciais SMTP são removidas das mensagens de
+erro de configuração e conexão antes do registro, e o handler de log mascara senhas de URLs em
+qualquer campo.
+
+No encerramento (SIGTERM), o worker responde `/readyz` 503 (`worker=shutting_down`) enquanto drena,
+mantém `/livez` e `/metrics` no ar e só fecha o servidor depois da última mensagem em andamento; um
+segundo sinal força a saída imediata.
+
 ## Validação das configurações
 
 `make obs-check` (`deploy/observability/validate.sh`) constrói as imagens e executa as ferramentas
