@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ricartefelipe/recorvia/internal/customers"
+	"github.com/ricartefelipe/recorvia/internal/kernel/address"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/calendar"
 	"github.com/ricartefelipe/recorvia/internal/kernel/money"
@@ -140,10 +141,13 @@ type Invoice struct {
 }
 
 // Issuer identifica o emitente (a organização) como estava na emissão.
+// Address é o endereço da organização na emissão; nil quando não havia
+// endereço cadastrado ou na fatura emitida antes da ADR-084.
 type Issuer struct {
-	Name           string `json:"name"`
-	LegalName      string `json:"legal_name,omitempty"`
-	DocumentNumber string `json:"document_number,omitempty"`
+	Name           string           `json:"name"`
+	LegalName      string           `json:"legal_name,omitempty"`
+	DocumentNumber string           `json:"document_number,omitempty"`
+	Address        *address.Address `json:"address,omitempty"`
 }
 
 // NewDraft cria uma fatura em rascunho.

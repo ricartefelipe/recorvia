@@ -302,6 +302,23 @@ func TestApplyActions(t *testing.T) {
 			}},
 		{name: "refund acima do saldo", setup: []paysim.Action{{Name: "pay"}}, action: paysim.Action{Name: "refund", Amount: 10001}, wantErr: true, wantStatus: "paid"},
 		{name: "refund de cobrança pendente", action: paysim.Action{Name: "refund"}, wantErr: true, wantStatus: "pending"},
+		// O pagamento só confirmado (ainda não creditado) já é reembolsável,
+		// como no provedor real.
+		{name: "refund parcial de cobrança confirmada", setup: []paysim.Action{{Name: "confirm"}}, action: paysim.Action{Name: "refund", Amount: 3000},
+			wantStatus: "partially_refunded", wantEvents: []string{"charge.partially_refunded"}, check: func(t *testing.T, c paysim.ChargeView) {
+				if c.RefundedAmount != 3000 || len(c.Refunds) != 1 || c.Refunds[0].Amount != 3000 || c.PaidAmount != 10000 {
+					t.Fatalf("reembolso: %+v", c)
+				}
+			}},
+		{name: "refund integral de cobrança confirmada", setup: []paysim.Action{{Name: "confirm"}}, action: paysim.Action{Name: "refund"},
+			wantStatus: "refunded", wantEvents: []string{"charge.refunded"}, check: func(t *testing.T, c paysim.ChargeView) {
+				if c.RefundedAmount != 10000 || len(c.Refunds) != 1 {
+					t.Fatalf("reembolso: %+v", c)
+				}
+			}},
+		{name: "refund de cobrança confirmada acima do saldo", setup: []paysim.Action{{Name: "confirm"}}, action: paysim.Action{Name: "refund", Amount: 10001},
+			wantErr: true, wantStatus: "confirmed"},
+		{name: "refund de cobrança recusada", setup: []paysim.Action{{Name: "fail"}}, action: paysim.Action{Name: "refund"}, wantErr: true, wantStatus: "failed"},
 		{name: "chargeback aberto", setup: []paysim.Action{{Name: "pay"}}, action: paysim.Action{Name: "chargeback", Stage: "requested"},
 			wantStatus: "chargeback_requested", wantEvents: []string{"charge.chargeback_requested"}},
 		{name: "chargeback ganho", setup: []paysim.Action{{Name: "pay"}, {Name: "chargeback", Stage: "requested"}},
@@ -316,6 +333,12 @@ func TestApplyActions(t *testing.T) {
 		{name: "chargeback ganho sem disputa aberta", setup: []paysim.Action{{Name: "pay"}}, action: paysim.Action{Name: "chargeback", Stage: "won"},
 			wantErr: true, wantStatus: "paid"},
 		{name: "chargeback de cobrança pendente", action: paysim.Action{Name: "chargeback", Stage: "requested"}, wantErr: true, wantStatus: "pending"},
+		{name: "chargeback de cobrança confirmada", setup: []paysim.Action{{Name: "confirm"}}, action: paysim.Action{Name: "chargeback", Stage: "requested"},
+			wantStatus: "chargeback_requested", wantEvents: []string{"charge.chargeback_requested"}},
+		{name: "chargeback ganho de cobrança confirmada", setup: []paysim.Action{{Name: "confirm"}, {Name: "chargeback", Stage: "requested"}},
+			action: paysim.Action{Name: "chargeback", Stage: "won"}, wantStatus: "paid", wantEvents: []string{"charge.chargeback_won"}},
+		{name: "chargeback de cobrança reembolsada", setup: []paysim.Action{{Name: "pay"}, {Name: "refund"}},
+			action: paysim.Action{Name: "chargeback", Stage: "requested"}, wantErr: true, wantStatus: "refunded"},
 		{name: "chargeback com estágio inválido", setup: []paysim.Action{{Name: "pay"}}, action: paysim.Action{Name: "chargeback", Stage: "x"},
 			wantErr: true, wantStatus: "paid"},
 		{name: "ação desconhecida", action: paysim.Action{Name: "explode"}, wantErr: true, wantStatus: "pending"},
@@ -565,6 +588,29 @@ func TestCancel(t *testing.T) {
 	})
 }
 
+// O reembolso pedido pela API (o caminho do Recorvia) também aceita a
+// cobrança só confirmada, com a mesma idempotência pela referência do pedido.
+func TestRefundOfConfirmedChargeThroughAPI(t *testing.T) {
+	e := newEnv(t)
+	c := e.create("", "fatura-1")
+	e.apply(c.ID, paysim.Action{Name: "confirm"})
+	e.dispatch()
+	r, err := e.sim.Refund(merchantKey, c.ID, paysim.RefundInput{Amount: 3000, ExternalReference: "rf-confirmada"})
+	if err != nil || r.Amount != 3000 || r.Status != "succeeded" {
+		t.Fatalf("reembolso da cobrança confirmada: %+v, %v", r, err)
+	}
+	again, err := e.sim.Refund(merchantKey, c.ID, paysim.RefundInput{Amount: 3000, ExternalReference: "rf-confirmada"})
+	if err != nil || again != r {
+		t.Fatalf("repetição: %+v, %v", again, err)
+	}
+	if v := e.view(c.ID); v.Status != "partially_refunded" || v.RefundedAmount != 3000 || len(v.Refunds) != 1 {
+		t.Fatalf("cobrança depois do reembolso: %+v", v)
+	}
+	if got := eventTypes(e.dispatch()); !slices.Equal(got, []string{"charge.partially_refunded"}) {
+		t.Fatalf("eventos = %v", got)
+	}
+}
+
 func TestCreateCustomerIsIdempotentByExternalReference(t *testing.T) {
 	e := newEnv(t)
 	a, err := e.sim.CreateCustomer(merchantKey, paysim.Customer{Name: "Ana", ExternalReference: "cli-1"})
@@ -585,6 +631,18 @@ func TestCreateCustomerIsIdempotentByExternalReference(t *testing.T) {
 		if err != nil || c.ID != want {
 			t.Fatalf("cliente sem referência: %+v, %v; esperado %s", c, err, want)
 		}
+	}
+	// A idempotência vale dentro do comerciante: a mesma referência em outro
+	// comerciante é outro pagador, e cada um continua reaproveitando o seu.
+	other, err := e.sim.CreateCustomer("outro_comerciante", paysim.Customer{Name: "Ana de outro comerciante", ExternalReference: "cli-1"})
+	if err != nil || other.ID != "cus_000005" || other.Name != "Ana de outro comerciante" {
+		t.Fatalf("mesma referência em outro comerciante: %+v, %v", other, err)
+	}
+	if again, err := e.sim.CreateCustomer("outro_comerciante", paysim.Customer{Name: "Outra", ExternalReference: "cli-1"}); err != nil || again != other {
+		t.Fatalf("repetição no outro comerciante: %+v, %v; esperado %+v", again, err, other)
+	}
+	if again, err := e.sim.CreateCustomer(merchantKey, paysim.Customer{Name: "Ana", ExternalReference: "cli-1"}); err != nil || again != a {
+		t.Fatalf("repetição no comerciante original: %+v, %v; esperado %+v", again, err, a)
 	}
 }
 

@@ -437,7 +437,8 @@ th,td{border-bottom:1px solid #d0d7de;padding:.4rem;text-align:left}td.num,th.nu
 <h1>Fatura {{.Number}}</h1>
 <p class="notice" role="note"><strong>{{.FiscalNotice}}</strong></p>
 <p><strong>Emitente:</strong> {{.Issuer.Name}}{{if .Issuer.LegalName}} ({{.Issuer.LegalName}}){{end}}{{if .Issuer.Document}}<br>
-<strong>CNPJ do emitente:</strong> {{.Issuer.Document}}{{end}}</p>
+<strong>CNPJ do emitente:</strong> {{.Issuer.Document}}{{end}}{{if .Issuer.Address}}<br>
+<strong>Endereço do emitente:</strong> {{.Issuer.Address}}{{end}}</p>
 <p class="muted">Documento comercial emitido pelo Recorvia em nome de {{.Issuer.Name}}.</p>
 <p><strong>Cliente:</strong> {{.Customer.Name}}{{if .Customer.LegalName}} ({{.Customer.LegalName}}){{end}}<br>
 <strong>{{.CustomerDocumentLabel}}:</strong> {{.CustomerDocument}}<br>
@@ -494,10 +495,13 @@ type docTotal struct {
 }
 
 // DocumentIssuer identifica o emitente (a organização) no documento.
+// Address é o endereço gravado na emissão, já formatado em uma linha; vazio
+// quando a fatura não o tem.
 type DocumentIssuer struct {
 	Name      string
 	LegalName string
 	Document  string
+	Address   string
 }
 
 // invoiceDocumentData reúne o que o documento comercial exibe. Issuer são os
@@ -568,7 +572,8 @@ func formatDocument(kind, doc string) string {
 	return doc
 }
 
-// formatAddress monta o endereço de cobrança em uma linha.
+// formatAddress monta o endereço (de cobrança do cliente ou do emitente) em
+// uma linha.
 func formatAddress(a *customers.Address) string {
 	if a == nil {
 		return ""
@@ -641,12 +646,17 @@ func documentTotals(inv billing.Invoice, customerFacing bool) []docTotal {
 }
 
 // documentIssuer devolve o emitente gravado na emissão; faturas emitidas
-// antes da ADR-079 não o têm e usam os dados atuais da organização.
+// antes da ADR-079 não o têm e usam os dados atuais da organização. O
+// endereço só aparece quando gravado na emissão (ADR-084): a fatura emitida
+// antes do endereço, ou sem endereço cadastrado, sai sem ele, e o endereço
+// atual da organização nunca substitui o da emissão.
 func documentIssuer(inv billing.Invoice, current DocumentIssuer) DocumentIssuer {
 	if inv.Issuer == nil {
+		current.Address = ""
 		return current
 	}
-	return DocumentIssuer{Name: inv.Issuer.Name, LegalName: inv.Issuer.LegalName, Document: inv.Issuer.DocumentNumber}
+	return DocumentIssuer{Name: inv.Issuer.Name, LegalName: inv.Issuer.LegalName, Document: inv.Issuer.DocumentNumber,
+		Address: formatAddress(inv.Issuer.Address)}
 }
 
 // documentCancellation descreve o cancelamento da fatura no documento; o

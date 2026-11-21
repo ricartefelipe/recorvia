@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ricartefelipe/recorvia/internal/audit"
+	"github.com/ricartefelipe/recorvia/internal/kernel/address"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
 	"github.com/ricartefelipe/recorvia/internal/kernel/ids"
@@ -18,9 +19,13 @@ import (
 
 // Tx são as operações dentro da transação de um tenant.
 type Tx interface {
+	// Tenant devolve a organização com o endereço (nil sem cadastro).
 	Tenant(ctx context.Context) (Tenant, error)
 	InsertTenant(ctx context.Context, t Tenant) error
+	// UpdateTenant grava os dados cadastrais, sem o endereço.
 	UpdateTenant(ctx context.Context, t Tenant) error
+	// UpsertTenantAddress grava o endereço da organização.
+	UpsertTenantAddress(ctx context.Context, a address.Address, at time.Time) error
 	InitTenantResources(ctx context.Context) error
 
 	Membership(ctx context.Context, userID uuid.UUID, forUpdate bool) (Membership, error)
@@ -150,6 +155,10 @@ func (s *Service) Organization(ctx context.Context, tenantID uuid.UUID) (Tenant,
 }
 
 // UpdateOrganization altera os dados com controle de concorrência otimista.
+// O endereço informado substitui o atual na mesma transação; quando muda, a
+// auditoria registra organization.address_updated com os nomes dos campos
+// alterados e se o endereço foi cadastrado agora, como no endereço de
+// cobrança do cliente.
 func (s *Service) UpdateOrganization(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, in TenantInput, expectedVersion int) (Tenant, error) {
 	var t Tenant
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
@@ -160,6 +169,7 @@ func (s *Service) UpdateOrganization(ctx context.Context, tenantID uuid.UUID, ac
 		if expectedVersion != t.Version {
 			return apperr.PreconditionFailed("version_mismatch", "A organização foi alterada por outra pessoa. Recarregue e tente novamente.")
 		}
+		prev := t.Address
 		if err := t.ApplyUpdate(in); err != nil {
 			return err
 		}
@@ -167,7 +177,22 @@ func (s *Service) UpdateOrganization(ctx context.Context, tenantID uuid.UUID, ac
 			return err
 		}
 		t.Version++
-		return tx.Audit(ctx, audit.New(tenantID, s.clock.Now(), actor, "organization.updated", "organization", tenantID.String(), nil))
+		now := s.clock.Now()
+		if err := tx.Audit(ctx, audit.New(tenantID, now, actor, "organization.updated", "organization", tenantID.String(), nil)); err != nil {
+			return err
+		}
+		if t.Address == nil {
+			return nil
+		}
+		changed := t.Address.ChangedFields(prev)
+		if len(changed) == 0 {
+			return nil
+		}
+		if err := tx.UpsertTenantAddress(ctx, *t.Address, now); err != nil {
+			return err
+		}
+		return tx.Audit(ctx, audit.New(tenantID, now, actor, "organization.address_updated", "organization", tenantID.String(),
+			map[string]any{"fields": changed, "created": prev == nil}))
 	})
 	return t, err
 }

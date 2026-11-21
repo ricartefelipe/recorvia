@@ -22,6 +22,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -344,7 +345,10 @@ func normalizeMethod(m string) string {
 // observe registra log de acesso e métricas por padrão de rota (nunca pela
 // URL concreta, que contém identificadores) e pelo método normalizado. O log
 // de acesso leva a correlação completa da requisição: request_id, trace_id e
-// span_id e, quando identificados, tenant_id, user_id e principal.
+// span_id e, quando identificados, tenant_id, user_id e principal. O tenant
+// pedido no header X-Recorvia-Tenant vai como requested_tenant_id, inclusive
+// na requisição recusada antes da validação do tenant (401, ou 403 de
+// permissão): ele não foi validado, por isso não ocupa a chave tenant_id.
 func (a *API) observe(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -352,6 +356,9 @@ func (a *API) observe(next http.Handler) http.Handler {
 		// O coletor recebe o tenant, o usuário e o principal identificados
 		// pelas etapas internas, que o log de acesso inclui.
 		ctx := logging.Collect(r.Context())
+		if requested, ok := requestedTenant(r); ok {
+			ctx = logging.WithAttrs(ctx, slog.String("requested_tenant_id", requested))
+		}
 		next.ServeHTTP(rec, r.WithContext(ctx))
 		route := "unmatched"
 		if rc := chi.RouteContext(r.Context()); rc != nil && rc.RoutePattern() != "" {
@@ -380,6 +387,21 @@ func (a *API) observe(next http.Handler) http.Handler {
 		a.log.InfoContext(logging.Collected(ctx), "requisição", slog.String("method", method), slog.String("route", route),
 			slog.Int("status", rec.status), slog.Duration("duration", d))
 	})
+}
+
+// requestedTenant devolve o tenant pedido no header X-Recorvia-Tenant, na
+// forma canônica, somente quando o valor é um identificador válido: o header
+// vem do cliente e não é repetido no log quando malformado.
+func requestedTenant(r *http.Request) (string, bool) {
+	h := r.Header.Get("X-Recorvia-Tenant")
+	if h == "" || len(h) > 64 {
+		return "", false
+	}
+	id, err := uuid.Parse(h)
+	if err != nil {
+		return "", false
+	}
+	return id.String(), true
 }
 
 func (a *API) securityHeaders(next http.Handler) http.Handler {

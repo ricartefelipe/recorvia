@@ -59,7 +59,9 @@ type Charge struct {
 
 // Customer é um pagador simulado.
 type Customer struct {
-	ID                string `json:"id"`
+	ID string `json:"id"`
+	// MerchantKey é o comerciante dono do pagador (não exposto na API).
+	MerchantKey       string `json:"-"`
 	Name              string `json:"name"`
 	Document          string `json:"document"`
 	Email             string `json:"email"`
@@ -120,8 +122,10 @@ type snapshot struct {
 	Events     map[string]*Event    `json:"events"`
 	Deliveries []*Delivery          `json:"deliveries"`
 	// Campos internos persistidos separadamente (não expostos na API).
-	ChargeMerchant map[string]string   `json:"charge_merchant"`
-	ChargeFlags    map[string][]string `json:"charge_flags"`
+	ChargeMerchant map[string]string `json:"charge_merchant"`
+	// CustomerMerchant liga cada pagador ao comerciante que o criou.
+	CustomerMerchant map[string]string   `json:"customer_merchant"`
+	ChargeFlags      map[string][]string `json:"charge_flags"`
 	// ChargeHeld guarda os eventos retidos do cenário out_of_order, ainda
 	// não entregues.
 	ChargeHeld map[string][]string `json:"charge_held_events"`
@@ -146,7 +150,7 @@ var ErrNotFound = errors.New("paysim: não encontrado")
 func Load(path string) (*State, error) {
 	st := &State{path: path, s: snapshot{Seq: map[string]int{}, Merchants: map[string]*Merchant{}, Customers: map[string]*Customer{},
 		Charges: map[string]*Charge{}, Refunds: map[string]*Refund{}, Events: map[string]*Event{},
-		ChargeMerchant: map[string]string{}, ChargeFlags: map[string][]string{}, ChargeHeld: map[string][]string{},
+		ChargeMerchant: map[string]string{}, CustomerMerchant: map[string]string{}, ChargeFlags: map[string][]string{}, ChargeHeld: map[string][]string{},
 		EventCharge: map[string]string{}, EventMerchant: map[string]string{}, EventSeq: map[string]int64{}}}
 	if path == "" {
 		return st, nil
@@ -162,7 +166,7 @@ func Load(path string) (*State, error) {
 		return nil, fmt.Errorf("paysim: estado ilegível: %w", err)
 	}
 	// Estados gravados antes destes campos voltam sem eles.
-	for _, m := range []*map[string]string{&st.s.ChargeMerchant, &st.s.EventCharge, &st.s.EventMerchant} {
+	for _, m := range []*map[string]string{&st.s.ChargeMerchant, &st.s.CustomerMerchant, &st.s.EventCharge, &st.s.EventMerchant} {
 		if *m == nil {
 			*m = map[string]string{}
 		}
@@ -183,6 +187,11 @@ func Load(path string) (*State, error) {
 			seq, _ = strconv.ParseInt(strings.TrimPrefix(id, "evt_"), 10, 64)
 		}
 		e.Seq = seq
+	}
+	// Pagadores gravados antes do vínculo com o comerciante ficam sem ele e
+	// não são reaproveitados por nenhum comerciante.
+	for id, c := range st.s.Customers {
+		c.MerchantKey = st.s.CustomerMerchant[id]
 	}
 	for id, c := range st.s.Charges {
 		c.MerchantKey = st.s.ChargeMerchant[id]
@@ -220,6 +229,9 @@ func (st *State) persist() error {
 		} else {
 			delete(st.s.ChargeHeld, id)
 		}
+	}
+	for id, c := range st.s.Customers {
+		st.s.CustomerMerchant[id] = c.MerchantKey
 	}
 	for id, e := range st.s.Events {
 		st.s.EventCharge[id], st.s.EventMerchant[id], st.s.EventSeq[id] = e.ChargeID, e.Merchant, e.Seq

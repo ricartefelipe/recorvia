@@ -301,7 +301,9 @@ func TestCompleteLoginStampsCurrentGeneration(t *testing.T) {
 	if sess.Generation != 0 {
 		t.Fatalf("geração inicial: %d", sess.Generation)
 	}
-	if err := e.svc.RevokeAll(context.Background(), user.ID); err != nil {
+	// Revogação em massa no armazenamento ("encerrar todas", membro removido
+	// ou usuário desativado): a geração do usuário avança.
+	if err := e.sessions.DeleteAllForUser(context.Background(), user.ID); err != nil {
 		t.Fatal(err)
 	}
 	next, _ := e.login(t)
@@ -832,25 +834,6 @@ func TestAuthenticateDisabledUserRevokesAllSessions(t *testing.T) {
 	assertKind(t, err, apperr.KindUnauthenticated, "session_invalid")
 	if len(e.sessions.sessions) != 0 || !slices.Contains(e.sessions.revoked, sess.UserID) {
 		t.Fatalf("todas as sessões do usuário desativado devem ser encerradas: %v", e.sessions.sessions)
-	}
-}
-
-func TestRevokeAll(t *testing.T) {
-	e := newIdentEnv()
-	sess := e.seedSession(t)
-	other := Session{ID: "sessao-2", UserID: sess.UserID}
-	stranger := Session{ID: "sessao-3", UserID: uuid.New()}
-	e.sessions.sessions[other.ID], e.sessions.sessions[stranger.ID] = other, stranger
-
-	if err := e.svc.RevokeAll(context.Background(), sess.UserID); err != nil {
-		t.Fatal(err)
-	}
-	if len(e.sessions.sessions) != 1 || e.sessions.sessions["sessao-3"].ID == "" {
-		t.Fatalf("somente as sessões do usuário devem ser removidas: %v", e.sessions.sessions)
-	}
-	e.sessions.fail["DeleteAllForUser"] = errBoom
-	if err := e.svc.RevokeAll(context.Background(), sess.UserID); !errors.Is(err, errBoom) {
-		t.Fatalf("esperado erro propagado, obtido %v", err)
 	}
 }
 

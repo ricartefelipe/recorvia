@@ -13,6 +13,17 @@ UPDATE tenants
        invoice_prefix = @invoice_prefix, payment_terms_days = @payment_terms_days, version = version + 1
  WHERE id = @id AND version = @version;
 
+-- name: GetTenantAddress :one
+SELECT * FROM tenant_addresses WHERE tenant_id = @tenant_id;
+
+-- name: UpsertTenantAddress :exec
+INSERT INTO tenant_addresses (tenant_id, street, number, complement, district, city, state, postal_code, country, updated_at)
+VALUES (@tenant_id, @street, @number, @complement, @district, @city, @state, @postal_code, @country, @updated_at)
+ON CONFLICT (tenant_id) DO UPDATE
+   SET street = EXCLUDED.street, number = EXCLUDED.number, complement = EXCLUDED.complement, district = EXCLUDED.district,
+       city = EXCLUDED.city, state = EXCLUDED.state, postal_code = EXCLUDED.postal_code, country = EXCLUDED.country,
+       updated_at = EXCLUDED.updated_at;
+
 -- name: TenantSlugAvailable :one
 SELECT app_tenant_slug_available(@slug)::boolean AS available;
 

@@ -60,8 +60,12 @@ func (b base) tenantSettings(ctx context.Context) (billing.TenantSettings, error
 	if err != nil {
 		return billing.TenantSettings{}, err
 	}
+	addr, err := b.tenantAddress(ctx)
+	if err != nil {
+		return billing.TenantSettings{}, err
+	}
 	return billing.TenantSettings{Location: loc, InvoicePrefix: t.InvoicePrefix, PaymentTermsDays: int(t.PaymentTermsDays),
-		Issuer: billing.Issuer{Name: t.Name, LegalName: deref(t.LegalName), DocumentNumber: deref(t.DocumentNumber)}}, nil
+		Issuer: billing.Issuer{Name: t.Name, LegalName: deref(t.LegalName), DocumentNumber: deref(t.DocumentNumber), Address: addr}}, nil
 }
 
 func (tx billingTx) TenantSettings(ctx context.Context) (billing.TenantSettings, error) {

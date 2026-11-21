@@ -387,7 +387,9 @@ Os logs são JSON (`slog`) e levam, quando existem no contexto (ADR-082):
 - `trace_id` e `span_id` do span ativo: do log se chega ao rastro no Jaeger;
 - na API, `request_id` em todos os logs da requisição; o log de acesso (`msg=requisição`) leva também
   `tenant_id`, `user_id` ou `principal` identificados pela autenticação, além de método, rota, status
-  e duração. Rota inexistente e método não permitido respondem `application/problem+json`
+  e duração. O tenant pedido no header `X-Recorvia-Tenant` vai como `requested_tenant_id`, inclusive na
+  requisição recusada antes da validação do tenant (401, ou 403 de permissão), que não tem `tenant_id`:
+  o valor não foi validado (ADR-084). Rota inexistente e método não permitido respondem `application/problem+json`
   (`route_not_found`, `method_not_allowed`, com `Allow`) e também têm `request_id`;
 - no worker, `consumer`, `message_id`, `tenant_id` e o `request_id` da requisição que originou o
   evento (gravado na outbox e propagado nas mensagens); cada mensagem gera, em nível debug,

@@ -7,6 +7,8 @@ export const USERS = {
   ana: 'ana.owner@acme.test',
   carla: 'carla.owner@beta.test',
   davi: 'davi.auditor@acme.test',
+  /** Sem organização no seed: aceita o convite do roteiro 09 (na Beta). */
+  gabi: 'gabi.convidada@exemplo.test',
 } as const;
 
 /** Nomes das organizações criadas pelo seed de demonstração. */

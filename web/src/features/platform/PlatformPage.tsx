@@ -158,7 +158,14 @@ function PlansSection({ currentCode }: { currentCode: string }) {
           {data.map((p) => {
             const current = p.code === currentCode;
             return (
-              <Card key={p.code} withBorder radius="md" style={current ? { borderColor: 'var(--mantine-color-blue-5)' } : undefined}>
+              <Card
+                key={p.code}
+                component="section"
+                aria-label={`Plano ${p.name}`}
+                withBorder
+                radius="md"
+                style={current ? { borderColor: 'var(--mantine-color-blue-5)' } : undefined}
+              >
                 <Stack gap="xs" h="100%">
                   <Group justify="space-between">
                     <Text fw={700}>{p.name}</Text>
