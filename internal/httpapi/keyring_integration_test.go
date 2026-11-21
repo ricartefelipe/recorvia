@@ -53,8 +53,8 @@ func TestProviderCredentialsUnreadableOverHTTP(t *testing.T) {
 		t.Fatalf("a reconfiguração deveria manter a conta com a chave nova: %v", configured)
 	}
 
-	run, _ := owner.expect(http.StatusOK, http.MethodPost, "/api/v1/reconciliation/runs", nil,
-		"Idempotency-Key", "chave-nova-"+uuid.NewString())
+	// A conciliação é pedida pela API e executada pelo worker (ADR-071).
+	run := r.reconcile(t, owner, tn.ID, "chave-nova-"+uuid.NewString())
 	if run["status"] != "completed" {
 		t.Fatalf("a conciliação deveria voltar a funcionar depois da reconfiguração: %v", run)
 	}
