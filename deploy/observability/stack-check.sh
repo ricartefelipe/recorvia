@@ -110,6 +110,8 @@ for q in \
   'recorvia_notifications_dispatched_total{outcome="sent"}' \
   'recorvia_webhook_deliveries_total{outcome="succeeded"}' \
   'recorvia_collection_actions_total{action="reminder_scheduled"}' \
+  'recorvia_retention_purged_total{kind="inbox_messages"}' \
+  'recorvia_job_interval_seconds{task="retention.purge"}' \
   'rabbitmq_detailed_queue_consumers{queue="recorvia.payments.invoice_issued"} > 0' \
   'rabbitmq_detailed_queue_messages{queue=~"recorvia\\..+\\.dlq"}'; do
   eventually "Prometheus: série $q" has_series "$q"

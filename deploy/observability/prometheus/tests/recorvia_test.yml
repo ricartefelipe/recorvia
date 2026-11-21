@@ -342,6 +342,90 @@ tests:
         alertname: RecorviaScheduledTaskFailing
         exp_alerts: []
 
+  # Expurgo por retenção parado: o último sucesso fica para trás por mais de
+  # três intervalos (a tarefa é horária). O alerta genérico de tarefas não
+  # dispara para a mesma tarefa.
+  - interval: 5m
+    input_series:
+      - series: 'recorvia_job_last_success_timestamp_seconds{service="worker", task="retention.purge", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 3600x80'
+      - series: 'recorvia_job_interval_seconds{service="worker", task="retention.purge", instance="worker:9091", job="recorvia-worker"}'
+        values: '3600x92'
+      - series: 'process_start_time_seconds{instance="worker:9091", job="recorvia-worker"}'
+        values: '0x92'
+    alert_rule_test:
+      - eval_time: 3h50m
+        alertname: RecorviaRetentionPurgeStale
+        exp_alerts: []
+      - eval_time: 4h10m
+        alertname: RecorviaRetentionPurgeStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: retencao
+            exp_annotations:
+              summary: "Expurgo por retenção sem sucesso há 3h 10m 0s"
+              description: "A tarefa retention.purge (intervalo de 1 hora) não conclui com sucesso há mais de 3 horas, ou não concluiu nenhuma vez desde a partida do worker: dados vencidos deixam de ser removidos."
+              runbook: docs/operacao/runbooks/retencao.md#expurgo-parado-ou-falhando
+      - eval_time: 4h10m
+        alertname: RecorviaScheduledTaskStale
+        exp_alerts: []
+
+  # Expurgo falhando desde a partida do worker: nenhum sucesso, a série do
+  # último sucesso não existe e o alerta usa a idade do processo.
+  - interval: 5m
+    input_series:
+      - series: 'process_start_time_seconds{instance="worker:9091", job="recorvia-worker"}'
+        values: '0x50'
+      - series: 'recorvia_job_interval_seconds{service="worker", task="retention.purge", instance="worker:9091", job="recorvia-worker"}'
+        values: '3600x50'
+      - series: 'recorvia_job_runs_total{service="worker", task="retention.purge", outcome="failure", instance="worker:9091", job="recorvia-worker"}'
+        values: '1x11 2x11 3x11 4x15'
+      - series: 'recorvia_retention_purge_failures_total{service="worker", kind="notifications", instance="worker:9091", job="recorvia-worker"}'
+        values: '1x11 2x11 3x11 4x15'
+    alert_rule_test:
+      - eval_time: 2h55m
+        alertname: RecorviaRetentionPurgeStale
+        exp_alerts: []
+      - eval_time: 3h5m
+        alertname: RecorviaRetentionPurgeStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: retencao
+            exp_annotations:
+              summary: "Expurgo por retenção sem sucesso há 3h 5m 0s"
+              description: "A tarefa retention.purge (intervalo de 1 hora) não conclui com sucesso há mais de 3 horas, ou não concluiu nenhuma vez desde a partida do worker: dados vencidos deixam de ser removidos."
+              runbook: docs/operacao/runbooks/retencao.md#expurgo-parado-ou-falhando
+      - eval_time: 3h5m
+        alertname: RecorviaScheduledTaskStale
+        exp_alerts: []
+
+  # Expurgo sem vazão: as execuções horárias param com registros vencidos
+  # restantes do mesmo tipo; execuções incompletas esporádicas (acúmulo
+  # inicial que termina) não disparam.
+  - interval: 1h
+    input_series:
+      - series: 'recorvia_retention_purge_incomplete_total{service="worker", kind="usage_events", instance="worker:9091", job="recorvia-worker"}'
+        values: '0+1x40'
+      - series: 'recorvia_retention_purge_incomplete_total{service="worker", kind="inbox_messages", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 1 2 3 4 5 5x35'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: RecorviaRetentionPurgeBacklog
+        exp_alerts: []
+      - eval_time: 30h
+        alertname: RecorviaRetentionPurgeBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: retencao
+              kind: usage_events
+            exp_annotations:
+              summary: "Expurgo de usage_events sem vazão nas últimas 24 horas"
+              description: "As execuções do expurgo param com registros vencidos restantes: o volume vencido cresce mais rápido do que os lotes removem."
+              runbook: docs/operacao/runbooks/retencao.md#expurgo-sem-vazao
+
   # Pool de conexões saturado e servidor perto do limite.
   - interval: 1m
     input_series:
