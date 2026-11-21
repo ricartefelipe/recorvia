@@ -2,10 +2,12 @@ import { screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
 import type { Dashboard } from '../../api/types';
+import { currentMonthInTimeZone } from '../../lib/dates';
+import type { Permission } from '../../session/permissions';
 import { makeSession } from '../../test/fixtures';
 import { renderPage } from '../../test/render';
 import { server } from '../../test/server';
-import { BASIS_LABELS, DashboardPage, INDICATOR_LABELS, type IndicatorKey } from './DashboardPage';
+import { BASIS_LABELS, DashboardPage, INDICATOR_LABELS, INDICATOR_LISTS, type IndicatorKey } from './DashboardPage';
 
 const keys = Object.keys(INDICATOR_LABELS) as IndicatorKey[];
 
@@ -162,6 +164,63 @@ describe('painel financeiro', () => {
     expect(within(unknown).getByRole('link', { name: '1' })).toHaveAttribute('href', '/operacoes-pagamento?status=unknown');
     const discrepancies = screen.getByRole('region', { name: 'Divergências abertas' });
     expect(within(discrepancies).getByRole('link', { name: '4' })).toHaveAttribute('href', '/conciliacao?aba=divergencias');
+  });
+
+  it('cada card com lista correspondente leva à lista com o filtro do número', async () => {
+    serve(makeDashboard());
+    renderPage(<DashboardPage />, { route: '/?mes=2025-01' });
+    await screen.findByRole('region', { name: 'MRR' });
+    const expected: Partial<Record<IndicatorKey, string>> = {
+      open_receivables: '/faturas?open_balance=true',
+      overdue_receivables: '/faturas?overdue=true',
+      active_subscriptions: '/assinaturas?in_force=true',
+      open_discrepancies: '/conciliacao?aba=divergencias',
+      unknown_operations: '/operacoes-pagamento?status=unknown',
+    };
+    for (const [label, key] of CARDS) {
+      const link = within(screen.getByRole('region', { name: label })).queryByRole('link');
+      if (expected[key]) {
+        expect(link, label).toHaveAttribute('href', expected[key]);
+      } else {
+        // Somas do mês e disputas com valor a recuperar não têm lista filtrada correspondente.
+        expect(link, label).toBeNull();
+      }
+    }
+  });
+
+  it('sem a permissão de leitura da lista, o card não tem link', async () => {
+    const permissions: Permission[] = ['dashboard.read', 'invoices.read'];
+    serve(makeDashboard());
+    renderPage(<DashboardPage />, { route: '/?mes=2025-01', session: makeSession({ permissions }) });
+    await screen.findByRole('region', { name: 'MRR' });
+    for (const [label, key] of CARDS) {
+      const list = INDICATOR_LISTS[key];
+      const link = within(screen.getByRole('region', { name: label })).queryByRole('link');
+      expect(Boolean(link), label).toBe(!!list && permissions.includes(list.permission));
+    }
+    // O número continua visível, só sem o link.
+    expect(within(screen.getByRole('region', { name: 'Assinaturas ativas' })).getByText('42')).toBeInTheDocument();
+    expect(within(screen.getByRole('region', { name: 'Divergências abertas' })).getByText('4')).toBeInTheDocument();
+  });
+
+  it('num mês encerrado, avisa nos cards de posição que a lista mostra a posição de hoje', async () => {
+    serve(makeDashboard());
+    renderPage(<DashboardPage />, { route: '/?mes=2025-01' });
+    await screen.findByRole('region', { name: 'MRR' });
+    for (const [label, key] of CARDS) {
+      const note = within(screen.getByRole('region', { name: label })).queryByText('A lista mostra a posição de hoje.');
+      const linkedPosition = !!INDICATOR_LISTS[key] && bases[key] !== 'month';
+      expect(Boolean(note), label).toBe(linkedPosition);
+    }
+  });
+
+  it('no mês corrente, a lista e o número têm a mesma posição e não há aviso', async () => {
+    const month = currentMonthInTimeZone('America/Sao_Paulo');
+    serve(makeDashboard({ month }));
+    renderPage(<DashboardPage />);
+    await screen.findByRole('region', { name: 'MRR' });
+    expect(screen.queryByText('A lista mostra a posição de hoje.')).not.toBeInTheDocument();
+    expect(within(screen.getByRole('region', { name: 'Recebíveis em aberto' })).getByRole('link')).toHaveAttribute('href', '/faturas?open_balance=true');
   });
 
   it('sem permissão, não consulta o painel', async () => {

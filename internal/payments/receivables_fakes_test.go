@@ -191,12 +191,13 @@ func (s *payStore) OverpaymentCreditBase(_ context.Context, chargeID uuid.UUID) 
 		over = brl(0)
 	}
 	// Como na consulta real: o excedente é o lançamento payment.overpayment
-	// dos pagamentos da cobrança (s.overpaid acrescenta um valor fixo).
+	// dos pagamentos da cobrança (s.overpaid acrescenta um valor fixo), em todo
+	// o histórico do ledger.
 	for _, p := range s.payments {
 		if p.ChargeID == nil || *p.ChargeID != chargeID {
 			continue
 		}
-		for _, t := range s.posted {
+		for _, t := range s.ledger {
 			if t.IdempotencyKey != "payment.overpayment:"+p.ID.String() {
 				continue
 			}
@@ -342,12 +343,21 @@ func (s *payStore) ReverseLedger(_ context.Context, key, description string, at 
 	if err := s.fail("ReverseLedger"); err != nil {
 		return err
 	}
-	for _, t := range s.posted {
-		if t.IdempotencyKey == key {
-			s.reversals = append(s.reversals, key)
-			s.posted = append(s.posted, t.Reversal(uuid.New(), at, description))
+	// Como o banco: o lançamento original é procurado em todo o histórico
+	// (s.ledger, não só nos lançamentos observados em s.posted), e o estorno é
+	// gravado nos dois, com a chave de idempotência descartando a repetição.
+	for _, t := range s.ledger {
+		if t.IdempotencyKey != key {
+			continue
+		}
+		s.reversals = append(s.reversals, key)
+		r := t.Reversal(uuid.New(), at, description)
+		if slices.ContainsFunc(s.ledger, func(p ledger.Transaction) bool { return p.IdempotencyKey == r.IdempotencyKey }) {
 			return nil
 		}
+		s.posted = append(s.posted, r)
+		s.ledger = append(s.ledger, r)
+		return nil
 	}
 	return nil
 }

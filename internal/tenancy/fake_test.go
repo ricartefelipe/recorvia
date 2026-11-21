@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ricartefelipe/recorvia/internal/audit"
+	"github.com/ricartefelipe/recorvia/internal/kernel/address"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/outbox"
 	"github.com/ricartefelipe/recorvia/internal/platformbilling"
@@ -160,8 +161,21 @@ func (t *fakeTx) UpdateTenant(_ context.Context, tn Tenant) error {
 	if t.d.tenant == nil || t.d.tenant.Version != tn.Version {
 		return apperr.PreconditionFailed("version_mismatch", "A organização foi alterada por outra pessoa.")
 	}
+	// Como no banco, o endereço fica em outra tabela e não é gravado aqui.
 	tn.Version++
+	tn.Address = t.d.tenant.Address
 	t.d.tenant = &tn
+	return nil
+}
+
+func (t *fakeTx) UpsertTenantAddress(_ context.Context, a address.Address, _ time.Time) error {
+	if err := t.store.hit("UpsertTenantAddress"); err != nil {
+		return err
+	}
+	if t.d.tenant == nil {
+		return apperr.NotFound("organization_not_found", "Organização não encontrada.")
+	}
+	t.d.tenant.Address = &a
 	return nil
 }
 

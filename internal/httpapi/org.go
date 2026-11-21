@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/ricartefelipe/recorvia/internal/kernel/address"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/calendar"
 	"github.com/ricartefelipe/recorvia/internal/platformbilling"
@@ -100,14 +101,16 @@ type organizationDTO struct {
 	Currency         string    `json:"currency"`
 	InvoicePrefix    string    `json:"invoice_prefix"`
 	PaymentTermsDays int       `json:"payment_terms_days"`
-	Status           string    `json:"status"`
-	CreatedAt        time.Time `json:"created_at"`
-	Version          int       `json:"version"`
+	// Address é nulo enquanto o endereço não for cadastrado.
+	Address   *address.Address `json:"address"`
+	Status    string           `json:"status"`
+	CreatedAt time.Time        `json:"created_at"`
+	Version   int              `json:"version"`
 }
 
 func orgDTO(t tenancy.Tenant) organizationDTO {
 	return organizationDTO{ID: t.ID, Slug: t.Slug, Name: t.Name, LegalName: t.LegalName, DocumentNumber: t.DocumentNumber, Timezone: t.Timezone,
-		Currency: t.Currency, InvoicePrefix: t.InvoicePrefix, PaymentTermsDays: t.PaymentTermsDays, Status: string(t.Status),
+		Currency: t.Currency, InvoicePrefix: t.InvoicePrefix, PaymentTermsDays: t.PaymentTermsDays, Address: t.Address, Status: string(t.Status),
 		CreatedAt: t.CreatedAt, Version: t.Version}
 }
 
@@ -133,6 +136,8 @@ func (a *API) updateOrganization(w http.ResponseWriter, r *http.Request) {
 		Timezone         string `json:"timezone"`
 		InvoicePrefix    string `json:"invoice_prefix"`
 		PaymentTermsDays *int   `json:"payment_terms_days"`
+		// Address substitui o endereço da organização; ausente, mantém o atual.
+		Address *address.Address `json:"address"`
 	}
 	if err := decodeJSON(r, &in); err != nil {
 		a.writeError(w, r, err)
@@ -140,7 +145,8 @@ func (a *API) updateOrganization(w http.ResponseWriter, r *http.Request) {
 	}
 	p := mustPrincipal(r)
 	t, err := a.Tenancy.UpdateOrganization(r.Context(), p.TenantID, p.Actor(), tenancy.TenantInput{Name: in.Name, LegalName: in.LegalName,
-		DocumentNumber: in.DocumentNumber, Timezone: in.Timezone, InvoicePrefix: in.InvoicePrefix, PaymentTermsDays: in.PaymentTermsDays}, version)
+		DocumentNumber: in.DocumentNumber, Timezone: in.Timezone, InvoicePrefix: in.InvoicePrefix, PaymentTermsDays: in.PaymentTermsDays,
+		Address: in.Address}, version)
 	if err != nil {
 		a.writeError(w, r, err)
 		return

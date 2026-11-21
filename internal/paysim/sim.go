@@ -155,19 +155,21 @@ func (s *Sim) View(key, id string) (ChargeView, error) {
 	return s.viewLocked(c), nil
 }
 
-// CreateCustomer registra um pagador (idempotente por referência externa).
+// CreateCustomer registra um pagador do comerciante (idempotente pela
+// referência externa dentro do mesmo comerciante: a mesma referência em outro
+// comerciante é outro pagador).
 func (s *Sim) CreateCustomer(key string, c Customer) (Customer, error) {
 	s.st.mu.Lock()
 	defer s.st.mu.Unlock()
 	s.st.merchant(key)
 	if c.ExternalReference != "" {
 		for _, existing := range s.st.s.Customers {
-			if existing.ExternalReference == c.ExternalReference {
+			if existing.MerchantKey == key && existing.ExternalReference == c.ExternalReference {
 				return *existing, nil
 			}
 		}
 	}
-	c.ID = s.st.nextID("cus")
+	c.ID, c.MerchantKey = s.st.nextID("cus"), key
 	s.st.s.Customers[c.ID] = &c
 	return c, s.st.persist()
 }
@@ -299,7 +301,8 @@ type Action struct {
 // como o cartão no prazo de recebimento, e receive informa o crédito do
 // pagamento confirmado. Uma cobrança recusada (fail) ainda pode ser paga,
 // como no pagamento por outro meio depois da recusa do cartão no mesmo
-// checkout.
+// checkout. Como no provedor real, o pagamento só confirmado (ainda não
+// creditado) já pode ser reembolsado e contestado (chargeback).
 func (s *Sim) Apply(id string, a Action) (Charge, error) {
 	s.st.mu.Lock()
 	defer s.st.mu.Unlock()
@@ -348,7 +351,7 @@ func (s *Sim) Apply(id string, a Action) (Charge, error) {
 	case "chargeback":
 		switch a.Stage {
 		case "requested":
-			if c.Status != "paid" && c.Status != "partially_refunded" {
+			if !paidStatus(c.Status) {
 				return *c, fmt.Errorf("cobrança não está paga")
 			}
 			c.Status, c.ChargebackStatus, c.UpdatedAt = "chargeback_requested", "requested", now
@@ -398,8 +401,16 @@ func (s *Sim) Apply(id string, a Action) (Charge, error) {
 	return *c, s.st.persist()
 }
 
+// paidStatus informa as situações com pagamento confirmado sem estorno total:
+// recebido (paid), confirmado e ainda não creditado (confirmed) e
+// parcialmente reembolsado. O provedor real aceita reembolso e chargeback em
+// todas elas, inclusive antes do crédito do pagamento confirmado.
+func paidStatus(status string) bool {
+	return status == "paid" || status == "confirmed" || status == "partially_refunded"
+}
+
 func (s *Sim) refundLocked(c *Charge, amount int64, extRef string) error {
-	if c.Status != "paid" && c.Status != "partially_refunded" {
+	if !paidStatus(c.Status) {
 		return fmt.Errorf("cobrança não reembolsável")
 	}
 	if amount <= 0 {

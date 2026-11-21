@@ -168,3 +168,22 @@ func TestReplayAfterReload(t *testing.T) {
 		t.Fatalf("replay após recarga = %v, esperado o charge.created", keys)
 	}
 }
+
+// O vínculo do pagador com o comerciante sobrevive à recarga do estado: a
+// idempotência pela referência externa continua restrita ao comerciante.
+func TestCustomerMerchantSurvivesReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "paysim.json")
+	e := newEnvAt(t, path, newClock())
+	a, err := e.sim.CreateCustomer(merchantKey, paysim.Customer{Name: "Ana", ExternalReference: "cli-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded := newEnvAt(t, path, newClock())
+	if again, err := reloaded.sim.CreateCustomer(merchantKey, paysim.Customer{Name: "Ana", ExternalReference: "cli-1"}); err != nil || again != a {
+		t.Fatalf("repetição depois da recarga: %+v, %v; esperado %+v", again, err, a)
+	}
+	other, err := reloaded.sim.CreateCustomer("outro_comerciante", paysim.Customer{Name: "Ana", ExternalReference: "cli-1"})
+	if err != nil || other.ID == a.ID {
+		t.Fatalf("outro comerciante depois da recarga: %+v, %v", other, err)
+	}
+}

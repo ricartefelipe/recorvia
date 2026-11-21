@@ -2421,3 +2421,93 @@ pedidos de serviços adicionais, que têm versão mas não exigem `If-Match`. As
 (produtos, planos, cupons, métricas, membros, endpoints de webhook, políticas e templates) continuam sem cursor, com
 os limites atuais. A listagem de operações por criação não tem índice próprio, como a anterior por atualização. A
 interface envia o `If-Match` com a versão exibida e percorre as listagens pelo `next_cursor`.
+
+## ADR-084 Acabamento da auditoria: aviso fiscal, endereço do emitente, links do painel, simulador e contrato
+**Status:** aceita (RF-06, RF-15, RF-17 e RNF-07; complementa as ADR-074, ADR-078, ADR-079, ADR-080 e ADR-082).
+**Contexto:** depois das frentes de correção, a auditoria de requisitos deixou itens menores. O portal do
+cliente só mostrava o aviso de que a fatura comercial não é documento fiscal dentro do modal do documento, e o
+e-mail de fatura emitida não o trazia. O documento da fatura não tinha o endereço do emitente, porque a
+organização não tinha endereço. Os cards do painel levavam a listas que não correspondiam ao número (saldo em
+aberto contava `partially_paid`, a lista filtrava `open`; assinaturas ativas contavam trial e atraso, a lista
+filtrava `active`; reembolsos, chargebacks e valores a recuperar levavam a listas sem o filtro do mês ou do
+valor) e apareciam sem a permissão de leitura da lista. O simulador recusava reembolso e chargeback de cobrança
+só confirmada, o que o provedor real aceita, e reaproveitava o pagador pela referência externa de outro
+comerciante. O fake de testes do ledger não via estornos no histórico completo. O validador de contrato
+aceitava qualquer 5xx não declarado. O log de acesso da requisição recusada antes da validação do tenant não
+identificava o tenant pedido. `identity.Service.RevokeAll` não tinha uso.
+**Decisão:**
+- **Aviso fiscal.** O aviso ("Este documento é uma fatura comercial e não é documento fiscal. Não substitui a
+  nota fiscal.") é um componente comum (`FiscalNotice`, papel `note`, rótulo "Aviso fiscal") na página da
+  fatura do painel e, agora, na página da fatura do portal, fora do modal; o visualizador do documento mantém a
+  linha própria. O e-mail padrão de fatura emitida ganha a frase "A fatura comercial não é documento fiscal e
+  não substitui a nota fiscal." (`notifications.InvoiceFiscalNotice`). O padrão do sistema só é usado quando o
+  tenant não tem template personalizado, e o personalizado é enviado como foi gravado: a mudança não altera
+  nem invalida os modelos editados, e não há migração de dados.
+- **Endereço da organização e do emitente.** Nova tabela `tenant_addresses` (migration 00024), no formato e com
+  as mesmas restrições de `customer_billing_addresses`, com RLS por tenant e sem `DELETE` para o papel da
+  aplicação. O tipo e as regras (normalização, validação e campos alterados) passam para
+  `internal/kernel/address`; `customers.Address` é um alias, sem mudança no endereço de cobrança. O endereço é
+  editado no perfil da organização: `PATCH /api/v1/organization` aceita `address` (mesma permissão
+  `organization.update` e o mesmo `If-Match` da organização); ausente, mantém o atual; o endereço não é
+  removido, como o de cobrança. Campos inválidos voltam em `invalid_organization` como `address.<campo>`. A
+  mudança registra `organization.address_updated` com os nomes dos campos alterados e se o endereço foi
+  cadastrado agora, nunca os valores, além do `organization.updated` de sempre. A emissão copia o endereço para
+  `invoices.issuer_snapshot.address` (cópia do valor, não referência). O documento mostra "Endereço do
+  emitente" somente quando o endereço foi gravado na emissão: a fatura emitida antes da 00024 ou sem endereço
+  cadastrado sai sem a linha, e o endereço atual da organização nunca a substitui, nem na fatura anterior à
+  ADR-079, que continua usando o nome, a razão social e o CNPJ atuais. A tela da organização ganha a seção
+  "Endereço da organização", opcional enquanto não houver cadastro.
+- **Links do painel.** O card leva à lista só quando a lista e o filtro já existem na API e mostram o mesmo
+  conjunto que o número conta: `/faturas?open_balance=true`, `/faturas?overdue=true`,
+  `/assinaturas?in_force=true`, `/conciliacao?aba=divergencias` e `/operacoes-pagamento?status=unknown`. Os
+  filtros `open_balance` e `in_force` já existiam na API; as telas de faturas e de assinaturas passaram a
+  lê-los da URL e a exibi-los como filtro ligado. Reembolsos, chargebacks e valores a recuperar perderam o
+  link: nenhuma lista filtra o mês nem o valor a recuperar. O link exige a permissão de leitura da lista
+  (`invoices.read`, `subscriptions.read`, `reconciliation.read`, `payments.read`); sem ela, o número aparece
+  sem link. Num mês encerrado, os cards de posição (fim do mês ou atual) com link avisam que a lista mostra a
+  posição de hoje.
+- **Simulador.** Reembolso e chargeback são aceitos nas situações `paid`, `confirmed` e `partially_refunded`.
+  A disputa ganha devolve a cobrança a `paid`: o Recorvia já dá o pagamento como recebido antes da
+  movimentação (ADR-080). O pagador é idempotente pela referência externa dentro do comerciante; o vínculo é
+  persistido em `customer_merchant`, e pagadores de estados gravados antes dele não são reaproveitados por
+  nenhum comerciante. O caminho completo no Recorvia (pagamento confirmado e não recebido, reembolsado, e
+  chargeback com disputa ganha) é coberto com o simulador real, conta a conta: `provider_confirmed` e
+  `provider_clearing` terminam zerados e `cash` fica com o líquido menos a movimentação.
+- **Fake do ledger.** `ReverseLedger` procura o lançamento original em todo o histórico gravado e grava o
+  estorno no histórico e nos lançamentos observados, com a mesma idempotência de `PostLedger`, como o banco; a
+  consulta do excedente do fake também lê o histórico completo. Nenhum teste existente dependia do defeito.
+- **Contrato.** Um 5xx não declarado na operação passa a ser divergência, como um sucesso não declarado. As
+  operações que carregam as credenciais do provedor na própria requisição declaram o 503
+  `components/responses/ProviderUnavailable` (`provider_credentials_unreadable` e, na resolução de divergência,
+  `provider_unavailable`): `retryInvoiceCharge`, `retryPaymentOperation`, `runReconciliation`,
+  `resolveDiscrepancy` e `receiveProviderWebhook`. Falhas de infraestrutura que qualquer operação pode ter
+  (500 `internal_error`, 503 do armazenamento de sessões ou do provedor de identidade) não são declaradas
+  operação a operação; o teste que provoca uma delas de propósito registra a exceção explícita
+  `contract.AllowUndeclared(t, método, caminho, status)`, restrita ao teste que montou o servidor, ao método, ao
+  caminho concreto e ao status 5xx, e a resposta continua obrigada a ser `problem+json` válido. É o caso da
+  falha simulada na gravação da auditoria da dead letter (500). O servidor com o limite de exportação reduzido
+  também passa pelo validador, que confere a exportação cortada e os headers `X-Recorvia-Export-*`.
+- **Log de acesso.** O tenant pedido no header `X-Recorvia-Tenant` vai ao log de acesso como
+  `requested_tenant_id`, inclusive no 401 e no 403 de permissão, que saem antes de `tenant_id`; o pedido não foi
+  validado, por isso não ocupa a chave `tenant_id`, reservada ao tenant validado. Só identificadores válidos
+  são registrados, na forma canônica.
+- **Código morto.** `identity.Service.RevokeAll` não tinha chamador e foi removido com o teste próprio; a
+  revogação em massa continua em `SessionStore.DeleteAllForUser`, usada por `LogoutAll` (encerrar todas as
+  sessões) e pela desativação do usuário, e a remoção de membro revoga as sessões da organização
+  (`RevokeTenantSessions`), como na ADR-078.
+- **Roteiros E2E.** Onboarding (06, inclusive o endereço da organização), política de cobrança (07), endpoint
+  de webhook (08) e convite com aceite (09). O convite e o webhook usam a Beta: a Acme já tem os três usuários
+  do plano Essencial, e o webhook exige o Profissional, que o roteiro 08 contrata se preciso. O aceite usa o
+  novo usuário de demonstração `gabi.convidada@exemplo.test`, sem organização no seed. O destino do webhook é
+  o simulador de pagamentos, que resolve dentro do ambiente e está na rede privada permitida.
+**Alternativas:** guardar o endereço em colunas de `tenants` mudaria a linha lida por todas as consultas da
+organização e se afastaria do formato do endereço de cobrança. Mostrar o endereço atual na fatura antiga
+contrariaria o emitente congelado na emissão (ADR-079). Acrescentar o aviso fiscal aos templates editados
+alteraria o texto gravado pelo tenant sem o consentimento dele. Declarar 500 e 503 em todas as operações do
+contrato documentaria falhas de infraestrutura como respostas de negócio e mudaria cada operação; aceitar 5xx
+não declarado escondia o 503 do provedor fora do contrato.
+**Consequências:** as faturas emitidas depois do cadastro do endereço trazem o endereço do emitente; as
+anteriores continuam como foram emitidas.
+Cada 503 novo de regra de negócio precisa ser declarado na operação, e cada teste que provoca falha de
+infraestrutura declara a exceção na própria requisição. O ambiente local já em execução só terá o usuário
+`gabi.convidada@exemplo.test` depois que o Keycloak reimportar o realm (`make reset`).

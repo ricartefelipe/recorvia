@@ -15,6 +15,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/audit"
 	"github.com/ricartefelipe/recorvia/internal/catalog"
 	"github.com/ricartefelipe/recorvia/internal/customers"
+	"github.com/ricartefelipe/recorvia/internal/kernel/address"
 	"github.com/ricartefelipe/recorvia/internal/kernel/calendar"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
 	"github.com/ricartefelipe/recorvia/internal/kernel/money"
@@ -104,12 +105,17 @@ type cycleFake struct {
 	discountEnded []uuid.UUID
 }
 
+// issuerAddress é o endereço da organização nas configurações do fake.
+var issuerAddress = address.Address{Street: "Av. Paulista", Number: "1000", District: "Bela Vista", City: "São Paulo", State: "SP",
+	PostalCode: "01310100", Country: "BR"}
+
 func newCycleFake() *cycleFake {
+	addr := issuerAddress
 	return &cycleFake{
 		cycleData: cycleData{discountUses: map[uuid.UUID]int{}, pendingBilled: map[uuid.UUID]uuid.UUID{}, credit: map[uuid.UUID]money.Money{},
 			invoiceKeys: map[string]bool{}, statusHistory: map[uuid.UUID][]StatusChange{}, usageBilled: map[uuid.UUID]uuid.UUID{}},
 		settings: TenantSettings{Location: saoPaulo, InvoicePrefix: "FAT", PaymentTermsDays: 5,
-			Issuer: Issuer{Name: "Acme Serviços", LegalName: "Acme Serviços Ltda.", DocumentNumber: "11444777000161"}},
+			Issuer: Issuer{Name: "Acme Serviços", LegalName: "Acme Serviços Ltda.", DocumentNumber: "11444777000161", Address: &addr}},
 		plans: map[uuid.UUID]catalog.Plan{}, prices: map[uuid.UUID]catalog.PriceVersion{},
 		snapshot: customers.Snapshot{Name: "Padaria Central", DocumentType: "cnpj", DocumentNumber: "11222333000181"},
 		pending:  map[uuid.UUID][]PendingItem{}, existing: map[string]bool{}, errs: map[string]error{}, failTenant: map[uuid.UUID]error{},
@@ -461,9 +467,16 @@ func TestEngineIssuesCycleInvoice(t *testing.T) {
 	if inv.Total.Amount() != 10000 || inv.AmountDue.Amount() != 10000 || inv.CustomerSnapshot.Name != "Padaria Central" {
 		t.Fatalf("valores: total=%v saldo=%v", inv.Total, inv.AmountDue)
 	}
-	// O emitente é gravado na emissão, como estava a organização.
-	if inv.Issuer == nil || *inv.Issuer != (Issuer{Name: "Acme Serviços", LegalName: "Acme Serviços Ltda.", DocumentNumber: "11444777000161"}) {
+	// O emitente é gravado na emissão, como estava a organização, com uma
+	// cópia do endereço: a alteração posterior do endereço da organização não
+	// muda a fatura emitida.
+	if inv.Issuer == nil || inv.Issuer.Name != "Acme Serviços" || inv.Issuer.LegalName != "Acme Serviços Ltda." ||
+		inv.Issuer.DocumentNumber != "11444777000161" || inv.Issuer.Address == nil || *inv.Issuer.Address != issuerAddress {
 		t.Fatalf("emitente gravado na emissão: %+v", inv.Issuer)
+	}
+	f.store.settings.Issuer.Address.Street = "Rua Nova"
+	if inv.Issuer.Address.Street != issuerAddress.Street || inv.Issuer.Address == f.store.settings.Issuer.Address {
+		t.Fatalf("o endereço do emitente deveria ser uma cópia: %+v", inv.Issuer.Address)
 	}
 	if !inv.IssuedAt.Equal(engineNow) || !inv.DueAt.Equal(local(2026, time.November, 22, 0, 0)) {
 		t.Fatalf("emissão/vencimento: %v %v", inv.IssuedAt, inv.DueAt)

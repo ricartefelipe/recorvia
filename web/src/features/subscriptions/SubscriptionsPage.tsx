@@ -1,4 +1,4 @@
-import { Anchor, Badge, Button, Group, Select, Stack, Table, Text } from '@mantine/core';
+import { Anchor, Badge, Button, Group, Select, Stack, Switch, Table, Text } from '@mantine/core';
 import { IconPlus } from '@tabler/icons-react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
@@ -75,10 +75,11 @@ export function SubscriptionsTable({ subscriptions, showCustomer = true }: { sub
 
 export function SubscriptionsPage() {
   const { keys } = useTenant();
-  const [filters, setFilters] = useUrlFilters(['status', 'cliente'] as const);
+  const [filters, setFilters] = useUrlFilters(['status', 'cliente', 'in_force'] as const);
   const [creating, setCreating] = useState(false);
   const params: SubscriptionListParams = {
     status: (filters.status || undefined) as SubscriptionStatus | undefined,
+    in_force: filters.in_force === 'true' ? true : undefined,
     customer_id: filters.cliente || undefined,
     limit: 25,
   };
@@ -89,7 +90,7 @@ export function SubscriptionsPage() {
     placeholderData: keepPreviousData,
   });
   useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
-  const filtered = !!params.status || !!params.customer_id;
+  const filtered = !!params.status || !!params.customer_id || !!params.in_force;
 
   return (
     <Stack gap={0}>
@@ -115,6 +116,12 @@ export function SubscriptionsPage() {
           w={200}
         />
         <CustomerSelect label="Cliente" includeArchived value={filters.cliente || null} onChange={(v) => setFilters({ cliente: v })} w={320} />
+        <Switch
+          label="Somente em vigor (trial, ativas e em atraso)"
+          checked={filters.in_force === 'true'}
+          onChange={(e) => setFilters({ in_force: e.currentTarget.checked ? 'true' : null })}
+          mb={8}
+        />
       </Group>
       <QueryContent query={query} loading={<LoadingState />}>
         {(page) =>

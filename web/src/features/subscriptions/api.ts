@@ -19,6 +19,8 @@ const base = (id: string) => `/api/v1/subscriptions/${enc(id)}`;
 
 export interface SubscriptionListParams {
   status?: SubscriptionStatus;
+  /** Somente em trial, ativas ou em atraso, a base das assinaturas ativas do painel. */
+  in_force?: boolean;
   customer_id?: string;
   cursor?: string;
   limit?: number;

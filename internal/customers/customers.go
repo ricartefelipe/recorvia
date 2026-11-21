@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ricartefelipe/recorvia/internal/kernel/address"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/brdoc"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
@@ -144,17 +145,9 @@ type Contact struct {
 	CreatedAt            time.Time
 }
 
-// Address é o endereço de cobrança.
-type Address struct {
-	Street     string `json:"street"`
-	Number     string `json:"number"`
-	Complement string `json:"complement,omitempty"`
-	District   string `json:"district"`
-	City       string `json:"city"`
-	State      string `json:"state"`
-	PostalCode string `json:"postal_code"`
-	Country    string `json:"country"`
-}
+// Address é o endereço de cobrança, no formato postal comum
+// (address.Address), o mesmo do endereço da organização.
+type Address = address.Address
 
 // Input são os dados de criação/alteração.
 type Input struct {
@@ -171,8 +164,6 @@ type Input struct {
 var (
 	phoneRe      = regexp.MustCompile(`^\+?[0-9]{8,15}$`)
 	externalIDRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
-	stateRe      = regexp.MustCompile(`^[A-Z]{2}$`)
-	postalRe     = regexp.MustCompile(`^[0-9]{8}$`)
 )
 
 func normalizePhone(p string) string {
@@ -374,61 +365,9 @@ func (c *Contact) Apply(in ContactInput) ([]string, error) {
 	return changed, nil
 }
 
-// ChangedFields devolve os nomes dos campos do endereço que diferem de prev
-// (todos os preenchidos, quando não havia endereço). Somente nomes, nunca
-// valores (ADR-061).
-func (a Address) ChangedFields(prev *Address) []string {
-	var old Address
-	if prev != nil {
-		old = *prev
-	}
-	var changed []string
-	for _, f := range []struct {
-		name     string
-		old, new string
-	}{{"street", old.Street, a.Street}, {"number", old.Number, a.Number}, {"complement", old.Complement, a.Complement},
-		{"district", old.District, a.District}, {"city", old.City, a.City}, {"state", old.State, a.State},
-		{"postal_code", old.PostalCode, a.PostalCode}, {"country", old.Country, a.Country}} {
-		if f.old != f.new {
-			changed = append(changed, f.name)
-		}
-	}
-	return changed
-}
-
 // ValidateAddress normaliza e valida o endereço de cobrança.
 func ValidateAddress(a Address) (Address, error) {
-	var f []apperr.FieldError
-	trim := func(s string) string { return strings.TrimSpace(s) }
-	a.Street, a.Number, a.Complement = trim(a.Street), trim(a.Number), trim(a.Complement)
-	a.District, a.City = trim(a.District), trim(a.City)
-	a.State = strings.ToUpper(trim(a.State))
-	a.PostalCode = strings.NewReplacer("-", "", ".", "", " ", "").Replace(a.PostalCode)
-	a.Country = strings.ToUpper(trim(a.Country))
-	if a.Country == "" {
-		a.Country = "BR"
-	}
-	req := func(field, v string, maxLen int) {
-		if n := len([]rune(v)); n < 1 || n > maxLen {
-			f = append(f, apperr.FieldError{Field: field, Message: "Campo obrigatório."})
-		}
-	}
-	req("street", a.Street, 200)
-	req("number", a.Number, 20)
-	req("district", a.District, 100)
-	req("city", a.City, 100)
-	if len([]rune(a.Complement)) > 100 {
-		f = append(f, apperr.FieldError{Field: "complement", Message: "Complemento deve ter no máximo 100 caracteres."})
-	}
-	if !stateRe.MatchString(a.State) {
-		f = append(f, apperr.FieldError{Field: "state", Message: "Informe a UF com duas letras."})
-	}
-	if !postalRe.MatchString(a.PostalCode) {
-		f = append(f, apperr.FieldError{Field: "postal_code", Message: "CEP deve ter 8 dígitos."})
-	}
-	if !stateRe.MatchString(a.Country) {
-		f = append(f, apperr.FieldError{Field: "country", Message: "País deve ter duas letras (ISO 3166-1)."})
-	}
+	a, f := address.Normalize(a)
 	if len(f) > 0 {
 		return Address{}, apperr.Invalid("invalid_address", "Endereço de cobrança inválido.", f...)
 	}
