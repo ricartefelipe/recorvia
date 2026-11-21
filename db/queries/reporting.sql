@@ -63,5 +63,14 @@ SELECT COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount
  WHERE e.tenant_id = @tenant_id AND a.code IN ('refunds', 'chargebacks')
    AND t.occurred_at >= @from_ts AND t.occurred_at < @to_ts;
 
+-- name: DashboardRecoverables :one
+-- Saldo atual da conta de valores a recuperar de clientes (débitos menos
+-- créditos): o excedente já usado estornado por chargeback menos as baixas
+-- recebidas e perdidas.
+SELECT COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END), 0)::bigint AS balance
+  FROM ledger_entries e
+  JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+ WHERE e.tenant_id = @tenant_id AND a.code = 'customer_recoverables';
+
 -- name: DashboardUnknownOperations :one
 SELECT count(*)::int FROM payment_operations WHERE tenant_id = @tenant_id AND status = 'unknown';
