@@ -66,7 +66,11 @@ SELECT tenant_id, template_key, status_reason, count(*), left(max(last_error), 2
   (concentrado num tenant) ou recusa do servidor (remetente `RECORVIA_SMTP_FROM` não autorizado,
   espalhado entre tenants).
 - `content_unavailable`: o conteúdo cifrado não decifra (chave retirada de
-  `RECORVIA_ENCRYPTION_KEYS` ou dado corrompido).
+  `RECORVIA_ENCRYPTION_KEYS` ou dado corrompido). Com a conferência do keyring na inicialização
+  (padrão), o worker não inicia com chave ausente ou errada; o motivo só aparece com a chave
+  declarada perdida (`RECORVIA_ENCRYPTION_LOST_KEYS`), com `RECORVIA_ENCRYPTION_STARTUP_CHECK=warn`
+  ou `off`, ou com um registro isolado ilegível, que não impede a inicialização
+  ([chaves de cifragem](recuperacao-de-desastre.md#chaves-de-cifragem)).
 - Fim das 5 tentativas: indisponibilidade prolongada do SMTP
   ([seção anterior](#envio-de-e-mails-parado)).
 

@@ -1068,3 +1068,123 @@ toda rota com permissão não delegável; o teste de contrato confere o esquema 
 integração exercitam cada rota afetada com uma credencial real pela pilha Bearer (autoria nula e
 auditoria com ator `api_credential` e, nas dead letters, com a justificativa; ou 403 sem efeito) e
 as leituras que continuam disponíveis à credencial.
+
+## ADR-063 Conferência do keyring contra o banco na inicialização e pelo subcomando `keyring-check`
+**Status:** aceita.
+**Decisão:** a API e o worker conferem, ao iniciar, se as chaves configuradas
+(`RECORVIA_ENCRYPTION_KEYS`) decifram os dados cifrados **em uso** no banco e, se não decifram, não
+iniciam: registram a chave (identificador), a finalidade e a quantidade de registros, e terminam com
+erro. A mesma conferência está disponível como subcomando dos dois executáveis
+(`/app keyring-check`), que imprime um relatório por finalidade e chave e termina com código
+diferente de zero, sem alterar dados nem exibir conteúdo decifrado; é o passo anterior a religar a
+aplicação sobre um banco restaurado. São conferidos, organização por organização e com o papel da
+aplicação: as credenciais das contas de provedor (chave de API e segredo do webhook), os segredos
+dos endpoints de webhook e uma notificação ainda não encerrada por chave. Contam como dados em uso
+as contas ativas, os segredos ainda válidos de endpoints não removidos e as notificações pendentes;
+contas desativadas e segredos expirados aparecem no relatório sem bloquear. O diagnóstico é por
+chave, não por finalidade e chave: o relatório distingue chave ausente (identificador não
+configurado), chave com outro valor (nenhum registro daquela chave decifra, em nenhuma finalidade)
+e registros ilegíveis (a chave decifra outros registros: o dado está corrompido, adulterado ou foi
+copiado de outro contexto). Só as duas primeiras impedem a inicialização e fazem o `keyring-check`
+terminar com erro; registros ilegíveis de uma chave comprovada ficam no log em nível de erro e no
+relatório, e degradam item a item (ADR-042 e ADR-045). Uma chave que não existe mais é declarada,
+por identificador, em `RECORVIA_ENCRYPTION_LOST_KEYS`: os dados cifrados com ela deixam de
+bloquear e aparecem como `chave declarada perdida`, e as demais chaves continuam conferidas; uma
+chave configurada não pode ser declarada perdida. `RECORVIA_ENCRYPTION_STARTUP_CHECK` define o
+modo: `enforce` (padrão), `warn` (registra e inicia, inclusive quando a própria conferência não
+pôde ser concluída) e `off`. A rotação de chave é um procedimento em duas fases (distribuir a
+chave nova a todos os processos, reiniciar e só então ativá-la), porque processos em fases
+diferentes convivem durante qualquer reinício; entre as fases, as chaves de cada processo em
+execução são conferidas com o `keyring-check` dentro do próprio container (`exec`), e não num
+container novo, que só mostraria a configuração atual. A exceção é a chave **ativa** perdida: a
+fase 1 manteria como ativa uma chave que não existe mais (configuração recusada), e a troca é
+feita num único passo, com todos os processos parados (chave nova como ativa e chave perdida
+declarada). Além disso: a falha ao decifrar as
+credenciais de uma conta de provedor deixou de responder 500 `internal_error` e passou a ser o erro
+de aplicação 503 `provider_credentials_unreadable`; e a troca da configuração do provedor
+(`PUT /api/v1/payment-providers/{provider}`) deixou de decifrar as credenciais anteriores, de modo
+que continua possível com a chave perdida.
+**Justificativa:** o exercício de recuperação de desastre (ADR-064) mostrou que, com uma chave
+errada ou ausente, a API e o worker iniciavam normalmente e respondiam `ready`; o worker encerrava
+sem volta as notificações pendentes (`content_unavailable`) e as entregas de webhook (segredo
+indisponível), as operações com o provedor respondiam 500 sem explicação e a reconfiguração da
+conta, que é a saída documentada para a chave perdida, também falhava com 500. A tolerância item a
+item (ADR-042 e ADR-045) serve a uma chave retirada de propósito, com poucos dados antigos; aplicada
+a um keyring inteiro errado depois de uma restauração, destrói trabalho pendente. Recusar a
+inicialização transforma o engano de configuração num erro imediato e reversível. A recusa se
+limita ao que uma correção do keyring resolve: um registro corrompido de uma organização, com a
+chave comprovada por outros registros, não justifica deixar todas as organizações fora do ar, e
+nenhum valor de chave o faria decifrar. A declaração de chave perdida por identificador substitui
+o modo `warn` como caminho da chave perdida: `warn` desliga a proteção para todas as chaves e, sem
+uma operação que desative contas de provedor ou expire segredos de endpoints em nome dos tenants,
+a instalação ficaria nele por tempo indeterminado, à espera de cada organização refazer as
+integrações. A rotação num único passo (acrescentar e ativar a chave no mesmo reinício) recria,
+entre processos, o mesmo encerramento sem volta que a conferência evita: quem já cifra com a chave
+nova produz dados que o processo ainda não reiniciado lê como chave desconhecida.
+**Consequências:** a conferência percorre as organizações uma a uma (a RLS impede uma leitura única
+entre tenants e não há função `SECURITY DEFINER` para isso: uma função agregada exigiria migration
+e fica como evolução), com prazo de 5 minutos; o custo da inicialização cresce com o número de
+organizações, e `off` existe para instalações em que esse custo não seja aceitável. Uma falha de
+leitura do banco ou o prazo esgotado durante a conferência impedem a inicialização no modo
+`enforce`; no modo `warn`, ficam registrados e a aplicação inicia. Retirar do keyring uma chave
+ainda referenciada por dados em uso passa a exigir a declaração explícita da chave em
+`RECORVIA_ENCRYPTION_LOST_KEYS` (ou o modo `warn`). Limite do diagnóstico: quando o único registro
+cifrado com uma chave está corrompido, nada comprova a chave e o resultado é chave com outro
+valor, que bloqueia. A conferência protege a inicialização, não a convivência de processos com
+keyrings diferentes: a rotação em duas fases é responsabilidade de quem opera, e um item cifrado
+com uma chave que o processo não conhece continua sendo encerrado (tratar a chave desconhecida
+como falha transitória no worker fica como evolução). Não são conferidos: o conteúdo das notificações já encerradas (não é mais lido), o token
+cifrado dos convites pendentes na outbox e as sessões no Redis. Sem migration nova: três consultas
+de leitura em `db/queries/keyring.sql`. O procedimento de guarda, rotação e restauração das chaves
+está em `docs/operacao/backup-e-restauracao.md`.
+
+## ADR-064 Exercício automatizado de recuperação de desastre em projeto isolado do compose
+**Status:** aceita.
+**Decisão:** `make dr-check` (`deploy/backup/dr-check.sh`, job `disaster-recovery` da CI) exercita
+a recuperação de ponta a ponta com os executáveis reais, num projeto do `docker compose` separado
+do ambiente local (`deploy/backup/dr.compose.yaml`: PostgreSQL, Redis e RabbitMQ sem portas no
+host, portas livres escolhidas pelo Docker em `127.0.0.1` para o que o roteiro consulta, imagens
+com etiqueta própria e containers e volumes com o rótulo `recorvia.dr-check`). O roteiro só remove
+o que é dele: o projeto (padrão `recorvia-drcheck`) é recusado se já tiver containers ou volumes
+sem o rótulo do exercício, e o diretório de saída precisa ser novo, vazio ou de uma execução
+anterior, cujos arquivos são movidos para `anterior/` em vez de apagados (o diretório dos backups
+e a raiz do repositório são recusados). O roteiro: origem com dados do seed e da API e segredos
+cifrados com duas versões de chave, com a rotação em duas fases e o trabalho da origem feito com a
+API e o worker em fases diferentes; backup com trabalho pendente (outbox e notificação com
+conteúdo cifrado); chaves num cofre fora do diretório do backup, com varredura do dump por chaves
+e segredos em claro, como texto e como bytes em hexadecimal das colunas `bytea`, com controles
+positivos dos dois tipos;
+trabalho depois do backup (janela perdida); remoção da API, do worker, do banco, do broker e do
+Redis com os volumes; restauração num servidor novo (bootstrap, `pg_restore`, `migrate up`,
+`restore-check`, manifesto idêntico e ledger balanceado); recusa de chave errada e de chave ausente
+e aceitação da chave declarada perdida, sem alteração do banco (ADR-063); API no ar com o worker parado; conciliação da janela pela API do
+produto (`payment_not_reflected` com `accept_provider`; `missing_local` cancelada no provedor e
+resolvida com `dismiss`); worker religado e conferência de readiness, decifragem real dos segredos
+(cobrança criada no provedor, webhooks do provedor autenticados, entregas assinadas conferidas com
+`openssl` e e-mail pendente enviado), ausência de efeitos duplicados depois de mais dois ciclos dos
+agendamentos e tempos medidos (janela perdida e tempo até o worker pronto), gravados num relatório.
+Provedor de pagamento (simulador), servidor de e-mail (Mailpit), provedor de identidade (Keycloak)
+e o sistema do tenant que recebe webhooks (`tools/hooksink`, receptor mínimo que não faz parte do
+produto) são tratados como externos e sobrevivem ao desastre. O guia de recuperação passa a ter a
+conferência das chaves como passo próprio e a conciliação pela API como caminho principal da janela
+perdida; a conciliação manual por tabelas continua documentada como alternativa.
+**Justificativa:** a troca da aplicação para o banco restaurado, o uso das chaves guardadas à parte
+e a conciliação antes de religar o worker estavam apenas descritos (ADR-055). Só a execução mostra
+se o procedimento funciona e quanto tempo leva; ela revelou os defeitos corrigidos na ADR-063. Um
+roteiro em bash sobre o compose usa os mesmos comandos de quem opera e roda igual na CI e
+localmente, sem depender de portas fixas nem interferir no ambiente de desenvolvimento.
+**Consequências:** os tempos do relatório são medições com dados de demonstração, não objetivos de
+serviço: o RPO real é o intervalo entre backups, e o `pg_restore`, a conferência das chaves e a
+conciliação crescem com o banco e com o número de organizações. O exercício cobre um provedor (o
+simulador), uma organização conciliada, com uma credencial de API emitida por ela antes do backup,
+e as duas divergências que o roteiro produz. A conciliação é uma operação de tenant: numa
+recuperação real, quem opera a plataforma depende da credencial de cada organização (ou de um
+membro dela), e falta um meio de plataforma para conciliar todas antes de religar o worker; o guia
+diz quem executa, com qual credencial e o que fazer sem ela. Os demais
+casos da conciliação manual, a recuperação completa sem as chaves (o exercício só confere a chave
+declarada perdida), o Asaas, a régua de cobrança sobre
+faturas vencidas, bancos grandes e arquivamento de WAL continuam fora dele
+(`docs/operacao/backup-e-restauracao.md`, seção *Não exercitado*). O job acrescenta alguns minutos
+à CI e constrói as imagens da aplicação com outra etiqueta. `deploy/docker/go.Dockerfile` ganhou o
+argumento `PKG` para compilar o receptor de webhooks do exercício. O roteiro depende do formulário
+de login do Keycloak local e da API do simulador; mudanças neles exigem ajuste do roteiro.

@@ -105,11 +105,15 @@ Na CI, o job `observability-check` executa `make obs-check` e o job `observabili
 make backup                 # pg_dump no container: backups/recorvia-<instante>.{dump,manifest,sha256}
 make restore-check          # restaura o backup mais recente num banco novo e confere contagens, ledger e RLS
 make restore-check DUMP=backups/recorvia-20261118T120000Z.dump
+make dr-check               # recuperação de desastre de ponta a ponta num projeto isolado do compose (relatório em backups/dr-check)
 ```
 
 O procedimento é exercitado pelo job `backup-restore` da CI (ambiente do compose com migrations,
 dados de demonstração e lançamento no ledger; `make backup`, `make restore-check` e recuperação num
-servidor PostgreSQL novo). O que é exercitado e as recomendações para produção estão em
+servidor PostgreSQL novo) e pelo job `disaster-recovery` (`make dr-check`: backup com as chaves de
+cifragem guardadas à parte, destruição do banco, restauração, recusa de chave errada, conciliação
+da janela perdida e API e worker religados sobre o banco restaurado, com os tempos medidos). O que
+é exercitado, a guarda das chaves e as recomendações para produção estão em
 [`docs/operacao/backup-e-restauracao.md`](docs/operacao/backup-e-restauracao.md).
 
 ### Análise de imagens
@@ -128,6 +132,14 @@ Variáveis `RECORVIA_*` validadas na inicialização (`internal/infra/config`); 
 exigidos HTTPS, cookie `__Host-` seguro, SMTP com TLS e ausência de destinos privados de webhook.
 Credenciais de provedores ficam cifradas (AES-256-GCM) com chave fornecida por
 `RECORVIA_ENCRYPTION_KEYS`/`RECORVIA_ENCRYPTION_ACTIVE_KEY` (rotação por identificador de chave).
+A API e o worker conferem, ao iniciar, se essas chaves decifram os dados em uso no banco e não
+iniciam com chave errada ou ausente (`RECORVIA_ENCRYPTION_STARTUP_CHECK`: `enforce`, `warn` ou
+`off`); o subcomando `keyring-check` faz a mesma conferência sem iniciar o serviço
+(`docker compose run --rm --no-deps worker keyring-check`). Uma chave que não existe mais é
+declarada em `RECORVIA_ENCRYPTION_LOST_KEYS`, e a rotação é feita em duas fases (distribuir a
+chave a todos os processos, conferir cada processo em execução com
+`docker compose exec -T <serviço> /app keyring-check` e só depois ativá-la):
+`docs/operacao/backup-e-restauracao.md`.
 
 ## Limitações conhecidas
 
