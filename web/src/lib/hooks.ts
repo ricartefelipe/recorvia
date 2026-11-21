@@ -37,7 +37,7 @@ export function useReturnFromEmptyPage(
   items: readonly unknown[] | undefined,
   isPlaceholderData = false,
 ) {
-  const empty = pagination.hasPrevious && !isPlaceholderData && items !== undefined && items.length === 0;
+  const empty = pagination.hasPrevious && !isPlaceholderData && items?.length === 0;
   const { previous } = pagination;
   useEffect(() => {
     if (empty) previous();

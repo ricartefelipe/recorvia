@@ -182,8 +182,8 @@ api_call() {
   if [[ $method != GET ]]; then
     args+=(-H "Idempotency-Key: dr-$(openssl rand -hex 12)")
   fi
-  # Alterações de recursos versionados exigem a versão atual (ADR-083):
-  # if_match=<versão> api MÉTODO CAMINHO [CORPO].
+  # Alterações de recursos versionados exigem a versão atual (ADR-083), passada
+  # na variável if_match da chamada, por exemplo: if_match=3 api PUT <caminho> <corpo>.
   if [[ -n ${if_match:-} ]]; then
     args+=(-H "If-Match: \"$if_match\"")
   fi
@@ -712,7 +712,10 @@ orphan_discrepancy=$(jq -r --arg c "$lost_provider_charge_b" '.data[] | select(.
 [[ -n $paid_discrepancy ]] || die "a conciliação não apontou o pagamento da fatura A recebido na janela"
 [[ -n $orphan_discrepancy ]] || die "a conciliação não apontou a cobrança criada na janela sem registro local"
 # Pagamento recebido na janela: adota o provedor (dinheiro recebido não é descartado).
-version_of() { jq -r --arg id "$1" '.data[] | select(.id == $id) | .version' "$work/divergencias.json"; }
+version_of() {
+  local id=$1
+  jq -r --arg id "$id" '.data[] | select(.id == $id) | .version' "$work/divergencias.json"
+}
 if_match=$(version_of "$paid_discrepancy") api POST "/api/v1/reconciliation/discrepancies/$paid_discrepancy/resolve" \
   '{"resolution":"accept_provider","justification":"Pagamento recebido no provedor durante a janela perdida na recuperação de desastre."}' >/dev/null
 # Cobrança criada na janela, não paga e sem registro local: cancelada no
