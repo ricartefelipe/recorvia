@@ -46,9 +46,14 @@ type fakeState struct {
 	payments    map[uuid.UUID]PaymentInfo
 	invitations map[uuid.UUID]InvitationInfo
 	suspended   map[uuid.UUID]bool
+	// suspensions guarda a situação das suspensões (true = ativa); ausente
+	// quando a suspensão não existe.
+	suspensions map[uuid.UUID]bool
 	rules       map[uuid.UUID]ReminderRules
-	inbox       map[string]bool
-	audits      []audit.Entry
+	// windows é a janela da política de cada suspensão.
+	windows map[uuid.UUID]Window
+	inbox   map[string]bool
+	audits  []audit.Entry
 }
 
 func (s *fakeState) clone() *fakeState {
@@ -64,7 +69,9 @@ func (s *fakeState) clone() *fakeState {
 	c.payments = maps.Clone(s.payments)
 	c.invitations = maps.Clone(s.invitations)
 	c.suspended = maps.Clone(s.suspended)
+	c.suspensions = maps.Clone(s.suspensions)
 	c.rules = maps.Clone(s.rules)
+	c.windows = maps.Clone(s.windows)
 	c.inbox = maps.Clone(s.inbox)
 	c.audits = append([]audit.Entry(nil), s.audits...)
 	return &c
@@ -82,7 +89,9 @@ func newFakeStore(loc *time.Location) *fakeStore {
 		payments:    map[uuid.UUID]PaymentInfo{},
 		invitations: map[uuid.UUID]InvitationInfo{},
 		suspended:   map[uuid.UUID]bool{},
+		suspensions: map[uuid.UUID]bool{},
 		rules:       map[uuid.UUID]ReminderRules{},
+		windows:     map[uuid.UUID]Window{},
 		inbox:       map[string]bool{},
 	}}
 }
@@ -312,6 +321,21 @@ func (t fakeTx) ReminderRules(_ context.Context, id uuid.UUID) (ReminderRules, e
 	return t.st.rules[id], nil
 }
 
+func (t fakeTx) SuspensionWindow(_ context.Context, id uuid.UUID) (Window, bool, error) {
+	if err := t.err("SuspensionWindow"); err != nil {
+		return Window{}, false, err
+	}
+	w, ok := t.st.windows[id]
+	return w, ok, nil
+}
+
+func (t fakeTx) NotificationEvents(_ context.Context, id uuid.UUID) ([]Event, error) {
+	if err := t.err("NotificationEvents"); err != nil {
+		return nil, err
+	}
+	return append([]Event(nil), t.st.events[id]...), nil
+}
+
 func (t fakeTx) Organization(context.Context) (Organization, error) {
 	if err := t.err("Organization"); err != nil {
 		return Organization{}, err
@@ -356,6 +380,14 @@ func (t fakeTx) SubscriptionSuspended(_ context.Context, id uuid.UUID) (bool, er
 		return false, err
 	}
 	return t.st.suspended[id], nil
+}
+
+func (t fakeTx) SuspensionActive(_ context.Context, id uuid.UUID) (bool, bool, error) {
+	if err := t.err("SuspensionActive"); err != nil {
+		return false, false, err
+	}
+	active, ok := t.st.suspensions[id]
+	return active, ok, nil
 }
 
 func (t fakeTx) PlatformPlan(context.Context) (platformbilling.Plan, error) {
