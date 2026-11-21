@@ -20,6 +20,8 @@ export interface InvoiceListParams {
   issued_from?: string;
   issued_to?: string;
   overdue?: boolean;
+  /** Somente com saldo em aberto (abertas ou parcialmente pagas), a base dos recebíveis em aberto do painel. */
+  open_balance?: boolean;
   cursor?: string;
   limit?: number;
 }

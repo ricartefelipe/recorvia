@@ -858,6 +858,19 @@ type Tenant struct {
 	Version          int32
 }
 
+type TenantAddress struct {
+	TenantID   uuid.UUID
+	Street     string
+	Number     string
+	Complement string
+	District   string
+	City       string
+	State      string
+	PostalCode string
+	Country    string
+	UpdatedAt  time.Time
+}
+
 type TenantPlatformSubscription struct {
 	TenantID           uuid.UUID
 	PlanCode           string

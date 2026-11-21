@@ -234,6 +234,13 @@ paths:
     patch:
       tags: [organizations]
       operationId: updateOrganization
+      description: >-
+        Altera o perfil da organização. `address`, quando enviado, substitui o endereço da organização (no formato do
+        endereço de cobrança do cliente); ausente, mantém o atual (o endereço não é removido). Cada alteração registra
+        `organization.updated` na auditoria; a mudança do endereço registra também `organization.address_updated`, com os
+        nomes dos campos alterados (`fields`) e se o endereço foi cadastrado agora (`created`), nunca os valores. O
+        endereço é copiado para o emitente de cada fatura emitida depois da alteração; faturas já emitidas mantêm o
+        emitente gravado na emissão.
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
       requestBody:
         required: true
@@ -1263,8 +1270,9 @@ paths:
       operationId: getInvoiceDocument
       description: >-
         Documento comercial da fatura emitida, em HTML imprimível sem scripts. Traz o aviso de que a fatura
-        comercial não é documento fiscal, o emitente (nome, razão social e CNPJ da organização gravados na
-        emissão; faturas emitidas antes da migration 00019 usam os dados atuais), o cliente com
+        comercial não é documento fiscal, o emitente (nome, razão social, CNPJ e endereço da organização gravados
+        na emissão; faturas emitidas antes da migration 00019 usam o nome, a razão social e o CNPJ atuais, e as
+        emitidas antes da migration 00024 ou sem endereço cadastrado saem sem o endereço do emitente), o cliente com
         documento e endereço de cobrança copiados na emissão, emissão, vencimento, condições de pagamento,
         período de faturamento, itens com período, e o quadro de totais que fecha com o saldo: subtotal,
         descontos, total, créditos aplicados, notas de crédito, pago, valor baixado e saldo. Na fatura cancelada,
@@ -1337,6 +1345,7 @@ paths:
       responses:
         "201": { description: Cobrança solicitada ao provedor, content: { application/json: { schema: { $ref: "#/components/schemas/Charge" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
   /api/v1/billing-runs:
     post:
       tags: [invoices]
@@ -1484,6 +1493,7 @@ paths:
       responses:
         "200": { description: Operação executada; a situação devolvida é o resultado da tentativa, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentOperation" } } } }
         "404": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
         "409": { description: "Nada executado: operação concluída (operation_completed), esgotada (operation_attempts_exhausted) ou em execução (operation_in_progress)", content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
 
   /api/v1/payment-providers:
@@ -1567,6 +1577,7 @@ paths:
         "200": { description: Repetição do pedido de uma execução já encerrada, headers: { Location: { description: Endereço da execução, schema: { type: string } } }, content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationRun" } } } }
         "202": { description: Execução registrada e em andamento, headers: { Location: { description: Endereço da execução para acompanhamento, schema: { type: string } } }, content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationRun" } } } }
         "409": { description: "Outra execução em andamento para o provedor (reconciliation_running, com Retry-After) ou nenhum provedor padrão ativo (provider_not_configured)", headers: { Retry-After: { description: Segundos até a nova tentativa (reconciliation_running), schema: { type: integer } } }, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
   /api/v1/reconciliation/runs/{id}:
     get:
       tags: [reconciliation]
@@ -1621,6 +1632,7 @@ paths:
         "409": { $ref: "#/components/responses/Problem" }
         "412": { $ref: "#/components/responses/Problem" }
         "428": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
 
   /api/v1/collection-policies:
     get:
@@ -1967,6 +1979,7 @@ paths:
         "401": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "413": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
 
   /portal/access:
     get:
@@ -2150,6 +2163,15 @@ components:
             required: [redirect_url]
             properties:
               redirect_url: { type: string, description: "Encerramento no provedor (client_id e post_logout_redirect_uri), sem tokens" }
+    ProviderUnavailable:
+      description: >-
+        Provedor de pagamento inacessível nesta requisição (RFC 9457): as credenciais da conta do provedor não
+        puderam ser decifradas com as chaves de cifragem configuradas (`provider_credentials_unreadable`; confira o
+        keyring da instalação ou configure o provedor novamente) ou, na resolução de divergência que consulta o
+        provedor, ele não respondeu (`provider_unavailable`). Nada é gravado; repita depois de corrigir a causa.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
     UserSessionRequired:
       description: >-
         Acesso negado (RFC 9457). A operação exige a sessão de um usuário:
@@ -2262,9 +2284,10 @@ components:
         timezone: { type: string }
         invoice_prefix: { type: string, pattern: '^[A-Z0-9]{1,10}$' }
         payment_terms_days: { type: integer, minimum: 0, maximum: 120 }
+        address: { $ref: "#/components/schemas/Address" }
     Organization:
       type: object
-      required: [id, slug, name, timezone, currency, invoice_prefix, payment_terms_days, status, created_at, version]
+      required: [id, slug, name, timezone, currency, invoice_prefix, payment_terms_days, address, status, created_at, version]
       properties:
         id: { type: string, format: uuid }
         slug: { type: string }
@@ -2275,6 +2298,10 @@ components:
         currency: { type: string }
         invoice_prefix: { type: string }
         payment_terms_days: { type: integer }
+        address:
+          description: Endereço da organização, copiado para o emitente das faturas emitidas; nulo enquanto não cadastrado.
+          nullable: true
+          allOf: [ { $ref: "#/components/schemas/Address" } ]
         status: { type: string, enum: [active, suspended, closed] }
         created_at: { type: string, format: date-time }
         version: { type: integer }

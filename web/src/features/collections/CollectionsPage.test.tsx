@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
-import type { Notification, NotificationEvent, NotificationTemplate } from '../../api/types';
+import type { CollectionPolicy, Notification, NotificationEvent, NotificationTemplate } from '../../api/types';
 import { AUDITOR_PERMISSIONS, makeSession } from '../../test/fixtures';
 import { renderPage } from '../../test/render';
 import { server } from '../../test/server';
@@ -198,5 +198,210 @@ describe('histórico de envios', () => {
     expect(within(rows[3]).getByText('Nova tentativa agendada')).toBeInTheDocument();
     expect(within(rows[3]).getByText('421 serviço indisponível')).toBeInTheDocument();
     expect(within(rows[4]).getByText('Substituída por um passo posterior da régua')).toBeInTheDocument();
+  });
+});
+
+// Formulário com vários campos numéricos do Mantine: sob carga, a digitação
+// passa do limite padrão de 15 s.
+const FORM_TEST_TIMEOUT = 40_000;
+
+const policy: CollectionPolicy = {
+  id: '0195f1a0-0000-7000-8000-00000000b001',
+  name: 'Régua padrão',
+  is_default: true,
+  reminder_offsets_days: [-3, 0, 3],
+  send_window_start_hour: 8,
+  send_window_end_hour: 20,
+  max_messages_per_day: 1,
+  suspend_after_days: 30,
+  reactivate_on_payment: true,
+  created_at: '2026-11-01T12:00:00Z',
+  version: 2,
+};
+
+const lenient: CollectionPolicy = {
+  ...policy,
+  id: '0195f1a0-0000-7000-8000-00000000b002',
+  name: 'Clientes estratégicos',
+  is_default: false,
+  reminder_offsets_days: [7, -1],
+  send_window_start_hour: 9,
+  send_window_end_hour: 18,
+  max_messages_per_day: 2,
+  suspend_after_days: null,
+  reactivate_on_payment: false,
+  version: 1,
+};
+
+function servePolicies(data: CollectionPolicy[] = [policy, lenient]) {
+  server.use(http.get('/api/v1/collection-policies', () => HttpResponse.json({ data })));
+}
+
+describe('políticas de cobrança', () => {
+  it('lista lembretes, janela, limite, suspensão e a política padrão', async () => {
+    servePolicies();
+    renderPage(<CollectionsPage />);
+    const table = await screen.findByRole('table', { name: 'Políticas de cobrança' });
+    const standard = within(table).getByRole('row', { name: /Régua padrão/ });
+    expect(within(standard).getByText('Padrão')).toBeInTheDocument();
+    expect(standard).toHaveTextContent('3 dia(s) antes, no vencimento, 3 dia(s) depois');
+    expect(standard).toHaveTextContent('8h–20h');
+    expect(standard).toHaveTextContent('1 e-mail(s)');
+    expect(standard).toHaveTextContent('Após 30 dia(s)');
+    expect(standard).toHaveTextContent('Sim');
+
+    const other = within(table).getByRole('row', { name: /Clientes estratégicos/ });
+    expect(within(other).queryByText('Padrão')).not.toBeInTheDocument();
+    // Os lembretes aparecem em ordem, do primeiro ao último.
+    expect(other).toHaveTextContent('1 dia(s) antes, 7 dia(s) depois');
+    expect(other).toHaveTextContent('9h–18h');
+    expect(other).toHaveTextContent('2 e-mail(s)');
+    expect(other).toHaveTextContent('Não suspende');
+    expect(other).toHaveTextContent('Não');
+  });
+
+  it(
+    'cria a política com os lembretes em ordem e sem suspensão quando desligada',
+    async () => {
+      const bodies: unknown[] = [];
+      servePolicies([]);
+      server.use(
+        http.post('/api/v1/collection-policies', async ({ request }) => {
+          const body = (await request.json()) as Record<string, unknown>;
+          bodies.push(body);
+          return HttpResponse.json({ ...policy, ...body, id: '0195f1a0-0000-7000-8000-00000000b003', version: 1 }, { status: 201 });
+        }),
+      );
+      const { user } = renderPage(<CollectionsPage />);
+      expect(await screen.findByText('Nenhuma política')).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Nova política' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Nova política de cobrança' });
+
+      await user.type(within(dialog).getByLabelText(/^Nome/), 'Régua de varejo');
+      await user.click(within(dialog).getByRole('button', { name: 'Adicionar lembrete' }));
+      await user.type(within(dialog).getByLabelText('Lembrete 5 (dias)'), '-7');
+      const maxPerDay = within(dialog).getByLabelText('Máximo de e-mails por dia');
+      await user.clear(maxPerDay);
+      await user.type(maxPerDay, '2');
+      expect(within(dialog).getByRole('switch', { name: 'Suspender a assinatura após atraso' })).not.toBeChecked();
+      await user.click(within(dialog).getByRole('button', { name: 'Salvar política' }));
+
+      await waitFor(() => expect(bodies).toHaveLength(1));
+      expect(bodies[0]).toEqual({
+        name: 'Régua de varejo',
+        is_default: false,
+        reminder_offsets_days: [-7, -3, 0, 3, 7],
+        send_window_start_hour: 8,
+        send_window_end_hour: 20,
+        max_messages_per_day: 2,
+        suspend_after_days: null,
+        reactivate_on_payment: true,
+      });
+      expect(await screen.findByText('Política criada.')).toBeInTheDocument();
+    },
+    FORM_TEST_TIMEOUT,
+  );
+
+  it(
+    'edita a política com If-Match da versão e desliga a suspensão',
+    async () => {
+      const requests: { ifMatch: string | null; id: string; body: Record<string, unknown> }[] = [];
+      servePolicies();
+      server.use(
+        http.patch('/api/v1/collection-policies/:id', async ({ request, params }) => {
+          const body = (await request.json()) as Record<string, unknown>;
+          requests.push({ ifMatch: request.headers.get('If-Match'), id: String(params.id), body });
+          return HttpResponse.json({ ...policy, ...body, version: 3 });
+        }),
+      );
+      const { user } = renderPage(<CollectionsPage />);
+      await user.click(await screen.findByRole('button', { name: 'Editar política Régua padrão' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Editar política de cobrança' });
+      const name = within(dialog).getByLabelText(/^Nome/);
+      expect(name).toHaveValue('Régua padrão');
+      expect(within(dialog).getByLabelText('Lembrete 3 (dias)')).toHaveValue('3');
+      expect(within(dialog).getByLabelText('Suspender após quantos dias de atraso')).toHaveValue('30');
+
+      await user.clear(name);
+      await user.type(name, 'Régua padrão revisada');
+      await user.click(within(dialog).getByRole('switch', { name: 'Suspender a assinatura após atraso' }));
+      expect(within(dialog).queryByLabelText('Suspender após quantos dias de atraso')).not.toBeInTheDocument();
+      await user.click(within(dialog).getByRole('button', { name: 'Salvar política' }));
+
+      await waitFor(() => expect(requests).toHaveLength(1));
+      expect(requests[0].ifMatch).toBe('"2"');
+      expect(requests[0].id).toBe(policy.id);
+      expect(requests[0].body).toEqual({
+        name: 'Régua padrão revisada',
+        is_default: true,
+        reminder_offsets_days: [-3, 0, 3],
+        send_window_start_hour: 8,
+        send_window_end_hour: 20,
+        max_messages_per_day: 1,
+        suspend_after_days: null,
+        reactivate_on_payment: true,
+      });
+      expect(await screen.findByText('Política atualizada.')).toBeInTheDocument();
+    },
+    FORM_TEST_TIMEOUT,
+  );
+
+  /** Abre o modal de nova política com o nome preenchido e conta os POST recebidos. */
+  async function openNewPolicy() {
+    const calls = { count: 0 };
+    servePolicies([]);
+    server.use(
+      http.post('/api/v1/collection-policies', () => {
+        calls.count++;
+        return HttpResponse.json(policy, { status: 201 });
+      }),
+    );
+    const { user } = renderPage(<CollectionsPage />);
+    await user.click(await screen.findByRole('button', { name: 'Nova política' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Nova política de cobrança' });
+    await user.type(within(dialog).getByLabelText(/^Nome/), 'Régua inválida');
+    return { user, dialog, calls };
+  }
+
+  it(
+    'não envia a janela de envio que termina antes de começar',
+    async () => {
+      const { user, dialog, calls } = await openNewPolicy();
+      const end = within(dialog).getByLabelText('Envio até as (h)');
+      await user.clear(end);
+      await user.type(end, '6');
+      await user.click(within(dialog).getByRole('button', { name: 'Salvar política' }));
+      expect(await within(dialog).findByText('O fim da janela deve ser depois do início.')).toBeInTheDocument();
+      expect(calls.count).toBe(0);
+    },
+    FORM_TEST_TIMEOUT,
+  );
+
+  it(
+    'não envia lembretes repetidos e explica o motivo',
+    async () => {
+      const { user, dialog, calls } = await openNewPolicy();
+      const second = within(dialog).getByLabelText('Lembrete 2 (dias)');
+      await user.clear(second);
+      await user.type(second, '-3');
+      await user.click(within(dialog).getByRole('button', { name: 'Salvar política' }));
+      // O erro da lista de lembretes fica na raiz do campo (offsets.root).
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent('Há lembretes repetidos.');
+      expect(calls.count).toBe(0);
+      // Corrigido o valor repetido, o aviso some sem novo envio.
+      await user.clear(second);
+      await user.type(second, '5');
+      await waitFor(() => expect(within(dialog).queryByText('Há lembretes repetidos.')).not.toBeInTheDocument());
+    },
+    FORM_TEST_TIMEOUT,
+  );
+
+  it('auditor consulta as políticas sem criar nem editar', async () => {
+    servePolicies();
+    renderPage(<CollectionsPage />, { session: makeSession({ permissions: AUDITOR_PERMISSIONS }) });
+    const table = await screen.findByRole('table', { name: 'Políticas de cobrança' });
+    expect(within(table).getByRole('row', { name: /Régua padrão/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Nova política' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Editar política/ })).not.toBeInTheDocument();
   });
 });

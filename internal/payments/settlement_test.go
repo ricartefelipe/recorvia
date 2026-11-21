@@ -162,6 +162,36 @@ func TestDisputeWonSettlesReleasedHold(t *testing.T) {
 	}
 }
 
+// O estorno da retenção na disputa ganha aparece em todo o histórico do
+// ledger, como no banco, e não só nos lançamentos observados depois da
+// abertura: o saldo completo das contas fecha com o líquido do pagamento, e
+// os chargebacks e os valores em liquidação voltam a zero.
+func TestDisputeWonReversalIsInFullLedger(t *testing.T) {
+	f, _, c := paidFixture(t)
+	f.sendSnapshot(t, "evt_cb", chargebackSnapshot(c.ProviderChargeID, ProviderChargebackRequested, payNow.Add(time.Hour)))
+	// Os testes limpam posted para observar só os lançamentos seguintes; o
+	// estorno precisa achar a abertura da disputa no histórico completo.
+	f.store.posted = nil
+	f.sendSnapshot(t, "evt_won", chargebackSnapshot(c.ProviderChargeID, ProviderChargebackReversed, payNow.Add(2*time.Hour)))
+	d := f.latestDispute(t, c.ID)
+	if d.Status != DisputeWon || !slices.Equal(f.store.reversals, []string{"dispute.opened:" + d.ID.String()}) {
+		t.Fatalf("disputa %s, estornos %v", d.Status, f.store.reversals)
+	}
+	if got := ledgerKindsOf(f.store.posted); !slices.Equal(got, []string{"dispute.opened.reversal", "settlement.received"}) {
+		t.Fatalf("lançamentos depois da disputa ganha: %v", got)
+	}
+	net := ledgerNet(f.store.ledger)
+	if net[ledger.Chargebacks] != 0 || net[ledger.ProviderClearing] != 0 || net[ledger.ProviderConfirmed] != 0 || net[ledger.Cash] != 9801 ||
+		net[ledger.ProviderFees] != 199 || net[ledger.AccountsReceivable] != -10000 {
+		t.Fatalf("ledger completo depois da disputa ganha: %v", net)
+	}
+	// A reentrega do mesmo evento não estorna de novo.
+	f.sendSnapshot(t, "evt_won_2", chargebackSnapshot(c.ProviderChargeID, ProviderChargebackReversed, payNow.Add(3*time.Hour)))
+	if n := len(postedByKind(f.store.ledger, "dispute.opened.reversal")); n != 1 {
+		t.Fatalf("estornos no ledger: %d", n)
+	}
+}
+
 // Pagamento confirmado antes da ADR-080 foi lançado direto nos valores em
 // liquidação: o recebimento posterior não lança nada (não há valor em
 // pagamentos confirmados), sem deixar a conta negativa.

@@ -8,6 +8,7 @@ import { isApiError } from '../../api/http';
 import { PORTAL_SESSION_KEY, portalKey } from '../../api/queryKeys';
 import type { PortalInvoice, PortalInvoicePage, PortalSession } from '../../api/types';
 import { DocumentViewer } from '../../components/DocumentViewer';
+import { FiscalNotice } from '../../components/FiscalNotice';
 import { CivilDate, Money, StatusBadge } from '../../components/format';
 import { EmptyState, ErrorState, LoadingState, QueryContent } from '../../components/states';
 import { KeyValue } from '../../components/ui';
@@ -186,6 +187,7 @@ export function PortalInvoicePage() {
                   <PayButton invoice={invoice} size="sm" />
                 </Group>
               </Group>
+              <FiscalNotice />
               {payable(invoice) && (
                 <Alert icon={<IconInfoCircle />} variant="light">
                   O pagamento é feito no ambiente seguro do provedor de pagamentos. Seus dados de cartão não passam por esta

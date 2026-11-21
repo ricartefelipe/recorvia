@@ -5,15 +5,18 @@
 // resposta.
 //
 // Regras para status não declarados na operação: o contrato estabelece que
-// todo erro segue a RFC 9457, então um status de erro (4xx ou 5xx) não
-// listado é aceito somente como application/problem+json válido contra
-// components/schemas/Problem; um status de sucesso ou redirecionamento não
-// listado é divergência. Toda resposta problem+json deve repetir no campo
-// status o status HTTP. Redirecionamentos declarados exigem Location e não
-// têm o corpo conferido (a nota de hipertexto da RFC 9110). Requisições a
-// caminhos fora do contrato (rota inexistente, método não permitido) também
-// só podem responder com problem+json, salvo os caminhos ignorados
-// explicitamente.
+// todo erro segue a RFC 9457, então um status 4xx não listado é aceito
+// somente como application/problem+json válido contra
+// components/schemas/Problem; um status 5xx não listado é divergência, como
+// um status de sucesso ou redirecionamento não listado (ADR-084): a operação
+// que devolve 503 por regra própria o declara. A falha provocada de propósito
+// num teste (por exemplo, 500 internal_error) é aceita somente com a exceção
+// explícita AllowUndeclared, restrita ao teste, ao método, ao caminho e ao
+// status. Toda resposta problem+json deve repetir no campo status o status
+// HTTP. Redirecionamentos declarados exigem Location e não têm o corpo
+// conferido (a nota de hipertexto da RFC 9110). Requisições a caminhos fora
+// do contrato (rota inexistente, método não permitido) só podem responder
+// com 4xx em problem+json, salvo os caminhos ignorados explicitamente.
 package contract
 
 import (
@@ -99,8 +102,8 @@ func (v *Validator) Check(req *http.Request, status int, header http.Header, bod
 	}
 	route, params, err := v.router.FindRoute(req)
 	if err != nil {
-		// Caminho ou método fora do contrato: apenas erros estruturados.
-		if status < 400 {
+		// Caminho ou método fora do contrato: apenas erros 4xx estruturados.
+		if status < 400 || status >= 500 {
 			return fmt.Errorf("resposta %d a uma operação fora do contrato", status)
 		}
 		return v.checkProblem(header, body)
@@ -111,7 +114,7 @@ func (v *Validator) Check(req *http.Request, status int, header http.Header, bod
 		declared = responses.Default()
 	}
 	if declared == nil {
-		if status < 400 {
+		if status < 400 || status >= 500 {
 			return fmt.Errorf("status %d não declarado na operação %s", status, route.Operation.OperationID)
 		}
 		return v.checkProblem(header, body)
@@ -136,6 +139,15 @@ func (v *Validator) Check(req *http.Request, status int, header http.Header, bod
 	}
 	in.SetBodyBytes(body)
 	return openapi3filter.ValidateResponse(req.Context(), in)
+}
+
+// checkAllowedUndeclared confere o 5xx aceito por AllowUndeclared: somente
+// problem+json válido, com o status repetido no corpo.
+func (v *Validator) checkAllowedUndeclared(_ *http.Request, status int, header http.Header, body []byte) error {
+	if err := checkProblemStatus(status, header, body); err != nil {
+		return err
+	}
+	return v.checkProblem(header, body)
 }
 
 // checkProblem confere uma resposta de erro não declarada pela operação.
@@ -177,6 +189,50 @@ func mediaType(h http.Header) string {
 	return mt
 }
 
+// undeclared guarda as exceções explícitas de status 5xx não declarados,
+// por teste (o mesmo testing.TB que montou o servidor com Wrap ou
+// Middleware).
+var undeclared = struct {
+	sync.Mutex
+	byTest map[testing.TB]map[string]bool
+}{byTest: map[testing.TB]map[string]bool{}}
+
+func undeclaredKey(method, path string, status int) string {
+	return fmt.Sprintf("%s %s %d", method, path, status)
+}
+
+// AllowUndeclared aceita, no teste t e somente para a requisição method path
+// (caminho concreto, sem query), o status 5xx que o contrato não declara. Serve
+// à falha provocada de propósito (falha simulada no banco, pânico), que
+// nenhuma operação documenta; a resposta continua obrigada a ser
+// problem+json válido com o status repetido no corpo. t é o teste que montou
+// o servidor; a exceção termina com ele.
+func AllowUndeclared(t testing.TB, method, path string, status int) {
+	t.Helper()
+	if status < 500 || status > 599 {
+		t.Fatalf("contrato: AllowUndeclared aceita somente status 5xx, não %d", status)
+	}
+	undeclared.Lock()
+	defer undeclared.Unlock()
+	allowed := undeclared.byTest[t]
+	if allowed == nil {
+		allowed = map[string]bool{}
+		undeclared.byTest[t] = allowed
+		t.Cleanup(func() {
+			undeclared.Lock()
+			defer undeclared.Unlock()
+			delete(undeclared.byTest, t)
+		})
+	}
+	allowed[undeclaredKey(method, path, status)] = true
+}
+
+func allowedUndeclared(t testing.TB, method, path string, status int) bool {
+	undeclared.Lock()
+	defer undeclared.Unlock()
+	return undeclared.byTest[t][undeclaredKey(method, path, status)]
+}
+
 // Middleware valida cada resposta de next e reporta as divergências em t.
 func Middleware(t testing.TB, v *Validator, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -189,7 +245,11 @@ func Middleware(t testing.TB, v *Validator, next http.Handler) http.Handler {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		if err := v.Check(req, status, rec.header(), rec.body.Bytes()); err != nil {
+		check := v.Check
+		if status >= 500 && allowedUndeclared(t, req.Method, req.URL.Path, status) {
+			check = v.checkAllowedUndeclared
+		}
+		if err := check(req, status, rec.header(), rec.body.Bytes()); err != nil {
 			t.Errorf("contrato: %s %s respondeu %d: %s\ncorpo: %s", r.Method, r.URL.Path, status, flatten(err), truncate(rec.body.String(), 2000))
 		}
 	})

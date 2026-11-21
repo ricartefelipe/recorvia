@@ -803,7 +803,13 @@ func issueDraft(ctx context.Context, tx IssueTx, inv *Invoice, termsDays int, se
 	if err := inv.Issue(number, now, DueAt(now, termsDays, settings.Location)); err != nil {
 		return err
 	}
+	// Cópia do emitente, inclusive do endereço: a fatura guarda os dados da
+	// emissão, que não mudam com alterações posteriores da organização.
 	issuer := settings.Issuer
+	if issuer.Address != nil {
+		a := *issuer.Address
+		issuer.Address = &a
+	}
 	inv.Issuer = &issuer
 	if err := tx.InsertInvoice(ctx, inv); err != nil {
 		return err

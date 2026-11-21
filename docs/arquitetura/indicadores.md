@@ -141,3 +141,15 @@ zero; uma cancelada depois do mês continua na base e no saldo daquele mês.
 
 A interface rotula esses cards com "Posição atual" e os de base `month_end` com "Posição em <data e hora>", e
 explica as bases no topo do painel a partir de `bases`.
+
+## Links dos cards para as listas
+
+Um card leva à lista filtrada somente quando a lista e o filtro já existem na API e na tela e mostram o mesmo
+conjunto que o número conta (ADR-084): recebíveis em aberto em `/faturas?open_balance=true`, recebíveis
+vencidos em `/faturas?overdue=true`, assinaturas ativas em `/assinaturas?in_force=true`, divergências abertas em
+`/conciliacao?aba=divergencias` e operações com resultado desconhecido em `/operacoes-pagamento?status=unknown`.
+Somas do mês (faturado, recebido, reembolsos, chargebacks, novas e canceladas), taxas, MRR e ARR, a receber do
+provedor e valores a recuperar de clientes não têm link: as listas não filtram o mês nem o valor a recuperar. O
+link aparece só para quem tem a permissão de leitura da lista (`invoices.read`, `subscriptions.read`,
+`reconciliation.read` e `payments.read`). As listas mostram a posição de hoje: num mês encerrado, os cards de
+posição com link avisam isso ("A lista mostra a posição de hoje.").

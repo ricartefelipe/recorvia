@@ -204,7 +204,8 @@ func TestRefundStateMapping(t *testing.T) {
 
 // O simulador distingue o pagamento confirmado e ainda não creditado (confirm)
 // do recebido (pay, ou receive depois de confirm), como o Asaas (CONFIRMED e
-// RECEIVED).
+// RECEIVED). Como no provedor real, o pagamento só confirmado já pode ser
+// reembolsado.
 func TestConfirmedAndReceivedStatuses(t *testing.T) {
 	e := newSimEnv(t)
 	ctx := context.Background()
@@ -219,9 +220,6 @@ func TestConfirmedAndReceivedStatuses(t *testing.T) {
 	if err != nil || got.Status != payments.ProviderConfirmed || got.RawStatus != "confirmed" || got.Fee == nil || got.Fee.Amount() != paysim.Fee(10000) ||
 		got.PaidAt == nil {
 		t.Fatalf("confirmada: %+v %v", got, err)
-	}
-	if _, err := e.sim.Apply(pc.ProviderChargeID, paysim.Action{Name: "refund"}); err == nil {
-		t.Fatal("o simulador só reembolsa cobrança creditada")
 	}
 	if _, err := e.sim.Apply(pc.ProviderChargeID, paysim.Action{Name: "receive"}); err != nil {
 		t.Fatal(err)
@@ -245,5 +243,19 @@ func TestConfirmedAndReceivedStatuses(t *testing.T) {
 	}
 	if MapStatus("confirmed", "") != payments.ProviderConfirmed || MapStatus("paid", "") != payments.ProviderReceived {
 		t.Fatal("mapeamento das situações")
+	}
+
+	other := e.charge(t, 10000)
+	if _, err := e.sim.Apply(other.ProviderChargeID, paysim.Action{Name: "confirm"}); err != nil {
+		t.Fatal(err)
+	}
+	pr, err := e.gw.Refund(ctx, payments.RefundRequest{ProviderChargeID: other.ProviderChargeID, Amount: money.New(3000, money.BRL),
+		ExternalReference: "ref-confirmada"})
+	if err != nil || pr.State != payments.RefundStateDone || pr.Amount.Amount() != 3000 {
+		t.Fatalf("reembolso da cobrança confirmada: %+v %v", pr, err)
+	}
+	if got, err := e.gw.GetCharge(ctx, other.ProviderChargeID); err != nil || got.Status != payments.ProviderPartiallyRefunded ||
+		!got.Status.IsReceived() || got.RefundedAmount.Amount() != 3000 {
+		t.Fatalf("cobrança confirmada e reembolsada: %+v %v", got, err)
 	}
 }

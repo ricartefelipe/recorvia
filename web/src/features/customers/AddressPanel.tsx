@@ -9,9 +9,10 @@ import { optionalText, requiredText } from '../../lib/validation';
 import { usePermission } from '../../session/SessionContext';
 import { customersApi } from './api';
 
-const UFS = ['AC', 'AL', 'AP', 'AM', 'BA', 'CE', 'DF', 'ES', 'GO', 'MA', 'MT', 'MS', 'MG', 'PA', 'PB', 'PR', 'PE', 'PI', 'RJ', 'RN', 'RS', 'RO', 'RR', 'SC', 'SP', 'SE', 'TO'];
+export const UFS = ['AC', 'AL', 'AP', 'AM', 'BA', 'CE', 'DF', 'ES', 'GO', 'MA', 'MT', 'MS', 'MG', 'PA', 'PB', 'PR', 'PE', 'PI', 'RJ', 'RN', 'RS', 'RO', 'RR', 'SC', 'SP', 'SE', 'TO'];
 
-const addressSchema = z.object({
+/** Endereço postal (cobrança do cliente e endereço da organização), com as regras da API. */
+export const addressSchema = z.object({
   street: requiredText(1, 200, 'O logradouro'),
   number: requiredText(1, 20, 'O número'),
   complement: optionalText(100),

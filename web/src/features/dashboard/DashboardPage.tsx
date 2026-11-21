@@ -11,6 +11,7 @@ import { HelpTip, PageHeader } from '../../components/ui';
 import { currentMonthInTimeZone, formatDateTime, formatMonth } from '../../lib/dates';
 import { useUrlFilters } from '../../lib/hooks';
 import { formatBasisPoints, formatMoney } from '../../lib/money';
+import type { Permission } from '../../session/permissions';
 import { useTenant } from '../../session/SessionContext';
 
 export function fetchDashboard(month: string, signal?: AbortSignal): Promise<Dashboard> {
@@ -44,6 +45,20 @@ export const INDICATOR_LABELS: Record<IndicatorKey, string> = {
   unknown_operations: 'Operações com resultado desconhecido',
 };
 
+/**
+ * Lista que corresponde ao número do card, com o filtro que já existe na API e
+ * na tela, e a permissão de leitura da lista: sem ela, o card fica sem link.
+ * Indicadores sem lista correspondente (por exemplo, somas do mês ou
+ * disputas com valor a recuperar, que a lista não filtra) não têm link.
+ */
+export const INDICATOR_LISTS: Partial<Record<IndicatorKey, { href: string; permission: Permission }>> = {
+  open_receivables: { href: '/faturas?open_balance=true', permission: 'invoices.read' },
+  overdue_receivables: { href: '/faturas?overdue=true', permission: 'invoices.read' },
+  active_subscriptions: { href: '/assinaturas?in_force=true', permission: 'subscriptions.read' },
+  open_discrepancies: { href: '/conciliacao?aba=divergencias', permission: 'reconciliation.read' },
+  unknown_operations: { href: '/operacoes-pagamento?status=unknown', permission: 'payments.read' },
+};
+
 export const BASIS_LABELS: Record<Basis, string> = {
   month: 'Mês consultado',
   month_end: 'Posição no fim do mês',
@@ -57,7 +72,6 @@ function StatCard({
   indicator,
   data,
   tone,
-  href,
   badge,
 }: {
   label: string;
@@ -66,12 +80,16 @@ function StatCard({
   indicator: IndicatorKey;
   data: Dashboard;
   tone?: 'danger' | 'warning';
-  href?: string;
   badge?: ReactNode;
 }) {
-  const { timeZone } = useTenant();
+  const { timeZone, can } = useTenant();
   const definition = data.definitions?.[indicator];
   const basis = data.bases?.[indicator];
+  const list = INDICATOR_LISTS[indicator];
+  const href = list && can(list.permission) ? list.href : undefined;
+  // A lista filtrada mostra a posição de hoje: num mês encerrado, ela difere
+  // do número das posições no fim do mês (e o card avisa).
+  const todayList = !!href && (basis === 'month_end' || basis === 'current') && data.month !== currentMonthInTimeZone(timeZone);
   const color = tone === 'danger' ? 'red.7' : tone === 'warning' ? 'orange.7' : undefined;
   return (
     <Paper withBorder p="md" radius="md" component="section" aria-label={label}>
@@ -109,6 +127,11 @@ function StatCard({
         {hint && (
           <Text size="xs" c="dimmed">
             {hint}
+          </Text>
+        )}
+        {todayList && (
+          <Text size="xs" c="dimmed">
+            A lista mostra a posição de hoje.
           </Text>
         )}
       </Stack>
@@ -229,7 +252,7 @@ function DashboardContent({ data }: { data: Dashboard }) {
               </Badge>
             }
           />
-          <StatCard label="Assinaturas ativas" value={data.active_subscriptions} indicator="active_subscriptions" data={data} href="/assinaturas?status=active" />
+          <StatCard label="Assinaturas ativas" value={data.active_subscriptions} indicator="active_subscriptions" data={data} />
           <StatCard label="Novas no mês" value={data.new_subscriptions} indicator="new_subscriptions" data={data} />
           <StatCard label="Canceladas no mês" value={data.canceled_subscriptions} indicator="canceled_subscriptions" data={data} />
         </SimpleGrid>
@@ -237,14 +260,13 @@ function DashboardContent({ data }: { data: Dashboard }) {
 
       <Section title="Recebíveis e inadimplência">
         <SimpleGrid cols={{ base: 1, xs: 2, lg: 4 }}>
-          <StatCard label="Recebíveis em aberto" value={money(data.open_receivables)} indicator="open_receivables" data={data} href="/faturas?status=open" />
+          <StatCard label="Recebíveis em aberto" value={money(data.open_receivables)} indicator="open_receivables" data={data} />
           <StatCard
             label="Recebíveis vencidos"
             value={money(data.overdue_receivables)}
             indicator="overdue_receivables"
             data={data}
             tone={data.overdue_receivables > 0 ? 'warning' : undefined}
-            href="/faturas?overdue=true"
           />
           <StatCard label="Taxa de inadimplência" value={formatBasisPoints(data.delinquency_rate_bp)} indicator="delinquency_rate_bp" data={data} />
           <StatCard label="Churn" value={formatBasisPoints(data.churn_rate_bp)} indicator="churn_rate_bp" data={data} />
@@ -253,15 +275,14 @@ function DashboardContent({ data }: { data: Dashboard }) {
 
       <Section title="Estornos e exceções">
         <SimpleGrid cols={{ base: 1, xs: 2, lg: 5 }}>
-          <StatCard label="Reembolsos" value={money(data.refunds)} indicator="refunds" data={data} href="/reembolsos" />
-          <StatCard label="Chargebacks" value={money(data.chargebacks)} indicator="chargebacks" data={data} href="/disputas" />
+          <StatCard label="Reembolsos" value={money(data.refunds)} indicator="refunds" data={data} />
+          <StatCard label="Chargebacks" value={money(data.chargebacks)} indicator="chargebacks" data={data} />
           <StatCard
             label="Valores a recuperar de clientes"
             value={money(data.open_recoverables)}
             indicator="open_recoverables"
             data={data}
             tone={(data.open_recoverables ?? 0) > 0 ? 'warning' : undefined}
-            href="/disputas"
           />
           <StatCard
             label="Divergências abertas"
@@ -269,7 +290,6 @@ function DashboardContent({ data }: { data: Dashboard }) {
             indicator="open_discrepancies"
             data={data}
             tone={openDiscrepancies > 0 ? 'warning' : undefined}
-            href="/conciliacao?aba=divergencias"
           />
           <StatCard
             label="Operações com resultado desconhecido"
@@ -278,7 +298,6 @@ function DashboardContent({ data }: { data: Dashboard }) {
             data={data}
             tone={unknownOps > 0 ? 'danger' : undefined}
             hint={unknownOps > 0 ? 'Reconsulte o provedor antes de cobrar novamente.' : undefined}
-            href="/operacoes-pagamento?status=unknown"
           />
         </SimpleGrid>
       </Section>

@@ -49,6 +49,7 @@ paths:
           headers: { ETag: { required: true, schema: { type: string } } }
           content: { application/json: { schema: { $ref: "#/components/schemas/Item" } } }
         "409": { description: Conflito, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+        "503": { description: Indisponível, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
     delete:
       operationId: deleteItem
       parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
@@ -112,6 +113,10 @@ func TestCheckFollowsTheContract(t *testing.T) {
 		{"erro não declarado em problem+json", http.MethodGet, "/items/" + itemID, 404, problem, problemBody(404), ""},
 		{"erro não declarado em texto", http.MethodGet, "/items/" + itemID, 404, text, "404 page not found", "problem+json"},
 		{"erro não declarado fora do schema", http.MethodGet, "/items", 422, problem, `{"code":"x","status":422}`, "Problem"},
+		{"5xx declarado", http.MethodGet, "/items/" + itemID, 503, problem, problemBody(503), ""},
+		{"5xx não declarado, mesmo em problem+json", http.MethodGet, "/items", 503, problem, problemBody(503), "status 503 não declarado"},
+		{"500 não declarado", http.MethodDelete, "/items/" + itemID, 500, problem, problemBody(500), "status 500 não declarado"},
+		{"5xx fora do contrato", http.MethodGet, "/nada", 500, problem, problemBody(500), "fora do contrato"},
 		{"status do corpo diferente do HTTP", http.MethodGet, "/items/" + itemID, 404, problem, problemBody(400), "status 400"},
 		{"sucesso não declarado", http.MethodGet, "/items", 201, json, `{"items":[]}`, "não declarado"},
 		{"sem corpo declarado", http.MethodDelete, "/items/" + itemID, 204, http.Header{}, "", ""},
@@ -222,6 +227,100 @@ func TestMiddlewareReportsDivergencesAndKeepsResponse(t *testing.T) {
 	}
 	if !strings.Contains(got[0], "GET /items/"+itemID+" respondeu 200") || !strings.Contains(got[1], "GET /nada respondeu 404") {
 		t.Fatalf("mensagens sem método, caminho e status: %v", got)
+	}
+}
+
+// A exceção explícita de AllowUndeclared vale só para o teste, o método, o
+// caminho e o status registrados, e a resposta continua obrigada a ser
+// problem+json válido.
+func TestAllowUndeclaredIsNarrow(t *testing.T) {
+	v, err := New([]byte(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failing := func(contentType, body string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", contentType)
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(body))
+		})
+	}
+	other := "0b8f2c1e-1111-4a54-9a43-0b6d2f9f7f10"
+	cases := []struct {
+		name         string
+		allow        func(tb testing.TB)
+		method, path string
+		handler      http.Handler
+		wantReported bool
+	}{
+		{"sem exceção", func(testing.TB) {}, http.MethodDelete, "/items/" + itemID, failing(problemMIME, problemBody(500)), true},
+		{"com a exceção da requisição", func(tb testing.TB) { AllowUndeclared(tb, http.MethodDelete, "/items/"+itemID, 500) },
+			http.MethodDelete, "/items/" + itemID, failing(problemMIME, problemBody(500)), false},
+		{"exceção de outro caminho", func(tb testing.TB) { AllowUndeclared(tb, http.MethodDelete, "/items/"+other, 500) },
+			http.MethodDelete, "/items/" + itemID, failing(problemMIME, problemBody(500)), true},
+		{"exceção de outro método", func(tb testing.TB) { AllowUndeclared(tb, http.MethodGet, "/items/"+itemID, 500) },
+			http.MethodDelete, "/items/" + itemID, failing(problemMIME, problemBody(500)), true},
+		{"exceção de outro status", func(tb testing.TB) { AllowUndeclared(tb, http.MethodDelete, "/items/"+itemID, 503) },
+			http.MethodDelete, "/items/" + itemID, failing(problemMIME, problemBody(500)), true},
+		{"exceção sem problem+json", func(tb testing.TB) { AllowUndeclared(tb, http.MethodDelete, "/items/"+itemID, 500) },
+			http.MethodDelete, "/items/" + itemID, failing("text/plain", "erro"), true},
+		{"exceção com status divergente no corpo", func(tb testing.TB) { AllowUndeclared(tb, http.MethodDelete, "/items/"+itemID, 500) },
+			http.MethodDelete, "/items/" + itemID, failing(problemMIME, problemBody(503)), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tb := &recordingTB{TB: t}
+			tc.allow(tb)
+			rec := httptest.NewRecorder()
+			Middleware(tb, v, tc.handler).ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+			if got := tb.reported(); (len(got) > 0) != tc.wantReported {
+				t.Fatalf("divergências %v, esperado reportar: %v", got, tc.wantReported)
+			}
+		})
+	}
+	// A exceção registrada por um teste não vale para outro.
+	t.Run("outro teste", func(t *testing.T) {
+		owner := &recordingTB{TB: t}
+		AllowUndeclared(owner, http.MethodDelete, "/items/"+itemID, 500)
+		tb := &recordingTB{TB: t}
+		Middleware(tb, v, failing(problemMIME, problemBody(500))).ServeHTTP(httptest.NewRecorder(),
+			httptest.NewRequest(http.MethodDelete, "/items/"+itemID, nil))
+		if len(tb.reported()) == 0 {
+			t.Fatal("a exceção de outro teste foi aceita")
+		}
+	})
+}
+
+// No contrato do projeto, as operações que carregam as credenciais do
+// provedor na própria requisição declaram o 503
+// provider_credentials_unreadable; as demais não aceitam 503.
+func TestProjectContractDeclaresProviderUnavailable(t *testing.T) {
+	v, err := New(api.OpenAPI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	problem := http.Header{"Content-Type": {problemMIME}}
+	body := []byte(`{"type":"https://recorvia.dev/problems/provider-credentials-unreadable","title":"Serviço indisponível","status":503,` +
+		`"code":"provider_credentials_unreadable","detail":"As credenciais do provedor de pagamento não puderam ser decifradas."}`)
+	for _, tc := range []struct {
+		method, path string
+		declared     bool
+	}{
+		{http.MethodPost, "/api/v1/invoices/" + itemID + "/charges", true},
+		{http.MethodPost, "/api/v1/payment-operations/" + itemID + "/retry", true},
+		{http.MethodPost, "/api/v1/reconciliation/runs", true},
+		{http.MethodPost, "/api/v1/reconciliation/discrepancies/" + itemID + "/resolve", true},
+		{http.MethodPost, "/webhooks/providers/simulator/token-do-endpoint", true},
+		{http.MethodGet, "/api/v1/payment-providers", false},
+		{http.MethodGet, "/api/v1/customers", false},
+	} {
+		err := v.Check(httptest.NewRequest(tc.method, tc.path, nil), http.StatusServiceUnavailable, problem, body)
+		if tc.declared && err != nil {
+			t.Errorf("%s %s: 503 deveria estar declarado: %v", tc.method, tc.path, err)
+		}
+		if !tc.declared && err == nil {
+			t.Errorf("%s %s: 503 não declarado foi aceito", tc.method, tc.path)
+		}
 	}
 }
 

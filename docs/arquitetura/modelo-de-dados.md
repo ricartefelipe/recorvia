@@ -5,6 +5,7 @@ O schema completo está em `db/migrations` (Goose). Todas as tabelas de tenant t
 
 ```mermaid
 erDiagram
+  tenants ||--o| tenant_addresses : tem
   tenants ||--o{ memberships : possui
   users ||--o{ memberships : participa
   tenants ||--o{ invitations : emite
@@ -92,7 +93,7 @@ erDiagram
 
 | Módulo | Tabelas |
 |---|---|
-| Organizações e identidade | `tenants`, `users`, `memberships`, `invitations`, `platform_staff`, `api_credentials` |
+| Organizações e identidade | `tenants`, `tenant_addresses`, `users`, `memberships`, `invitations`, `platform_staff`, `api_credentials` |
 | Plataforma | `platform_plans`, `platform_addons`, `tenant_platform_subscriptions`, `platform_addon_orders`, `platform_statements` |
 | Clientes | `customers`, `customer_contacts`, `customer_billing_addresses`, `customer_provider_refs`, `customer_credit_entries`, `customer_portal_links` |
 | Catálogo | `products`, `billable_metrics`, `plans`, `plan_price_versions`, `coupons` |

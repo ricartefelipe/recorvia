@@ -11,6 +11,7 @@ criados pelo seed (executado por `make up`; repetir com `docker compose --profil
 | `carla.owner@beta.test` | `Recorvia#Demo2026` | Beta Consultoria (demonstração) | proprietária |
 | `nova.empresa@exemplo.test` | `Recorvia#Demo2026` | sem organização (onboarding) | — |
 | `equipe@recorvia.test` | `Recorvia#Demo2026` | sem organização (equipe da plataforma) | atendimento de serviços |
+| `gabi.convidada@exemplo.test` | `Recorvia#Demo2026` | sem organização (aceita o convite do roteiro E2E 09 na Beta) | — |
 
 O usuário da equipe da plataforma é incluído em `platform_staff` pelo `migrate up` do ambiente local
 (inclusão e remoção em outros ambientes: `docs/operacao/runbooks/equipe-da-plataforma.md`).

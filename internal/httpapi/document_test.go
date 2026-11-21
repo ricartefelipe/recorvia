@@ -325,3 +325,60 @@ func TestInvoiceDocumentVoidAndIssuerSnapshot(t *testing.T) {
 		t.Fatalf("emitente de fatura antiga: %+v", got)
 	}
 }
+
+// O endereço do emitente sai no documento quando foi gravado na emissão. A
+// fatura emitida antes do endereço da organização (emitente gravado sem
+// endereço) e a anterior à ADR-079 (sem emitente gravado) não ganham o
+// endereço atual da organização, e o documento continua completo.
+func TestInvoiceDocumentIssuerAddress(t *testing.T) {
+	loc, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &API{Deps: Deps{Clock: clock.System{}}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	at := time.Date(2026, time.November, 1, 12, 0, 0, 0, time.UTC)
+	brl := func(v int64) money.Money { return money.New(v, money.BRL) }
+	inv := billing.NewDraft(uuid.New(), uuid.New(), uuid.New(), nil, billing.KindManual, money.BRL, nil, customers.Snapshot{Name: "Cliente"}, at)
+	if err := inv.AddItem(billing.Item{Description: "Plano", Quantity: big.NewRat(1, 1), UnitAmount: big.NewRat(10000, 1), Amount: brl(10000),
+		DiscountAmount: brl(0)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := inv.Issue("ACME-2026-000300", at, at.Add(5*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	// O endereço atual da organização, diferente do gravado na emissão.
+	current := DocumentIssuer{Name: "Acme hoje", Document: "11444777000161", Address: "Rua Atual, 9 - Centro - Campinas/SP - CEP 13010-000"}
+	const label = "<strong>Endereço do emitente:</strong>"
+	cases := []struct {
+		name   string
+		issuer *billing.Issuer
+		want   string
+	}{
+		{"gravado na emissão", &billing.Issuer{Name: "Acme", DocumentNumber: "11444777000161", Address: &customers.Address{Street: "Av. Paulista",
+			Number: "1000", Complement: "10º andar", District: "Bela Vista", City: "São Paulo", State: "SP", PostalCode: "01310100", Country: "BR"}},
+			label + " Av. Paulista, 1000, 10º andar - Bela Vista - São Paulo/SP - CEP 01310-100"},
+		{"emitente gravado sem endereço", &billing.Issuer{Name: "Acme", DocumentNumber: "11444777000161"}, ""},
+		{"sem emitente gravado", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := *inv
+			doc.Issuer = tc.issuer
+			w := httptest.NewRecorder()
+			a.writeInvoiceDocument(w, httptest.NewRequest(http.MethodGet, "/", nil), invoiceDocumentData{Issuer: current, Invoice: doc, Location: loc})
+			body := w.Body.String()
+			if w.Code != http.StatusOK || !strings.Contains(body, documentFiscalNotice) || !strings.Contains(body, "</html>") {
+				t.Fatalf("documento incompleto (%d):\n%s", w.Code, body)
+			}
+			if tc.want != "" && !strings.Contains(body, tc.want) {
+				t.Errorf("documento sem %q:\n%s", tc.want, body)
+			}
+			if tc.want == "" && strings.Contains(body, label) {
+				t.Errorf("documento não deveria ter endereço do emitente:\n%s", body)
+			}
+			if strings.Contains(body, "Rua Atual") {
+				t.Errorf("o endereço atual da organização não substitui o da emissão:\n%s", body)
+			}
+		})
+	}
+}

@@ -175,7 +175,10 @@ function PolicyModal({ policy, opened, onClose }: { policy: CollectionPolicy | n
     onSuccess: onClose,
     onConcurrentReload: onClose,
   });
+  // Erros da lista inteira (máximo, repetidos) chegam em root, como no
+  // resolver do zod para arrays; mensagens do servidor, em message.
   const offsetsError = form.formState.errors.offsets;
+  const offsetsMessage = offsetsError?.message ?? offsetsError?.root?.message;
   return (
     <Modal opened={opened} onClose={onClose} title={policy ? 'Editar política de cobrança' : 'Nova política de cobrança'} size="lg">
       <form onSubmit={form.handleSubmit((v) => mutation.mutate(v))} noValidate>
@@ -204,7 +207,13 @@ function PolicyModal({ policy, opened, onClose }: { policy: CollectionPolicy | n
                       max={90}
                       allowDecimal={false}
                       value={field.value}
-                      onChange={(v) => field.onChange(v === '' ? '' : Number(v))}
+                      onChange={(v) => {
+                        field.onChange(v === '' ? '' : Number(v));
+                        // A repetição é uma regra da lista inteira (offsets.root):
+                        // depois do primeiro envio, a lista é revalidada a cada
+                        // mudança para que o aviso suma assim que for corrigido.
+                        if (form.formState.isSubmitted) void form.trigger('offsets');
+                      }}
                       error={fieldState.error?.message}
                       w={140}
                     />
@@ -215,9 +224,9 @@ function PolicyModal({ policy, opened, onClose }: { policy: CollectionPolicy | n
                 </ActionIcon>
               </Group>
             ))}
-            {offsetsError?.message && (
+            {offsetsMessage && (
               <Text size="xs" c="red" role="alert">
-                {offsetsError.message}
+                {offsetsMessage}
               </Text>
             )}
             <Button
