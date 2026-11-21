@@ -109,7 +109,7 @@ func invFullInvoice(t *testing.T, a *apiEnv, c *client, tn fixture.Tenant, cust 
 		"discount_type": "amount", "amount_off": 2000, "duration": "once"})
 	plan := newPlan(t, a.env, tn, "Plano Documento", flatPrice(20000))
 	sub := a.env.NewSubscription(t, tn, cust.ID, plan.ID, nil)
-	c.expect(http.StatusCreated, http.MethodPost, "/api/v1/subscriptions/"+sub.ID.String()+"/discounts", map[string]any{"coupon_code": "DOC20"})
+	c.expect(http.StatusCreated, http.MethodPost, "/api/v1/subscriptions/"+sub.ID.String()+"/discounts", map[string]any{"coupon_code": "DOC20"}, "Idempotency-Key", idemKey())
 	c.expect(http.StatusCreated, http.MethodPost, custPath+"/credits", map[string]any{"amount": 1500, "reason": "Cortesia comercial"},
 		"Idempotency-Key", "credito-"+uuid.NewString())
 	inv := issuedInvoice(c, sub.ID)

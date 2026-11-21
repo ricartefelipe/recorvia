@@ -11,6 +11,7 @@ import { DateTime, Money, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { confirmAction, KeyValue, PageHeader } from '../../components/ui';
 import { useApiMutation } from '../../lib/hooks';
+import { useIdempotencyKey } from '../../lib/idempotency';
 import { addonOrderStatusLabels, labelOf, platformSubscriptionStatusLabels } from '../../lib/labels';
 import { formatMoney } from '../../lib/money';
 import { optionalText } from '../../lib/validation';
@@ -22,7 +23,8 @@ const platformApi = {
   changePlan: (planCode: string) => api.put<PlatformOverview>('/api/v1/platform/plan', { plan_code: planCode }),
   addons: (signal?: AbortSignal) => api.get<DataList<PlatformAddon>>('/api/v1/platform/addons', { signal }),
   orders: (signal?: AbortSignal) => api.get<DataList<AddonOrder>>('/api/v1/platform/addon-orders', { signal }),
-  order: (input: { addon_code: string; notes?: string }) => api.post<AddonOrder>('/api/v1/platform/addon-orders', input),
+  order: (input: { addon_code: string; notes?: string }, idempotencyKey: string) =>
+    api.post<AddonOrder>('/api/v1/platform/addon-orders', input, { idempotencyKey }),
   statements: (signal?: AbortSignal) => api.get<DataList<PlatformStatement>>('/api/v1/platform/statements', { signal }),
 };
 
@@ -202,10 +204,15 @@ function PlansSection({ currentCode }: { currentCode: string }) {
 
 const orderSchema = z.object({ notes: optionalText(2000) });
 
-function OrderAddonModal({ addon, onClose }: { addon: PlatformAddon; onClose: () => void }) {
+export function OrderAddonModal({ addon, onClose }: { addon: PlatformAddon; onClose: () => void }) {
   const form = useForm<z.input<typeof orderSchema>, unknown, z.output<typeof orderSchema>>({ resolver: zodResolver(orderSchema), defaultValues: { notes: '' } });
+  const idempotency = useIdempotencyKey();
   const mutation = useApiMutation<z.output<typeof orderSchema>, AddonOrder>({
-    mutationFn: (v) => platformApi.order({ addon_code: addon.code, notes: v.notes }),
+    mutationFn: (v) => {
+      const input = { addon_code: addon.code, notes: v.notes };
+      return platformApi.order(input, idempotency.keyFor(input));
+    },
+    idempotency,
     invalidate: ['platform'],
     successMessage: 'Pedido registrado. Nossa equipe entrará em contato.',
     onSuccess: onClose,

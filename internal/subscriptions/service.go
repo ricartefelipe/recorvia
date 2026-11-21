@@ -1,7 +1,11 @@
 package subscriptions
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -55,7 +59,12 @@ type Tx interface {
 	LockPlatformPlan(ctx context.Context) (platformbilling.Plan, error)
 	PlatformUsage(ctx context.Context) (platformbilling.Usage, error)
 
-	Insert(ctx context.Context, s Subscription) error
+	// Insert grava a assinatura. false indica que outra transação já
+	// confirmou uma assinatura com a mesma RequestKey (nada é gravado).
+	Insert(ctx context.Context, s Subscription) (bool, error)
+	// ByRequestKey lê a assinatura criada com a chave de negócio informada
+	// (não encontrada: apperr.KindNotFound).
+	ByRequestKey(ctx context.Context, key string) (Subscription, error)
 	Get(ctx context.Context, id uuid.UUID, forUpdate bool) (Subscription, error)
 	Update(ctx context.Context, s Subscription) error
 	List(ctx context.Context, f ListFilter) (Page, error)
@@ -93,13 +102,70 @@ type CreateInput struct {
 	StartDate        *calendar.Date
 	TrialDays        *int
 	PaymentTermsDays *int
+	// RequestKey é a chave de negócio do pedido (derivada do
+	// Idempotency-Key). Com ela, a repetição do pedido devolve a assinatura
+	// já criada, mesmo depois de expirado o registro da resposta.
+	RequestKey string
 }
 
-// Create cria uma assinatura com a versão de preço vigente do plano.
+// RequestFingerprint é a impressão dos campos de negócio do pedido de
+// criação, gravada com a chave de negócio: SHA-256 de cliente, plano,
+// quantidade (vazia vale 1), data de início, dias de avaliação e prazo de
+// pagamento (ausentes distintos de zero).
+func RequestFingerprint(in CreateInput) []byte {
+	qty := in.Quantity
+	if qty == 0 {
+		qty = 1
+	}
+	opt := func(v *int) string {
+		if v == nil {
+			return "-"
+		}
+		return strconv.Itoa(*v)
+	}
+	start := "-"
+	if in.StartDate != nil {
+		start = in.StartDate.String()
+	}
+	sum := sha256.Sum256([]byte(strings.Join([]string{in.CustomerID.String(), in.PlanID.String(), strconv.Itoa(qty), start,
+		opt(in.TrialDays), opt(in.PaymentTermsDays)}, "|")))
+	return sum[:]
+}
+
+// Create cria uma assinatura com a versão de preço vigente do plano. Com
+// RequestKey, é repetível: a mesma chave com o mesmo conteúdo (impressão dos
+// campos de negócio, RequestFingerprint) devolve a assinatura já criada,
+// inclusive quando outra transação a grava ao mesmo tempo; com outro
+// conteúdo, é recusada com conflito (request_key_reused).
 func (s *Service) Create(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, in CreateInput) (Subscription, error) {
 	now := s.clock.Now()
+	var fingerprint []byte
+	if in.RequestKey != "" {
+		fingerprint = RequestFingerprint(in)
+	}
 	var sub Subscription
+	// existing devolve a assinatura já criada com a chave do pedido;
+	// found=false quando não há.
+	existing := func(tx Tx) (bool, error) {
+		prev, err := tx.ByRequestKey(ctx, in.RequestKey)
+		if apperr.IsKind(err, apperr.KindNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if !bytes.Equal(prev.RequestFingerprint, fingerprint) {
+			return false, apperr.Conflict("request_key_reused", "A chave do pedido já foi usada para outra assinatura.")
+		}
+		sub = prev
+		return true, nil
+	}
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		if in.RequestKey != "" {
+			if found, err := existing(tx); found || err != nil {
+				return err
+			}
+		}
 		loc, err := tx.TenantLocation(ctx)
 		if err != nil {
 			return err
@@ -155,7 +221,18 @@ func (s *Service) Create(ctx context.Context, tenantID uuid.UUID, actor audit.Ac
 		if err != nil {
 			return err
 		}
-		if err := tx.Insert(ctx, sub); err != nil {
+		sub.RequestKey, sub.RequestFingerprint = in.RequestKey, fingerprint
+		inserted, err := tx.Insert(ctx, sub)
+		if err != nil {
+			return err
+		}
+		if !inserted {
+			// Outra transação confirmou a assinatura com a mesma chave
+			// enquanto esta a preparava: devolve a confirmada.
+			found, err := existing(tx)
+			if err == nil && !found {
+				err = apperr.Conflict("subscription_in_progress", "Pedido de criação da assinatura em processamento; tente novamente.")
+			}
 			return err
 		}
 		if err := tx.InsertHistory(ctx, sub.ID, actor, sub.PopEvents()); err != nil {

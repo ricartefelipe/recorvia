@@ -17,7 +17,11 @@ info:
     - Erros no formato RFC 9457 (`application/problem+json`).
     - Concorrência otimista: recursos expõem `version` e `ETag`; alterações
       exigem `If-Match: "<version>"` quando indicado.
-    - Operações financeiras de criação exigem `Idempotency-Key`.
+    - Operações financeiras de criação exigem `Idempotency-Key` (veja o parâmetro
+      `IdempotencyKey`): pagamentos manuais, notas de crédito, cobranças,
+      reembolsos, baixas de valor a recuperar, créditos de cliente, execuções de
+      faturamento e de conciliação, anonimização, criação de assinaturas,
+      reajustes programados, aplicação de cupom e pedidos de serviço adicional.
     - Navegador: sessão por cookie HttpOnly, header `X-CSRF-Token` em métodos
       que alteram estado e `X-Recorvia-Tenant` igual à organização ativa.
     - CORS (somente para as origens de `RECORVIA_ALLOWED_ORIGINS`): a resposta
@@ -355,13 +359,15 @@ paths:
       tags: [platform]
       operationId: createAddonOrder
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, required: [addon_code], properties: { addon_code: { type: string }, notes: { type: string, maxLength: 2000 } } } } }
       responses:
         "201": { description: Pedido registrado, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/platform/statements:
     get:
       tags: [platform]
@@ -879,13 +885,21 @@ paths:
     post:
       tags: [subscriptions]
       operationId: createSubscription
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      description: >-
+        Cria a assinatura com a versão de preço vigente do plano. Exige `Idempotency-Key`: a repetição devolve o resultado
+        registrado (sem o header `ETag`; a versão está no corpo) e, depois de um processamento interrompido ou da validade
+        do registro (24 h), a chave de negócio derivada da chave devolve a mesma assinatura em vez de criar outra. A mesma
+        chave com outro conteúdo de negócio (cliente, plano, quantidade, início, avaliação ou prazo) responde 409
+        `request_key_reused`; 409 `subscription_in_progress` (com Retry-After) indica outra criação com a mesma chave
+        ainda não confirmada.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/SubscriptionInput" } } }
       responses:
-        "201": { description: Assinatura criada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "201": { description: Assinatura criada, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
         "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}:
     get:
@@ -993,12 +1007,13 @@ paths:
     post:
       tags: [subscriptions]
       operationId: schedulePriceAdjustment
-      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/PriceAdjustmentInput" } } }
       responses:
         "201": { description: Reajuste programado, content: { application/json: { schema: { $ref: "#/components/schemas/PriceAdjustment" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/price-adjustments/{adjustment_id}:
     delete:
@@ -1017,7 +1032,7 @@ paths:
     post:
       tags: [subscriptions]
       operationId: applySubscriptionCoupon
-      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, required: [coupon_code], properties: { coupon_code: { type: string } } } } }
@@ -1878,10 +1893,17 @@ components:
       in: header
       required: true
       description: >-
-        Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx,
-        401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido
-        aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente;
-        o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito.
+        Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou
+        credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o
+        método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado
+        registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro
+        corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no
+        caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave
+        registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx,
+        401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e
+        subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a
+        repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não
+        duplica o efeito.
       schema: { type: string, minLength: 8, maxLength: 255 }
     ID:
       name: id

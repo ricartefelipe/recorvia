@@ -17,6 +17,7 @@ import type { ChangeTiming, Subscription, SubscriptionDiscount } from '../../api
 import { confirmAction } from '../../components/ui';
 import { formatInstantDate } from '../../lib/dates';
 import { useApiMutation } from '../../lib/hooks';
+import { useIdempotencyKey } from '../../lib/idempotency';
 import { changeTimingLabels } from '../../lib/labels';
 import { optionalInt, optionalText, requiredInt } from '../../lib/validation';
 import { useSession, useTenant } from '../../session/SessionContext';
@@ -248,8 +249,10 @@ const couponSchema = z.object({ coupon_code: z.string().trim().min(3, 'Informe o
 
 function ApplyCouponModal({ subscription, onClose }: { subscription: Subscription; onClose: () => void }) {
   const form = useForm<z.input<typeof couponSchema>>({ resolver: zodResolver(couponSchema), defaultValues: { coupon_code: '' } });
+  const idempotency = useIdempotencyKey();
   const mutation = useApiMutation<string, SubscriptionDiscount, z.input<typeof couponSchema>>({
-    mutationFn: (code) => subscriptionsApi.applyCoupon(subscription.id, code),
+    mutationFn: (code) => subscriptionsApi.applyCoupon(subscription.id, code, idempotency.keyFor({ subscription: subscription.id, code })),
+    idempotency,
     invalidate: ['subscriptions', 'coupons'],
     successMessage: (d) => `Cupom ${d.coupon_code} aplicado.`,
     form,

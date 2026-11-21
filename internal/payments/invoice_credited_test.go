@@ -93,6 +93,34 @@ func TestHandleInvoiceCreditedReplacesDivergentCharge(t *testing.T) {
 	}
 }
 
+// Regressão: o inbox era marcado depois do ajuste, numa transação própria.
+// Se a cobrança nova pelo saldo fosse recusada pelo provedor, a reentrega da
+// mesma mensagem solicitava outra cobrança (tentativa 3) no provedor.
+func TestHandleInvoiceCreditedRedeliveryAfterDeclineCreatesNoCharge(t *testing.T) {
+	f := newPayFixture(t)
+	inv, _ := awaitingCharge(t, f)
+	f.creditInvoice(t, inv.ID, 3000)
+	f.gw.createResults = []gwResult{{err: errPermanent}}
+	msg := uuid.New()
+	if err := f.svc.HandleInvoiceCredited(context.Background(), f.tenantID, inv.ID, msg); err != nil {
+		t.Fatal(err)
+	}
+	charges := f.chargesOf(inv.ID)
+	if len(charges) != 2 || charges[0].Status != ChargeCanceled || charges[1].Status != ChargeFailed || len(f.gw.createCalls) != 2 {
+		t.Fatalf("cobrança pelo saldo recusada: %+v, %d criações", charges, len(f.gw.createCalls))
+	}
+	cancels := len(f.gw.cancelCalls)
+	for range 2 {
+		if err := f.svc.HandleInvoiceCredited(context.Background(), f.tenantID, inv.ID, msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(f.chargesOf(inv.ID)) != 2 || len(f.gw.createCalls) != 2 || len(f.gw.cancelCalls) != cancels {
+		t.Fatalf("reentrega não cria cobrança nem cancela de novo: %d cobranças, %d criações, %d cancelamentos",
+			len(f.chargesOf(inv.ID)), len(f.gw.createCalls), len(f.gw.cancelCalls))
+	}
+}
+
 func TestHandleInvoiceCreditedFullCreditCancelsWithoutNewCharge(t *testing.T) {
 	f := newPayFixture(t)
 	inv, old := awaitingCharge(t, f)
@@ -431,12 +459,10 @@ func TestHandleInvoiceCreditedFailures(t *testing.T) {
 			if len(f.store.inbox) != 0 {
 				t.Fatal("sem ajuste concluído, a mensagem não é marcada")
 			}
-			wantStatus := ChargeAwaitingPayment
-			if m == "DefaultAccount" || m == "MarkInbox" {
-				wantStatus = ChargeCanceled // o cancelamento local já foi confirmado; a reentrega conclui o restante
-			}
-			if got := f.store.charges[old.ID]; got.Status != wantStatus {
-				t.Fatalf("cobrança antiga: %s, esperado %s", got.Status, wantStatus)
+			// Inbox, cancelamentos e nova cobrança estão na mesma transação:
+			// qualquer falha desfaz tudo e a reentrega refaz o ajuste inteiro.
+			if got := f.store.charges[old.ID]; got.Status != ChargeAwaitingPayment || len(f.chargesOf(inv.ID)) != 1 || len(f.gw.cancelCalls) != 0 {
+				t.Fatalf("falha desfaz o ajuste: %s, %d cobranças, cancelamentos %v", got.Status, len(f.chargesOf(inv.ID)), f.gw.cancelCalls)
 			}
 		})
 	}

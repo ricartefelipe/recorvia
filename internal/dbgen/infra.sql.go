@@ -47,12 +47,13 @@ func (q *Queries) ClaimScheduledJob(ctx context.Context, arg ClaimScheduledJobPa
 	return i, err
 }
 
-const completeIdempotencyKey = `-- name: CompleteIdempotencyKey :exec
+const completeIdempotencyKey = `-- name: CompleteIdempotencyKey :execrows
 UPDATE idempotency_keys
    SET status = 'completed', response_status = $1, response_body = $2,
        response_content_type = $3, response_location = $4, completed_at = $5,
        locked_until = NULL
  WHERE tenant_id = $6 AND client_id = $7 AND operation = $8 AND idempotency_key = $9
+   AND status = 'in_progress' AND lease_token = $10::uuid
 `
 
 type CompleteIdempotencyKeyParams struct {
@@ -65,10 +66,14 @@ type CompleteIdempotencyKeyParams struct {
 	ClientID            string
 	Operation           string
 	IdempotencyKey      string
+	LeaseToken          uuid.UUID
 }
 
-func (q *Queries) CompleteIdempotencyKey(ctx context.Context, arg CompleteIdempotencyKeyParams) error {
-	_, err := q.db.Exec(ctx, completeIdempotencyKey,
+// Só a execução que detém a chave (mesmo token, ainda em processamento)
+// registra o resultado: a execução cujo lease foi assumido por outra não
+// sobrescreve o resultado da nova.
+func (q *Queries) CompleteIdempotencyKey(ctx context.Context, arg CompleteIdempotencyKeyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, completeIdempotencyKey,
 		arg.ResponseStatus,
 		arg.ResponseBody,
 		arg.ResponseContentType,
@@ -78,8 +83,12 @@ func (q *Queries) CompleteIdempotencyKey(ctx context.Context, arg CompleteIdempo
 		arg.ClientID,
 		arg.Operation,
 		arg.IdempotencyKey,
+		arg.LeaseToken,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const completeScheduledJob = `-- name: CompleteScheduledJob :exec
@@ -156,7 +165,7 @@ func (q *Queries) GetDeadLetterForUpdate(ctx context.Context, arg GetDeadLetterF
 }
 
 const getIdempotencyKey = `-- name: GetIdempotencyKey :one
-SELECT tenant_id, client_id, operation, idempotency_key, request_hash, status, response_status, response_body, response_content_type, locked_until, created_at, completed_at, expires_at, response_location FROM idempotency_keys
+SELECT tenant_id, client_id, operation, idempotency_key, request_hash, status, response_status, response_body, response_content_type, locked_until, created_at, completed_at, expires_at, response_location, lease_token FROM idempotency_keys
  WHERE tenant_id = $1 AND client_id = $2 AND operation = $3 AND idempotency_key = $4
 `
 
@@ -190,6 +199,7 @@ func (q *Queries) GetIdempotencyKey(ctx context.Context, arg GetIdempotencyKeyPa
 		&i.CompletedAt,
 		&i.ExpiresAt,
 		&i.ResponseLocation,
+		&i.LeaseToken,
 	)
 	return i, err
 }
@@ -287,8 +297,9 @@ func (q *Queries) InsertDeadLetter(ctx context.Context, arg InsertDeadLetterPara
 }
 
 const insertIdempotencyKey = `-- name: InsertIdempotencyKey :execrows
-INSERT INTO idempotency_keys (tenant_id, client_id, operation, idempotency_key, request_hash, status, locked_until, created_at, expires_at)
-VALUES ($1, $2, $3, $4, $5, 'in_progress', $6, $7, $8)
+INSERT INTO idempotency_keys (tenant_id, client_id, operation, idempotency_key, request_hash, status, locked_until, lease_token, created_at,
+                              expires_at)
+VALUES ($1, $2, $3, $4, $5, 'in_progress', $6, $7::uuid, $8, $9)
 ON CONFLICT DO NOTHING
 `
 
@@ -299,6 +310,7 @@ type InsertIdempotencyKeyParams struct {
 	IdempotencyKey string
 	RequestHash    []byte
 	LockedUntil    *time.Time
+	LeaseToken     uuid.UUID
 	Now            time.Time
 	ExpiresAt      time.Time
 }
@@ -311,6 +323,7 @@ func (q *Queries) InsertIdempotencyKey(ctx context.Context, arg InsertIdempotenc
 		arg.IdempotencyKey,
 		arg.RequestHash,
 		arg.LockedUntil,
+		arg.LeaseToken,
 		arg.Now,
 		arg.ExpiresAt,
 	)
@@ -691,7 +704,7 @@ func (q *Queries) RecordUntenantedDeadLetter(ctx context.Context, arg RecordUnte
 const releaseIdempotencyKey = `-- name: ReleaseIdempotencyKey :exec
 DELETE FROM idempotency_keys
  WHERE tenant_id = $1 AND client_id = $2 AND operation = $3 AND idempotency_key = $4
-   AND status = 'in_progress'
+   AND status = 'in_progress' AND lease_token = $5::uuid
 `
 
 type ReleaseIdempotencyKeyParams struct {
@@ -699,6 +712,7 @@ type ReleaseIdempotencyKeyParams struct {
 	ClientID       string
 	Operation      string
 	IdempotencyKey string
+	LeaseToken     uuid.UUID
 }
 
 func (q *Queries) ReleaseIdempotencyKey(ctx context.Context, arg ReleaseIdempotencyKeyParams) error {
@@ -707,6 +721,7 @@ func (q *Queries) ReleaseIdempotencyKey(ctx context.Context, arg ReleaseIdempote
 		arg.ClientID,
 		arg.Operation,
 		arg.IdempotencyKey,
+		arg.LeaseToken,
 	)
 	return err
 }
@@ -807,13 +822,14 @@ func (q *Queries) RetentionTenants(ctx context.Context, arg RetentionTenantsPara
 }
 
 const takeOverIdempotencyKey = `-- name: TakeOverIdempotencyKey :execrows
-UPDATE idempotency_keys SET locked_until = $1
- WHERE tenant_id = $2 AND client_id = $3 AND operation = $4 AND idempotency_key = $5
-   AND status = 'in_progress' AND locked_until < $6
+UPDATE idempotency_keys SET locked_until = $1, lease_token = $2::uuid
+ WHERE tenant_id = $3 AND client_id = $4 AND operation = $5 AND idempotency_key = $6
+   AND status = 'in_progress' AND locked_until < $7
 `
 
 type TakeOverIdempotencyKeyParams struct {
 	LockedUntil    *time.Time
+	LeaseToken     uuid.UUID
 	TenantID       uuid.UUID
 	ClientID       string
 	Operation      string
@@ -822,10 +838,12 @@ type TakeOverIdempotencyKeyParams struct {
 }
 
 // Recuperação de processamento interrompido: assume a chave apenas se o
-// lease anterior expirou (um único processo vence a disputa).
+// lease anterior expirou (um único processo vence a disputa). O token novo
+// passa a ser o único aceito para registrar o resultado ou liberar a chave.
 func (q *Queries) TakeOverIdempotencyKey(ctx context.Context, arg TakeOverIdempotencyKeyParams) (int64, error) {
 	result, err := q.db.Exec(ctx, takeOverIdempotencyKey,
 		arg.LockedUntil,
+		arg.LeaseToken,
 		arg.TenantID,
 		arg.ClientID,
 		arg.Operation,

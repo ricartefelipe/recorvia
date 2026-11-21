@@ -304,6 +304,7 @@ type IdempotencyKey struct {
 	CompletedAt         *time.Time
 	ExpiresAt           time.Time
 	ResponseLocation    *string
+	LeaseToken          *uuid.UUID
 }
 
 type Invitation struct {
@@ -788,6 +789,8 @@ type Subscription struct {
 	PriceOverrideAmount       pgtype.Numeric
 	PriceOverrideAdjustmentID *uuid.UUID
 	PendingUsageStarts        []time.Time
+	RequestKey                *string
+	RequestFingerprint        []byte
 }
 
 type SubscriptionHistory struct {

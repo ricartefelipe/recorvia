@@ -24,6 +24,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -82,6 +84,9 @@ type Event struct {
 	Data      json.RawMessage `json:"data"`
 	ChargeID  string          `json:"-"`
 	Merchant  string          `json:"-"`
+	// Seq é a ordem de criação do evento (sequência numérica do
+	// simulador), usada para reenviar os eventos na ordem em que surgiram.
+	Seq int64 `json:"-"`
 }
 
 // Delivery é uma entrega pendente de webhook.
@@ -117,6 +122,14 @@ type snapshot struct {
 	// Campos internos persistidos separadamente (não expostos na API).
 	ChargeMerchant map[string]string   `json:"charge_merchant"`
 	ChargeFlags    map[string][]string `json:"charge_flags"`
+	// ChargeHeld guarda os eventos retidos do cenário out_of_order, ainda
+	// não entregues.
+	ChargeHeld map[string][]string `json:"charge_held_events"`
+	// EventCharge e EventMerchant ligam cada evento à cobrança e ao
+	// integrador (o corpo do evento é o do webhook e não os inclui).
+	EventCharge   map[string]string `json:"event_charge"`
+	EventMerchant map[string]string `json:"event_merchant"`
+	EventSeq      map[string]int64  `json:"event_seq"`
 }
 
 // State guarda todo o estado do simulador.
@@ -133,7 +146,8 @@ var ErrNotFound = errors.New("paysim: não encontrado")
 func Load(path string) (*State, error) {
 	st := &State{path: path, s: snapshot{Seq: map[string]int{}, Merchants: map[string]*Merchant{}, Customers: map[string]*Customer{},
 		Charges: map[string]*Charge{}, Refunds: map[string]*Refund{}, Events: map[string]*Event{},
-		ChargeMerchant: map[string]string{}, ChargeFlags: map[string][]string{}}}
+		ChargeMerchant: map[string]string{}, ChargeFlags: map[string][]string{}, ChargeHeld: map[string][]string{},
+		EventCharge: map[string]string{}, EventMerchant: map[string]string{}, EventSeq: map[string]int64{}}}
 	if path == "" {
 		return st, nil
 	}
@@ -147,8 +161,32 @@ func Load(path string) (*State, error) {
 	if err := json.Unmarshal(b, &st.s); err != nil {
 		return nil, fmt.Errorf("paysim: estado ilegível: %w", err)
 	}
+	// Estados gravados antes destes campos voltam sem eles.
+	for _, m := range []*map[string]string{&st.s.ChargeMerchant, &st.s.EventCharge, &st.s.EventMerchant} {
+		if *m == nil {
+			*m = map[string]string{}
+		}
+	}
+	for _, m := range []*map[string][]string{&st.s.ChargeFlags, &st.s.ChargeHeld} {
+		if *m == nil {
+			*m = map[string][]string{}
+		}
+	}
+	if st.s.EventSeq == nil {
+		st.s.EventSeq = map[string]int64{}
+	}
+	for id, e := range st.s.Events {
+		e.ChargeID, e.Merchant = st.s.EventCharge[id], st.s.EventMerchant[id]
+		seq, ok := st.s.EventSeq[id]
+		if !ok {
+			// Estado gravado antes da sequência: o número do id é a ordem.
+			seq, _ = strconv.ParseInt(strings.TrimPrefix(id, "evt_"), 10, 64)
+		}
+		e.Seq = seq
+	}
 	for id, c := range st.s.Charges {
 		c.MerchantKey = st.s.ChargeMerchant[id]
+		c.HeldEvents = st.s.ChargeHeld[id]
 		for _, f := range st.s.ChargeFlags[id] {
 			switch f {
 			case "duplicate_webhooks":
@@ -177,6 +215,14 @@ func (st *State) persist() error {
 			flags = append(flags, "out_of_order")
 		}
 		st.s.ChargeFlags[id] = flags
+		if len(c.HeldEvents) > 0 {
+			st.s.ChargeHeld[id] = c.HeldEvents
+		} else {
+			delete(st.s.ChargeHeld, id)
+		}
+	}
+	for id, e := range st.s.Events {
+		st.s.EventCharge[id], st.s.EventMerchant[id], st.s.EventSeq[id] = e.ChargeID, e.Merchant, e.Seq
 	}
 	b, err := json.Marshal(st.s)
 	if err != nil {
@@ -196,8 +242,14 @@ func (st *State) persist() error {
 }
 
 func (st *State) nextID(prefix string) string {
+	n := st.nextSeq(prefix)
+	return fmt.Sprintf("%s_%06d", prefix, n)
+}
+
+// nextSeq avança e devolve a sequência numérica do prefixo.
+func (st *State) nextSeq(prefix string) int64 {
 	st.s.Seq[prefix]++
-	return fmt.Sprintf("%s_%06d", prefix, st.s.Seq[prefix])
+	return int64(st.s.Seq[prefix])
 }
 
 // Fee calcula a taxa determinística do simulador: 2,99% (half-even) + R$ 0,49.

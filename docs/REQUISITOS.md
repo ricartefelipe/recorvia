@@ -126,9 +126,10 @@ ajuste rastreável; métrica `max` não soma eventos.
 duplicidade, eventos fora de ordem, reembolso e divergência de conciliação.
 
 ### RF-09 Idempotência e falhas distribuídas
-- `Idempotency-Key` obrigatório nas operações financeiras de criação.
-- Escopo: tenant, cliente da API e operação; impressão (hash) do pedido e
-  resultado persistidos.
+- `Idempotency-Key` obrigatório nas operações financeiras de criação (lista
+  e critério na ADR-075).
+- Escopo: tenant, cliente da API e operação; impressão (hash do método, do
+  caminho e dos bytes do corpo) do pedido e resultado persistidos.
 - Repetição equivalente retorna o resultado registrado; conteúdo diferente
   gera conflito; concorrência não duplica efeito; processamento interrompido é
   recuperado após expiração do lease.

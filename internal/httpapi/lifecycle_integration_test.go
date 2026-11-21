@@ -201,7 +201,7 @@ func TestLifecycleTrialUntilFirstInvoice(t *testing.T) {
 	today := tenantToday(t, a.env)
 
 	created, _ := c.expect(http.StatusCreated, http.MethodPost, "/api/v1/subscriptions", map[string]any{"customer_id": cust.ID, "plan_id": plan.ID,
-		"trial_days": 14})
+		"trial_days": 14}, "Idempotency-Key", idemKey())
 	loc, err := time.LoadLocation(tenantTimezone)
 	if err != nil {
 		t.Fatal(err)

@@ -1721,6 +1721,102 @@ há estorno da baixa nem operação para o recebimento de valor já baixado como
 o recebimento da baixa entra direto no disponível liquidado, sem conciliação com extrato bancário; disputas
 perdidas antes da ADR-070 continuam sem valor a recuperar (o crédito permaneceu com o cliente).
 
+## ADR-075 Operações financeiras de criação: lista, critério e impressão do pedido
+**Status:** aceita (completa a ADR-022 e o RF-09).
+**Contexto:** o RF-09 exige `Idempotency-Key` nas operações financeiras de criação, mas a lista não estava
+escrita. Uma auditoria encontrou quatro rotas sem a exigência: `POST /api/v1/subscriptions` (a repetição de
+rede duplicava a assinatura e o faturamento), `POST /api/v1/platform/addon-orders`,
+`POST /api/v1/subscriptions/{id}/price-adjustments` e `POST /api/v1/subscriptions/{id}/discounts`. Também não
+estava documentado o que compõe a impressão do pedido nem o escopo da chave.
+**Decisão:**
+- **Critério.** É operação financeira de criação todo `POST` que cria um registro do qual decorre valor a
+  receber, recebido, devolvido ou abatido, ou faturamento futuro, e cuja repetição criaria um segundo efeito
+  (outro registro ou outra cobrança). Atos irreversíveis ou execuções que não podem ser repetidos sem efeito
+  também exigem a chave. Alterações de recursos existentes protegidas por `If-Match` (troca de plano e de
+  quantidade, cancelamento, suspensão) e operações sem efeito financeiro (cadastros, catálogo, cupons,
+  endpoints de webhook) ficam fora: a versão já impede a repetição ou a repetição não cria valor.
+- **Lista.** Exigem `Idempotency-Key`: pagamento manual (`POST /invoices/{id}/payments`), nota de crédito
+  (`POST /invoices/{id}/credit-notes`), nova cobrança (`POST /invoices/{id}/charges`), reembolso
+  (`POST /charges/{id}/refunds`), baixa de valor a recuperar (`POST /disputes/{id}/recovery-settlements`),
+  crédito do cliente (`POST /customers/{id}/credits`), criação de assinatura (`POST /subscriptions`), reajuste
+  programado (`POST /subscriptions/{id}/price-adjustments`), aplicação de cupom
+  (`POST /subscriptions/{id}/discounts`), pedido de serviço adicional (`POST /platform/addon-orders`) e
+  execução de faturamento (`POST /billing-runs`); fora do critério financeiro, também a execução de
+  conciliação (`POST /reconciliation/runs`) e a anonimização de cliente (`POST /customers/{id}/anonymize`). A
+  lista é a de `idempotencyRequiredRoutes` em `internal/httpapi/contract_test.go`; o teste falha se uma rota
+  ganhar ou perder a exigência sem a lista mudar, e o teste de contrato exige o parâmetro `IdempotencyKey`
+  nas mesmas operações do `api/openapi.yaml`.
+- **Chave de negócio onde não há chave natural.** A assinatura não tem chave natural (um cliente pode ter
+  várias assinaturas do mesmo plano): a criação grava a chave de negócio da ADR-022 em
+  `subscriptions.request_key` (migration `00022`, única por tenant) junto da impressão dos campos de negócio
+  do pedido (`subscriptions.request_fingerprint`: SHA-256 de cliente, plano, quantidade, com vazio valendo 1,
+  data de início, dias de avaliação e prazo de pagamento). A repetição depois de um processamento interrompido
+  (lease expirado antes do registro da resposta) ou da validade do registro HTTP devolve a mesma assinatura
+  quando a impressão confere; com outro conteúdo de negócio responde `409 request_key_reused`. Duas
+  transações com a mesma chave não disputam com erro: o `INSERT ... ON CONFLICT DO NOTHING` espera a outra
+  terminar e a perdedora relê e devolve a assinatura confirmada. `subscription_in_progress` (a assinatura
+  confirmada ainda não visível) e `credit_note_in_progress` (o mesmo caso na nota de crédito) passam a ser
+  conflitos transitórios, com `Retry-After`, e não ficam registrados na chave.
+- **Posse da execução.** Cada pedido HTTP com `Idempotency-Key` usa um token próprio
+  (`idempotency_keys.lease_token`, migration `00022`), gravado ao vencer a disputa ou ao assumir um
+  processamento interrompido. Registrar o resultado e liberar a chave exigem o mesmo token e a chave ainda
+  em processamento: a execução antiga, cujo lease outra assumiu, não sobrescreve o resultado da nova nem
+  apaga o processamento dela (antes, a última escrita vencia, e a chave podia repetir por 24 horas a
+  resposta da execução antiga). A regra vale para todas as rotas idempotentes. Reajuste e cupom
+  têm chave natural no banco (um reajuste programado por assinatura e data, um desconto ativo por
+  assinatura): a reexecução depois de uma interrupção é recusada com `adjustment_date_taken` ou
+  `discount_already_active`, sem segundo efeito, e não ganham coluna nova. O pedido de serviço adicional é
+  atendido manualmente pela equipe da plataforma e não gera cobrança automática; o registro HTTP basta.
+- **Impressão do pedido.** É o SHA-256 do método, do caminho e dos **bytes do corpo como enviados**. O JSON não
+  é normalizado: o mesmo conteúdo com outra ordem de campos, outros espaços ou um campo opcional explícito com
+  o valor padrão (por exemplo `"quantity": 1`) é outro pedido e responde `409 idempotency_key_reused`. Quem
+  repete um pedido deve reenviar exatamente os mesmos bytes; a interface serializa o mesmo objeto.
+- **Escopo.** O registro é por organização, cliente da API (usuário ou credencial) e operação (método e rota
+  do roteador, por exemplo `POST /api/v1/subscriptions/{id}/discounts`). A mesma chave em outra operação, ou
+  enviada por outro usuário, é independente. Na mesma rota, outro recurso no caminho muda a
+  impressão e a chave já usada é recusada.
+- **Interface.** Criação de assinatura, reajuste, cupom e pedido de serviço adicional passam a enviar a chave
+  pelo `useIdempotencyKey`, com a regra de descarte da ADR-022. O cliente HTTP serializa todo corpo em JSON
+  canônico (campos em ordem fixa, em qualquer nível): a mesma chave acompanha sempre os mesmos bytes.
+
+**Alternativas:** normalizar o JSON antes da impressão foi descartado: aceitaria como repetição corpos que o
+decodificador interpreta de forma diferente (campos duplicados, números fora da faixa) e exigiria definir uma
+forma canônica no contrato. Gravar a chave de negócio também em reajustes, descontos e pedidos de serviço
+adicional foi descartado: as constraints de unicidade já impedem o segundo efeito.
+**Consequências:** clientes da API precisam enviar `Idempotency-Key` nas quatro rotas novas na lista (`422
+idempotency_key_required` sem ela). A repetição registrada de `POST /subscriptions` sai sem `ETag` (a chave
+guarda status, corpo, `Content-Type` e `Location`); a versão continua no corpo. Na reexecução de reajuste ou
+cupom depois de uma interrupção, o cliente recebe o conflito de negócio em vez da resposta original. Chaves em
+processamento gravadas antes da migration `00022` ficam sem token e só são concluídas depois de assumidas por
+nova tentativa, após o lease (um minuto).
+
+## ADR-076 Consumidores de cobrança: inbox e cobrança na mesma transação
+**Status:** aceita (corrige a aplicação da ADR-009 em `payments.invoice_issued` e `payments.invoice_credited`).
+**Contexto:** os dois consumidores solicitavam a cobrança (`RequestCharge`, com transação própria) e só depois
+marcavam o inbox, em outra transação, sem olhar se a mensagem já tinha sido processada. A idempotência por
+fatura de `RequestCharge` só cobre a cobrança em andamento: depois de uma recusa do provedor, a cobrança fica
+`failed` e uma reentrega da mesma mensagem (confirmação perdida, republicação do relay depois do lease,
+reprocessamento da DLQ) criava uma nova tentativa no provedor.
+**Decisão:**
+- A marcação do inbox é a primeira escrita da transação do consumidor; mensagem já registrada encerra o
+  tratamento sem efeito. Na mesma transação: em `invoice_credited`, o cancelamento local das cobranças
+  divergentes com sua auditoria e as operações de cancelamento no provedor; nos dois, a cobrança pelo saldo e
+  a operação persistida que a cria no provedor (`chargeForInvoice`).
+- As chamadas ao provedor (cancelamentos e criação) acontecem depois do commit, como nas demais operações
+  externas; se falharem, a operação gravada é retomada pela recuperação agendada (`RecoverOperations`), não
+  pela reentrega da mensagem.
+- Nova tentativa depois de recusa é pedido explícito (`POST /invoices/{id}/charges`, "Nova tentativa de
+  cobrança" na interface), nunca efeito de uma reentrega.
+
+**Alternativas:** manter as transações separadas e consultar o inbox antes de `RequestCharge` foi descartado:
+a falha entre a cobrança e a marcação continuaria permitindo a duplicidade.
+**Consequências:** falha em qualquer passo desfaz também o inbox e o cancelamento local, e a reentrega refaz o
+ajuste inteiro (antes, o cancelamento local ficava confirmado sem o restante). Os testes de integração de
+`internal/pgstore/payments_redelivery_integration_test.go` provam que a reentrega depois de recusa e depois de
+sucesso não cria cobrança nem operação nova, e `internal/app/dlq_replay_integration_test.go` prova o
+reprocessamento da DLQ de ponta a ponta (ADR-024): reentrega direcionada à fila do consumidor que falhou, com
+o id original no inbox, sem chegar aos demais consumidores do evento.
+
 ## ADR-077 Limites do plano da plataforma serializados na assinatura e implantação assistida atendida pela equipe
 **Status:** aceita (RF-16).
 **Contexto:** uma auditoria de RF-16 encontrou três furos nos limites do plano da plataforma e um serviço
