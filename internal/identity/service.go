@@ -317,11 +317,6 @@ func (s *Service) RevokeTenantSessions(ctx context.Context, userID, tenantID uui
 	return n, nil
 }
 
-// RevokeAll encerra todas as sessões de um usuário.
-func (s *Service) RevokeAll(ctx context.Context, userID uuid.UUID) error {
-	return s.sessions.DeleteAllForUser(ctx, userID)
-}
-
 // User retorna um usuário.
 func (s *Service) User(ctx context.Context, id uuid.UUID) (User, error) { return s.users.User(ctx, id) }
 
