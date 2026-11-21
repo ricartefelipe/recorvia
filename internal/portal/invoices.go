@@ -60,6 +60,10 @@ type InvoiceDetail struct {
 	// Location é o fuso da organização para as datas do documento.
 	Location         *time.Location
 	OrganizationName string
+	// OrganizationLegalName e OrganizationDocument identificam o emitente
+	// (razão social e CNPJ da organização) no documento.
+	OrganizationLegalName string
+	OrganizationDocument  string
 }
 
 // ContactPreference é a escolha do cliente para um de seus contatos.
@@ -178,7 +182,11 @@ func (s *Service) Invoice(ctx context.Context, sess Session, id uuid.UUID) (Invo
 	now := s.clock.Now()
 	var out InvoiceDetail
 	err := s.store.InTenant(ctx, sess.TenantID, func(tx Tx) error {
-		loc, org, err := tenantLocation(ctx, tx)
+		t, err := tx.Tenant(ctx)
+		if err != nil {
+			return err
+		}
+		loc, err := t.Location()
 		if err != nil {
 			return err
 		}
@@ -196,7 +204,8 @@ func (s *Service) Invoice(ctx context.Context, sess Session, id uuid.UUID) (Invo
 		if err != nil {
 			return err
 		}
-		out = InvoiceDetail{Invoice: present(inv, loc, now, urls[inv.ID]), Location: loc, OrganizationName: org}
+		out = InvoiceDetail{Invoice: present(inv, loc, now, urls[inv.ID]), Location: loc, OrganizationName: t.Name,
+			OrganizationLegalName: t.LegalName, OrganizationDocument: t.DocumentNumber}
 		return nil
 	})
 	return out, err

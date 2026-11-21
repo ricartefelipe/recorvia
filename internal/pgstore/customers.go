@@ -194,6 +194,18 @@ func (tx customersTx) InsertContact(ctx context.Context, c customers.Contact) er
 		Email: c.Email, Phone: strPtr(c.Phone), Role: c.Role, ReceivesBillingEmail: c.ReceivesBillingEmail, CreatedAt: c.CreatedAt})
 }
 
+func (tx customersTx) UpdateContact(ctx context.Context, c customers.Contact) error {
+	n, err := tx.q.UpdateContact(ctx, dbgen.UpdateContactParams{TenantID: tx.tenantID, CustomerID: c.CustomerID, ID: c.ID, Name: c.Name,
+		Email: c.Email, Phone: strPtr(c.Phone), Role: c.Role, ReceivesBillingEmail: c.ReceivesBillingEmail})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return apperr.NotFound("contact_not_found", "Contato não encontrado.")
+	}
+	return nil
+}
+
 func (tx customersTx) DeleteContact(ctx context.Context, customerID, contactID uuid.UUID) error {
 	n, err := tx.q.DeleteContact(ctx, dbgen.DeleteContactParams{TenantID: tx.tenantID, CustomerID: customerID, ID: contactID})
 	if err != nil {

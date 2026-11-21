@@ -77,6 +77,10 @@ type Deps struct {
 	Portal        *portal.Service
 	Credentials   *apicredentials.Service
 	Providers     []string
+	// InvoiceExportMaxRows limita as faturas por arquivo exportado; zero usa
+	// o padrão (exportMaxRows). Os testes reduzem o limite para exercitar a
+	// exportação em partes.
+	InvoiceExportMaxRows int
 	// Ready verifica dependências críticas (readiness).
 	Ready func(ctx context.Context) map[string]error
 }
@@ -341,6 +345,11 @@ func (a *API) securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// exposedHeaders são os cabeçalhos de resposta liberados para origens
+// permitidas (Access-Control-Expose-Headers).
+const exposedHeaders = "ETag, Location, X-Request-ID, Idempotent-Replayed, X-Recorvia-Export-Limit, X-Recorvia-Export-Truncated, " +
+	"X-Recorvia-Export-Next-Cursor, X-Recorvia-Export-Next-Part"
+
 // cors só responde a origens explicitamente permitidas; por padrão a
 // aplicação é servida na mesma origem e nenhum header CORS é emitido.
 func (a *API) cors(next http.Handler) http.Handler {
@@ -357,6 +366,10 @@ func (a *API) cors(next http.Handler) http.Handler {
 			h.Set("Access-Control-Allow-Origin", origin)
 			h.Set("Access-Control-Allow-Credentials", "true")
 			h.Set("Vary", "Origin")
+			// Cabeçalhos de resposta que a interface lê (concorrência,
+			// idempotência, rastreio e o corte da exportação de faturas): sem
+			// isto, o navegador os esconde do fetch em outra origem.
+			h.Set("Access-Control-Expose-Headers", exposedHeaders)
 			if r.Method == http.MethodOptions {
 				h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE")
 				h.Set("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token, X-Recorvia-Tenant, If-Match, Idempotency-Key, X-Request-ID")
