@@ -189,12 +189,12 @@ func TestAddonCursorAndSortKey(t *testing.T) {
 func TestCompleteAddonOrderRefusedWithCanceledPlatformSubscription(t *testing.T) {
 	f, o, staff := staffFixture(t, AddonScheduled)
 	f.state().sub.Status = StatusCanceled
-	_, err := f.svc.CompleteAddonOrder(context.Background(), staff, f.tenantID, o.ID)
+	_, err := f.svc.CompleteAddonOrder(context.Background(), staff, f.tenantID, o.ID, o.Version)
 	assertAppErr(t, err, apperr.KindConflict, "platform_subscription_canceled")
 	if st := f.state(); st.orders[0].Status != AddonScheduled || st.orderUpdates != 0 {
 		t.Fatal("o pedido não pode ser concluído")
 	}
-	if _, err := f.svc.CancelAddonOrder(context.Background(), staff, f.tenantID, o.ID, "Organização encerrou o contrato."); err != nil {
+	if _, err := f.svc.CancelAddonOrder(context.Background(), staff, f.tenantID, o.ID, "Organização encerrou o contrato.", o.Version); err != nil {
 		t.Fatalf("o cancelamento continua possível: %v", err)
 	}
 }
@@ -209,13 +209,13 @@ func TestStaffHandlesAddonOrder(t *testing.T) {
 		detail string
 	}{
 		{"agendar", func(f *fixture, o AddonOrder, st Staff) (AddonOrder, error) {
-			return f.svc.ScheduleAddonOrder(context.Background(), st, f.tenantID, o.ID, at)
+			return f.svc.ScheduleAddonOrder(context.Background(), st, f.tenantID, o.ID, at, o.Version)
 		}, "platform.addon_scheduled", AddonScheduled, "scheduled_for"},
 		{"concluir", func(f *fixture, o AddonOrder, st Staff) (AddonOrder, error) {
-			return f.svc.CompleteAddonOrder(context.Background(), st, f.tenantID, o.ID)
+			return f.svc.CompleteAddonOrder(context.Background(), st, f.tenantID, o.ID, o.Version)
 		}, "platform.addon_completed", AddonCompleted, ""},
 		{"cancelar", func(f *fixture, o AddonOrder, st Staff) (AddonOrder, error) {
-			return f.svc.CancelAddonOrder(context.Background(), st, f.tenantID, o.ID, "Cliente desistiu.")
+			return f.svc.CancelAddonOrder(context.Background(), st, f.tenantID, o.ID, "Cliente desistiu.", o.Version)
 		}, "platform.addon_canceled", AddonCanceled, "reason"},
 	}
 	for _, tc := range cases {
@@ -247,9 +247,9 @@ func TestStaffHandlesAddonOrder(t *testing.T) {
 
 func TestStaffHandleAddonOrderRejected(t *testing.T) {
 	f, o, staff := staffFixture(t, AddonCompleted)
-	_, err := f.svc.CancelAddonOrder(context.Background(), staff, f.tenantID, o.ID, "Cliente desistiu.")
+	_, err := f.svc.CancelAddonOrder(context.Background(), staff, f.tenantID, o.ID, "Cliente desistiu.", o.Version)
 	assertAppErr(t, err, apperr.KindConflict, "addon_order_closed")
-	_, err = f.svc.CompleteAddonOrder(context.Background(), staff, f.tenantID, uuid.New())
+	_, err = f.svc.CompleteAddonOrder(context.Background(), staff, f.tenantID, uuid.New(), 1)
 	assertAppErr(t, err, apperr.KindNotFound, "addon_order_not_found")
 	if st := f.state(); st.orderUpdates != 0 || len(st.audits) != 0 {
 		t.Fatal("nada deveria ser gravado")
@@ -259,10 +259,42 @@ func TestStaffHandleAddonOrderRejected(t *testing.T) {
 		t.Run("falha em "+op, func(t *testing.T) {
 			f, o, staff := staffFixture(t, AddonScheduled)
 			f.store.fail[op] = errBoom
-			if _, err := f.svc.CompleteAddonOrder(context.Background(), staff, f.tenantID, o.ID); !errors.Is(err, errBoom) {
+			if _, err := f.svc.CompleteAddonOrder(context.Background(), staff, f.tenantID, o.ID, o.Version); !errors.Is(err, errBoom) {
 				t.Fatalf("esperado erro propagado, obtido %v", err)
 			}
 		})
+	}
+}
+
+// Com a versão do pedido diferente da do If-Match, nenhuma transição é
+// gravada nem auditada, inclusive num pedido já encerrado: a versão é
+// conferida antes da situação.
+func TestStaffHandleAddonOrderVersionMismatch(t *testing.T) {
+	at := utc(2026, time.November, 25, 13, 0)
+	actions := map[string]func(f *fixture, o AddonOrder, st Staff) error{
+		"agendar": func(f *fixture, o AddonOrder, st Staff) error {
+			_, err := f.svc.ScheduleAddonOrder(context.Background(), st, f.tenantID, o.ID, at, o.Version+1)
+			return err
+		},
+		"concluir": func(f *fixture, o AddonOrder, st Staff) error {
+			_, err := f.svc.CompleteAddonOrder(context.Background(), st, f.tenantID, o.ID, o.Version+1)
+			return err
+		},
+		"cancelar": func(f *fixture, o AddonOrder, st Staff) error {
+			_, err := f.svc.CancelAddonOrder(context.Background(), st, f.tenantID, o.ID, "Cliente desistiu.", o.Version+1)
+			return err
+		},
+	}
+	for name, run := range actions {
+		for _, status := range []AddonStatus{AddonRequested, AddonCanceled} {
+			t.Run(name+" "+string(status), func(t *testing.T) {
+				f, o, staff := staffFixture(t, status)
+				assertAppErr(t, run(f, o, staff), apperr.KindPreconditionFailed, "version_mismatch")
+				if st := f.state(); st.orders[0] != o || st.orderUpdates != 0 || len(st.audits) != 0 {
+					t.Fatalf("nada deveria ser gravado nem auditado: %+v", st.orders[0])
+				}
+			})
+		}
 	}
 }
 
@@ -275,7 +307,7 @@ func TestCompletedAddonIsBilledOnce(t *testing.T) {
 	o := AddonOrder{ID: uuid.New(), TenantID: f.tenantID, AddonCode: "implantacao_assistida", Status: AddonScheduled,
 		Price: money.New(250000, money.BRL), Version: 1}
 	f.state().orders = []AddonOrder{o}
-	if _, err := f.svc.CompleteAddonOrder(context.Background(), staff, f.tenantID, o.ID); err != nil {
+	if _, err := f.svc.CompleteAddonOrder(context.Background(), staff, f.tenantID, o.ID, o.Version); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.svc.CloseDueStatements(context.Background()); err != nil {

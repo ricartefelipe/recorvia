@@ -135,6 +135,7 @@ describe('atendimento de serviços adicionais', () => {
     const [req] = requests;
     expect(req.headers.get('X-CSRF-Token')).toBe('csrf-123');
     expect(req.headers.get('X-Recorvia-Tenant')).toBeNull();
+    expect(req.headers.get('If-Match')).toBe('"1"');
     const body = (await req.json()) as { scheduled_for: string };
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     expect(body.scheduled_for).toMatch(/^2026-11-2[45]T\d{2}:00:00Z$/);
@@ -172,10 +173,12 @@ describe('atendimento de serviços adicionais', () => {
   it('conclui somente depois da confirmação, que explica a cobrança no demonstrativo', async () => {
     let completes = 0;
     const seen: string[] = [];
+    const versions: (string | null)[] = [];
     server.use(
-      listHandler({ '': [order({ status: 'scheduled', scheduled_for: '2026-11-25T13:00:00Z' })] }, seen),
+      listHandler({ '': [order({ status: 'scheduled', scheduled_for: '2026-11-25T13:00:00Z', version: 2 })] }, seen),
       http.post(`${base}/complete`, ({ request }) => {
         completes++;
+        versions.push(request.headers.get('If-Match'));
         expect(request.headers.get('X-Recorvia-Tenant')).toBeNull();
         return HttpResponse.json(order({ status: 'completed', completed_at: '2026-11-25T15:00:00Z', version: 3 }));
       }),
@@ -193,6 +196,7 @@ describe('atendimento de serviços adicionais', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Concluir' }));
     expect(await screen.findByText('Atendimento concluído.')).toBeInTheDocument();
     expect(completes).toBe(1);
+    expect(versions).toEqual(['"2"']);
     await waitFor(() => expect(seen.length).toBe(2)); // a lista é recarregada
   });
 
@@ -220,6 +224,47 @@ describe('atendimento de serviços adicionais', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Cancelar pedido' }));
     expect(await screen.findByText('Pedido de Acme Software cancelado.')).toBeInTheDocument();
     expect(bodies).toEqual([{ reason: 'Cliente desistiu.' }]);
+  });
+
+  it.each([
+    ['agendamento', { action: 'Agendar', title: 'Agendar atendimento: Acme Software', path: 'schedule', submit: 'Salvar agendamento' }],
+    ['cancelamento', { action: 'Cancelar', title: 'Cancelar pedido: Acme Software', path: 'cancel', submit: 'Cancelar pedido' }],
+  ] as const)('depois do 412 no %s, recarregar fecha o modal e a nova tentativa usa a versão atual', async (_name, { action, title, path, submit }) => {
+    const versions: (string | null)[] = [];
+    let current = order();
+    server.use(
+      http.get('/api/v1/admin/addon-orders', () => HttpResponse.json({ data: [current], next_cursor: null })),
+      http.post(`${base}/${path}`, ({ request }) => {
+        versions.push(request.headers.get('If-Match'));
+        if (versions.length === 1) {
+          // Outra pessoa da equipe alterou o pedido com o modal aberto.
+          current = order({ notes: 'Atualizado por outra pessoa', version: 2 });
+          return HttpResponse.json(
+            { type: 'about:blank', title: 'Versão divergente', status: 412, code: 'version_mismatch' },
+            { status: 412, headers: { 'Content-Type': 'application/problem+json' } },
+          );
+        }
+        return HttpResponse.json(order({ status: path === 'cancel' ? 'canceled' : 'scheduled', version: 3 }), { headers: { ETag: '"3"' } });
+      }),
+    );
+    const { user } = renderPage(<AddonOrdersAdminPage />, { path: '/admin/servicos', session: staffSession() });
+    const send = async () => {
+      await user.click(await screen.findByRole('button', { name: `${action} Acme Software` }));
+      const dialog = await screen.findByRole('dialog', { name: title });
+      if (path === 'schedule') {
+        fireEvent.change(within(dialog).getByLabelText(/Data e hora do atendimento/), { target: { value: '2026-11-25T10:00' } });
+      } else {
+        await user.click(within(dialog).getByLabelText(/Justificativa/));
+        await user.paste('Cliente desistiu.');
+      }
+      await user.click(within(dialog).getByRole('button', { name: submit }));
+    };
+    await send();
+    await user.click(await screen.findByRole('button', { name: 'Recarregar dados' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: title })).not.toBeInTheDocument());
+    expect(await screen.findByText('Atualizado por outra pessoa')).toBeInTheDocument();
+    await send();
+    await waitFor(() => expect(versions).toEqual(['"1"', '"2"']));
   });
 
   it('conflito do servidor (pedido já encerrado) é informado', async () => {

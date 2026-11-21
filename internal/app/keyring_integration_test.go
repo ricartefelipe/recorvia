@@ -56,7 +56,7 @@ func TestKeyringCheckAgainstRestoredDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	tn := env.NewTenant(t, "restaurado")
-	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "profissional"); err != nil {
+	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "profissional", env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	err = env.Store.Payments().InTenant(ctx, tn.ID, func(tx payments.Tx) error {

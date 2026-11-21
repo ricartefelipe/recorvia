@@ -17,16 +17,18 @@ type Tx interface {
 	InsertProduct(ctx context.Context, p Product) error
 	Product(ctx context.Context, id uuid.UUID, forUpdate bool) (Product, error)
 	UpdateProduct(ctx context.Context, p Product) error
-	Products(ctx context.Context, status Status) ([]Product, error)
+	// Products, Metrics e Plans devolvem uma página da listagem (limite e
+	// cursor opaco; ADR-085).
+	Products(ctx context.Context, status Status, limit int, cursor string) (Page[Product], error)
 
 	InsertMetric(ctx context.Context, m Metric) error
 	Metric(ctx context.Context, id uuid.UUID) (Metric, error)
-	Metrics(ctx context.Context) ([]Metric, error)
+	Metrics(ctx context.Context, limit int, cursor string) (Page[Metric], error)
 
 	InsertPlan(ctx context.Context, p Plan) error
 	Plan(ctx context.Context, id uuid.UUID, forUpdate bool) (Plan, error)
 	UpdatePlan(ctx context.Context, p Plan) error
-	Plans(ctx context.Context, status Status, productID *uuid.UUID) ([]Plan, error)
+	Plans(ctx context.Context, status Status, productID *uuid.UUID, limit int, cursor string) (Page[Plan], error)
 
 	InsertPriceVersion(ctx context.Context, pv PriceVersion) error
 	PriceVersions(ctx context.Context, planID uuid.UUID) ([]PriceVersion, error)
@@ -34,6 +36,13 @@ type Tx interface {
 	MaxPriceVersion(ctx context.Context, planID uuid.UUID) (int, error)
 
 	Audit(ctx context.Context, e audit.Entry) error
+}
+
+// Page é uma página de uma listagem do catálogo; NextCursor vazio indica a
+// última página.
+type Page[T any] struct {
+	Items      []T
+	NextCursor string
 }
 
 // Store abre transações do tenant.
@@ -94,12 +103,13 @@ func (s *Service) UpdateProduct(ctx context.Context, tenantID uuid.UUID, actor a
 	return p, err
 }
 
-// Products lista produtos.
-func (s *Service) Products(ctx context.Context, tenantID uuid.UUID, status Status) ([]Product, error) {
-	var out []Product
+// Products lista produtos, dos criados mais recentemente para os mais
+// antigos, em páginas por cursor.
+func (s *Service) Products(ctx context.Context, tenantID uuid.UUID, status Status, limit int, cursor string) (Page[Product], error) {
+	var out Page[Product]
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		var err error
-		out, err = tx.Products(ctx, status)
+		out, err = tx.Products(ctx, status, limit, cursor)
 		return err
 	})
 	return out, err
@@ -122,12 +132,12 @@ func (s *Service) CreateMetric(ctx context.Context, tenantID uuid.UUID, actor au
 	return m, err
 }
 
-// Metrics lista métricas.
-func (s *Service) Metrics(ctx context.Context, tenantID uuid.UUID) ([]Metric, error) {
-	var out []Metric
+// Metrics lista métricas pelo código, em páginas por cursor.
+func (s *Service) Metrics(ctx context.Context, tenantID uuid.UUID, limit int, cursor string) (Page[Metric], error) {
+	var out Page[Metric]
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		var err error
-		out, err = tx.Metrics(ctx)
+		out, err = tx.Metrics(ctx, limit, cursor)
 		return err
 	})
 	return out, err
@@ -290,12 +300,13 @@ func (s *Service) Plan(ctx context.Context, tenantID, id uuid.UUID) (PlanDetails
 	return out, err
 }
 
-// Plans lista planos.
-func (s *Service) Plans(ctx context.Context, tenantID uuid.UUID, status Status, productID *uuid.UUID) ([]Plan, error) {
-	var out []Plan
+// Plans lista planos, dos criados mais recentemente para os mais antigos, em
+// páginas por cursor.
+func (s *Service) Plans(ctx context.Context, tenantID uuid.UUID, status Status, productID *uuid.UUID, limit int, cursor string) (Page[Plan], error) {
+	var out Page[Plan]
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		var err error
-		out, err = tx.Plans(ctx, status, productID)
+		out, err = tx.Plans(ctx, status, productID, limit, cursor)
 		return err
 	})
 	return out, err

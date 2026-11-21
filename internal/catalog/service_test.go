@@ -175,19 +175,23 @@ func TestProductsAndMetricsListing(t *testing.T) {
 	e.seedProduct(t, Archived)
 	e.seedMetric(Active)
 
-	ps, err := e.svc.Products(context.Background(), e.tenantID, Archived)
-	if err != nil || len(ps) != 1 || ps[0].Status != Archived || e.st().productFilter != Archived {
-		t.Fatalf("Products = %+v, %v", ps, err)
+	// O limite e o cursor chegam ao armazenamento, e o cursor da página
+	// seguinte volta a quem listou.
+	e.st().nextCursor = "seguinte"
+	ps, err := e.svc.Products(context.Background(), e.tenantID, Archived, 10, "atual")
+	if err != nil || len(ps.Items) != 1 || ps.Items[0].Status != Archived || e.st().productFilter != Archived ||
+		e.st().page != (pageRequest{10, "atual"}) || ps.NextCursor != "seguinte" {
+		t.Fatalf("Products = %+v, %v (página pedida %+v)", ps, err, e.st().page)
 	}
-	ms, err := e.svc.Metrics(context.Background(), e.tenantID)
-	if err != nil || len(ms) != 1 {
+	ms, err := e.svc.Metrics(context.Background(), e.tenantID, 25, "")
+	if err != nil || len(ms.Items) != 1 || e.st().page != (pageRequest{25, ""}) || ms.NextCursor != "seguinte" {
 		t.Fatalf("Metrics = %+v, %v", ms, err)
 	}
 	e.store.fail["Products"], e.store.fail["Metrics"] = errBoom, errBoom
-	if _, err := e.svc.Products(context.Background(), e.tenantID, ""); !errors.Is(err, errBoom) {
+	if _, err := e.svc.Products(context.Background(), e.tenantID, "", 25, ""); !errors.Is(err, errBoom) {
 		t.Errorf("Products deveria propagar o erro: %v", err)
 	}
-	if _, err := e.svc.Metrics(context.Background(), e.tenantID); !errors.Is(err, errBoom) {
+	if _, err := e.svc.Metrics(context.Background(), e.tenantID, 25, ""); !errors.Is(err, errBoom) {
 		t.Errorf("Metrics deveria propagar o erro: %v", err)
 	}
 }
@@ -554,12 +558,13 @@ func TestPlanQueries(t *testing.T) {
 	_, err = e.svc.Plan(context.Background(), e.tenantID, uuid.New())
 	assertAppErr(t, err, apperr.KindNotFound, "plan_not_found")
 
-	plans, err := e.svc.Plans(context.Background(), e.tenantID, Active, &d.ProductID)
-	if err != nil || len(plans) != 1 || e.st().planFilter != Active || *e.st().planProduct != d.ProductID {
+	plans, err := e.svc.Plans(context.Background(), e.tenantID, Active, &d.ProductID, 100, "c1")
+	if err != nil || len(plans.Items) != 1 || e.st().planFilter != Active || *e.st().planProduct != d.ProductID ||
+		e.st().page != (pageRequest{100, "c1"}) {
 		t.Fatalf("Plans = %+v, %v", plans, err)
 	}
 	other := uuid.New()
-	if plans, _ := e.svc.Plans(context.Background(), e.tenantID, "", &other); len(plans) != 0 {
+	if plans, _ := e.svc.Plans(context.Background(), e.tenantID, "", &other, 25, ""); len(plans.Items) != 0 {
 		t.Fatalf("filtro por produto não aplicado: %+v", plans)
 	}
 
@@ -568,7 +573,7 @@ func TestPlanQueries(t *testing.T) {
 		t.Errorf("Plan deveria propagar o erro das versões: %v", err)
 	}
 	e.store.fail["Plans"] = errBoom
-	if _, err := e.svc.Plans(context.Background(), e.tenantID, "", nil); !errors.Is(err, errBoom) {
+	if _, err := e.svc.Plans(context.Background(), e.tenantID, "", nil, 25, ""); !errors.Is(err, errBoom) {
 		t.Errorf("Plans deveria propagar o erro: %v", err)
 	}
 }

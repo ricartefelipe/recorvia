@@ -72,17 +72,28 @@ func addonOrderFromRow(r dbgen.PlatformAddonOrder) platformbilling.AddonOrder {
 		StatementID: r.StatementID, Version: int(r.Version)}
 }
 
-// AddonOrders lista pedidos de serviços adicionais.
-func (p *Platform) AddonOrders(ctx context.Context, tenantID uuid.UUID) ([]platformbilling.AddonOrder, error) {
+// AddonOrders lista os pedidos de serviços adicionais do tenant, dos mais
+// recentes para os mais antigos, em páginas por cursor.
+func (p *Platform) AddonOrders(ctx context.Context, tenantID uuid.UUID, limit int, cursor string) ([]platformbilling.AddonOrder, string, error) {
+	cts, cid, err := parseTimeCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	limit = pageLimit(limit)
 	var out []platformbilling.AddonOrder
-	err := p.s.inTenant(ctx, tenantID, func(b base) error {
-		rows, err := b.q.ListAddonOrders(ctx, tenantID)
+	next := ""
+	err = p.s.inTenant(ctx, tenantID, func(b base) error {
+		rows, err := b.q.ListAddonOrders(ctx, dbgen.ListAddonOrdersParams{TenantID: tenantID, CursorTs: cts, CursorID: cid, RowLimit: int32(limit + 1)})
+		if err != nil {
+			return err
+		}
+		rows, next = keysetPage(rows, limit, func(r dbgen.PlatformAddonOrder) (time.Time, uuid.UUID) { return r.CreatedAt, r.ID })
 		for _, r := range rows {
 			out = append(out, addonOrderFromRow(r))
 		}
-		return err
+		return nil
 	})
-	return out, err
+	return out, next, err
 }
 
 // StaffAddonOrders lista os pedidos de todas as organizações para a equipe
@@ -139,19 +150,31 @@ func (p *Platform) StaffAddonOrders(ctx context.Context, query platformbilling.S
 	return out, err
 }
 
-// Statements lista demonstrativos.
-func (p *Platform) Statements(ctx context.Context, tenantID uuid.UUID) ([]platformbilling.Statement, error) {
+// Statements lista os demonstrativos do tenant, do período mais recente para
+// o mais antigo, em páginas por cursor.
+func (p *Platform) Statements(ctx context.Context, tenantID uuid.UUID, limit int, cursor string) ([]platformbilling.Statement, string, error) {
+	cts, cid, err := parseTimeCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	limit = pageLimit(limit)
 	var out []platformbilling.Statement
-	err := p.s.inTenant(ctx, tenantID, func(b base) error {
-		rows, err := b.q.ListPlatformStatements(ctx, tenantID)
+	next := ""
+	err = p.s.inTenant(ctx, tenantID, func(b base) error {
+		rows, err := b.q.ListPlatformStatements(ctx, dbgen.ListPlatformStatementsParams{TenantID: tenantID, CursorTs: cts, CursorID: cid,
+			RowLimit: int32(limit + 1)})
+		if err != nil {
+			return err
+		}
+		rows, next = keysetPage(rows, limit, func(r dbgen.PlatformStatement) (time.Time, uuid.UUID) { return r.PeriodStart, r.ID })
 		for _, r := range rows {
 			out = append(out, platformbilling.Statement{ID: r.ID, TenantID: r.TenantID, PeriodStart: r.PeriodStart, PeriodEnd: r.PeriodEnd,
 				PlanCode: r.PlanCode, SubscriptionAmount: brl(r.SubscriptionAmount), AddonsAmount: brl(r.AddonsAmount),
 				Total: brl(r.TotalAmount), Status: r.Status, CreatedAt: r.CreatedAt})
 		}
-		return err
+		return nil
 	})
-	return out, err
+	return out, next, err
 }
 
 func (tx platformTx) Subscription(ctx context.Context) (platformbilling.Subscription, error) {

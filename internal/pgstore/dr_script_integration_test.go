@@ -244,7 +244,7 @@ func TestKeyRotationPhasesAcrossProcesses(t *testing.T) {
 	t.Cleanup(owner.Close)
 
 	tn := env.NewTenant(t, "rotacao")
-	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "profissional"); err != nil {
+	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "profissional", env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	rcv := newReceiver(t)

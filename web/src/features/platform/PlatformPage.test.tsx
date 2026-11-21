@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
 import type { AddonOrder, PlatformOverview, PlatformPlan } from '../../api/types';
@@ -29,6 +29,7 @@ const overview: PlatformOverview = {
     trial_ends_at: null,
     current_period_start: '2026-11-16T03:00:00Z',
     current_period_end: '2026-12-16T03:00:00Z',
+    version: 3,
   },
   usage: { active_users: 2, pending_invitations: 1, active_subscriptions: 40 },
 };
@@ -126,13 +127,15 @@ describe('plano Recorvia', () => {
     expect(bodies).toEqual([{ addon_code: 'implantacao_assistida', notes: 'Migrar 300 contratos' }]);
   });
 
-  it('troca de plano pede confirmação e envia o código do plano', async () => {
+  it('troca de plano pede confirmação e envia o código do plano com a versão da assinatura no If-Match', async () => {
     const bodies: unknown[] = [];
+    const versions: (string | null)[] = [];
     server.use(
       ...platformHandlers(),
       http.put('/api/v1/platform/plan', async ({ request }) => {
+        versions.push(request.headers.get('If-Match'));
         bodies.push(await request.json());
-        return HttpResponse.json({ ...overview, plan: escala });
+        return HttpResponse.json({ ...overview, plan: escala, subscription: { ...overview.subscription, version: 4 } }, { headers: { ETag: '"4"' } });
       }),
     );
     const { user } = renderPage(<PlatformPage />, { path: '/plataforma' });
@@ -141,6 +144,82 @@ describe('plano Recorvia', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Trocar plano' }));
     expect(await screen.findByText('Plano do Recorvia alterado para Escala.')).toBeInTheDocument();
     expect(bodies).toEqual([{ plan_code: 'escala' }]);
+    expect(versions).toEqual(['"3"']);
+  });
+
+  it('depois do 412, recarregar traz a versão atual da assinatura e a nova troca a envia', async () => {
+    const versions: (string | null)[] = [];
+    let current = overview;
+    server.use(
+      http.get('/api/v1/platform/overview', () => HttpResponse.json(current)),
+      ...platformHandlers(),
+      http.put('/api/v1/platform/plan', ({ request }) => {
+        versions.push(request.headers.get('If-Match'));
+        if (versions.length === 1) {
+          // O fechamento do demonstrativo avançou a assinatura enquanto a página estava aberta.
+          current = { ...overview, subscription: { ...overview.subscription, version: 4 } };
+          return HttpResponse.json(
+            { type: 'about:blank', title: 'Versão divergente', status: 412, code: 'version_mismatch' },
+            { status: 412, headers: { 'Content-Type': 'application/problem+json' } },
+          );
+        }
+        return HttpResponse.json({ ...overview, plan: escala, subscription: { ...overview.subscription, version: 5 } }, { headers: { ETag: '"5"' } });
+      }),
+    );
+    const { user } = renderPage(<PlatformPage />, { path: '/plataforma' });
+    const change = async () => {
+      await user.click(await screen.findByRole('button', { name: 'Mudar para este plano' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Trocar plano do Recorvia' });
+      await user.click(within(dialog).getByRole('button', { name: 'Trocar plano' }));
+    };
+    await change();
+    await user.click(await screen.findByRole('button', { name: 'Recarregar dados' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await change();
+    expect(await screen.findByText('Plano do Recorvia alterado para Escala.')).toBeInTheDocument();
+    expect(versions).toEqual(['"3"', '"4"']);
+  });
+
+  it('pedidos e demonstrativos seguem para a página seguinte pelo cursor', async () => {
+    const cursors: Record<string, (string | null)[]> = { orders: [], statements: [] };
+    const statement = (id: string, start: string) => ({
+      id,
+      period_start: start,
+      period_end: start,
+      plan_code: 'essencial',
+      subscription_amount: 19900,
+      addons_amount: 0,
+      total: 19900,
+      currency: 'BRL',
+      status: 'open',
+    });
+    server.use(
+      http.get('/api/v1/platform/addon-orders', ({ request }) => {
+        const query = new URL(request.url).searchParams;
+        cursors.orders.push(query.get('cursor'));
+        return query.get('cursor')
+          ? HttpResponse.json({ data: [order({ id: 'o2', notes: 'Pedido da segunda página' })], next_cursor: null })
+          : HttpResponse.json({ data: [order({ id: 'o1', notes: 'Pedido da primeira página' })], next_cursor: 'pedidos-2' });
+      }),
+      http.get('/api/v1/platform/statements', ({ request }) => {
+        const query = new URL(request.url).searchParams;
+        cursors.statements.push(query.get('cursor'));
+        return query.get('cursor')
+          ? HttpResponse.json({ data: [statement('s2', '2026-09-16T03:00:00Z')], next_cursor: null })
+          : HttpResponse.json({ data: [statement('s1', '2026-10-16T03:00:00Z')], next_cursor: 'demonstrativos-2' });
+      }),
+      ...platformHandlers(),
+    );
+    const { user } = renderPage(<PlatformPage />, { path: '/plataforma' });
+    expect(await screen.findByText('Pedido da primeira página')).toBeInTheDocument();
+    const statements = await screen.findByRole('table', { name: 'Demonstrativos do Recorvia' });
+    expect(statements).toHaveTextContent('16/10/2026');
+    const [ordersPager, statementsPager] = screen.getAllByRole('navigation', { name: 'Paginação' });
+    await user.click(within(ordersPager).getByRole('button', { name: 'Próxima' }));
+    expect(await screen.findByText('Pedido da segunda página')).toBeInTheDocument();
+    await user.click(within(statementsPager).getByRole('button', { name: 'Próxima' }));
+    await waitFor(() => expect(screen.getByRole('table', { name: 'Demonstrativos do Recorvia' })).toHaveTextContent('16/09/2026'));
+    expect(cursors).toEqual({ orders: [null, 'pedidos-2'], statements: [null, 'demonstrativos-2'] });
   });
 
   it('sem a gestão do plano, não oferece troca nem pedidos', async () => {

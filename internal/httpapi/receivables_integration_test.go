@@ -110,7 +110,7 @@ func (r *recvAPI) conforms(t *testing.T, schema string, v any) {
 func (r *recvAPI) newTenant(t *testing.T, slug string) fixture.Tenant {
 	t.Helper()
 	tn := r.env.NewTenant(t, slug)
-	if _, err := r.env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "escala"); err != nil {
+	if _, err := r.env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "escala", r.env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.pay.ConfigureAccount(context.Background(), tn.ID, tn.Actor, payments.AccountInput{Provider: "simulator", Environment: "local",

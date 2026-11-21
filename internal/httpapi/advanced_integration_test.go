@@ -182,7 +182,7 @@ func newPlan(t *testing.T, env *fixture.Env, tn fixture.Tenant, name string, pri
 // enableUsageBilling troca o plano da plataforma por um que inclui consumo medido.
 func enableUsageBilling(t *testing.T, env *fixture.Env, tn fixture.Tenant) {
 	t.Helper()
-	if _, err := env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "escala"); err != nil {
+	if _, err := env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "escala", env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -74,7 +74,7 @@ func TestAuditKeyringAgainstDatabase(t *testing.T) {
 	// provedor (chave de API e segredo do webhook), endpoint de webhook e uma
 	// notificação ainda não enviada.
 	a := env.NewTenant(t, "keyring-a")
-	if _, err := env.Platform.ChangePlan(ctx, a.ID, a.Actor, "profissional"); err != nil {
+	if _, err := env.Platform.ChangePlan(ctx, a.ID, a.Actor, "profissional", env.PlatformVersion(t, a.ID)); err != nil {
 		t.Fatal(err)
 	}
 	accountID := ids.New()
@@ -104,7 +104,7 @@ func TestAuditKeyringAgainstDatabase(t *testing.T) {
 	rotated := testKeyring(t, "t2", map[string]byte{"t1": 7, "t2": 8})
 	rotatedStore := pgstore.New(env.DB, rotated, env.Clock, nil)
 	b := env.NewTenant(t, "keyring-b")
-	if _, err := env.Platform.ChangePlan(ctx, b.ID, b.Actor, "profissional"); err != nil {
+	if _, err := env.Platform.ChangePlan(ctx, b.ID, b.Actor, "profissional", env.PlatformVersion(t, b.ID)); err != nil {
 		t.Fatal(err)
 	}
 	rotatedHooks := webhooks.NewService(rotatedStore.Webhooks(), transport{client}, client, env.Clock, webhooks.Config{Lease: time.Minute,

@@ -30,6 +30,17 @@ func staffUser(t *testing.T, a *apiEnv) identity.User {
 	return u
 }
 
+// staffList lê a primeira página da lista da equipe com o filtro informado.
+func staffList(t *testing.T, staff *client, status string) map[string]any {
+	t.Helper()
+	path := "/api/v1/admin/addon-orders?limit=100"
+	if status != "" {
+		path += "&status=" + status
+	}
+	body, _ := staff.expect(http.StatusOK, http.MethodGet, path, nil)
+	return body
+}
+
 func findOrder(t *testing.T, body map[string]any, id string) map[string]any {
 	t.Helper()
 	for _, it := range body["data"].([]any) {
@@ -92,35 +103,56 @@ func TestAdminAddonOrdersOverHTTP(t *testing.T) {
 	if status, body, _ := noCSRF.do(http.MethodPost, base+"/complete", nil); status != http.StatusForbidden || body["code"] != "csrf_invalid" {
 		t.Fatalf("atendimento sem CSRF: %d %v", status, body)
 	}
-	if status, body, _ := staff.do(http.MethodPost, base+"/schedule", map[string]any{"scheduled_for": a.env.Clock.Now().Add(-time.Hour)}); status != http.StatusUnprocessableEntity ||
-		body["code"] != "invalid_addon_schedule" {
+	if status, body, _ := staff.do(http.MethodPost, base+"/schedule", map[string]any{"scheduled_for": a.env.Clock.Now().Add(-time.Hour)},
+		matchVersion(created["version"])...); status != http.StatusUnprocessableEntity || body["code"] != "invalid_addon_schedule" {
 		t.Fatalf("agendamento no passado: %d %v", status, body)
 	}
 	at := a.env.Clock.Now().Add(72 * time.Hour).UTC().Truncate(time.Second)
-	status, scheduled, _ := staff.do(http.MethodPost, base+"/schedule", map[string]any{"scheduled_for": at})
-	if status != http.StatusOK || scheduled["status"] != "scheduled" || scheduled["scheduled_for"] != at.Format(time.RFC3339) {
-		t.Fatalf("agendamento: %d %v", status, scheduled)
+	schedule := map[string]any{"scheduled_for": at}
+	// Sem If-Match, 428; com a versão divergente, 412 e o pedido não muda.
+	staff.expectProblem(http.StatusPreconditionRequired, "if_match_required", http.MethodPost, base+"/schedule", schedule)
+	staff.expectProblem(http.StatusPreconditionFailed, "version_mismatch", http.MethodPost, base+"/schedule", schedule, matchVersion(2)...)
+	if o := findOrder(t, staffList(t, staff, ""), orderID); o["status"] != "requested" || o["version"] != float64(1) {
+		t.Fatalf("agendamento recusado alterou o pedido: %v", o)
+	}
+	scheduled, h := staff.expect(http.StatusOK, http.MethodPost, base+"/schedule", schedule, matchVersion(created["version"])...)
+	if scheduled["status"] != "scheduled" || scheduled["scheduled_for"] != at.Format(time.RFC3339) || scheduled["version"] != float64(2) ||
+		h.Get("ETag") != `"2"` {
+		t.Fatalf("agendamento: %v (ETag %q)", scheduled, h.Get("ETag"))
 	}
 	// O tenant do caminho delimita o pedido.
-	if status, body, _ := staff.do(http.MethodPost, "/api/v1/admin/tenants/"+other.ID.String()+"/addon-orders/"+orderID+"/complete", nil); status != http.StatusNotFound {
+	if status, body, _ := staff.do(http.MethodPost, "/api/v1/admin/tenants/"+other.ID.String()+"/addon-orders/"+orderID+"/complete", nil,
+		matchVersion(scheduled["version"])...); status != http.StatusNotFound {
 		t.Fatalf("pedido em outro tenant: %d %v", status, body)
 	}
 	a.env.Clock.Advance(10 * time.Minute)
-	status, done, _ := staff.do(http.MethodPost, base+"/complete", nil)
-	if status != http.StatusOK || done["status"] != "completed" || done["completed_at"] == nil || done["billed"] != false {
-		t.Fatalf("conclusão: %d %v", status, done)
+	staff.expectProblem(http.StatusPreconditionRequired, "if_match_required", http.MethodPost, base+"/complete", nil)
+	staff.expectProblem(http.StatusPreconditionFailed, "version_mismatch", http.MethodPost, base+"/complete", nil, matchVersion(1)...)
+	if o := findOrder(t, staffList(t, staff, ""), orderID); o["status"] != "scheduled" || o["version"] != float64(2) {
+		t.Fatalf("conclusão recusada alterou o pedido: %v", o)
 	}
-	if status, body, _ := staff.do(http.MethodPost, base+"/cancel", map[string]any{"reason": "Tarde demais."}); status != http.StatusConflict ||
-		body["code"] != "addon_order_closed" {
+	done, h := staff.expect(http.StatusOK, http.MethodPost, base+"/complete", nil, matchVersion(scheduled["version"])...)
+	if done["status"] != "completed" || done["completed_at"] == nil || done["billed"] != false || h.Get("ETag") != `"3"` {
+		t.Fatalf("conclusão: %v (ETag %q)", done, h.Get("ETag"))
+	}
+	if status, body, _ := staff.do(http.MethodPost, base+"/cancel", map[string]any{"reason": "Tarde demais."},
+		matchVersion(done["version"])...); status != http.StatusConflict || body["code"] != "addon_order_closed" {
 		t.Fatalf("cancelar pedido concluído: %d %v", status, body)
 	}
 	secondBase := "/api/v1/admin/tenants/" + other.ID.String() + "/addon-orders/" + second["id"].(string)
-	if status, body, _ := staff.do(http.MethodPost, secondBase+"/cancel", map[string]any{"reason": "x"}); status != http.StatusUnprocessableEntity {
+	cancel := map[string]any{"reason": "A organização desistiu."}
+	if status, body, _ := staff.do(http.MethodPost, secondBase+"/cancel", map[string]any{"reason": "x"},
+		matchVersion(second["version"])...); status != http.StatusUnprocessableEntity {
 		t.Fatalf("cancelamento sem justificativa: %d %v", status, body)
 	}
-	if status, body, _ := staff.do(http.MethodPost, secondBase+"/cancel", map[string]any{"reason": "A organização desistiu."}); status != http.StatusOK ||
-		body["status"] != "canceled" || body["cancel_reason"] != "A organização desistiu." {
-		t.Fatalf("cancelamento: %d %v", status, body)
+	staff.expectProblem(http.StatusPreconditionRequired, "if_match_required", http.MethodPost, secondBase+"/cancel", cancel)
+	staff.expectProblem(http.StatusPreconditionFailed, "version_mismatch", http.MethodPost, secondBase+"/cancel", cancel, matchVersion(5)...)
+	if o := findOrder(t, staffList(t, staff, ""), second["id"].(string)); o["status"] != "requested" || o["version"] != float64(1) {
+		t.Fatalf("cancelamento recusado alterou o pedido: %v", o)
+	}
+	canceled, h := staff.expect(http.StatusOK, http.MethodPost, secondBase+"/cancel", cancel, matchVersion(second["version"])...)
+	if canceled["status"] != "canceled" || canceled["cancel_reason"] != "A organização desistiu." || h.Get("ETag") != `"2"` {
+		t.Fatalf("cancelamento: %v (ETag %q)", canceled, h.Get("ETag"))
 	}
 	// Assinatura da plataforma cancelada: não há demonstrativo para cobrar, e
 	// a conclusão é recusada.
@@ -134,7 +166,8 @@ func TestAdminAddonOrdersOverHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	thirdBase := "/api/v1/admin/tenants/" + other.ID.String() + "/addon-orders/" + third["id"].(string)
-	if status, body, _ := staff.do(http.MethodPost, thirdBase+"/complete", nil); status != http.StatusConflict || body["code"] != "platform_subscription_canceled" {
+	if status, body, _ := staff.do(http.MethodPost, thirdBase+"/complete", nil, matchVersion(third["version"])...); status != http.StatusConflict ||
+		body["code"] != "platform_subscription_canceled" {
 		t.Fatalf("conclusão com a assinatura da plataforma cancelada: %d %v", status, body)
 	}
 	for filter, id := range map[string]string{"completed": orderID, "canceled": second["id"].(string)} {

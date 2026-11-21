@@ -130,7 +130,12 @@ INSERT INTO platform_addon_orders (id, tenant_id, addon_code, status, notes, pri
 VALUES (@id, @tenant_id, @addon_code, @status, @notes, @price_amount, @requested_by, @created_at, @created_at);
 
 -- name: ListAddonOrders :many
-SELECT * FROM platform_addon_orders WHERE tenant_id = @tenant_id ORDER BY created_at DESC, id DESC LIMIT 100;
+-- Paginação por keyset em (created_at, id), que não mudam depois do pedido.
+SELECT * FROM platform_addon_orders
+ WHERE tenant_id = @tenant_id
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (created_at, id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT @row_limit;
 
 -- name: GetAddonOrderForUpdate :one
 SELECT * FROM platform_addon_orders WHERE tenant_id = @tenant_id AND id = @id FOR UPDATE;
@@ -168,7 +173,13 @@ VALUES (@id, @tenant_id, @period_start, @period_end, @plan_code, @subscription_a
 ON CONFLICT (tenant_id, period_start) DO NOTHING;
 
 -- name: ListPlatformStatements :many
-SELECT * FROM platform_statements WHERE tenant_id = @tenant_id ORDER BY period_start DESC, id DESC LIMIT 36;
+-- Paginação por keyset em (period_start, id), que não mudam depois do
+-- fechamento.
+SELECT * FROM platform_statements
+ WHERE tenant_id = @tenant_id
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (period_start, id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY period_start DESC, id DESC
+ LIMIT @row_limit;
 
 -- name: TenantsDuePlatformStatement :many
 SELECT t::uuid AS tenant_id FROM app_tenants_due_platform_statement(@now) AS t;

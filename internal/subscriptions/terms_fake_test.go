@@ -2,6 +2,7 @@ package subscriptions
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"time"
@@ -25,9 +26,13 @@ type fakeTermsStore struct {
 	discounts   []Discount
 	appliedBy   map[uuid.UUID]*uuid.UUID
 	adjustments []PriceAdjustment
-	histories   []historyWrite
-	audits      []audit.Entry
-	events      []outbox.Event
+	// adjustmentPage registra o limite e o cursor da última listagem de
+	// reajustes; adjustmentNext é o cursor devolvido por ela.
+	adjustmentPage string
+	adjustmentNext string
+	histories      []historyWrite
+	audits         []audit.Entry
+	events         []outbox.Event
 
 	errs          map[string]error
 	tenant        uuid.UUID
@@ -156,17 +161,18 @@ func (s *fakeTermsStore) InsertAdjustment(_ context.Context, a PriceAdjustment) 
 	return nil
 }
 
-func (s *fakeTermsStore) Adjustments(_ context.Context, subscriptionID uuid.UUID) ([]PriceAdjustment, error) {
+func (s *fakeTermsStore) Adjustments(_ context.Context, subscriptionID uuid.UUID, limit int, cursor string) (AdjustmentPage, error) {
 	if err := s.fail("Adjustments"); err != nil {
-		return nil, err
+		return AdjustmentPage{}, err
 	}
+	s.adjustmentPage = fmt.Sprintf("%d|%s", limit, cursor)
 	var out []PriceAdjustment
 	for _, a := range s.adjustments {
 		if a.SubscriptionID == subscriptionID {
 			out = append(out, a)
 		}
 	}
-	return out, nil
+	return AdjustmentPage{Items: out, NextCursor: s.adjustmentNext}, nil
 }
 
 func (s *fakeTermsStore) Adjustment(_ context.Context, subscriptionID, id uuid.UUID) (PriceAdjustment, error) {

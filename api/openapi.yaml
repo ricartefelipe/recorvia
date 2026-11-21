@@ -362,15 +362,21 @@ paths:
     put:
       tags: [platform]
       operationId: changePlatformPlan
+      description: >-
+        Troca o plano na versão da assinatura da plataforma informada no If-Match (`subscription.version` de
+        PlatformOverview); o ETag da resposta é a versão gravada. A troca para o plano atual, na versão atual, não tem
+        efeito.
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, required: [plan_code], properties: { plan_code: { type: string } } } } }
       responses:
-        "200": { description: Plano alterado, content: { application/json: { schema: { $ref: "#/components/schemas/PlatformOverview" } } } }
+        "200": { description: Plano alterado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/PlatformOverview" } } } }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/platform/addons:
     get:
       tags: [platform]
@@ -383,9 +389,10 @@ paths:
     get:
       tags: [platform]
       operationId: listAddonOrders
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      description: Pedidos de serviços adicionais da organização, dos mais recentes para os mais antigos, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Pedidos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AddonOrder" } } } } } } }
+        "200": { description: Pedidos, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/AddonOrder" } }, next_cursor: { type: string, nullable: true } } } } } }
         "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [platform]
@@ -404,9 +411,10 @@ paths:
     get:
       tags: [platform]
       operationId: listPlatformStatements
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      description: Demonstrativos mensais, do período mais recente para o mais antigo, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Demonstrativos mensais da plataforma, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PlatformStatement" } } } } } } }
+        "200": { description: Demonstrativos mensais da plataforma, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/PlatformStatement" } }, next_cursor: { type: string, nullable: true } } } } } }
         "422": { $ref: "#/components/responses/Problem" }
   /api/v1/admin/tenants:
     get:
@@ -453,8 +461,9 @@ paths:
       tags: [platform]
       operationId: adminScheduleAddonOrder
       summary: Agenda (ou reagenda) o atendimento do pedido
+      description: Na versão do pedido informada no If-Match (`version` do pedido); o ETag da resposta é a versão gravada.
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
       requestBody:
         required: true
         content:
@@ -465,11 +474,13 @@ paths:
               properties:
                 scheduled_for: { type: string, format: date-time, description: "Instante futuro, em até um ano" }
       responses:
-        "200": { description: Pedido agendado, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
+        "200": { description: Pedido agendado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/complete:
     parameters: [ { $ref: "#/components/parameters/AdminTenantID" }, { $ref: "#/components/parameters/ID" } ]
     post:
@@ -480,22 +491,26 @@ paths:
         O valor entra no demonstrativo do período em que a conclusão ocorreu
         (ou no seguinte, se esse já estiver fechado). Com a assinatura da
         plataforma da organização cancelada, responde 409
-        `platform_subscription_canceled`: o pedido deve ser cancelado.
+        `platform_subscription_canceled`: o pedido deve ser cancelado. Na versão
+        do pedido informada no If-Match; o ETag da resposta é a versão gravada.
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
       responses:
-        "200": { description: Pedido concluído, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
+        "200": { description: Pedido concluído, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/cancel:
     parameters: [ { $ref: "#/components/parameters/AdminTenantID" }, { $ref: "#/components/parameters/ID" } ]
     post:
       tags: [platform]
       operationId: adminCancelAddonOrder
       summary: Cancela o pedido em aberto, sem cobrança
+      description: Na versão do pedido informada no If-Match (`version` do pedido); o ETag da resposta é a versão gravada.
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
       requestBody:
         required: true
         content:
@@ -506,11 +521,13 @@ paths:
               properties:
                 reason: { type: string, minLength: 3, maxLength: 500 }
       responses:
-        "200": { description: Pedido cancelado, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
+        "200": { description: Pedido cancelado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
 
   /api/v1/customers:
     get:
@@ -794,9 +811,10 @@ paths:
     get:
       tags: [catalog]
       operationId: listProducts
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { name: status, in: query, schema: { type: string, enum: [active, archived] } } ]
+      description: Produtos, dos criados mais recentemente para os mais antigos, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { name: status, in: query, schema: { type: string, enum: [active, archived] } }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Produtos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Product" } } } } } } }
+        "200": { description: Produtos, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/Product" } }, next_cursor: { type: string, nullable: true } } } } } }
         "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [catalog]
@@ -832,9 +850,10 @@ paths:
     get:
       tags: [catalog]
       operationId: listMetrics
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      description: Métricas pelo código, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Métricas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Metric" } } } } } } }
+        "200": { description: Métricas, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/Metric" } }, next_cursor: { type: string, nullable: true } } } } } }
         "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [catalog]
@@ -850,12 +869,15 @@ paths:
     get:
       tags: [catalog]
       operationId: listPlans
+      description: Planos, dos criados mais recentemente para os mais antigos, em páginas por cursor.
       parameters:
         - { $ref: "#/components/parameters/Tenant" }
         - { name: status, in: query, schema: { type: string, enum: [active, archived] } }
         - { name: product_id, in: query, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
       responses:
-        "200": { description: Planos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Plan" } } } } } } }
+        "200": { description: Planos, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/Plan" } }, next_cursor: { type: string, nullable: true } } } } } }
         "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [catalog]
@@ -906,9 +928,10 @@ paths:
     get:
       tags: [catalog]
       operationId: listCoupons
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      description: Cupons, dos criados mais recentemente para os mais antigos, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Cupons, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Coupon" } } } } } } }
+        "200": { description: Cupons, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/Coupon" } }, next_cursor: { type: string, nullable: true } } } } } }
         "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [catalog]
@@ -1082,8 +1105,10 @@ paths:
     get:
       tags: [subscriptions]
       operationId: listPriceAdjustments
+      description: Reajustes da assinatura, da vigência mais antiga para a mais recente, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Reajustes, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PriceAdjustment" } } } } } } }
+        "200": { description: Reajustes, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/PriceAdjustment" } }, next_cursor: { type: string, nullable: true } } } } } }
         "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [subscriptions]
@@ -2330,13 +2355,14 @@ components:
         plan: { $ref: "#/components/schemas/PlatformPlan" }
         subscription:
           type: object
-          required: [plan_code, status, current_period_start, current_period_end]
+          required: [plan_code, status, current_period_start, current_period_end, version]
           properties:
             plan_code: { type: string }
             status: { type: string, enum: [trialing, active, past_due, canceled] }
             trial_ends_at: { type: string, format: date-time, nullable: true }
             current_period_start: { type: string, format: date-time }
             current_period_end: { type: string, format: date-time }
+            version: { type: integer, description: Versão da assinatura da plataforma; If-Match da troca de plano }
         usage:
           type: object
           required: [active_users, pending_invitations, active_subscriptions]

@@ -25,16 +25,21 @@ func prodDTO(p catalog.Product) productDTO {
 }
 
 func (a *API) listProducts(w http.ResponseWriter, r *http.Request) {
-	items, err := a.Catalog.Products(r.Context(), mustPrincipal(r).TenantID, catalog.Status(r.URL.Query().Get("status")))
+	limit, cursor, err := pageParams(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	out := make([]productDTO, 0, len(items))
-	for _, p := range items {
+	pg, err := a.Catalog.Products(r.Context(), mustPrincipal(r).TenantID, catalog.Status(r.URL.Query().Get("status")), limit, cursor)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	out := make([]productDTO, 0, len(pg.Items))
+	for _, p := range pg.Items {
 		out = append(out, prodDTO(p))
 	}
-	a.writeJSON(w, r, http.StatusOK, list(out))
+	a.writeJSON(w, r, http.StatusOK, newPage(out, pg.NextCursor))
 }
 
 func (a *API) createProduct(w http.ResponseWriter, r *http.Request) {
@@ -102,16 +107,21 @@ func metDTO(m catalog.Metric) metricDTO {
 }
 
 func (a *API) listMetrics(w http.ResponseWriter, r *http.Request) {
-	items, err := a.Catalog.Metrics(r.Context(), mustPrincipal(r).TenantID)
+	limit, cursor, err := pageParams(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	out := make([]metricDTO, 0, len(items))
-	for _, m := range items {
+	pg, err := a.Catalog.Metrics(r.Context(), mustPrincipal(r).TenantID, limit, cursor)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	out := make([]metricDTO, 0, len(pg.Items))
+	for _, m := range pg.Items {
 		out = append(out, metDTO(m))
 	}
-	a.writeJSON(w, r, http.StatusOK, list(out))
+	a.writeJSON(w, r, http.StatusOK, newPage(out, pg.NextCursor))
 }
 
 func (a *API) createMetric(w http.ResponseWriter, r *http.Request) {
@@ -202,14 +212,19 @@ func (a *API) listPlans(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	tenant := mustPrincipal(r).TenantID
-	items, err := a.Catalog.Plans(r.Context(), tenant, catalog.Status(r.URL.Query().Get("status")), productID)
+	limit, cursor, err := pageParams(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	out := make([]planDTO, 0, len(items))
-	for _, p := range items {
+	tenant := mustPrincipal(r).TenantID
+	pg, err := a.Catalog.Plans(r.Context(), tenant, catalog.Status(r.URL.Query().Get("status")), productID, limit, cursor)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	out := make([]planDTO, 0, len(pg.Items))
+	for _, p := range pg.Items {
 		d, err := a.Catalog.Plan(r.Context(), tenant, p.ID)
 		if err != nil {
 			a.writeError(w, r, err)
@@ -219,7 +234,7 @@ func (a *API) listPlans(w http.ResponseWriter, r *http.Request) {
 		dto.Prices = nil
 		out = append(out, dto)
 	}
-	a.writeJSON(w, r, http.StatusOK, list(out))
+	a.writeJSON(w, r, http.StatusOK, newPage(out, pg.NextCursor))
 }
 
 type priceInput struct {

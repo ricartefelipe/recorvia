@@ -42,6 +42,13 @@ var versionedRoutes = map[string]bool{
 	"PATCH /api/v1/webhook-endpoints/{id}":                   true,
 	"DELETE /api/v1/webhook-endpoints/{id}":                  true,
 	"POST /api/v1/webhook-endpoints/{id}/rotate-secret":      true,
+
+	// Troca do plano da plataforma e atendimento dos pedidos de serviços
+	// adicionais pela equipe da plataforma (ADR-085).
+	"PUT /api/v1/platform/plan":                                         true,
+	"POST /api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/schedule": true,
+	"POST /api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/complete": true,
+	"POST /api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/cancel":   true,
 }
 
 // requireIfMatch recusa com 428 a alteração de recurso versionado enviada sem

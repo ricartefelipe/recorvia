@@ -146,8 +146,14 @@ VALUES (@id, @tenant_id, @subscription_id, @effective_date, @kind, sqlc.narg(per
         @reason, 'scheduled', sqlc.narg(created_by), @created_at);
 
 -- name: ListPriceAdjustments :many
-SELECT * FROM subscription_price_adjustments WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id
- ORDER BY effective_date, created_at, id LIMIT 200;
+-- Paginação por keyset em (effective_date, created_at, id), que não mudam
+-- depois da programação.
+SELECT * FROM subscription_price_adjustments
+ WHERE tenant_id = @tenant_id AND subscription_id = @subscription_id
+   AND (sqlc.narg(cursor_date)::date IS NULL
+        OR (effective_date, created_at, id) > (sqlc.narg(cursor_date)::date, sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY effective_date, created_at, id
+ LIMIT @row_limit;
 
 -- name: GetPriceAdjustmentForUpdate :one
 SELECT * FROM subscription_price_adjustments

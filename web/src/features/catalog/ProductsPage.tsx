@@ -1,18 +1,19 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { ActionIcon, Button, Group, Modal, Select, Stack, Table, Text, Textarea, TextInput } from '@mantine/core';
 import { IconPencil, IconPlus } from '@tabler/icons-react';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
 import type { Product, ProductInput } from '../../api/types';
 import { DateTime, StatusBadge } from '../../components/format';
 import { EmptyState, QueryContent } from '../../components/states';
-import { LabeledSegmented } from '../../components/ui';
-import { useApiMutation } from '../../lib/hooks';
+import { CursorPager, LabeledSegmented } from '../../components/ui';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
 import { catalogStatusLabels } from '../../lib/labels';
 import { optionalText, requiredText } from '../../lib/validation';
-import { Can, usePermission } from '../../session/SessionContext';
-import { catalogApi, useProducts } from './api';
+import { Can, usePermission, useTenant } from '../../session/SessionContext';
+import { catalogApi } from './api';
 
 const productSchema = z.object({
   name: requiredText(2, 200, 'O nome'),
@@ -77,10 +78,18 @@ function ProductModal({ product, opened, onClose }: { product: Product | null; o
 }
 
 export function ProductsPage() {
+  const { keys } = useTenant();
   const [status, setStatus] = useState<'active' | 'archived' | 'all'>('active');
   const [editing, setEditing] = useState<Product | null | undefined>(undefined);
   const canWrite = usePermission('catalog.write');
-  const query = useProducts(status === 'all' ? undefined : status);
+  const pagination = useCursorPagination(`products:${status}`);
+  const query = useQuery({
+    queryKey: keys('products', 'page', status, pagination.cursor),
+    queryFn: ({ signal }) =>
+      catalogApi.listProducts({ status: status === 'all' ? undefined : status, cursor: pagination.cursor, limit: 25 }, signal),
+    placeholderData: keepPreviousData,
+  });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
 
   return (
     <Stack>
@@ -102,48 +111,58 @@ export function ProductsPage() {
         </Can>
       </Group>
       <QueryContent query={query}>
-        {({ data }) =>
-          data.length === 0 ? (
+        {(page) =>
+          page.data.length === 0 ? (
             <EmptyState title="Nenhum produto" description="Produtos agrupam planos. Crie um produto e depois os planos com seus preços." />
           ) : (
-            <Table.ScrollContainer minWidth={600}>
-              <Table aria-label="Produtos">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Nome</Table.Th>
-                    <Table.Th>Descrição</Table.Th>
-                    <Table.Th>Situação</Table.Th>
-                    <Table.Th>Criado em</Table.Th>
-                    {canWrite && <Table.Th aria-label="Ações" />}
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {data.map((p) => (
-                    <Table.Tr key={p.id}>
-                      <Table.Td fw={500}>{p.name}</Table.Td>
-                      <Table.Td>
-                        <Text size="sm" lineClamp={2}>
-                          {p.description || '—'}
-                        </Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <StatusBadge status={p.status} labels={catalogStatusLabels} />
-                      </Table.Td>
-                      <Table.Td>
-                        <DateTime value={p.created_at} dateOnly />
-                      </Table.Td>
-                      {canWrite && (
-                        <Table.Td>
-                          <ActionIcon variant="subtle" aria-label={`Editar produto ${p.name}`} onClick={() => setEditing(p)}>
-                            <IconPencil size={16} />
-                          </ActionIcon>
-                        </Table.Td>
-                      )}
+            <>
+              <Table.ScrollContainer minWidth={600}>
+                <Table aria-label="Produtos">
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Nome</Table.Th>
+                      <Table.Th>Descrição</Table.Th>
+                      <Table.Th>Situação</Table.Th>
+                      <Table.Th>Criado em</Table.Th>
+                      {canWrite && <Table.Th aria-label="Ações" />}
                     </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            </Table.ScrollContainer>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {page.data.map((p) => (
+                      <Table.Tr key={p.id}>
+                        <Table.Td fw={500}>{p.name}</Table.Td>
+                        <Table.Td>
+                          <Text size="sm" lineClamp={2}>
+                            {p.description || '—'}
+                          </Text>
+                        </Table.Td>
+                        <Table.Td>
+                          <StatusBadge status={p.status} labels={catalogStatusLabels} />
+                        </Table.Td>
+                        <Table.Td>
+                          <DateTime value={p.created_at} dateOnly />
+                        </Table.Td>
+                        {canWrite && (
+                          <Table.Td>
+                            <ActionIcon variant="subtle" aria-label={`Editar produto ${p.name}`} onClick={() => setEditing(p)}>
+                              <IconPencil size={16} />
+                            </ActionIcon>
+                          </Table.Td>
+                        )}
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
+              <CursorPager
+                page={pagination.page}
+                hasPrevious={pagination.hasPrevious}
+                hasNext={!!page.next_cursor}
+                onPrevious={pagination.previous}
+                onNext={() => page.next_cursor && pagination.next(page.next_cursor)}
+                loading={query.isFetching}
+              />
+            </>
           )
         }
       </QueryContent>

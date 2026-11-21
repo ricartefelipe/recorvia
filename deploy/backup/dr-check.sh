@@ -235,12 +235,18 @@ login() {
   [[ -n $csrf ]] || die "login: sessão não criada"
 }
 
-# session_call MÉTODO CAMINHO CORPO: chamada com o cookie da sessão e CSRF
-# (operações que não aceitam credencial de API).
+# session_call MÉTODO CAMINHO [CORPO]: chamada com o cookie da sessão e CSRF
+# (operações que não aceitam credencial de API). A versão esperada das
+# alterações versionadas vai na variável if_match, como em api_call.
 session_call() {
-  local code
-  code=$(curl -sS -o "$work/resposta" -w '%{http_code}' -X "$1" "${connect[@]}" -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
-    -H 'Content-Type: application/json' -d "$3" "$api_url$2")
+  local code args=(-sS -o "$work/resposta" -w '%{http_code}' -X "$1" "${connect[@]}" -b "$work/cookies" -H "X-CSRF-Token: $csrf")
+  if [[ -n ${if_match:-} ]]; then
+    args+=(-H "If-Match: \"$if_match\"")
+  fi
+  if [[ -n ${3:-} ]]; then
+    args+=(-H 'Content-Type: application/json' -d "$3")
+  fi
+  code=$(curl "${args[@]}" "$api_url$2")
   if [[ $code != 2* ]]; then
     cat "$work/resposta" >&2
     die "$1 $2 respondeu $code"
@@ -413,7 +419,9 @@ ok "rotação, fase 2 em andamento: API com dr2 ativa e worker ainda com dr1 ati
 
 login
 [[ $(jq -r '.active_tenant.slug' "$work/sessao.json") == acme ]] || die "organização ativa inesperada"
-session_call PUT /api/v1/platform/plan '{"plan_code":"escala"}' >/dev/null
+# A troca do plano da plataforma exige a versão da assinatura (ADR-085).
+if_match=$(session_call GET /api/v1/platform/overview | jq -r .subscription.version) \
+  session_call PUT /api/v1/platform/plan '{"plan_code":"escala"}' >/dev/null
 # Permissões que nunca viram escopo de credencial (apicredentials.NonDelegable;
 # o teste TestNonDelegableListsStayInSync confere esta lista).
 non_delegable='["members.manage","platform_billing.manage","api_credentials.manage","customers.anonymize"]'

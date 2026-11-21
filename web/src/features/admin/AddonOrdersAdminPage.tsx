@@ -42,10 +42,12 @@ export const adminApi = {
     const qs = params.toString();
     return api.get<CursorPage<StaffAddonOrder>>(`/api/v1/admin/addon-orders${qs ? `?${qs}` : ''}`, { signal, tenant: false });
   },
+  // As transições enviam a versão do pedido exibido (If-Match).
   schedule: (o: StaffAddonOrder, scheduledFor: string) =>
-    api.post<AddonOrder>(orderPath(o, 'schedule'), { scheduled_for: scheduledFor }, { tenant: false }),
-  complete: (o: StaffAddonOrder) => api.post<AddonOrder>(orderPath(o, 'complete'), undefined, { tenant: false }),
-  cancel: (o: StaffAddonOrder, reason: string) => api.post<AddonOrder>(orderPath(o, 'cancel'), { reason }, { tenant: false }),
+    api.post<AddonOrder>(orderPath(o, 'schedule'), { scheduled_for: scheduledFor }, { tenant: false, ifMatch: o.version }),
+  complete: (o: StaffAddonOrder) => api.post<AddonOrder>(orderPath(o, 'complete'), undefined, { tenant: false, ifMatch: o.version }),
+  cancel: (o: StaffAddonOrder, reason: string) =>
+    api.post<AddonOrder>(orderPath(o, 'cancel'), { reason }, { tenant: false, ifMatch: o.version }),
 };
 
 /** Fuso do navegador de quem atende (a equipe não tem organização ativa). */
@@ -62,10 +64,16 @@ function When({ value, timeZone }: { value: string | null | undefined; timeZone:
   return <time dateTime={value}>{formatDateTime(value, timeZone)}</time>;
 }
 
+/**
+ * Mutation da equipe da plataforma (sem organização ativa, por isso fora de
+ * useApiMutation). Depois de um 412, "Recarregar dados" recarrega a fila e
+ * executa onConcurrentReload: os modais que guardam o pedido aberto fecham, e
+ * a ação é refeita sobre a versão recarregada.
+ */
 function useAdminMutation<TVars, TForm extends FieldValues = FieldValues>(
   mutationFn: (vars: TVars) => Promise<AddonOrder>,
   successMessage: string,
-  options: { onSuccess?: () => void; form?: FormErrorTarget<TForm> } = {},
+  options: { onSuccess?: () => void; onConcurrentReload?: () => void; form?: FormErrorTarget<TForm> } = {},
 ) {
   const queryClient = useQueryClient();
   return useMutation<AddonOrder, unknown, TVars>({
@@ -75,7 +83,14 @@ function useAdminMutation<TVars, TForm extends FieldValues = FieldValues>(
       options.onSuccess?.();
       await queryClient.invalidateQueries({ queryKey: ADMIN_KEY });
     },
-    onError: (error) => handleMutationError(error, { form: options.form }),
+    onError: (error) =>
+      handleMutationError(error, {
+        form: options.form,
+        onConcurrentChange: () => {
+          void queryClient.invalidateQueries({ queryKey: ADMIN_KEY });
+          options.onConcurrentReload?.();
+        },
+      }),
   });
 }
 
@@ -91,6 +106,7 @@ function ScheduleModal({ order, timeZone, onClose }: { order: StaffAddonOrder; t
   const form = useForm<ScheduleValues>({ resolver: zodResolver(scheduleSchema), defaultValues: { scheduled_for: '' } });
   const mutation = useAdminMutation<string, ScheduleValues>((at) => adminApi.schedule(order, at), `Atendimento de ${order.tenant_name} agendado.`, {
     onSuccess: onClose,
+    onConcurrentReload: onClose,
     form,
   });
   const submit = form.handleSubmit((v) => mutation.mutate(zonedWallTimeToUtc(v.scheduled_for, timeZone)));
@@ -130,6 +146,7 @@ function CancelModal({ order, onClose }: { order: StaffAddonOrder; onClose: () =
   const form = useForm<CancelValues>({ resolver: zodResolver(cancelSchema), defaultValues: { reason: '' } });
   const mutation = useAdminMutation<string, CancelValues>((reason) => adminApi.cancel(order, reason), `Pedido de ${order.tenant_name} cancelado.`, {
     onSuccess: onClose,
+    onConcurrentReload: onClose,
     form,
   });
   return (

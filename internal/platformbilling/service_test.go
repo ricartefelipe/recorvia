@@ -95,7 +95,7 @@ func TestChangePlanSamePlanHasNoEffect(t *testing.T) {
 	f := newFixture(t)
 	// Nem o plano de destino é consultado: a troca para o mesmo plano é neutra.
 	f.store.fail["Plan"] = errBoom
-	sub, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, "escala")
+	sub, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, "escala", 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestChangePlanSamePlanHasNoEffect(t *testing.T) {
 func TestChangePlanSuccess(t *testing.T) {
 	f := newFixture(t)
 	f.state().pending = 1 // dois membros e um convite cabem nos três usuários do plano
-	sub, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, "essencial")
+	sub, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, "essencial", 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,10 +164,27 @@ func TestChangePlanRejected(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(f)
 			}
-			_, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, tc.plan)
+			_, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, tc.plan, 4)
 			assertAppErr(t, err, tc.kind, tc.code)
 			if st := f.state(); st.sub.PlanCode != "escala" || st.updates != 0 || len(st.audits) != 0 {
 				t.Fatalf("nada deveria ser alterado: %+v", st.sub)
+			}
+		})
+	}
+}
+
+// Com a versão da assinatura diferente da do If-Match, a troca é recusada
+// sem efeito, inclusive para o plano atual e para um plano que não caberia
+// no consumo: a versão é conferida antes de qualquer outra regra.
+func TestChangePlanVersionMismatch(t *testing.T) {
+	for _, plan := range []string{"essencial", "escala", "ouro"} {
+		t.Run(plan, func(t *testing.T) {
+			f := newFixture(t)
+			f.state().usage.ActiveUsers = 4
+			_, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, plan, 3)
+			assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+			if st := f.state(); st.sub.PlanCode != "escala" || st.sub.Version != 4 || st.updates != 0 || len(st.audits) != 0 {
+				t.Fatalf("nada deveria ser gravado nem auditado: %+v (%d auditorias)", st.sub, len(st.audits))
 			}
 		})
 	}
@@ -178,7 +195,7 @@ func TestChangePlanStoreErrors(t *testing.T) {
 		t.Run(op, func(t *testing.T) {
 			f := newFixture(t)
 			f.store.fail[op] = errBoom
-			if _, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, "essencial"); !errors.Is(err, errBoom) {
+			if _, err := f.svc.ChangePlan(context.Background(), f.tenantID, f.actor, "essencial", 4); !errors.Is(err, errBoom) {
 				t.Fatalf("esperado erro propagado, obtido %v", err)
 			}
 		})

@@ -260,7 +260,7 @@ func TestEndToEndDunningNotificationsAndWebhooks(t *testing.T) {
 	env := e.env
 
 	tn := env.NewTenant(t, "ponta-a-ponta")
-	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "profissional"); err != nil {
+	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "profissional", env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	uid := tn.Owner.ID

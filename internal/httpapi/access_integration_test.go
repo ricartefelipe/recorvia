@@ -86,7 +86,7 @@ func bearer(token string, extra ...string) map[string]string {
 func apiPlanTenant(t *testing.T, a *apiEnv, prefix string) fixture.Tenant {
 	t.Helper()
 	tn := a.env.NewTenant(t, prefix)
-	if _, err := a.env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "profissional"); err != nil {
+	if _, err := a.env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "profissional", a.env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	return tn

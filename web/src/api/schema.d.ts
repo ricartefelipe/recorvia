@@ -325,6 +325,7 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
+        /** @description Troca o plano na versão da assinatura da plataforma informada no If-Match (`subscription.version` de PlatformOverview); o ETag da resposta é a versão gravada. A troca para o plano atual, na versão atual, não tem efeito. */
         put: operations["changePlatformPlan"];
         post?: never;
         delete?: never;
@@ -356,6 +357,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Pedidos de serviços adicionais da organização, dos mais recentes para os mais antigos, em páginas por cursor. */
         get: operations["listAddonOrders"];
         put?: never;
         post: operations["createAddonOrder"];
@@ -372,6 +374,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Demonstrativos mensais, do período mais recente para o mais antigo, em páginas por cursor. */
         get: operations["listPlatformStatements"];
         put?: never;
         post?: never;
@@ -431,7 +434,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Agenda (ou reagenda) o atendimento do pedido */
+        /**
+         * Agenda (ou reagenda) o atendimento do pedido
+         * @description Na versão do pedido informada no If-Match (`version` do pedido); o ETag da resposta é a versão gravada.
+         */
         post: operations["adminScheduleAddonOrder"];
         delete?: never;
         options?: never;
@@ -454,7 +460,7 @@ export interface paths {
         put?: never;
         /**
          * Conclui o atendimento; o valor entra no próximo demonstrativo da plataforma
-         * @description O valor entra no demonstrativo do período em que a conclusão ocorreu (ou no seguinte, se esse já estiver fechado). Com a assinatura da plataforma da organização cancelada, responde 409 `platform_subscription_canceled`: o pedido deve ser cancelado.
+         * @description O valor entra no demonstrativo do período em que a conclusão ocorreu (ou no seguinte, se esse já estiver fechado). Com a assinatura da plataforma da organização cancelada, responde 409 `platform_subscription_canceled`: o pedido deve ser cancelado. Na versão do pedido informada no If-Match; o ETag da resposta é a versão gravada.
          */
         post: operations["adminCompleteAddonOrder"];
         delete?: never;
@@ -476,7 +482,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Cancela o pedido em aberto, sem cobrança */
+        /**
+         * Cancela o pedido em aberto, sem cobrança
+         * @description Na versão do pedido informada no If-Match (`version` do pedido); o ETag da resposta é a versão gravada.
+         */
         post: operations["adminCancelAddonOrder"];
         delete?: never;
         options?: never;
@@ -718,6 +727,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Produtos, dos criados mais recentemente para os mais antigos, em páginas por cursor. */
         get: operations["listProducts"];
         put?: never;
         post: operations["createProduct"];
@@ -750,6 +760,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Métricas pelo código, em páginas por cursor. */
         get: operations["listMetrics"];
         put?: never;
         post: operations["createMetric"];
@@ -766,6 +777,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Planos, dos criados mais recentemente para os mais antigos, em páginas por cursor. */
         get: operations["listPlans"];
         put?: never;
         post: operations["createPlan"];
@@ -823,6 +835,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Cupons, dos criados mais recentemente para os mais antigos, em páginas por cursor. */
         get: operations["listCoupons"];
         put?: never;
         post: operations["createCoupon"];
@@ -1006,6 +1019,7 @@ export interface paths {
             };
             cookie?: never;
         };
+        /** @description Reajustes da assinatura, da vigência mais antiga para a mais recente, em páginas por cursor. */
         get: operations["listPriceAdjustments"];
         put?: never;
         post: operations["schedulePriceAdjustment"];
@@ -2211,6 +2225,8 @@ export interface components {
                 current_period_start: string;
                 /** Format: date-time */
                 current_period_end: string;
+                /** @description Versão da assinatura da plataforma; If-Match da troca de plano */
+                version: number;
             };
             usage: {
                 active_users: number;
@@ -4250,11 +4266,13 @@ export interface operations {
     changePlatformPlan: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path?: never;
             cookie?: never;
@@ -4270,6 +4288,7 @@ export interface operations {
             /** @description Plano alterado */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -4278,6 +4297,8 @@ export interface operations {
             };
             403: components["responses"]["UserSessionRequired"];
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     listPlatformAddons: {
@@ -4308,7 +4329,10 @@ export interface operations {
     };
     listAddonOrders: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
@@ -4326,6 +4350,7 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["AddonOrder"][];
+                        next_cursor: string | null;
                     };
                 };
             };
@@ -4371,7 +4396,10 @@ export interface operations {
     };
     listPlatformStatements: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
@@ -4389,6 +4417,7 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["PlatformStatement"][];
+                        next_cursor: string | null;
                     };
                 };
             };
@@ -4451,9 +4480,11 @@ export interface operations {
     adminScheduleAddonOrder: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 /** @description Organização do pedido (equipe da plataforma) */
@@ -4477,6 +4508,7 @@ export interface operations {
             /** @description Pedido agendado */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -4486,15 +4518,19 @@ export interface operations {
             403: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     adminCompleteAddonOrder: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 /** @description Organização do pedido (equipe da plataforma) */
@@ -4508,6 +4544,7 @@ export interface operations {
             /** @description Pedido concluído */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -4517,14 +4554,18 @@ export interface operations {
             403: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     adminCancelAddonOrder: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412 `version_mismatch`, sem efeito. */
+                "If-Match": components["parameters"]["IfMatch"];
             };
             path: {
                 /** @description Organização do pedido (equipe da plataforma) */
@@ -4544,6 +4585,7 @@ export interface operations {
             /** @description Pedido cancelado */
             200: {
                 headers: {
+                    ETag: components["headers"]["ETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -4553,7 +4595,9 @@ export interface operations {
             403: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
             409: components["responses"]["Problem"];
+            412: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+            428: components["responses"]["Problem"];
         };
     };
     listCustomers: {
@@ -5084,6 +5128,8 @@ export interface operations {
         parameters: {
             query?: {
                 status?: "active" | "archived";
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
             };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
@@ -5102,6 +5148,7 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["Product"][];
+                        next_cursor: string | null;
                     };
                 };
             };
@@ -5179,7 +5226,10 @@ export interface operations {
     };
     listMetrics: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
@@ -5197,6 +5247,7 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["Metric"][];
+                        next_cursor: string | null;
                     };
                 };
             };
@@ -5238,6 +5289,8 @@ export interface operations {
             query?: {
                 status?: "active" | "archived";
                 product_id?: string;
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
             };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
@@ -5256,6 +5309,7 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["Plan"][];
+                        next_cursor: string | null;
                     };
                 };
             };
@@ -5392,7 +5446,10 @@ export interface operations {
     };
     listCoupons: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
@@ -5410,6 +5467,7 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["Coupon"][];
+                        next_cursor: string | null;
                     };
                 };
             };
@@ -5830,7 +5888,10 @@ export interface operations {
     };
     listPriceAdjustments: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
@@ -5850,6 +5911,7 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["PriceAdjustment"][];
+                        next_cursor: string | null;
                     };
                 };
             };
