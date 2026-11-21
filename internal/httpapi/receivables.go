@@ -14,9 +14,9 @@ import (
 
 // Reembolsos, disputas e conciliação com o provedor (ADR-034 a ADR-038).
 
-// listLimit é o número de itens das listas sem paginação por cursor
-// (disputas, execuções e divergências): as mais recentes primeiro.
-const listLimit = 100
+// historyLimit é o número de eventos do histórico da divergência devolvidos
+// com ela (detecção, reaberturas e resolução).
+const historyLimit = 100
 
 func refundDTO(r payments.Refund) map[string]any {
 	return map[string]any{"id": r.ID, "charge_id": r.ChargeID, "amount": r.Amount.Amount(), "currency": r.Amount.Currency().Code(),
@@ -84,8 +84,15 @@ func disputeDTO(d payments.Dispute) (map[string]any, error) {
 		"closed_at": d.ClosedAt}, nil
 }
 
+// listDisputes lista as disputas, das abertas mais recentemente para as mais
+// antigas, em páginas por cursor.
 func (a *API) listDisputes(w http.ResponseWriter, r *http.Request) {
-	items, err := a.Store.ListDisputes(r.Context(), mustPrincipal(r).TenantID, nil, listLimit)
+	limit, cursor, err := pageParams(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	items, next, err := a.Store.ListDisputes(r.Context(), mustPrincipal(r).TenantID, nil, limit, cursor)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -99,7 +106,7 @@ func (a *API) listDisputes(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, dto)
 	}
-	a.writeJSON(w, r, http.StatusOK, list(out))
+	a.writeJSON(w, r, http.StatusOK, newPage(out, next))
 }
 
 // getDispute devolve a disputa com o saldo a recuperar do cliente.
@@ -197,8 +204,15 @@ func runDTO(r payments.ReconciliationRun) map[string]any {
 		"attempts": r.Attempts, "started_at": r.StartedAt, "finished_at": r.FinishedAt}
 }
 
+// listReconciliationRuns lista as execuções, das mais recentes para as mais
+// antigas, em páginas por cursor.
 func (a *API) listReconciliationRuns(w http.ResponseWriter, r *http.Request) {
-	items, err := a.Store.ListReconciliationRuns(r.Context(), mustPrincipal(r).TenantID, listLimit)
+	limit, cursor, err := pageParams(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	items, next, err := a.Store.ListReconciliationRuns(r.Context(), mustPrincipal(r).TenantID, limit, cursor)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -207,7 +221,7 @@ func (a *API) listReconciliationRuns(w http.ResponseWriter, r *http.Request) {
 	for _, x := range items {
 		out = append(out, runDTO(x))
 	}
-	a.writeJSON(w, r, http.StatusOK, list(out))
+	a.writeJSON(w, r, http.StatusOK, newPage(out, next))
 }
 
 // runReconciliation registra a conciliação manual do provedor padrão sobre a
@@ -261,7 +275,7 @@ func discrepancyDTO(d payments.Discrepancy) map[string]any {
 	return map[string]any{"id": d.ID, "run_id": d.RunID, "kind": d.Kind, "status": d.Status, "charge_id": d.ChargeID,
 		"provider_charge_id": nullable(d.ProviderChargeID), "local_value": local, "provider_value": provider,
 		"resolution": nullable(string(d.Resolution)), "justification": nullable(d.Justification), "resolved_by": d.ResolvedBy,
-		"resolved_at": d.ResolvedAt, "created_at": d.CreatedAt}
+		"resolved_at": d.ResolvedAt, "created_at": d.CreatedAt, "version": d.Version}
 }
 
 func knownDiscrepancyKind(kind string) bool {
@@ -286,7 +300,12 @@ func (a *API) listDiscrepancies(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, invalidField("kind", "Tipo de divergência desconhecido."))
 		return
 	}
-	items, err := a.Store.ListDiscrepancies(r.Context(), mustPrincipal(r).TenantID, status, kind, listLimit)
+	limit, cursor, err := pageParams(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	items, next, err := a.Store.ListDiscrepancies(r.Context(), mustPrincipal(r).TenantID, status, kind, limit, cursor)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -295,14 +314,14 @@ func (a *API) listDiscrepancies(w http.ResponseWriter, r *http.Request) {
 	for _, d := range items {
 		out = append(out, discrepancyDTO(d))
 	}
-	a.writeJSON(w, r, http.StatusOK, list(out))
+	a.writeJSON(w, r, http.StatusOK, newPage(out, next))
 }
 
 // discrepancyWithHistory acrescenta o histórico de auditoria (detecção,
 // reabertura e resolução) à divergência.
 func (a *API) discrepancyWithHistory(r *http.Request, tenantID uuid.UUID, d payments.Discrepancy) (map[string]any, error) {
 	events, _, err := a.Store.AuditEvents(r.Context(), tenantID, pgstore.AuditFilter{ResourceType: "reconciliation_discrepancy",
-		ResourceID: d.ID.String(), Limit: listLimit})
+		ResourceID: d.ID.String(), Limit: historyLimit})
 	if err != nil {
 		return nil, err
 	}
@@ -328,15 +347,21 @@ func (a *API) getDiscrepancy(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, out)
+	a.writeVersioned(w, r, http.StatusOK, d.Version, out)
 }
 
 // resolveDiscrepancy resolve a divergência aberta com responsável,
 // justificativa e ação; a resolução fica no histórico e, quando houver
 // ajuste, no ledger. O responsável é o usuário da sessão (resolved_by) ou a
-// credencial de API, registrada na auditoria (resolved_by nulo).
+// credencial de API, registrada na auditoria (resolved_by nulo). A resolução
+// exige a versão da divergência vista por quem resolve (If-Match).
 func (a *API) resolveDiscrepancy(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	version, err := ifMatch(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -351,7 +376,7 @@ func (a *API) resolveDiscrepancy(w http.ResponseWriter, r *http.Request) {
 	}
 	p := mustPrincipal(r)
 	d, err := a.Payments.ResolveDiscrepancy(r.Context(), p.TenantID, p.Actor(), p.UserID(), payments.ResolveInput{ID: id,
-		Resolution: payments.Resolution(in.Resolution), Justification: in.Justification})
+		Resolution: payments.Resolution(in.Resolution), Justification: in.Justification, ExpectedVersion: version})
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -361,5 +386,5 @@ func (a *API) resolveDiscrepancy(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, out)
+	a.writeVersioned(w, r, http.StatusOK, d.Version, out)
 }

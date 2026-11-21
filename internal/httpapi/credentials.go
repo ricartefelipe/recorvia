@@ -19,6 +19,7 @@ type apiCredentialDTO struct {
 	ExpiresAt  *time.Time `json:"expires_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
 	RevokedAt  *time.Time `json:"revoked_at"`
+	Version    int        `json:"version"`
 }
 
 type apiCredentialWithSecretDTO struct {
@@ -32,7 +33,7 @@ func credentialDTO(c apicredentials.Credential) apiCredentialDTO {
 		scopes[i] = string(s)
 	}
 	return apiCredentialDTO{ID: c.ID, Name: c.Name, Prefix: c.Prefix(), Scopes: scopes, CreatedAt: c.CreatedAt, ExpiresAt: c.ExpiresAt,
-		LastUsedAt: c.LastUsedAt, RevokedAt: c.RevokedAt}
+		LastUsedAt: c.LastUsedAt, RevokedAt: c.RevokedAt, Version: c.Version}
 }
 
 // grantor descreve o membro que gerencia credenciais. Credenciais de API não
@@ -46,17 +47,25 @@ func grantor(p Principal) (apicredentials.Grantor, error) {
 	return apicredentials.Grantor{UserID: p.User.ID, Role: p.Role, Actor: p.Actor()}, nil
 }
 
+// listAPICredentials lista as credenciais em páginas por cursor: ativas
+// primeiro, depois revogadas e expiradas, das mais recentes para as mais
+// antigas.
 func (a *API) listAPICredentials(w http.ResponseWriter, r *http.Request) {
-	items, err := a.Credentials.List(r.Context(), mustPrincipal(r).TenantID)
+	limit, cursor, err := pageParams(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	out := make([]apiCredentialDTO, 0, len(items))
-	for _, c := range items {
+	pg, err := a.Credentials.List(r.Context(), mustPrincipal(r).TenantID, limit, cursor)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	out := make([]apiCredentialDTO, 0, len(pg.Items))
+	for _, c := range pg.Items {
 		out = append(out, credentialDTO(c))
 	}
-	a.writeJSON(w, r, http.StatusOK, list(out))
+	a.writeJSON(w, r, http.StatusOK, newPage(out, pg.NextCursor))
 }
 
 func (a *API) createAPICredential(w http.ResponseWriter, r *http.Request) {
@@ -90,18 +99,24 @@ func (a *API) rotateAPICredential(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	version, err := ifMatch(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	p := mustPrincipal(r)
 	g, err := grantor(p)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	issued, err := a.Credentials.Rotate(r.Context(), p.TenantID, g, id)
+	issued, err := a.Credentials.Rotate(r.Context(), p.TenantID, g, id, version)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusCreated, apiCredentialWithSecretDTO{Credential: credentialDTO(issued.Credential), Secret: issued.Token})
+	a.writeVersioned(w, r, http.StatusCreated, issued.Credential.Version,
+		apiCredentialWithSecretDTO{Credential: credentialDTO(issued.Credential), Secret: issued.Token})
 }
 
 func (a *API) revokeAPICredential(w http.ResponseWriter, r *http.Request) {
@@ -110,13 +125,18 @@ func (a *API) revokeAPICredential(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	version, err := ifMatch(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	p := mustPrincipal(r)
 	g, err := grantor(p)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	if err := a.Credentials.Revoke(r.Context(), p.TenantID, g, id); err != nil {
+	if err := a.Credentials.Revoke(r.Context(), p.TenantID, g, id, version); err != nil {
 		a.writeError(w, r, err)
 		return
 	}

@@ -475,16 +475,28 @@ func (q *Queries) ListAuditEvents(ctx context.Context, arg ListAuditEventsParams
 const listDeadLetters = `-- name: ListDeadLetters :many
 SELECT id, tenant_id, consumer, message_id, event_type, payload, headers, error, attempts, status, failed_at, resolved_at, resolved_by, resolution_note FROM dead_letters
  WHERE tenant_id = $1 AND ($2::text IS NULL OR status = $2)
- ORDER BY failed_at DESC, id DESC LIMIT 200
+   AND ($3::timestamptz IS NULL OR (failed_at, id) < ($3::timestamptz, $4::uuid))
+ ORDER BY failed_at DESC, id DESC
+ LIMIT $5
 `
 
 type ListDeadLettersParams struct {
 	TenantID *uuid.UUID
 	Status   *string
+	CursorTs *time.Time
+	CursorID *uuid.UUID
+	RowLimit int32
 }
 
+// Paginação por keyset em (failed_at, id), gravados no registro da falha.
 func (q *Queries) ListDeadLetters(ctx context.Context, arg ListDeadLettersParams) ([]DeadLetter, error) {
-	rows, err := q.db.Query(ctx, listDeadLetters, arg.TenantID, arg.Status)
+	rows, err := q.db.Query(ctx, listDeadLetters,
+		arg.TenantID,
+		arg.Status,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

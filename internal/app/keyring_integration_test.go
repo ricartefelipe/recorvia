@@ -62,7 +62,7 @@ func TestKeyringCheckAgainstRestoredDatabase(t *testing.T) {
 	err = env.Store.Payments().InTenant(ctx, tn.ID, func(tx payments.Tx) error {
 		return tx.SaveAccount(ctx, payments.ProviderAccount{ID: ids.New(), TenantID: tn.ID, Provider: "simulator", Environment: "local",
 			Status: "active", IsDefault: true, APIKey: "sim_restaurado_0001", APIKeyHint: "0001", Secret: strings.Repeat("s", 40),
-			CreatedAt: start, UpdatedAt: start, Version: 1}, []byte("hash-do-token"))
+			CreatedAt: start, UpdatedAt: start, Version: 1}, []byte("hash-do-token"), 0)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -278,14 +278,14 @@ func TestKeyringCheckAgainstRestoredDatabase(t *testing.T) {
 				return err
 			}
 			acc.APIKey, acc.APIKeyHint, acc.Secret = "sim_refeita_0002", "0002", strings.Repeat("n", 40)
-			return tx.SaveAccount(ctx, acc, []byte("hash-do-token"))
+			return tx.SaveAccount(ctx, acc, []byte("hash-do-token"), acc.Version)
 		})
 		if err != nil {
 			t.Fatalf("reconfiguração da conta com a chave perdida: %v", err)
 		}
 		// Sem janela para o segredo anterior, que não decifra mais.
 		noWindow := 0
-		if _, _, err := recovered.Webhooks.RotateSecret(ctx, tn.ID, tn.Actor, endpoint.ID, &noWindow); err != nil {
+		if _, _, err := recovered.Webhooks.RotateSecret(ctx, tn.ID, tn.Actor, endpoint.ID, &noWindow, endpoint.Version); err != nil {
 			t.Fatalf("rotação do segredo do endpoint com a chave perdida: %v", err)
 		}
 		out, err = runLost("t1")

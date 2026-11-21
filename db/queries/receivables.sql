@@ -121,9 +121,11 @@ INSERT INTO dispute_events (id, tenant_id, dispute_id, from_status, to_status, p
 VALUES (@id, @tenant_id, @dispute_id, sqlc.narg(from_status), @to_status, sqlc.narg(provider_status), @occurred_at, @recorded_at, @details);
 
 -- name: ListDisputes :many
+-- Paginação por keyset em (opened_at, id), que não mudam depois da abertura.
 SELECT * FROM disputes
  WHERE tenant_id = @tenant_id
    AND (sqlc.narg(charge_id)::uuid IS NULL OR charge_id = sqlc.narg(charge_id))
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (opened_at, id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
  ORDER BY opened_at DESC, id DESC
  LIMIT @row_limit;
 
@@ -166,7 +168,12 @@ UPDATE reconciliation_runs
  WHERE tenant_id = @tenant_id AND id = @id;
 
 -- name: ListReconciliationRuns :many
-SELECT * FROM reconciliation_runs WHERE tenant_id = @tenant_id ORDER BY started_at DESC, id DESC LIMIT @row_limit;
+-- Paginação por keyset em (started_at, id), gravados no registro da execução.
+SELECT * FROM reconciliation_runs
+ WHERE tenant_id = @tenant_id
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (started_at, id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY started_at DESC, id DESC
+ LIMIT @row_limit;
 
 -- name: TenantsDueReconciliation :many
 SELECT t::uuid AS tenant_id FROM app_tenants_due_reconciliation(@now, @interval_seconds) AS t;
@@ -248,6 +255,7 @@ SELECT * FROM reconciliation_discrepancies
  WHERE tenant_id = @tenant_id
    AND (sqlc.narg(status)::text IS NULL OR status = sqlc.narg(status))
    AND (sqlc.narg(kind)::text IS NULL OR kind = sqlc.narg(kind))
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (created_at, id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
  ORDER BY created_at DESC, id DESC
  LIMIT @row_limit;
 

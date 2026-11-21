@@ -698,6 +698,53 @@ func (q *Queries) InsertPayment(ctx context.Context, arg InsertPaymentParams) (i
 	return result.RowsAffected(), nil
 }
 
+const insertProviderAccount = `-- name: InsertProviderAccount :execrows
+INSERT INTO payment_provider_accounts (id, tenant_id, provider, environment, status, is_default, api_key_ciphertext, api_key_key_id,
+                                       api_key_hint, webhook_secret_ciphertext, webhook_secret_key_id, webhook_endpoint_token_hash,
+                                       created_at, updated_at, version)
+VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8,
+        $9, $10, $11, $12, $12, 1)
+ON CONFLICT (tenant_id, provider) DO NOTHING
+`
+
+type InsertProviderAccountParams struct {
+	ID                       uuid.UUID
+	TenantID                 uuid.UUID
+	Provider                 string
+	Environment              string
+	IsDefault                bool
+	ApiKeyCiphertext         []byte
+	ApiKeyKeyID              *string
+	ApiKeyHint               *string
+	WebhookSecretCiphertext  []byte
+	WebhookSecretKeyID       *string
+	WebhookEndpointTokenHash []byte
+	CreatedAt                time.Time
+}
+
+// Primeira configuração do provedor (versão esperada 0): nenhuma linha se
+// outra pessoa configurou o provedor antes.
+func (q *Queries) InsertProviderAccount(ctx context.Context, arg InsertProviderAccountParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertProviderAccount,
+		arg.ID,
+		arg.TenantID,
+		arg.Provider,
+		arg.Environment,
+		arg.IsDefault,
+		arg.ApiKeyCiphertext,
+		arg.ApiKeyKeyID,
+		arg.ApiKeyHint,
+		arg.WebhookSecretCiphertext,
+		arg.WebhookSecretKeyID,
+		arg.WebhookEndpointTokenHash,
+		arg.CreatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const insertWebhookEvent = `-- name: InsertWebhookEvent :execrows
 INSERT INTO provider_webhook_events (id, tenant_id, provider_account_id, provider, provider_event_id, event_type, provider_charge_id,
                                      occurred_at, received_at, payload, status)
@@ -897,17 +944,31 @@ func (q *Queries) ListChargesPendingReceipt(ctx context.Context, arg ListCharges
 }
 
 const listOperations = `-- name: ListOperations :many
-SELECT id, tenant_id, charge_id, refund_id, kind, status, external_reference, attempts, lease_until, next_attempt_at, last_error, provider_response, created_at, updated_at, completed_at FROM payment_operations WHERE tenant_id = $1 AND ($2::text IS NULL OR status = $2)
- ORDER BY updated_at DESC, id DESC LIMIT 200
+SELECT id, tenant_id, charge_id, refund_id, kind, status, external_reference, attempts, lease_until, next_attempt_at, last_error, provider_response, created_at, updated_at, completed_at FROM payment_operations
+ WHERE tenant_id = $1 AND ($2::text IS NULL OR status = $2)
+   AND ($3::timestamptz IS NULL OR (created_at, id) < ($3::timestamptz, $4::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT $5
 `
 
 type ListOperationsParams struct {
 	TenantID uuid.UUID
 	Status   *string
+	CursorTs *time.Time
+	CursorID *uuid.UUID
+	RowLimit int32
 }
 
+// Paginação por keyset em (created_at, id): updated_at muda a cada tentativa
+// e deslocaria a operação entre as páginas.
 func (q *Queries) ListOperations(ctx context.Context, arg ListOperationsParams) ([]PaymentOperation, error) {
-	rows, err := q.db.Query(ctx, listOperations, arg.TenantID, arg.Status)
+	rows, err := q.db.Query(ctx, listOperations,
+		arg.TenantID,
+		arg.Status,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1256,6 +1317,50 @@ func (q *Queries) UpdateOperation(ctx context.Context, arg UpdateOperationParams
 	return err
 }
 
+const updateProviderAccount = `-- name: UpdateProviderAccount :execrows
+UPDATE payment_provider_accounts
+   SET environment = $1, status = 'active', is_default = $2,
+       api_key_ciphertext = $3, api_key_key_id = $4, api_key_hint = $5,
+       webhook_secret_ciphertext = $6, webhook_secret_key_id = $7,
+       webhook_endpoint_token_hash = $8, version = version + 1
+ WHERE tenant_id = $9 AND provider = $10 AND version = $11
+`
+
+type UpdateProviderAccountParams struct {
+	Environment              string
+	IsDefault                bool
+	ApiKeyCiphertext         []byte
+	ApiKeyKeyID              *string
+	ApiKeyHint               *string
+	WebhookSecretCiphertext  []byte
+	WebhookSecretKeyID       *string
+	WebhookEndpointTokenHash []byte
+	TenantID                 uuid.UUID
+	Provider                 string
+	Version                  int32
+}
+
+// Nova configuração do provedor, condicionada à versão esperada (If-Match).
+func (q *Queries) UpdateProviderAccount(ctx context.Context, arg UpdateProviderAccountParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateProviderAccount,
+		arg.Environment,
+		arg.IsDefault,
+		arg.ApiKeyCiphertext,
+		arg.ApiKeyKeyID,
+		arg.ApiKeyHint,
+		arg.WebhookSecretCiphertext,
+		arg.WebhookSecretKeyID,
+		arg.WebhookEndpointTokenHash,
+		arg.TenantID,
+		arg.Provider,
+		arg.Version,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const updateWebhookEventStatus = `-- name: UpdateWebhookEventStatus :exec
 UPDATE provider_webhook_events SET status = $1, error = $2, processed_at = $3
  WHERE tenant_id = $4 AND id = $5
@@ -1276,52 +1381,6 @@ func (q *Queries) UpdateWebhookEventStatus(ctx context.Context, arg UpdateWebhoo
 		arg.ProcessedAt,
 		arg.TenantID,
 		arg.ID,
-	)
-	return err
-}
-
-const upsertProviderAccount = `-- name: UpsertProviderAccount :exec
-INSERT INTO payment_provider_accounts (id, tenant_id, provider, environment, status, is_default, api_key_ciphertext, api_key_key_id,
-                                       api_key_hint, webhook_secret_ciphertext, webhook_secret_key_id, webhook_endpoint_token_hash,
-                                       created_at, updated_at, version)
-VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8,
-        $9, $10, $11, $12, $12, 1)
-ON CONFLICT (tenant_id, provider) DO UPDATE
-   SET environment = EXCLUDED.environment, status = 'active', is_default = EXCLUDED.is_default,
-       api_key_ciphertext = EXCLUDED.api_key_ciphertext, api_key_key_id = EXCLUDED.api_key_key_id, api_key_hint = EXCLUDED.api_key_hint,
-       webhook_secret_ciphertext = EXCLUDED.webhook_secret_ciphertext, webhook_secret_key_id = EXCLUDED.webhook_secret_key_id,
-       webhook_endpoint_token_hash = EXCLUDED.webhook_endpoint_token_hash, version = payment_provider_accounts.version + 1
-`
-
-type UpsertProviderAccountParams struct {
-	ID                       uuid.UUID
-	TenantID                 uuid.UUID
-	Provider                 string
-	Environment              string
-	IsDefault                bool
-	ApiKeyCiphertext         []byte
-	ApiKeyKeyID              *string
-	ApiKeyHint               *string
-	WebhookSecretCiphertext  []byte
-	WebhookSecretKeyID       *string
-	WebhookEndpointTokenHash []byte
-	CreatedAt                time.Time
-}
-
-func (q *Queries) UpsertProviderAccount(ctx context.Context, arg UpsertProviderAccountParams) error {
-	_, err := q.db.Exec(ctx, upsertProviderAccount,
-		arg.ID,
-		arg.TenantID,
-		arg.Provider,
-		arg.Environment,
-		arg.IsDefault,
-		arg.ApiKeyCiphertext,
-		arg.ApiKeyKeyID,
-		arg.ApiKeyHint,
-		arg.WebhookSecretCiphertext,
-		arg.WebhookSecretKeyID,
-		arg.WebhookEndpointTokenHash,
-		arg.CreatedAt,
 	)
 	return err
 }

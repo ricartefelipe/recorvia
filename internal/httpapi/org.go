@@ -194,6 +194,11 @@ func (a *API) updateMemberRole(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	version, err := ifMatch(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	var in struct {
 		Role tenancy.Role `json:"role"`
 	}
@@ -202,7 +207,7 @@ func (a *API) updateMemberRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	m, err := a.Tenancy.ChangeRole(r.Context(), p.TenantID, a.access(p), p.UserRef(), target, in.Role)
+	m, err := a.Tenancy.ChangeRole(r.Context(), p.TenantID, a.access(p), p.UserRef(), target, in.Role, version)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -214,7 +219,7 @@ func (a *API) updateMemberRole(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, mm := range members {
 		if mm.UserID == m.UserID {
-			a.writeJSON(w, r, http.StatusOK, memberDTO{UserID: mm.UserID, Email: mm.Email, DisplayName: mm.DisplayName, Role: mm.Role,
+			a.writeVersioned(w, r, http.StatusOK, mm.Version, memberDTO{UserID: mm.UserID, Email: mm.Email, DisplayName: mm.DisplayName, Role: mm.Role,
 				Status: string(mm.Status), CreatedAt: mm.CreatedAt, Version: mm.Version})
 			return
 		}
@@ -228,8 +233,13 @@ func (a *API) removeMember(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	version, err := ifMatch(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	p := mustPrincipal(r)
-	if err := a.Tenancy.RemoveMember(r.Context(), p.TenantID, a.access(p), p.UserRef(), target); err != nil {
+	if err := a.Tenancy.RemoveMember(r.Context(), p.TenantID, a.access(p), p.UserRef(), target, version); err != nil {
 		a.writeError(w, r, err)
 		return
 	}
@@ -256,16 +266,21 @@ func (a *API) invDTO(i tenancy.Invitation) invitationDTO {
 }
 
 func (a *API) listInvitations(w http.ResponseWriter, r *http.Request) {
-	invs, err := a.Tenancy.Invitations(r.Context(), mustPrincipal(r).TenantID)
+	limit, cursor, err := pageParams(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	out := make([]invitationDTO, 0, len(invs))
-	for _, i := range invs {
+	pg, err := a.Tenancy.Invitations(r.Context(), mustPrincipal(r).TenantID, limit, cursor)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	out := make([]invitationDTO, 0, len(pg.Items))
+	for _, i := range pg.Items {
 		out = append(out, a.invDTO(i))
 	}
-	a.writeJSON(w, r, http.StatusOK, list(out))
+	a.writeJSON(w, r, http.StatusOK, newPage(out, pg.NextCursor))
 }
 
 func (a *API) createInvitation(w http.ResponseWriter, r *http.Request) {

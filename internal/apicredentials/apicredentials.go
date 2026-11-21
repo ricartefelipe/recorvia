@@ -134,6 +134,14 @@ type Credential struct {
 	Version                 int
 }
 
+// Page é uma página da listagem de credenciais: as ativas primeiro, depois
+// revogadas e expiradas, das mais recentes para as mais antigas. NextCursor
+// vazio indica a última página.
+type Page struct {
+	Items      []Credential
+	NextCursor string
+}
+
 // Prefix é a parte pública do token (exibida nas listagens).
 func (c Credential) Prefix() string { return TokenPrefix + c.KeyID }
 

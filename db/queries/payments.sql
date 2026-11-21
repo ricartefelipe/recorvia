@@ -15,17 +15,24 @@ SELECT * FROM payment_provider_accounts WHERE tenant_id = @tenant_id ORDER BY pr
 -- name: ClearDefaultProviderAccount :exec
 UPDATE payment_provider_accounts SET is_default = false WHERE tenant_id = @tenant_id AND is_default AND id <> @keep_id;
 
--- name: UpsertProviderAccount :exec
+-- name: InsertProviderAccount :execrows
+-- Primeira configuração do provedor (versão esperada 0): nenhuma linha se
+-- outra pessoa configurou o provedor antes.
 INSERT INTO payment_provider_accounts (id, tenant_id, provider, environment, status, is_default, api_key_ciphertext, api_key_key_id,
                                        api_key_hint, webhook_secret_ciphertext, webhook_secret_key_id, webhook_endpoint_token_hash,
                                        created_at, updated_at, version)
 VALUES (@id, @tenant_id, @provider, @environment, 'active', @is_default, @api_key_ciphertext, @api_key_key_id, @api_key_hint,
         @webhook_secret_ciphertext, @webhook_secret_key_id, @webhook_endpoint_token_hash, @created_at, @created_at, 1)
-ON CONFLICT (tenant_id, provider) DO UPDATE
-   SET environment = EXCLUDED.environment, status = 'active', is_default = EXCLUDED.is_default,
-       api_key_ciphertext = EXCLUDED.api_key_ciphertext, api_key_key_id = EXCLUDED.api_key_key_id, api_key_hint = EXCLUDED.api_key_hint,
-       webhook_secret_ciphertext = EXCLUDED.webhook_secret_ciphertext, webhook_secret_key_id = EXCLUDED.webhook_secret_key_id,
-       webhook_endpoint_token_hash = EXCLUDED.webhook_endpoint_token_hash, version = payment_provider_accounts.version + 1;
+ON CONFLICT (tenant_id, provider) DO NOTHING;
+
+-- name: UpdateProviderAccount :execrows
+-- Nova configuração do provedor, condicionada à versão esperada (If-Match).
+UPDATE payment_provider_accounts
+   SET environment = @environment, status = 'active', is_default = @is_default,
+       api_key_ciphertext = @api_key_ciphertext, api_key_key_id = @api_key_key_id, api_key_hint = @api_key_hint,
+       webhook_secret_ciphertext = @webhook_secret_ciphertext, webhook_secret_key_id = @webhook_secret_key_id,
+       webhook_endpoint_token_hash = @webhook_endpoint_token_hash, version = version + 1
+ WHERE tenant_id = @tenant_id AND provider = @provider AND version = @version;
 
 -- name: ResolveWebhookEndpoint :one
 SELECT tenant_id::uuid AS tenant_id, account_id::uuid AS account_id FROM app_resolve_webhook_endpoint(@provider, @token_hash);
@@ -112,8 +119,13 @@ SELECT o.status::text AS status, count(*)::bigint AS total
  GROUP BY o.status;
 
 -- name: ListOperations :many
-SELECT * FROM payment_operations WHERE tenant_id = @tenant_id AND (sqlc.narg(status)::text IS NULL OR status = sqlc.narg(status))
- ORDER BY updated_at DESC, id DESC LIMIT 200;
+-- Paginação por keyset em (created_at, id): updated_at muda a cada tentativa
+-- e deslocaria a operação entre as páginas.
+SELECT * FROM payment_operations
+ WHERE tenant_id = @tenant_id AND (sqlc.narg(status)::text IS NULL OR status = sqlc.narg(status))
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (created_at, id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT @row_limit;
 
 -- name: TenantsWithPendingOperations :many
 SELECT t::uuid AS tenant_id FROM app_tenants_with_pending_payment_operations(@now) AS t;

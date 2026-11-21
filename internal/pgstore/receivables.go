@@ -624,15 +624,23 @@ type DisputeWithHistory struct {
 	History []payments.DisputeEvent
 }
 
-// ListDisputes lista as disputas mais recentes do tenant com histórico.
-func (s *Store) ListDisputes(ctx context.Context, tenantID uuid.UUID, chargeID *uuid.UUID, limit int) ([]DisputeWithHistory, error) {
+// ListDisputes lista as disputas do tenant com histórico, das abertas mais
+// recentemente para as mais antigas, em páginas por cursor.
+func (s *Store) ListDisputes(ctx context.Context, tenantID uuid.UUID, chargeID *uuid.UUID, limit int, cursor string) ([]DisputeWithHistory, string, error) {
+	cts, cid, err := parseTimeCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
 	limit = pageLimit(limit)
 	var out []DisputeWithHistory
-	err := s.inTenant(ctx, tenantID, func(b base) error {
-		rows, err := b.q.ListDisputes(ctx, dbgen.ListDisputesParams{TenantID: tenantID, ChargeID: chargeID, RowLimit: int32(limit)})
+	next := ""
+	err = s.inTenant(ctx, tenantID, func(b base) error {
+		rows, err := b.q.ListDisputes(ctx, dbgen.ListDisputesParams{TenantID: tenantID, ChargeID: chargeID, CursorTs: cts, CursorID: cid,
+			RowLimit: int32(limit + 1)})
 		if err != nil {
 			return err
 		}
+		rows, next = keysetPage(rows, limit, func(r dbgen.Dispute) (time.Time, uuid.UUID) { return r.OpenedAt, r.ID })
 		ids := make([]uuid.UUID, 0, len(rows))
 		idx := map[uuid.UUID]int{}
 		for _, r := range rows {
@@ -667,36 +675,51 @@ func (s *Store) ListDisputes(ctx context.Context, tenantID uuid.UUID, chargeID *
 		}
 		return nil
 	})
-	return out, err
+	return out, next, err
 }
 
-// ListReconciliationRuns lista as execuções mais recentes.
-func (s *Store) ListReconciliationRuns(ctx context.Context, tenantID uuid.UUID, limit int) ([]payments.ReconciliationRun, error) {
+// ListReconciliationRuns lista as execuções, das mais recentes para as mais
+// antigas, em páginas por cursor.
+func (s *Store) ListReconciliationRuns(ctx context.Context, tenantID uuid.UUID, limit int, cursor string) ([]payments.ReconciliationRun, string, error) {
+	cts, cid, err := parseTimeCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
 	limit = pageLimit(limit)
 	var out []payments.ReconciliationRun
-	err := s.inTenant(ctx, tenantID, func(b base) error {
-		rows, err := b.q.ListReconciliationRuns(ctx, dbgen.ListReconciliationRunsParams{TenantID: tenantID, RowLimit: int32(limit)})
+	next := ""
+	err = s.inTenant(ctx, tenantID, func(b base) error {
+		rows, err := b.q.ListReconciliationRuns(ctx, dbgen.ListReconciliationRunsParams{TenantID: tenantID, CursorTs: cts, CursorID: cid,
+			RowLimit: int32(limit + 1)})
 		if err != nil {
 			return err
 		}
+		rows, next = keysetPage(rows, limit, func(r dbgen.ReconciliationRun) (time.Time, uuid.UUID) { return r.StartedAt, r.ID })
 		for _, r := range rows {
 			out = append(out, runFromRow(r))
 		}
 		return nil
 	})
-	return out, err
+	return out, next, err
 }
 
-// ListDiscrepancies lista divergências com filtros de situação e tipo.
-func (s *Store) ListDiscrepancies(ctx context.Context, tenantID uuid.UUID, status, kind string, limit int) ([]payments.Discrepancy, error) {
+// ListDiscrepancies lista divergências com filtros de situação e tipo, das
+// detectadas mais recentemente para as mais antigas, em páginas por cursor.
+func (s *Store) ListDiscrepancies(ctx context.Context, tenantID uuid.UUID, status, kind string, limit int, cursor string) ([]payments.Discrepancy, string, error) {
+	cts, cid, err := parseTimeCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
 	limit = pageLimit(limit)
 	var out []payments.Discrepancy
-	err := s.inTenant(ctx, tenantID, func(b base) error {
+	next := ""
+	err = s.inTenant(ctx, tenantID, func(b base) error {
 		rows, err := b.q.ListDiscrepancies(ctx, dbgen.ListDiscrepanciesParams{TenantID: tenantID, Status: strPtr(status), Kind: strPtr(kind),
-			RowLimit: int32(limit)})
+			CursorTs: cts, CursorID: cid, RowLimit: int32(limit + 1)})
 		if err != nil {
 			return err
 		}
+		rows, next = keysetPage(rows, limit, func(r dbgen.ReconciliationDiscrepancy) (time.Time, uuid.UUID) { return r.CreatedAt, r.ID })
 		for _, r := range rows {
 			d, err := discrepancyFromRow(r)
 			if err != nil {
@@ -706,7 +729,7 @@ func (s *Store) ListDiscrepancies(ctx context.Context, tenantID uuid.UUID, statu
 		}
 		return nil
 	})
-	return out, err
+	return out, next, err
 }
 
 // OpenDiscrepancyStats conta divergências abertas por tipo (todos os

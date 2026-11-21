@@ -156,11 +156,25 @@ func TestReceivablesHandlersRejectInvalidInput(t *testing.T) {
 			map[string]string{"id": id}, a.settleRecovery, 422, "invalid_recovery_settlement"},
 		{"resolução com campo desconhecido", http.MethodPost, "/", `{"resolution":"dismiss","justification":"conferido no extrato","x":1}`,
 			map[string]string{"id": id}, a.resolveDiscrepancy, 422, "invalid_json"},
+		{"resolução sem If-Match", http.MethodPost, "/", `{"resolution":"dismiss","justification":"conferido no extrato"}`,
+			map[string]string{"id": id}, a.resolveDiscrepancy, 428, "if_match_required"},
+		{"resolução com If-Match inválido", http.MethodPost, "/", `{"resolution":"dismiss","justification":"conferido no extrato"}`,
+			map[string]string{"id": id}, a.resolveDiscrepancy, 422, "invalid_if_match"},
+		{"divergências com cursor inválido", http.MethodGet, "/?cursor=abc", ``, nil, a.listDiscrepancies, 422, "invalid_cursor"},
+		{"limite de execuções inválido", http.MethodGet, "/?limit=101", ``, nil, a.listReconciliationRuns, 422, "invalid_limit"},
+		{"limite de disputas inválido", http.MethodGet, "/?limit=0", ``, nil, a.listDisputes, 422, "invalid_limit"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
 			req.Header.Set("Content-Type", "application/json")
+			switch {
+			case strings.HasSuffix(tc.name, "sem If-Match"):
+			case strings.HasSuffix(tc.name, "If-Match inválido"):
+				req.Header.Set("If-Match", `"versão"`)
+			default:
+				req.Header.Set("If-Match", `"1"`)
+			}
 			rc := chi.NewRouteContext()
 			for k, v := range tc.params {
 				rc.URLParams.Add(k, v)

@@ -243,22 +243,31 @@ func TestCollectionsAPITemplates(t *testing.T) {
 	}
 
 	path := "/api/v1/notification-templates/reminder_after_due"
-	st, body, _ := owner.do(http.MethodPut, path, map[string]any{"subject": "Fatura {{invoice_number}} em atraso", "body": "Olá {{senha}}, pague."})
+	// O template padrão tem a versão 0: é a do If-Match da primeira personalização.
+	if v := after["version"]; v != float64(0) {
+		t.Fatalf("versão do template padrão: %v", v)
+	}
+	st, body, _ := owner.do(http.MethodPut, path, map[string]any{"subject": "Fatura {{invoice_number}} em atraso", "body": "Olá {{senha}}, pague."},
+		matchVersion(0)...)
 	if st != 422 || body["code"] != "invalid_template" || !strings.Contains(objects(t, body["errors"])[0]["message"].(string), "senha") {
 		t.Fatalf("variável não permitida: %d %v", st, body)
 	}
-	owner.expectProblem(422, "invalid_template", http.MethodPut, path, map[string]any{"subject": "ab", "body": "Corpo suficiente."})
-	saved, _ := owner.expect(http.StatusOK, http.MethodPut, path, map[string]any{"subject": "Fatura {{invoice_number}} em atraso",
-		"body": "Olá, {{customer_name}}.\n\nA fatura {{invoice_number}} está vencida há {{days_overdue}} dia(s)."})
-	if saved["is_default"] != false || saved["updated_at"] == nil || saved["key"] != "reminder_after_due" || saved["subject"] != "Fatura {{invoice_number}} em atraso" {
-		t.Fatalf("template gravado: %v", saved)
+	owner.expectProblem(422, "invalid_template", http.MethodPut, path, map[string]any{"subject": "ab", "body": "Corpo suficiente."}, matchVersion(0)...)
+	saved, h := owner.expect(http.StatusOK, http.MethodPut, path, map[string]any{"subject": "Fatura {{invoice_number}} em atraso",
+		"body": "Olá, {{customer_name}}.\n\nA fatura {{invoice_number}} está vencida há {{days_overdue}} dia(s)."}, matchVersion(0)...)
+	if saved["is_default"] != false || saved["updated_at"] == nil || saved["key"] != "reminder_after_due" || saved["subject"] != "Fatura {{invoice_number}} em atraso" ||
+		saved["version"] != float64(1) || h.Get("ETag") != `"1"` {
+		t.Fatalf("template gravado: %v (ETag %q)", saved, h.Get("ETag"))
 	}
+	// Quem ainda via o template padrão não sobrescreve a personalização.
+	owner.expectProblem(412, "version_mismatch", http.MethodPut, path, map[string]any{"subject": "Outro assunto", "body": "Outro corpo suficiente."},
+		matchVersion(0)...)
 	out, _ = owner.expect(http.StatusOK, http.MethodGet, "/api/v1/notification-templates", nil)
 	if byField(t, objects(t, out["data"]), "key")["reminder_after_due"]["is_default"] != false {
 		t.Fatal("template personalizado não listado")
 	}
 	owner.expectProblem(404, "template_not_found", http.MethodPut, "/api/v1/notification-templates/member_invitation",
-		map[string]any{"subject": "Convite", "body": "Corpo do convite."})
+		map[string]any{"subject": "Convite", "body": "Corpo do convite."}, matchVersion(0)...)
 	if acts := auditActions(owner, "notification_template"); acts["notification_template.updated"] != 1 {
 		t.Fatalf("auditoria do template: %v", acts)
 	}
@@ -401,7 +410,12 @@ func TestWebhooksAPIEndpoints(t *testing.T) {
 	}
 
 	// Rotação: novo segredo uma única vez; o anterior expira na janela.
-	rotated, _ := owner.expect(http.StatusOK, http.MethodPost, path+"/rotate-secret", nil)
+	owner.expectProblem(428, "if_match_required", http.MethodPost, path+"/rotate-secret", nil)
+	owner.expectProblem(412, "version_mismatch", http.MethodPost, path+"/rotate-secret", nil, "If-Match", `"2"`)
+	rotated, rh := owner.expect(http.StatusOK, http.MethodPost, path+"/rotate-secret", nil, "If-Match", `"3"`)
+	if rotated["endpoint"].(map[string]any)["version"] != float64(4) || rh.Get("ETag") != `"4"` {
+		t.Fatalf("a rotação gera a versão seguinte do endpoint: %v (ETag %q)", rotated["endpoint"], rh.Get("ETag"))
+	}
 	newSecret := rotated["secret"].(string)
 	secrets := objects(t, rotated["endpoint"].(map[string]any)["secrets"])
 	if newSecret == secret || !strings.HasPrefix(newSecret, webhooks.SecretPrefix) || len(secrets) != 2 {
@@ -419,8 +433,9 @@ func TestWebhooksAPIEndpoints(t *testing.T) {
 	if expiring != 1 {
 		t.Fatalf("segredo anterior com validade: %v", secrets)
 	}
-	owner.expectProblem(422, "invalid_rotation_window", http.MethodPost, path+"/rotate-secret", map[string]any{"previous_secret_valid_hours": 169})
-	rotated, _ = owner.expect(http.StatusOK, http.MethodPost, path+"/rotate-secret", map[string]any{"previous_secret_valid_hours": 0})
+	owner.expectProblem(422, "invalid_rotation_window", http.MethodPost, path+"/rotate-secret", map[string]any{"previous_secret_valid_hours": 169},
+		"If-Match", `"4"`)
+	rotated, _ = owner.expect(http.StatusOK, http.MethodPost, path+"/rotate-secret", map[string]any{"previous_secret_valid_hours": 0}, "If-Match", `"4"`)
 	if s := objects(t, rotated["endpoint"].(map[string]any)["secrets"]); len(s) != 1 || s[0]["expires_at"] != nil {
 		t.Fatalf("rotação sem janela encerra os anteriores: %v", s)
 	}
@@ -433,10 +448,10 @@ func TestWebhooksAPIEndpoints(t *testing.T) {
 	// altera; operador não lê.
 	auditor := a.login(member(t, a.env, tn, tenancy.RoleAuditor), &tn.ID)
 	auditor.expect(http.StatusOK, http.MethodGet, "/api/v1/webhook-endpoints", nil)
-	auditor.expectProblem(403, "forbidden", http.MethodPost, path+"/rotate-secret", nil)
+	auditor.expectProblem(403, "forbidden", http.MethodPost, path+"/rotate-secret", nil, "If-Match", `"5"`)
 	finance := a.login(member(t, a.env, tn, tenancy.RoleFinance), &tn.ID)
 	finance.expect(http.StatusOK, http.MethodGet, "/api/v1/webhook-event-types", nil)
-	finance.expectProblem(403, "forbidden", http.MethodDelete, path, nil)
+	finance.expectProblem(403, "forbidden", http.MethodDelete, path, nil, "If-Match", `"5"`)
 	operator := a.login(member(t, a.env, tn, tenancy.RoleOperator), &tn.ID)
 	operator.expectProblem(403, "forbidden", http.MethodGet, "/api/v1/webhook-endpoints", nil)
 
@@ -444,17 +459,19 @@ func TestWebhooksAPIEndpoints(t *testing.T) {
 	// recurso não cria endpoints.
 	other := a.env.NewTenant(t, "wh-api-b")
 	ownerB := a.login(other.Owner, &other.ID)
-	ownerB.expectProblem(404, "webhook_endpoint_not_found", http.MethodPost, path+"/rotate-secret", nil)
+	ownerB.expectProblem(404, "webhook_endpoint_not_found", http.MethodPost, path+"/rotate-secret", nil, "If-Match", `"5"`)
 	ownerB.expectProblem(404, "webhook_endpoint_not_found", http.MethodGet, path+"/deliveries", nil)
 	ownerB.expectProblem(403, "platform_feature_unavailable", http.MethodPost, "/api/v1/webhook-endpoints", input)
 
-	// Remoção: sai da listagem e não aceita novas operações.
-	owner.expect(http.StatusNoContent, http.MethodDelete, path, nil)
+	// Remoção: exige a versão atual, sai da listagem e não aceita novas operações.
+	owner.expectProblem(428, "if_match_required", http.MethodDelete, path, nil)
+	owner.expectProblem(412, "version_mismatch", http.MethodDelete, path, nil, "If-Match", `"4"`)
+	owner.expect(http.StatusNoContent, http.MethodDelete, path, nil, "If-Match", `"5"`)
 	if out, _ := owner.expect(http.StatusOK, http.MethodGet, "/api/v1/webhook-endpoints", nil); len(objects(t, out["data"])) != 0 {
 		t.Fatalf("endpoint removido listado: %v", out)
 	}
-	owner.expectProblem(404, "webhook_endpoint_not_found", http.MethodDelete, path, nil)
-	owner.expectProblem(404, "not_found", http.MethodDelete, "/api/v1/webhook-endpoints/nao-e-uuid", nil)
+	owner.expectProblem(404, "webhook_endpoint_not_found", http.MethodDelete, path, nil, "If-Match", `"6"`)
+	owner.expectProblem(404, "not_found", http.MethodDelete, "/api/v1/webhook-endpoints/nao-e-uuid", nil, "If-Match", `"1"`)
 }
 
 // rawBody devolve o corpo bruto da resposta (para conferir ausência de segredos).

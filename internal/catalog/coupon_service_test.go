@@ -229,7 +229,7 @@ func TestCouponServiceArchive(t *testing.T) {
 	plan := e.seedPlans(e.tenantID, 1)[0]
 	created := e.create(t, nil)
 	e.clock.Advance(24 * time.Hour)
-	c, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID)
+	c, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,12 +254,12 @@ func TestCouponServiceArchive(t *testing.T) {
 func TestCouponServiceArchiveIsIdempotent(t *testing.T) {
 	e := newCouponEnv()
 	created := e.create(t, nil)
-	first, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID)
+	first, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	audits := len(e.st().audits)
-	second, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID)
+	second, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID, first.Version)
 	if err != nil {
 		t.Fatalf("arquivar de novo deve ser aceito: %v", err)
 	}
@@ -271,6 +271,25 @@ func TestCouponServiceArchiveIsIdempotent(t *testing.T) {
 	}
 	if len(e.st().audits) != audits {
 		t.Fatal("arquivar um cupom já arquivado não deve gerar auditoria")
+	}
+	// Já arquivado, a versão do If-Match ainda é conferida.
+	_, err = e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID, 1)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+}
+
+// A versão do If-Match vai na condição da gravação: divergente, o cupom não é
+// arquivado nem auditado.
+func TestCouponServiceArchiveVersionMismatch(t *testing.T) {
+	e := newCouponEnv()
+	created := e.create(t, nil)
+	audits := len(e.st().audits)
+	_, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, created.ID, 7)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	if n := e.store.calls["ArchiveCoupon"]; n != 1 {
+		t.Fatalf("ArchiveCoupon chamado %d vezes: a versão é conferida na gravação", n)
+	}
+	if stored := e.st().coupons[created.ID]; stored.Status != Active || stored.Version != 1 || len(e.st().audits) != audits {
+		t.Fatalf("o cupom não deve ser alterado: %+v", stored)
 	}
 }
 
@@ -310,7 +329,7 @@ func TestCouponServiceArchiveRejected(t *testing.T) {
 			if tc.fail != "" {
 				e.store.fail[tc.fail] = errBoom
 			}
-			_, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, id)
+			_, err := e.svc.Archive(context.Background(), e.tenantID, e.actor, id, 1)
 			if tc.check != nil {
 				tc.check(t, err)
 			} else if !errors.Is(err, errBoom) {

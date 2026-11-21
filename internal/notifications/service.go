@@ -51,7 +51,10 @@ type Page struct {
 type Tx interface {
 	TemplateSource
 	CustomTemplates(ctx context.Context) ([]Template, error)
-	UpsertTemplate(ctx context.Context, t Template, updatedBy *uuid.UUID, now time.Time) (Template, error)
+	// SaveTemplate grava o template personalizado na versão esperada: 0 é o
+	// template padrão (cria a personalização); acima de 0, altera a
+	// personalização com essa versão. Versão divergente: 412 version_mismatch.
+	SaveTemplate(ctx context.Context, t Template, updatedBy *uuid.UUID, now time.Time, expectedVersion int) (Template, error)
 
 	// InsertNotification grava a notificação e seu histórico; false indica
 	// que a identidade de negócio já existia (nada é gravado).
@@ -218,8 +221,10 @@ func (s *Service) Templates(ctx context.Context, tenantID uuid.UUID) ([]Template
 	return out, nil
 }
 
-// UpdateTemplate grava o template personalizado do tenant.
-func (s *Service) UpdateTemplate(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, userID *uuid.UUID, key, subject, body string) (Template, error) {
+// UpdateTemplate grava o template personalizado do tenant na versão esperada
+// (If-Match): 0 para o template padrão, ainda não personalizado.
+func (s *Service) UpdateTemplate(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, userID *uuid.UUID, key, subject, body string,
+	expectedVersion int) (Template, error) {
 	k, err := ParseCustomizableKey(key)
 	if err != nil {
 		return Template{}, err
@@ -232,7 +237,7 @@ func (s *Service) UpdateTemplate(ctx context.Context, tenantID uuid.UUID, actor 
 	var out Template
 	err = s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		var err error
-		if out, err = tx.UpsertTemplate(ctx, t, userID, now); err != nil {
+		if out, err = tx.SaveTemplate(ctx, t, userID, now, expectedVersion); err != nil {
 			return err
 		}
 		return tx.Audit(ctx, audit.New(tenantID, now, actor, "notification_template.updated", "notification_template", string(k),

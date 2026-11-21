@@ -372,13 +372,13 @@ func TestAPICredentialLifecycle(t *testing.T) {
 	if p.TenantID != tn.ID || !p.Can(tenancy.PermCustomersWrite) || p.Can(tenancy.PermInvoicesRead) {
 		t.Fatalf("principal: %+v", p)
 	}
-	list, err := svc.List(ctx, tn.ID)
-	if err != nil || len(list) != 1 || list[0].LastUsedAt == nil || !list[0].LastUsedAt.Equal(now) {
+	list, err := svc.List(ctx, tn.ID, 0, "")
+	if err != nil || len(list.Items) != 1 || list.Items[0].LastUsedAt == nil || !list.Items[0].LastUsedAt.Equal(now) || list.NextCursor != "" {
 		t.Fatalf("último uso: %+v %v", list, err)
 	}
 	// Rotação: o segredo anterior vale por 24 horas.
 	env.Clock.Advance(time.Hour)
-	rot, err := svc.Rotate(ctx, tn.ID, ownerGrantor(tn), is.Credential.ID)
+	rot, err := svc.Rotate(ctx, tn.ID, ownerGrantor(tn), is.Credential.ID, list.Items[0].Version)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,14 +394,18 @@ func TestAPICredentialLifecycle(t *testing.T) {
 	if _, err := svc.Authenticate(ctx, rot.Token, "ip:teste"); err != nil {
 		t.Fatalf("segredo novo: %v", err)
 	}
-	// Revogação imediata.
-	if err := svc.Revoke(ctx, tn.ID, ownerGrantor(tn), is.Credential.ID); err != nil {
+	// Revogação imediata, na versão gravada pela rotação; a versão anterior é
+	// recusada pela condição do UPDATE.
+	if err := svc.Revoke(ctx, tn.ID, ownerGrantor(tn), is.Credential.ID, rot.Credential.Version-1); !apperr.IsKind(err, apperr.KindPreconditionFailed) {
+		t.Fatalf("revogação com versão anterior à rotação: %v", err)
+	}
+	if err := svc.Revoke(ctx, tn.ID, ownerGrantor(tn), is.Credential.ID, rot.Credential.Version); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Authenticate(ctx, rot.Token, "ip:teste"); !apperr.IsKind(err, apperr.KindUnauthenticated) {
 		t.Fatalf("credencial revogada aceita: %v", err)
 	}
-	if err := svc.Revoke(ctx, tn.ID, ownerGrantor(tn), is.Credential.ID); err != nil {
+	if err := svc.Revoke(ctx, tn.ID, ownerGrantor(tn), is.Credential.ID, rot.Credential.Version+1); err != nil {
 		t.Fatalf("revogação repetida: %v", err)
 	}
 	var actions []string
@@ -428,7 +432,8 @@ func TestAPICredentialIssuerMembershipAndScopes(t *testing.T) {
 	owner := tenancy.Access{TenantID: tn.ID, UserID: tn.Owner.ID, Role: tenancy.RoleOwner}
 	ownerRef := tenancy.UserRef{ID: tn.Owner.ID, Email: tn.Owner.Email, DisplayName: tn.Owner.DisplayName}
 	// Rebaixado a operador, o emissor reduz os escopos efetivos da credencial.
-	if _, err := env.Tenancy.ChangeRole(ctx, tn.ID, owner, ownerRef, admin.ID, tenancy.RoleOperator); err != nil {
+	changed, err := env.Tenancy.ChangeRole(ctx, tn.ID, owner, ownerRef, admin.ID, tenancy.RoleOperator, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
 	p, err := svc.Authenticate(ctx, is.Token, "ip:teste")
@@ -439,13 +444,13 @@ func TestAPICredentialIssuerMembershipAndScopes(t *testing.T) {
 		t.Fatalf("escopos efetivos após rebaixamento: %v", p.Scopes)
 	}
 	// Removido, a credencial deixa de autenticar até ser rotacionada por um membro ativo.
-	if err := env.Tenancy.RemoveMember(ctx, tn.ID, owner, ownerRef, admin.ID); err != nil {
+	if err := env.Tenancy.RemoveMember(ctx, tn.ID, owner, ownerRef, admin.ID, changed.Version); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Authenticate(ctx, is.Token, "ip:teste"); !apperr.IsKind(err, apperr.KindForbidden) {
 		t.Fatalf("emissor removido: %v", err)
 	}
-	rot, err := svc.Rotate(ctx, tn.ID, ownerGrantor(tn), is.Credential.ID)
+	rot, err := svc.Rotate(ctx, tn.ID, ownerGrantor(tn), is.Credential.ID, is.Credential.Version)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,14 +467,14 @@ func TestAPICredentialsAreTenantIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Rotate(ctx, b.ID, ownerGrantor(b), is.Credential.ID); !apperr.IsKind(err, apperr.KindNotFound) {
+	if _, err := svc.Rotate(ctx, b.ID, ownerGrantor(b), is.Credential.ID, is.Credential.Version); !apperr.IsKind(err, apperr.KindNotFound) {
 		t.Fatalf("rotação a partir de outro tenant: %v", err)
 	}
-	if err := svc.Revoke(ctx, b.ID, ownerGrantor(b), is.Credential.ID); !apperr.IsKind(err, apperr.KindNotFound) {
+	if err := svc.Revoke(ctx, b.ID, ownerGrantor(b), is.Credential.ID, is.Credential.Version); !apperr.IsKind(err, apperr.KindNotFound) {
 		t.Fatalf("revogação a partir de outro tenant: %v", err)
 	}
-	listB, err := svc.List(ctx, b.ID)
-	if err != nil || len(listB) != 0 {
+	listB, err := svc.List(ctx, b.ID, 0, "")
+	if err != nil || len(listB.Items) != 0 {
 		t.Fatalf("lista de B contém credenciais de A: %v %v", listB, err)
 	}
 	p, err := svc.Authenticate(ctx, is.Token, "ip:teste")
@@ -517,7 +522,7 @@ func TestAPICredentialDatabaseGuards(t *testing.T) {
 			}
 		})
 	}
-	if err := svc.Revoke(ctx, tn.ID, ownerGrantor(tn), is.Credential.ID); err != nil {
+	if err := svc.Revoke(ctx, tn.ID, ownerGrantor(tn), is.Credential.ID, is.Credential.Version); err != nil {
 		t.Fatal(err)
 	}
 	if err := exec(`UPDATE api_credentials SET revoked_at = NULL, revoked_by = NULL WHERE tenant_id = $1 AND id = $2`); !postgres.IsRaisedException(err) {
@@ -528,9 +533,10 @@ func TestAPICredentialDatabaseGuards(t *testing.T) {
 	}
 }
 
-// Rotações concorrentes da mesma credencial são serializadas pelo bloqueio da
-// linha: nenhuma se perde e somente o último segredo e o imediatamente
-// anterior continuam válidos.
+// Rotações concorrentes da mesma credencial, na mesma versão (If-Match), são
+// serializadas pelo bloqueio da linha e decididas pela condição do UPDATE:
+// somente uma é gravada, as demais respondem version_mismatch, e continuam
+// válidos apenas o segredo novo e o anterior.
 func TestAPICredentialConcurrentRotation(t *testing.T) {
 	ctx := context.Background()
 	env, svc := credentialsEnv(t, 8)
@@ -545,19 +551,24 @@ func TestAPICredentialConcurrentRotation(t *testing.T) {
 	errs := make([]error, n)
 	for i := range n {
 		wg.Go(func() {
-			r, err := svc.Rotate(ctx, tn.ID, ownerGrantor(tn), is.Credential.ID)
+			r, err := svc.Rotate(ctx, tn.ID, ownerGrantor(tn), is.Credential.ID, is.Credential.Version)
 			tokens[i], errs[i] = r.Token, err
 		})
 	}
 	wg.Wait()
+	succeeded := 0
 	for _, err := range errs {
-		if err != nil {
+		switch {
+		case err == nil:
+			succeeded++
+		case !apperr.IsKind(err, apperr.KindPreconditionFailed):
 			t.Fatalf("rotação concorrente: %v", err)
 		}
 	}
 	var version int
-	if err := pgtest.OwnerPool(t).QueryRow(ctx, `SELECT version FROM api_credentials WHERE id = $1`, is.Credential.ID).Scan(&version); err != nil || version != n+1 {
-		t.Fatalf("versão após %d rotações: %d %v", n, version, err)
+	if err := pgtest.OwnerPool(t).QueryRow(ctx, `SELECT version FROM api_credentials WHERE id = $1`, is.Credential.ID).Scan(&version); err != nil ||
+		version != 2 || succeeded != 1 {
+		t.Fatalf("rotações concorrentes na mesma versão: %d gravadas, versão %d %v", succeeded, version, err)
 	}
 	valid := 0
 	for _, token := range append(tokens, is.Token) {
@@ -661,9 +672,10 @@ func randomKeyID(t *testing.T) string {
 	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
 }
 
-// Credenciais nunca são excluídas: uma credencial ativa antiga continua na
-// listagem (e pode ser revogada pela interface) mesmo depois de mais
-// credenciais revogadas e expiradas do que o limite da listagem.
+// Credenciais nunca são excluídas: a listagem é paginada por cursor, abre com
+// as ativas (que podem ser revogadas pela interface) mesmo depois de mais
+// credenciais revogadas e expiradas do que uma página, e percorre todas as
+// demais, das mais recentes para as mais antigas.
 func TestAPICredentialListKeepsActiveCredentialsBeyondListLimit(t *testing.T) {
 	ctx := context.Background()
 	env, svc := credentialsEnv(t, 4)
@@ -695,12 +707,22 @@ func TestAPICredentialListKeepsActiveCredentialsBeyondListLimit(t *testing.T) {
 	}
 	env.Clock.Advance(48 * time.Hour)
 
-	list, err := svc.List(ctx, tn.ID)
-	if err != nil {
-		t.Fatal(err)
+	var list []apicredentials.Credential
+	pages, cursor := 0, ""
+	for {
+		pg, err := svc.List(ctx, tn.ID, 100, cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		list = append(list, pg.Items...)
+		if cursor = pg.NextCursor; cursor == "" {
+			break
+		}
 	}
-	if len(list) != revoked || list[0].ID != old.Credential.ID || list[0].State(env.Clock.Now()) != apicredentials.StateActive {
-		t.Fatalf("a credencial ativa deveria abrir a listagem: %d itens, primeiro %s (esperado %s)", len(list), list[0].ID, old.Credential.ID)
+	if pages != 3 || len(list) != revoked+2 || list[0].ID != old.Credential.ID || list[0].State(env.Clock.Now()) != apicredentials.StateActive {
+		t.Fatalf("a credencial ativa deveria abrir a listagem: %d páginas, %d itens, primeiro %s (esperado %s)", pages, len(list), list[0].ID,
+			old.Credential.ID)
 	}
 	for i := 1; i < len(list); i++ {
 		if list[i].State(env.Clock.Now()) == apicredentials.StateActive {
@@ -710,11 +732,68 @@ func TestAPICredentialListKeepsActiveCredentialsBeyondListLimit(t *testing.T) {
 			t.Fatalf("inativas fora da ordem da mais recente: posição %d", i)
 		}
 	}
-	if slices.ContainsFunc(list, func(c apicredentials.Credential) bool { return c.ID == expiring.Credential.ID }) {
-		t.Fatal("a expirada mais antiga que as revogadas deveria ficar fora do limite da listagem")
+	if list[len(list)-1].ID != expiring.Credential.ID {
+		t.Fatal("a expirada mais antiga que as revogadas deveria fechar a listagem")
 	}
 	if _, err := svc.Authenticate(ctx, old.Token, "ip:teste"); err != nil {
 		t.Fatalf("a credencial ativa continua autenticando: %v", err)
+	}
+}
+
+// A situação que ordena as credenciais (ativas primeiro) é a do instante da
+// primeira página, levado no cursor: a credencial mais recente, que expira
+// durante a navegação, não reaparece no bloco das inativas das páginas
+// seguintes; uma nova listagem já a mostra entre as inativas.
+func TestAPICredentialListCursorKeepsOrderWhenCredentialExpires(t *testing.T) {
+	ctx := context.Background()
+	env, svc := credentialsEnv(t, 4)
+	tn := apiTenant(t, env, "cred-cursor")
+	create := func(name string, days *int) apicredentials.Credential {
+		t.Helper()
+		is, err := svc.Create(ctx, tn.ID, ownerGrantor(tn), apicredentials.CreateInput{Name: name, Scopes: []string{"customers.read"}, ExpiresInDays: days})
+		if err != nil {
+			t.Fatal(err)
+		}
+		env.Clock.Advance(time.Minute)
+		return is.Credential
+	}
+	oldest, middle, revoked := create("Mais antiga", nil), create("Intermediária", nil), create("Revogada", nil)
+	if err := svc.Revoke(ctx, tn.ID, ownerGrantor(tn), revoked.ID, revoked.Version); err != nil {
+		t.Fatal(err)
+	}
+	expiring := create("Temporária", new(1))
+	ids := func(items []apicredentials.Credential) []uuid.UUID {
+		out := make([]uuid.UUID, 0, len(items))
+		for _, c := range items {
+			out = append(out, c.ID)
+		}
+		return out
+	}
+	first, err := svc.List(ctx, tn.ID, 1, "")
+	if err != nil || len(first.Items) != 1 || first.Items[0].ID != expiring.ID || first.NextCursor == "" {
+		t.Fatalf("primeira página: %+v %v", first, err)
+	}
+	env.Clock.Advance(48 * time.Hour)
+	seen := ids(first.Items)
+	for cursor := first.NextCursor; cursor != ""; {
+		pg, err := svc.List(ctx, tn.ID, 1, cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen, cursor = append(seen, ids(pg.Items)...), pg.NextCursor
+	}
+	if want := []uuid.UUID{expiring.ID, middle.ID, oldest.ID, revoked.ID}; !slices.Equal(seen, want) {
+		t.Fatalf("páginas depois da expiração: %v, esperado %v", seen, want)
+	}
+	fresh, err := svc.List(ctx, tn.ID, 10, "")
+	if err != nil || !slices.Equal(ids(fresh.Items), []uuid.UUID{middle.ID, oldest.ID, expiring.ID, revoked.ID}) {
+		t.Fatalf("nova listagem com a expirada entre as inativas: %v %v", ids(fresh.Items), err)
+	}
+	// Cursor fora da forma canônica ou de outra listagem: 422 invalid_cursor.
+	for _, c := range []string{"abc", first.NextCursor + "x", "MjAyNi0wMS0wMVQwMDowMDowMFp8MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAw"} {
+		if _, err := svc.List(ctx, tn.ID, 1, c); !apperr.IsKind(err, apperr.KindInvalid) {
+			t.Errorf("cursor %q: %v", c, err)
+		}
 	}
 }
 

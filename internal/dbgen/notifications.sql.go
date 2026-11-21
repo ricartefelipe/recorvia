@@ -532,6 +532,60 @@ func (q *Queries) InsertNotificationEvent(ctx context.Context, arg InsertNotific
 	return err
 }
 
+const insertNotificationTemplate = `-- name: InsertNotificationTemplate :many
+INSERT INTO notification_templates (tenant_id, template_key, subject, body, updated_by, created_at, updated_at, version)
+VALUES ($1, $2, $3, $4, $5, $6, $6, 1)
+ON CONFLICT (tenant_id, template_key) DO NOTHING
+RETURNING tenant_id, template_key, subject, body, updated_by, created_at, updated_at, version
+`
+
+type InsertNotificationTemplateParams struct {
+	TenantID    uuid.UUID
+	TemplateKey string
+	Subject     string
+	Body        string
+	UpdatedBy   *uuid.UUID
+	Now         time.Time
+}
+
+// Primeira personalização (versão esperada 0, a do template padrão): sem
+// linha se outra pessoa personalizou antes.
+func (q *Queries) InsertNotificationTemplate(ctx context.Context, arg InsertNotificationTemplateParams) ([]NotificationTemplate, error) {
+	rows, err := q.db.Query(ctx, insertNotificationTemplate,
+		arg.TenantID,
+		arg.TemplateKey,
+		arg.Subject,
+		arg.Body,
+		arg.UpdatedBy,
+		arg.Now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []NotificationTemplate
+	for rows.Next() {
+		var i NotificationTemplate
+		if err := rows.Scan(
+			&i.TenantID,
+			&i.TemplateKey,
+			&i.Subject,
+			&i.Body,
+			&i.UpdatedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Version,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listNotificationEvents = `-- name: ListNotificationEvents :many
 SELECT id, tenant_id, notification_id, status, reason, attempt, detail, occurred_at FROM notification_events WHERE tenant_id = $1 AND notification_id = $2 ORDER BY occurred_at, id
 `
@@ -923,43 +977,57 @@ func (q *Queries) UpdateNotification(ctx context.Context, arg UpdateNotification
 	return result.RowsAffected(), nil
 }
 
-const upsertNotificationTemplate = `-- name: UpsertNotificationTemplate :one
-INSERT INTO notification_templates (tenant_id, template_key, subject, body, updated_by, created_at, updated_at, version)
-VALUES ($1, $2, $3, $4, $5, $6, $6, 1)
-ON CONFLICT (tenant_id, template_key) DO UPDATE
-   SET subject = EXCLUDED.subject, body = EXCLUDED.body, updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at,
-       version = notification_templates.version + 1
+const updateNotificationTemplate = `-- name: UpdateNotificationTemplate :many
+UPDATE notification_templates
+   SET subject = $1, body = $2, updated_by = $3, updated_at = $4, version = version + 1
+ WHERE tenant_id = $5 AND template_key = $6 AND version = $7
 RETURNING tenant_id, template_key, subject, body, updated_by, created_at, updated_at, version
 `
 
-type UpsertNotificationTemplateParams struct {
-	TenantID    uuid.UUID
-	TemplateKey string
+type UpdateNotificationTemplateParams struct {
 	Subject     string
 	Body        string
 	UpdatedBy   *uuid.UUID
 	Now         time.Time
+	TenantID    uuid.UUID
+	TemplateKey string
+	Version     int32
 }
 
-func (q *Queries) UpsertNotificationTemplate(ctx context.Context, arg UpsertNotificationTemplateParams) (NotificationTemplate, error) {
-	row := q.db.QueryRow(ctx, upsertNotificationTemplate,
-		arg.TenantID,
-		arg.TemplateKey,
+// Alteração do template personalizado, condicionada à versão esperada.
+func (q *Queries) UpdateNotificationTemplate(ctx context.Context, arg UpdateNotificationTemplateParams) ([]NotificationTemplate, error) {
+	rows, err := q.db.Query(ctx, updateNotificationTemplate,
 		arg.Subject,
 		arg.Body,
 		arg.UpdatedBy,
 		arg.Now,
+		arg.TenantID,
+		arg.TemplateKey,
+		arg.Version,
 	)
-	var i NotificationTemplate
-	err := row.Scan(
-		&i.TenantID,
-		&i.TemplateKey,
-		&i.Subject,
-		&i.Body,
-		&i.UpdatedBy,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.Version,
-	)
-	return i, err
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []NotificationTemplate
+	for rows.Next() {
+		var i NotificationTemplate
+		if err := rows.Scan(
+			&i.TenantID,
+			&i.TemplateKey,
+			&i.Subject,
+			&i.Body,
+			&i.UpdatedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Version,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

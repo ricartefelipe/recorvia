@@ -332,8 +332,8 @@ func TestListings(t *testing.T) {
 	if err != nil || len(members) != 2 {
 		t.Fatalf("Members = %v, %v", members, err)
 	}
-	invs, err := e.svc.Invitations(context.Background(), e.tenantID)
-	if err != nil || len(invs) != 1 || invs[0].Email != "nova@acme.com" {
+	invs, err := e.svc.Invitations(context.Background(), e.tenantID, 25, "")
+	if err != nil || len(invs.Items) != 1 || invs.Items[0].Email != "nova@acme.com" || invs.NextCursor != "" {
 		t.Fatalf("Invitations = %v, %v", invs, err)
 	}
 	e.store.userMemberships[e.owner.ID] = []UserMembership{{TenantID: e.tenantID, TenantSlug: "acme", Role: RoleOwner}}
@@ -348,7 +348,7 @@ func TestListings(t *testing.T) {
 	if _, err := e.svc.Members(context.Background(), e.tenantID); !errors.Is(err, errBoom) {
 		t.Errorf("Members deveria propagar o erro: %v", err)
 	}
-	if _, err := e.svc.Invitations(context.Background(), e.tenantID); !errors.Is(err, errBoom) {
+	if _, err := e.svc.Invitations(context.Background(), e.tenantID, 25, ""); !errors.Is(err, errBoom) {
 		t.Errorf("Invitations deveria propagar o erro: %v", err)
 	}
 	if _, err := e.svc.UserOrganizations(context.Background(), e.owner.ID); !errors.Is(err, errBoom) {
@@ -758,7 +758,7 @@ func TestChangeRole(t *testing.T) {
 	admin := e.addMember(RoleAdmin, MembershipActive, "admin@acme.com")
 	fin := e.addMember(RoleFinance, MembershipActive, "fin@acme.com")
 
-	m, err := e.svc.ChangeRole(context.Background(), e.tenantID, e.access(admin), admin, fin.ID, RoleOperator)
+	m, err := e.svc.ChangeRole(context.Background(), e.tenantID, e.access(admin), admin, fin.ID, RoleOperator, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -775,6 +775,32 @@ func TestChangeRole(t *testing.T) {
 	}
 }
 
+// A versão do If-Match vai na condição da gravação da associação: divergente,
+// o papel e a situação não mudam e nada é auditado.
+func TestMemberChangesRequireCurrentVersion(t *testing.T) {
+	e := newEnv(t)
+	fin := e.addMember(RoleFinance, MembershipActive, "fin@acme.com")
+	audits := len(e.d().audits)
+	_, err := e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, fin.ID, RoleOperator, 2)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	err = e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, fin.ID, 2)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	if stored := e.d().members[fin.ID]; stored.Role != RoleFinance || stored.Status != MembershipActive || stored.Version != 1 ||
+		len(e.d().audits) != audits || e.store.calls["UpdateMembership"] != 2 {
+		t.Fatalf("associação com versão divergente não pode mudar: %+v", stored)
+	}
+	m, err := e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, fin.ID, RoleOperator, 1)
+	if err != nil || m.Version != 2 {
+		t.Fatalf("alteração na versão atual: %+v %v", m, err)
+	}
+	// A versão anterior à alteração não remove mais o membro.
+	err = e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, fin.ID, 1)
+	assertAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	if err := e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, fin.ID, m.Version); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestChangeRoleOwnerRules(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -787,7 +813,7 @@ func TestChangeRoleOwnerRules(t *testing.T) {
 			name: "admin não rebaixa proprietário",
 			run: func(e *env) (Membership, error) {
 				admin := e.addMember(RoleAdmin, MembershipActive, "admin@acme.com")
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(admin), admin, e.owner.ID, RoleAdmin)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(admin), admin, e.owner.ID, RoleAdmin, 1)
 			},
 			kind: apperr.KindForbidden, code: "owner_only",
 		},
@@ -795,14 +821,14 @@ func TestChangeRoleOwnerRules(t *testing.T) {
 			name: "admin não promove a proprietário",
 			run: func(e *env) (Membership, error) {
 				admin := e.addMember(RoleAdmin, MembershipActive, "admin@acme.com")
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(admin), admin, admin.ID, RoleOwner)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(admin), admin, admin.ID, RoleOwner, 1)
 			},
 			kind: apperr.KindForbidden, code: "owner_only",
 		},
 		{
 			name: "último proprietário não pode ser rebaixado",
 			run: func(e *env) (Membership, error) {
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, RoleAdmin)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, RoleAdmin, 1)
 			},
 			kind: apperr.KindConflict, code: "last_owner",
 		},
@@ -810,7 +836,7 @@ func TestChangeRoleOwnerRules(t *testing.T) {
 			name: "proprietário removido não conta como outro proprietário",
 			run: func(e *env) (Membership, error) {
 				e.addMember(RoleOwner, MembershipRemoved, "ex@acme.com")
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, RoleAdmin)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, RoleAdmin, 1)
 			},
 			kind: apperr.KindConflict, code: "last_owner",
 		},
@@ -818,7 +844,7 @@ func TestChangeRoleOwnerRules(t *testing.T) {
 			name: "proprietário rebaixa outro proprietário",
 			run: func(e *env) (Membership, error) {
 				other := e.addMember(RoleOwner, MembershipActive, "socia@acme.com")
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID, RoleFinance)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID, RoleFinance, 1)
 			},
 			wantOK: RoleFinance,
 		},
@@ -826,28 +852,28 @@ func TestChangeRoleOwnerRules(t *testing.T) {
 			name: "proprietário promove admin a proprietário",
 			run: func(e *env) (Membership, error) {
 				admin := e.addMember(RoleAdmin, MembershipActive, "admin@acme.com")
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, admin.ID, RoleOwner)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, admin.ID, RoleOwner, 1)
 			},
 			wantOK: RoleOwner,
 		},
 		{
 			name: "manter o papel de proprietário não exige outro proprietário",
 			run: func(e *env) (Membership, error) {
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, RoleOwner)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, RoleOwner, 1)
 			},
 			wantOK: RoleOwner,
 		},
 		{
 			name: "papel desconhecido",
 			run: func(e *env) (Membership, error) {
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, Role("deus"))
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, Role("deus"), 1)
 			},
 			kind: apperr.KindInvalid, code: "invalid_role",
 		},
 		{
 			name: "membro inexistente",
 			run: func(e *env) (Membership, error) {
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, uuid.New(), RoleAdmin)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, uuid.New(), RoleAdmin, 1)
 			},
 			kind: apperr.KindNotFound, code: "member_not_found",
 		},
@@ -855,7 +881,7 @@ func TestChangeRoleOwnerRules(t *testing.T) {
 			name: "membro removido",
 			run: func(e *env) (Membership, error) {
 				ex := e.addMember(RoleOperator, MembershipRemoved, "ex@acme.com")
-				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, ex.ID, RoleAdmin)
+				return e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, ex.ID, RoleAdmin, 1)
 			},
 			kind: apperr.KindNotFound, code: "member_not_found",
 		},
@@ -887,7 +913,7 @@ func TestChangeRoleStoreErrors(t *testing.T) {
 			e := newEnv(t)
 			other := e.addMember(RoleOwner, MembershipActive, "socia@acme.com")
 			e.store.fail[op] = errBoom
-			_, err := e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID, RoleAdmin)
+			_, err := e.svc.ChangeRole(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID, RoleAdmin, 1)
 			if !errors.Is(err, errBoom) {
 				t.Fatalf("esperado erro propagado, obtido %v", err)
 			}
@@ -903,7 +929,7 @@ func TestRemoveMember(t *testing.T) {
 	admin := e.addMember(RoleAdmin, MembershipActive, "admin@acme.com")
 	op := e.addMember(RoleOperator, MembershipActive, "op@acme.com")
 
-	if err := e.svc.RemoveMember(context.Background(), e.tenantID, e.access(admin), admin, op.ID); err != nil {
+	if err := e.svc.RemoveMember(context.Background(), e.tenantID, e.access(admin), admin, op.ID, 1); err != nil {
 		t.Fatal(err)
 	}
 	if e.d().members[op.ID].Status != MembershipRemoved {
@@ -926,17 +952,17 @@ func TestRemoveMemberRules(t *testing.T) {
 	}{
 		{"admin não remove proprietário", func(e *env) error {
 			admin := e.addMember(RoleAdmin, MembershipActive, "admin@acme.com")
-			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(admin), admin, e.owner.ID)
+			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(admin), admin, e.owner.ID, 1)
 		}, apperr.KindForbidden, "owner_only"},
 		{"último proprietário não pode ser removido", func(e *env) error {
-			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID)
+			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, e.owner.ID, 1)
 		}, apperr.KindConflict, "last_owner"},
 		{"membro inexistente", func(e *env) error {
-			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, uuid.New())
+			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, uuid.New(), 1)
 		}, apperr.KindNotFound, "member_not_found"},
 		{"membro já removido", func(e *env) error {
 			ex := e.addMember(RoleOperator, MembershipRemoved, "ex@acme.com")
-			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, ex.ID)
+			return e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, ex.ID, 1)
 		}, apperr.KindNotFound, "member_not_found"},
 	}
 	for _, tc := range cases {
@@ -951,7 +977,7 @@ func TestRemoveMemberRules(t *testing.T) {
 	t.Run("proprietário remove outro proprietário", func(t *testing.T) {
 		e := newEnv(t)
 		other := e.addMember(RoleOwner, MembershipActive, "socia@acme.com")
-		if err := e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID); err != nil {
+		if err := e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID, 1); err != nil {
 			t.Fatal(err)
 		}
 		if e.d().members[other.ID].Status != MembershipRemoved {
@@ -966,7 +992,7 @@ func TestRemoveMemberStoreErrors(t *testing.T) {
 			e := newEnv(t)
 			other := e.addMember(RoleOwner, MembershipActive, "socia@acme.com")
 			e.store.fail[op] = errBoom
-			if err := e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID); !errors.Is(err, errBoom) {
+			if err := e.svc.RemoveMember(context.Background(), e.tenantID, e.access(e.owner), e.owner, other.ID, 1); !errors.Is(err, errBoom) {
 				t.Fatalf("esperado erro propagado, obtido %v", err)
 			}
 			if e.d().members[other.ID].Status != MembershipActive {

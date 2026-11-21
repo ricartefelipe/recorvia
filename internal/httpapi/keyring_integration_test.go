@@ -47,7 +47,8 @@ func TestProviderCredentialsUnreadableOverHTTP(t *testing.T) {
 
 	newKey := "sim_reconfigurada_" + uuid.NewString()[:8]
 	configured, _ := owner.expect(http.StatusOK, http.MethodPut, "/api/v1/payment-providers/simulator", map[string]any{
-		"environment": "local", "api_key": newKey, "webhook_secret": strings.Repeat("n", 40), "make_default": true})
+		"environment": "local", "api_key": newKey, "webhook_secret": strings.Repeat("n", 40), "make_default": true},
+		matchVersion(accounts[0].(map[string]any)["version"])...)
 	account, _ := configured["account"].(map[string]any)
 	if account["id"] != accountID || account["api_key_hint"] != newKey[len(newKey)-4:] {
 		t.Fatalf("a reconfiguração deveria manter a conta com a chave nova: %v", configured)

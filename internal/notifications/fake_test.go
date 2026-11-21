@@ -191,11 +191,14 @@ func (t fakeTx) CustomTemplates(context.Context) ([]Template, error) {
 	return out, nil
 }
 
-func (t fakeTx) UpsertTemplate(_ context.Context, tp Template, _ *uuid.UUID, now time.Time) (Template, error) {
-	if err := t.err("UpsertTemplate"); err != nil {
+func (t fakeTx) SaveTemplate(_ context.Context, tp Template, _ *uuid.UUID, now time.Time, expectedVersion int) (Template, error) {
+	if err := t.err("SaveTemplate"); err != nil {
 		return Template{}, err
 	}
 	prev := t.st.templates[tp.Key]
+	if prev.Version != expectedVersion {
+		return Template{}, apperr.PreconditionFailed("version_mismatch", "O template foi alterado por outra pessoa.")
+	}
 	tp.Version, tp.UpdatedAt = prev.Version+1, &now
 	t.st.templates[tp.Key] = tp
 	return tp, nil

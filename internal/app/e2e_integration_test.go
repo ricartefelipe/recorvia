@@ -350,7 +350,7 @@ func TestEndToEndDunningNotificationsAndWebhooks(t *testing.T) {
 	}
 
 	// 3. Rotação com janela: as entregas seguintes levam as duas assinaturas.
-	_, secret2, err := e.core.Webhooks.RotateSecret(ctx, tn.ID, tn.Actor, ep.ID, new(int(webhooks.MaxRotationWindow/time.Hour)))
+	rotated, secret2, err := e.core.Webhooks.RotateSecret(ctx, tn.ID, tn.Actor, ep.ID, new(int(webhooks.MaxRotationWindow/time.Hour)), ep.Version)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +383,7 @@ func TestEndToEndDunningNotificationsAndWebhooks(t *testing.T) {
 	})
 
 	// 6. Rotação sem janela e pagamento: o consumidor interrompe a régua.
-	_, secret3, err := e.core.Webhooks.RotateSecret(ctx, tn.ID, tn.Actor, ep.ID, new(0))
+	_, secret3, err := e.core.Webhooks.RotateSecret(ctx, tn.ID, tn.Actor, ep.ID, new(0), rotated.Version)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -254,10 +254,22 @@ func (s *payStore) AccountByProvider(_ context.Context, provider string) (Provid
 	return ProviderAccount{}, apperr.NotFound("provider_account_not_found", "Conta não encontrada.")
 }
 
-func (s *payStore) SaveAccount(_ context.Context, a ProviderAccount, hash []byte) error {
+// SaveAccount reproduz a gravação condicionada à versão: 0 cria a conta do
+// provedor; acima de 0, substitui a configuração com essa versão.
+func (s *payStore) SaveAccount(_ context.Context, a ProviderAccount, hash []byte, expectedVersion int) error {
 	if err := s.fail("SaveAccount"); err != nil {
 		return err
 	}
+	current := 0
+	for _, x := range s.accounts {
+		if x.Provider == a.Provider && x.TenantID == a.TenantID {
+			current = x.Version
+		}
+	}
+	if current != expectedVersion {
+		return apperr.PreconditionFailed("version_mismatch", "A configuração do provedor foi alterada por outra pessoa.")
+	}
+	a.Version = expectedVersion + 1
 	s.accounts[a.ID] = a
 	s.saved = append(s.saved, savedAccount{a, hash})
 	return nil
@@ -645,6 +657,7 @@ type fakeGateway struct {
 	getErr         error
 	configureCalls []configureCall
 	configureErr   error
+	onConfigure    func()
 	getByID        map[string]gwResult
 	refundCalls    []RefundRequest
 	refundResults  []refundRes
@@ -751,6 +764,9 @@ func (g *fakeGateway) ListCharges(_ context.Context, req ListRequest) (ListResul
 func (g *fakeGateway) ConfigureWebhook(ctx context.Context, url, secret string) error {
 	_, ok := ctx.Deadline()
 	g.configureCalls = append(g.configureCalls, configureCall{url, secret, ok})
+	if g.onConfigure != nil {
+		g.onConfigure()
+	}
 	return g.configureErr
 }
 

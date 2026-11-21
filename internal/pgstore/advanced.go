@@ -572,8 +572,8 @@ func (tx couponTx) Coupons(ctx context.Context) ([]catalog.Coupon, error) {
 	return out, nil
 }
 
-func (tx couponTx) ArchiveCoupon(ctx context.Context, id uuid.UUID) error {
-	n, err := tx.q.ArchiveCoupon(ctx, dbgen.ArchiveCouponParams{TenantID: tx.tenantID, ID: id})
+func (tx couponTx) ArchiveCoupon(ctx context.Context, id uuid.UUID, version int) error {
+	n, err := tx.q.ArchiveCoupon(ctx, dbgen.ArchiveCouponParams{TenantID: tx.tenantID, ID: id, Version: int32(version)})
 	if err != nil {
 		return err
 	}

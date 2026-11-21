@@ -94,7 +94,8 @@ func TestAPICredentialAuthorshipOnTenantWriteRoutes(t *testing.T) {
 			return r, id
 		}, "collection_policies", "created_by", "id", "collection_policy.created", ""},
 		{"PUT /api/v1/notification-templates/{key}", http.StatusOK, func(t *testing.T, send sender) (rawResponse, string) {
-			return send(http.MethodPut, "/api/v1/notification-templates/reminder_after_due", template), "reminder_after_due"
+			return send(http.MethodPut, "/api/v1/notification-templates/reminder_after_due", template,
+				matchVersion(owner.versionIn("/api/v1/notification-templates", "key", "reminder_after_due"))...), "reminder_after_due"
 		}, "notification_templates", "updated_by", "template_key", "notification_template.updated", ""},
 		{"POST /api/v1/webhook-endpoints", http.StatusCreated, func(t *testing.T, send sender) (rawResponse, string) {
 			r := send(http.MethodPost, "/api/v1/webhook-endpoints", map[string]any{"url": "https://hooks.cliente.test/" + uuid.NewString(),

@@ -69,7 +69,10 @@ type Tx interface {
 	// AccountByProvider devolve a conta sem as credenciais (APIKey e Secret
 	// vazios): a troca da configuração não depende de decifrar a anterior.
 	AccountByProvider(ctx context.Context, provider string) (ProviderAccount, error)
-	SaveAccount(ctx context.Context, a ProviderAccount, endpointTokenHash []byte) error
+	// SaveAccount grava a conta na versão esperada: 0 cria a conta do provedor
+	// (412 version_mismatch se ela já existir); acima de 0, substitui a
+	// configuração com essa versão (412 se a linha tiver outra versão).
+	SaveAccount(ctx context.Context, a ProviderAccount, endpointTokenHash []byte, expectedVersion int) error
 	Accounts(ctx context.Context) ([]ProviderAccount, error)
 
 	Invoice(ctx context.Context, id uuid.UUID, forUpdate bool) (billing.Invoice, error)

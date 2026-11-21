@@ -221,10 +221,14 @@ func (s *Service) UpdatePlan(ctx context.Context, tenantID uuid.UUID, actor audi
 }
 
 // AddPriceVersion cria uma nova versão de preço, que passa a ser a vigente
-// para novas assinaturas. Assinaturas existentes mantêm sua versão.
-func (s *Service) AddPriceVersion(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, actorUser *uuid.UUID, planID uuid.UUID, in PriceInput) (PriceVersion, error) {
+// para novas assinaturas. Assinaturas existentes mantêm sua versão. A troca
+// do preço vigente altera o plano: exige a versão esperada do plano
+// (If-Match) e devolve a versão do plano depois da gravação.
+func (s *Service) AddPriceVersion(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, actorUser *uuid.UUID, planID uuid.UUID, in PriceInput,
+	expectedVersion int) (PriceVersion, int, error) {
 	now := s.clock.Now()
 	var pv PriceVersion
+	planVersion := 0
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		p, err := tx.Plan(ctx, planID, true)
 		if err != nil {
@@ -254,14 +258,18 @@ func (s *Service) AddPriceVersion(ctx context.Context, tenantID uuid.UUID, actor
 		if err := tx.InsertPriceVersion(ctx, pv); err != nil {
 			return err
 		}
-		p.CurrentPriceVersionID = &pv.ID
+		p.CurrentPriceVersionID, p.Version = &pv.ID, expectedVersion
 		if err := tx.UpdatePlan(ctx, p); err != nil {
 			return err
 		}
+		planVersion = expectedVersion + 1
 		return tx.Audit(ctx, audit.New(tenantID, now, actor, "catalog.price_version_created", "plan", planID.String(),
 			map[string]any{"price_version": pv.Version, "pricing_model": pv.Model}))
 	})
-	return pv, err
+	if err != nil {
+		return PriceVersion{}, 0, err
+	}
+	return pv, planVersion, nil
 }
 
 // Plan retorna o plano com todas as versões de preço.

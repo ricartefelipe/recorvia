@@ -159,8 +159,13 @@ func (a *API) archiveCustomer(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	version, err := ifMatch(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	p := mustPrincipal(r)
-	if _, err := a.Customers.Archive(r.Context(), p.TenantID, p.Actor(), id); err != nil {
+	if _, err := a.Customers.Archive(r.Context(), p.TenantID, p.Actor(), id, version); err != nil {
 		a.writeError(w, r, err)
 		return
 	}
@@ -324,8 +329,15 @@ func (a *API) removeContact(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// setAddress grava o endereço de cobrança. O endereço faz parte da ficha do
+// cliente: If-Match e ETag são a versão do cliente.
 func (a *API) setAddress(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	version, err := ifMatch(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -336,12 +348,12 @@ func (a *API) setAddress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	addr, err := a.Customers.SetAddress(r.Context(), p.TenantID, p.Actor(), id, in)
+	addr, current, err := a.Customers.SetAddress(r.Context(), p.TenantID, p.Actor(), id, in, version)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, addr)
+	a.writeVersioned(w, r, http.StatusOK, current, addr)
 }
 
 // customerHistory lista o histórico do cliente (auditoria), do mais recente
@@ -371,8 +383,10 @@ func (a *API) customerHistory(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, r, http.StatusOK, newPage(auditDTOs(events), next))
 }
 
-func (a *API) creditBalanceView(r *http.Request, customerID uuid.UUID) (map[string]any, error) {
-	bal, entries, err := a.Store.Customers().Credits(r.Context(), mustPrincipal(r).TenantID, customerID)
+// creditBalanceView devolve o saldo de crédito do cliente e uma página dos
+// movimentos (mais recentes primeiro), com next_cursor para a seguinte.
+func (a *API) creditBalanceView(r *http.Request, customerID uuid.UUID, limit int, cursor string) (map[string]any, error) {
+	bal, entries, next, err := a.Store.Customers().Credits(r.Context(), mustPrincipal(r).TenantID, customerID, limit, cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -380,7 +394,7 @@ func (a *API) creditBalanceView(r *http.Request, customerID uuid.UUID) (map[stri
 	for _, e := range entries {
 		out = append(out, map[string]any{"id": e.ID, "amount": e.Amount, "kind": e.Kind, "invoice_id": e.InvoiceID, "reason": e.Reason, "created_at": e.CreatedAt})
 	}
-	return map[string]any{"balance": bal.Amount(), "currency": bal.Currency().Code(), "entries": out}, nil
+	return map[string]any{"balance": bal.Amount(), "currency": bal.Currency().Code(), "entries": out, "next_cursor": newPage(out, next).NextCursor}, nil
 }
 
 func (a *API) getCredits(w http.ResponseWriter, r *http.Request) {
@@ -389,7 +403,12 @@ func (a *API) getCredits(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	v, err := a.creditBalanceView(r, id)
+	limit, cursor, err := pageParams(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	v, err := a.creditBalanceView(r, id, limit, cursor)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -417,7 +436,7 @@ func (a *API) grantCredit(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	v, err := a.creditBalanceView(r, id)
+	v, err := a.creditBalanceView(r, id, 0, "")
 	if err != nil {
 		a.writeError(w, r, err)
 		return

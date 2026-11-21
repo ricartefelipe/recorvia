@@ -308,8 +308,15 @@ func (a *API) updatePlan(w http.ResponseWriter, r *http.Request) {
 	a.getPlan(w, r)
 }
 
+// addPrice cria a versão de preço vigente do plano. A troca do preço vigente
+// altera o plano: If-Match e ETag são a versão do plano.
 func (a *API) addPrice(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	version, err := ifMatch(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -321,10 +328,10 @@ func (a *API) addPrice(w http.ResponseWriter, r *http.Request) {
 	}
 	p := mustPrincipal(r)
 	uid := p.UserID()
-	pv, err := a.Catalog.AddPriceVersion(r.Context(), p.TenantID, p.Actor(), uid, id, in.domain())
+	pv, planVersion, err := a.Catalog.AddPriceVersion(r.Context(), p.TenantID, p.Actor(), uid, id, in.domain(), version)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusCreated, priceVersionDTO(pv))
+	a.writeVersioned(w, r, http.StatusCreated, planVersion, priceVersionDTO(pv))
 }

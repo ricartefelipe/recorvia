@@ -104,7 +104,8 @@ func invFullInvoice(t *testing.T, a *apiEnv, c *client, tn fixture.Tenant, cust 
 	t.Helper()
 	custPath := "/api/v1/customers/" + cust.ID.String()
 	c.expect(http.StatusOK, http.MethodPut, custPath+"/billing-address", map[string]any{"street": "Avenida Paulista", "number": "1000",
-		"complement": "Conjunto 12", "district": "Bela Vista", "city": "São Paulo", "state": "SP", "postal_code": "01310-100"})
+		"complement": "Conjunto 12", "district": "Bela Vista", "city": "São Paulo", "state": "SP", "postal_code": "01310-100"},
+		matchVersion(c.versionOf(custPath))...)
 	c.expect(http.StatusCreated, http.MethodPost, "/api/v1/coupons", map[string]any{"code": "DOC20", "name": "Desconto do documento",
 		"discount_type": "amount", "amount_off": 2000, "duration": "once"})
 	plan := newPlan(t, a.env, tn, "Plano Documento", flatPrice(20000))

@@ -12,11 +12,17 @@ info:
       centavos, até 10 casas).
     - Instantes em RFC 3339 (UTC). Datas civis no formato `AAAA-MM-DD`, no fuso
       da organização.
-    - Listas paginadas por cursor: `limit` (1 a 100, padrão 25) e `cursor`.
-      A ordenação é determinística (desempate por `id`).
+    - Listas paginadas por cursor: `limit` (1 a 100, padrão 25), `cursor` opaco
+      e `next_cursor` na resposta (nulo na última página). A ordenação é
+      determinística (desempate por `id`). `sort` só é aceito nas listas que o
+      declaram, com os valores do enum; fora disso, a lista responde 422
+      `invalid_sort` em vez de ignorar o parâmetro.
     - Erros no formato RFC 9457 (`application/problem+json`).
-    - Concorrência otimista: recursos expõem `version` e `ETag`; alterações
-      exigem `If-Match: "<version>"` quando indicado.
+    - Concorrência otimista: recursos expõem `version` e `ETag`; as alterações
+      que declaram o parâmetro `IfMatch` exigem `If-Match: "<version>"`. Sem o
+      header, a resposta é 428 `if_match_required`; com versão divergente, 412
+      `version_mismatch`, sem nenhum efeito. A resposta de sucesso traz o `ETag`
+      da versão gravada.
     - Operações financeiras de criação exigem `Idempotency-Key` (veja o parâmetro
       `IdempotencyKey`): pagamentos manuais, notas de crédito, cobranças,
       reembolsos, baixas de valor a recuperar, créditos de cliente, execuções de
@@ -228,9 +234,10 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/OrganizationUpdate" } } }
       responses:
-        "200": { description: Atualizada, content: { application/json: { schema: { $ref: "#/components/schemas/Organization" } } } }
+        "200": { description: Atualizada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Organization" } } } }
         "412": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/roles:
     get:
       tags: [organizations]
@@ -248,6 +255,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/RolePermissions" }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/members:
     get:
       tags: [organizations]
@@ -255,36 +263,45 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Membros, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Member" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/members/{user_id}:
     parameters: [ { $ref: "#/components/parameters/Tenant" }, { name: user_id, in: path, required: true, schema: { type: string, format: uuid } } ]
     patch:
       tags: [organizations]
       operationId: updateMemberRole
+      description: Altera o papel do membro na versão da associação informada no If-Match (`version` do membro).
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, required: [role], properties: { role: { $ref: "#/components/schemas/Role" } } } } }
       responses:
-        "200": { description: Papel alterado, content: { application/json: { schema: { $ref: "#/components/schemas/Member" } } } }
+        "200": { description: Papel alterado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Member" } } } }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
     delete:
       tags: [organizations]
       operationId: removeMember
+      description: Remove o membro na versão da associação informada no If-Match (`version` do membro).
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
       responses:
         "204": { description: Removido }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/invitations:
     get:
       tags: [organizations]
       operationId: listInvitations
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      description: Convites, dos mais recentes para os mais antigos, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Convites, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Invitation" } } } } } } }
+        "200": { description: Convites, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/Invitation" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [organizations]
       operationId: createInvitation
@@ -328,6 +345,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Planos da plataforma, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PlatformPlan" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/platform/plan:
     put:
       tags: [platform]
@@ -348,6 +366,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Serviços adicionais, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PlatformAddon" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/platform/addon-orders:
     get:
       tags: [platform]
@@ -355,6 +374,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Pedidos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AddonOrder" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [platform]
       operationId: createAddonOrder
@@ -375,6 +395,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Demonstrativos mensais da plataforma, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PlatformStatement" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/admin/tenants:
     get:
       tags: [platform]
@@ -384,6 +405,7 @@ paths:
       responses:
         "200": { description: Organizações, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AdminTenant" } } } } } } }
         "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/admin/addon-orders:
     get:
       tags: [platform]
@@ -519,17 +541,21 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/CustomerInput" } } }
       responses:
-        "200": { description: Atualizado, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerDetails" } } } }
+        "200": { description: Atualizado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerDetails" } } } }
         "412": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/archive:
     post:
       tags: [customers]
       operationId: archiveCustomer
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      description: Arquiva o cliente na versão informada no If-Match. Arquivar um cliente já arquivado, na versão atual, não tem efeito.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       responses:
-        "200": { description: Arquivado, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerDetails" } } } }
+        "200": { description: Arquivado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerDetails" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/anonymize:
     post:
       tags: [customers]
@@ -642,15 +668,19 @@ paths:
         Grava o endereço de cobrança do cliente. Sem mudança, nada é gravado. O histórico do cliente registra
         `customer.address_updated` com os nomes dos campos alterados (`fields`) e se o endereço foi
         cadastrado agora (`created`), nunca os valores. Responde 409 `customer_anonymized` para cliente
-        anonimizado, que não volta a receber dados pessoais.
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+        anonimizado, que não volta a receber dados pessoais. O endereço faz parte da ficha do cliente: o If-Match
+        é a versão do cliente (`version` de CustomerDetails) e a gravação gera a versão seguinte, devolvida no
+        ETag; sem mudança, a versão não muda.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/Address" } } }
       responses:
-        "200": { description: Endereço gravado, content: { application/json: { schema: { $ref: "#/components/schemas/Address" } } } }
+        "200": { description: Endereço gravado; o ETag é a versão do cliente, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Address" } } } }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/history:
     get:
       tags: [customers]
@@ -671,9 +701,14 @@ paths:
     get:
       tags: [customers]
       operationId: getCustomerCredits
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      description: >-
+        Saldo de crédito do cliente e os movimentos, dos mais recentes para os mais antigos, em páginas por cursor
+        (`entries` é a página; `next_cursor` pede a seguinte).
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
         "200": { description: Saldo e movimentos de crédito, content: { application/json: { schema: { $ref: "#/components/schemas/CreditBalance" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [customers]
       operationId: grantCustomerCredit
@@ -750,6 +785,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { name: status, in: query, schema: { type: string, enum: [active, archived] } } ]
       responses:
         "200": { description: Produtos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Product" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [catalog]
       operationId: createProduct
@@ -777,8 +813,9 @@ paths:
                   properties:
                     status: { type: string, enum: [active, archived] }
       responses:
-        "200": { description: Atualizado, content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } } }
+        "200": { description: Atualizado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } } }
         "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/metrics:
     get:
       tags: [catalog]
@@ -786,6 +823,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Métricas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Metric" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [catalog]
       operationId: createMetric
@@ -806,6 +844,7 @@ paths:
         - { name: product_id, in: query, schema: { type: string, format: uuid } }
       responses:
         "200": { description: Planos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Plan" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [catalog]
       operationId: createPlan
@@ -831,20 +870,26 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/PlanUpdate" } } }
       responses:
-        "200": { description: Atualizado, content: { application/json: { schema: { $ref: "#/components/schemas/PlanDetails" } } } }
+        "200": { description: Atualizado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/PlanDetails" } } } }
         "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/plans/{id}/prices:
     post:
       tags: [catalog]
       operationId: addPriceVersion
       summary: Cria nova versão de preço (não altera assinaturas existentes)
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      description: >-
+        A nova versão passa a ser o preço vigente do plano, o que altera o plano: o If-Match é a versão do plano
+        (`version` de PlanDetails) e o ETag da resposta é a versão seguinte do plano.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/PriceInput" } } }
       responses:
-        "201": { description: Versão criada, content: { application/json: { schema: { $ref: "#/components/schemas/PriceVersion" } } } }
+        "201": { description: Versão criada; o ETag é a versão do plano, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/PriceVersion" } } } }
         "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/coupons:
     get:
       tags: [catalog]
@@ -852,6 +897,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Cupons, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Coupon" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [catalog]
       operationId: createCoupon
@@ -866,9 +912,13 @@ paths:
     post:
       tags: [catalog]
       operationId: archiveCoupon
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      description: Arquiva o cupom na versão informada no If-Match. Arquivar um cupom já arquivado, na versão atual, não tem efeito.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       responses:
-        "200": { description: Arquivado, content: { application/json: { schema: { $ref: "#/components/schemas/Coupon" } } } }
+        "200": { description: Arquivado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Coupon" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
 
   /api/v1/subscriptions:
     get:
@@ -886,6 +936,7 @@ paths:
         - { name: customer_id, in: query, schema: { type: string, format: uuid } }
       responses:
         "200": { description: Assinaturas, content: { application/json: { schema: { $ref: "#/components/schemas/SubscriptionPage" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [subscriptions]
       operationId: createSubscription
@@ -920,6 +971,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
       responses:
         "200": { description: Histórico de transições, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/SubscriptionHistoryEntry" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/cancel:
     post:
       tags: [subscriptions]
@@ -936,15 +988,19 @@ paths:
                 mode: { type: string, enum: [immediate, period_end] }
                 reason: { type: string, maxLength: 500 }
       responses:
-        "200": { description: Cancelada ou agendada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "200": { description: Cancelada ou agendada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/resume-renewal:
     post:
       tags: [subscriptions]
       operationId: resumeSubscriptionRenewal
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       responses:
-        "200": { description: Cancelamento agendado desfeito, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "200": { description: Cancelamento agendado desfeito, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/suspend:
     post:
       tags: [subscriptions]
@@ -953,16 +1009,20 @@ paths:
       requestBody:
         content: { application/json: { schema: { type: object, properties: { reason: { type: string, maxLength: 500 } } } } }
       responses:
-        "200": { description: Suspensa, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "200": { description: Suspensa, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/reactivate:
     post:
       tags: [subscriptions]
       operationId: reactivateSubscription
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       responses:
-        "200": { description: Reativada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "200": { description: Reativada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/change-plan:
     post:
       tags: [subscriptions]
@@ -980,9 +1040,11 @@ paths:
                 quantity: { type: integer, minimum: 1, maximum: 1000000 }
                 timing: { $ref: "#/components/schemas/ChangeTiming" }
       responses:
-        "200": { description: Alteração aplicada ou agendada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "200": { description: Alteração aplicada ou agendada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/change-quantity:
     post:
       tags: [subscriptions]
@@ -999,8 +1061,10 @@ paths:
                 quantity: { type: integer, minimum: 1, maximum: 1000000 }
                 timing: { $ref: "#/components/schemas/ChangeTiming" }
       responses:
-        "200": { description: Alteração aplicada ou agendada, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
+        "200": { description: Alteração aplicada ou agendada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } } }
         "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/subscriptions/{id}/price-adjustments:
     parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
     get:
@@ -1008,6 +1072,7 @@ paths:
       operationId: listPriceAdjustments
       responses:
         "200": { description: Reajustes, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PriceAdjustment" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [subscriptions]
       operationId: schedulePriceAdjustment
@@ -1070,6 +1135,7 @@ paths:
         - { name: metric_id, in: query, schema: { type: string, format: uuid } }
       responses:
         "200": { description: Eventos de consumo, content: { application/json: { schema: { $ref: "#/components/schemas/UsageEventPage" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [usage]
       operationId: ingestUsageEvents
@@ -1116,6 +1182,7 @@ paths:
           schema: { type: boolean }
       responses:
         "200": { description: Faturas (ordenadas por emissão decrescente), content: { application/json: { schema: { $ref: "#/components/schemas/InvoicePage" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/invoices/export:
     get:
       tags: [invoices]
@@ -1185,8 +1252,10 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/ReasonInput" } } }
       responses:
-        "200": { description: Cancelada, content: { application/json: { schema: { $ref: "#/components/schemas/InvoiceDetails" } } } }
+        "200": { description: Cancelada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/InvoiceDetails" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/invoices/{id}/mark-uncollectible:
     post:
       tags: [invoices]
@@ -1196,8 +1265,10 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/ReasonInput" } } }
       responses:
-        "200": { description: Baixada, content: { application/json: { schema: { $ref: "#/components/schemas/InvoiceDetails" } } } }
+        "200": { description: Baixada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/InvoiceDetails" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/invoices/{id}/credit-notes:
     post:
       tags: [invoices]
@@ -1257,6 +1328,7 @@ paths:
         - { name: invoice_id, in: query, schema: { type: string, format: uuid } }
       responses:
         "200": { description: Cobranças, content: { application/json: { schema: { $ref: "#/components/schemas/ChargePage" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/charges/{id}:
     get:
       tags: [payments]
@@ -1290,6 +1362,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
         "200": { description: Reembolsos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Refund" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/payments:
     get:
       tags: [payments]
@@ -1297,13 +1370,16 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" }, { name: invoice_id, in: query, schema: { type: string, format: uuid } } ]
       responses:
         "200": { description: Recebimentos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Payment" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/disputes:
     get:
       tags: [payments]
       operationId: listDisputes
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      description: Disputas, das abertas mais recentemente para as mais antigas, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Disputas e chargebacks, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Dispute" } } } } } } }
+        "200": { description: Disputas e chargebacks, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/Dispute" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/disputes/{id}:
     get:
       tags: [payments]
@@ -1324,6 +1400,7 @@ paths:
       responses:
         "200": { description: Baixas da disputa, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/RecoverySettlement" } } } } } } }
         "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [payments]
       operationId: settleRecovery
@@ -1352,11 +1429,15 @@ paths:
     get:
       tags: [payments]
       operationId: listPaymentOperations
+      description: Operações externas, das criadas mais recentemente para as mais antigas, em páginas por cursor.
       parameters:
         - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
         - { name: status, in: query, schema: { type: string, enum: [pending, in_flight, succeeded, failed, unknown] } }
       responses:
-        "200": { description: Operações externas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PaymentOperation" } } } } } } }
+        "200": { description: Operações externas, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/PaymentOperation" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/payment-operations/{id}/retry:
     post:
       tags: [payments]
@@ -1382,21 +1463,29 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Provedores configurados (sem segredos), content: { application/json: { schema: { type: object, required: [data, available], properties: { data: { type: array, items: { $ref: "#/components/schemas/ProviderAccount" } }, available: { type: array, items: { type: string } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/payment-providers/{provider}:
     put:
       tags: [integrations]
       operationId: configurePaymentProvider
+      description: >-
+        Configura o provedor na versão da conta informada no If-Match (`version` de ProviderAccount); `"0"` para o
+        provedor ainda não configurado (presente apenas em `available`). Versão divergente responde 412 antes de
+        chamar o provedor.
       parameters:
         - { $ref: "#/components/parameters/Tenant" }
         - { $ref: "#/components/parameters/CSRF" }
+        - { $ref: "#/components/parameters/IfMatch" }
         - { name: provider, in: path, required: true, schema: { type: string, enum: [simulator, asaas] } }
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/ProviderAccountInput" } } }
       responses:
-        "200": { description: Configurado; webhook_endpoint_url é exibida uma única vez, content: { application/json: { schema: { $ref: "#/components/schemas/ProviderAccountConfigured" } } } }
+        "200": { description: Configurado; webhook_endpoint_url é exibida uma única vez, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/ProviderAccountConfigured" } } } }
         "403": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
 
   /api/v1/ledger/accounts:
     get:
@@ -1405,6 +1494,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Contas com saldos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/LedgerAccount" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/ledger/transactions:
     get:
       tags: [ledger]
@@ -1417,14 +1507,17 @@ paths:
         - { name: reference_id, in: query, schema: { type: string, format: uuid } }
       responses:
         "200": { description: Lançamentos, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/LedgerTransaction" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
 
   /api/v1/reconciliation/runs:
     get:
       tags: [reconciliation]
       operationId: listReconciliationRuns
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      description: Execuções, das mais recentes para as mais antigas, em páginas por cursor.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Execuções, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/ReconciliationRun" } } } } } } }
+        "200": { description: Execuções, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/ReconciliationRun" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [reconciliation]
       operationId: runReconciliation
@@ -1458,24 +1551,31 @@ paths:
     get:
       tags: [reconciliation]
       operationId: listDiscrepancies
+      description: Divergências, das detectadas mais recentemente para as mais antigas, em páginas por cursor.
       parameters:
         - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
         - { name: status, in: query, schema: { type: string, enum: [open, resolved, dismissed] } }
         - { name: kind, in: query, schema: { $ref: "#/components/schemas/DiscrepancyKind" } }
       responses:
-        "200": { description: Divergências, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Discrepancy" } } } } } } }
+        "200": { description: Divergências, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/Discrepancy" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/reconciliation/discrepancies/{id}:
     get:
       tags: [reconciliation]
       operationId: getDiscrepancy
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
       responses:
-        "200": { description: Divergência com histórico, content: { application/json: { schema: { $ref: "#/components/schemas/Discrepancy" } } } }
+        "200": { description: Divergência com histórico, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Discrepancy" } } } }
   /api/v1/reconciliation/discrepancies/{id}/resolve:
     post:
       tags: [reconciliation]
       operationId: resolveDiscrepancy
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      description: >-
+        Resolve a divergência aberta na versão informada no If-Match (`version` da divergência). Uma nova detecção da
+        divergência gera outra versão: quem resolve com a versão anterior recebe 412 e precisa consultá-la de novo.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       requestBody:
         required: true
         content:
@@ -1487,8 +1587,10 @@ paths:
                 resolution: { type: string, enum: [accept_provider, keep_local, adjust_ledger, dismiss] }
                 justification: { type: string, minLength: 10, maxLength: 2000 }
       responses:
-        "200": { description: Resolvida, content: { application/json: { schema: { $ref: "#/components/schemas/Discrepancy" } } } }
+        "200": { description: Resolvida, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Discrepancy" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
 
   /api/v1/collection-policies:
     get:
@@ -1497,6 +1599,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Políticas de cobrança, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/CollectionPolicy" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [collections]
       operationId: createCollectionPolicy
@@ -1517,8 +1620,9 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/CollectionPolicyInput" } } }
       responses:
-        "200": { description: Atualizada, content: { application/json: { schema: { $ref: "#/components/schemas/CollectionPolicy" } } } }
+        "200": { description: Atualizada, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/CollectionPolicy" } } } }
         "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/notification-templates:
     get:
       tags: [collections]
@@ -1526,13 +1630,18 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Templates de e-mail, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/NotificationTemplate" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/notification-templates/{key}:
     put:
       tags: [collections]
       operationId: updateNotificationTemplate
+      description: >-
+        Grava a personalização do template na versão informada no If-Match (`version` do template): `"0"` para o
+        template padrão, ainda não personalizado.
       parameters:
         - { $ref: "#/components/parameters/Tenant" }
         - { $ref: "#/components/parameters/CSRF" }
+        - { $ref: "#/components/parameters/IfMatch" }
         - { name: key, in: path, required: true, schema: { $ref: "#/components/schemas/TemplateKey" } }
       requestBody:
         required: true
@@ -1545,8 +1654,11 @@ paths:
                 subject: { type: string, minLength: 3, maxLength: 200 }
                 body: { type: string, minLength: 10, maxLength: 10000 }
       responses:
-        "200": { description: Template gravado, content: { application/json: { schema: { $ref: "#/components/schemas/NotificationTemplate" } } } }
+        "200": { description: Template gravado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/NotificationTemplate" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/notifications:
     get:
       tags: [collections]
@@ -1559,6 +1671,7 @@ paths:
         - { name: invoice_id, in: query, schema: { type: string, format: uuid } }
       responses:
         "200": { description: Histórico de envio, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Notification" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/notifications/{id}/events:
     get:
       tags: [collections]
@@ -1568,6 +1681,7 @@ paths:
       responses:
         "200": { description: Eventos em ordem cronológica, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/NotificationEvent" } } } } } } }
         "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
 
   /api/v1/webhook-event-types:
     get:
@@ -1576,6 +1690,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Tipos de evento disponíveis, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { type: string } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/webhook-endpoints:
     get:
       tags: [webhooks]
@@ -1583,6 +1698,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Endpoints, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/WebhookEndpoint" } } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [webhooks]
       operationId: createWebhookEndpoint
@@ -1611,22 +1727,35 @@ paths:
                   properties:
                     status: { type: string, enum: [active, disabled] }
       responses:
-        "200": { description: Atualizado, content: { application/json: { schema: { $ref: "#/components/schemas/WebhookEndpoint" } } } }
+        "200": { description: Atualizado, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/WebhookEndpoint" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
     delete:
       tags: [webhooks]
       operationId: deleteWebhookEndpoint
-      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" } ]
       responses:
         "204": { description: Desativado e removido da listagem ativa }
+        "404": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/webhook-endpoints/{id}/rotate-secret:
     post:
       tags: [webhooks]
       operationId: rotateWebhookSecret
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      description: >-
+        Gera um novo segredo. Os segredos fazem parte do endpoint: a rotação exige a versão do endpoint no If-Match e
+        gera a versão seguinte, devolvida no ETag.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       requestBody:
         content: { application/json: { schema: { type: object, properties: { previous_secret_valid_hours: { type: integer, minimum: 0, maximum: 168 } } } } }
       responses:
-        "200": { description: Novo segredo (exibido uma única vez), content: { application/json: { schema: { $ref: "#/components/schemas/WebhookEndpointWithSecret" } } } }
+        "200": { description: Novo segredo (exibido uma única vez), headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/WebhookEndpointWithSecret" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/webhook-endpoints/{id}/deliveries:
     get:
       tags: [webhooks]
@@ -1634,6 +1763,7 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
         "200": { description: Entregas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/WebhookDelivery" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/webhook-deliveries/{id}/attempts:
     get:
       tags: [webhooks]
@@ -1643,6 +1773,7 @@ paths:
       responses:
         "200": { description: Tentativas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/WebhookDeliveryAttempt" } } } } } } }
         "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/webhook-deliveries/{id}/retry:
     post:
       tags: [webhooks]
@@ -1655,11 +1786,15 @@ paths:
     get:
       tags: [integrations]
       operationId: listApiCredentials
+      description: >-
+        Credenciais em páginas por cursor: as ativas primeiro, depois revogadas e expiradas, das mais recentes para
+        as mais antigas. A situação que define a ordem é a do instante da primeira página, levado no cursor.
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/Tenant" } ]
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" } ]
       responses:
-        "200": { description: Credenciais (sem segredos), content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/ApiCredential" } } } } } } }
+        "200": { description: Credenciais (sem segredos), content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/ApiCredential" } }, next_cursor: { type: string, nullable: true } } } } } }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [integrations]
       operationId: createApiCredential
@@ -1685,27 +1820,41 @@ paths:
       tags: [integrations]
       operationId: rotateApiCredential
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       responses:
-        "201": { description: Nova credencial; a anterior permanece válida por 24 horas, content: { application/json: { schema: { $ref: "#/components/schemas/ApiCredentialWithSecret" } } } }
+        "201": { description: Nova credencial; a anterior permanece válida por 24 horas, headers: { ETag: { $ref: "#/components/headers/ETag" } }, content: { application/json: { schema: { $ref: "#/components/schemas/ApiCredentialWithSecret" } } } }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
   /api/v1/api-credentials/{id}:
     delete:
       tags: [integrations]
       operationId: revokeApiCredential
+      description: Revoga a credencial na versão informada no If-Match. Revogar uma credencial já revogada, na versão atual, não tem efeito.
       security: [ { session: [] } ]
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/ID" } ]
       responses:
         "204": { description: Revogada }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "412": { $ref: "#/components/responses/Problem" }
+        "428": { $ref: "#/components/responses/Problem" }
 
   /api/v1/dead-letters:
     get:
       tags: [operations]
       operationId: listDeadLetters
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { name: status, in: query, schema: { type: string, enum: [open, replayed, discarded] } } ]
+      description: Mensagens não processadas, das falhas mais recentes para as mais antigas, em páginas por cursor.
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: status, in: query, schema: { type: string, enum: [open, replayed, discarded] } }
       responses:
-        "200": { description: Mensagens não processadas, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/DeadLetter" } } } } } } }
+        "200": { description: Mensagens não processadas, content: { application/json: { schema: { type: object, required: [data, next_cursor], properties: { data: { type: array, items: { $ref: "#/components/schemas/DeadLetter" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/dead-letters/{id}/replay:
     post:
       tags: [operations]
@@ -1744,6 +1893,7 @@ paths:
         - { name: to, in: query, schema: { type: string, format: date } }
       responses:
         "200": { description: Trilha de auditoria, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AuditEvent" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "422": { $ref: "#/components/responses/Problem" }
 
   /api/v1/dashboard:
     get:
@@ -1900,7 +2050,9 @@ components:
       name: If-Match
       in: header
       required: true
-      description: Versão esperada do recurso, entre aspas (ex. "3").
+      description: >-
+        Versão esperada do recurso, entre aspas (ex. "3"). Sem o header: 428 `if_match_required`; versão divergente: 412
+        `version_mismatch`, sem efeito.
       schema: { type: string }
     IdempotencyKey:
       name: Idempotency-Key
@@ -1938,6 +2090,11 @@ components:
       name: cursor
       in: query
       schema: { type: string, maxLength: 512 }
+
+  headers:
+    ETag:
+      description: Versão do recurso entre aspas (ex. "3"), a ser enviada no If-Match da próxima alteração.
+      schema: { type: string }
 
   responses:
     Problem:
@@ -2328,10 +2485,11 @@ components:
         country: { type: string, default: BR }
     CreditBalance:
       type: object
-      required: [balance, currency, entries]
+      required: [balance, currency, entries, next_cursor]
       properties:
         balance: { type: integer, format: int64 }
         currency: { type: string }
+        next_cursor: { type: string, nullable: true, description: Página seguinte dos movimentos; nulo na última }
         entries:
           type: array
           items:
@@ -2961,7 +3119,7 @@ components:
         make_default: { type: boolean }
     ProviderAccount:
       type: object
-      required: [id, provider, environment, status, is_default, created_at]
+      required: [id, provider, environment, status, is_default, created_at, version]
       properties:
         id: { type: string, format: uuid }
         provider: { type: string }
@@ -2970,6 +3128,7 @@ components:
         is_default: { type: boolean }
         api_key_hint: { type: string, description: Últimos 4 caracteres }
         created_at: { type: string, format: date-time }
+        version: { type: integer, description: Versão da configuração (If-Match da próxima configuração) }
     ProviderAccountConfigured:
       type: object
       required: [account, webhook_endpoint_url]
@@ -3042,7 +3201,7 @@ components:
         finished_at: { type: string, format: date-time, nullable: true }
     Discrepancy:
       type: object
-      required: [id, kind, status, created_at, local_value, provider_value]
+      required: [id, kind, status, created_at, local_value, provider_value, version]
       properties:
         id: { type: string, format: uuid }
         run_id: { type: string, format: uuid, nullable: true }
@@ -3063,6 +3222,7 @@ components:
             credencial de API; o responsável fica sempre no histórico (ator do evento reconciliation.discrepancy_resolved).
         resolved_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
+        version: { type: integer, description: Muda a cada nova detecção e na resolução }
         history:
           type: array
           items: { $ref: "#/components/schemas/AuditEvent" }
@@ -3097,7 +3257,7 @@ components:
             version: { type: integer }
     NotificationTemplate:
       type: object
-      required: [key, channel, subject, body, is_default, variables]
+      required: [key, channel, subject, body, is_default, variables, version]
       properties:
         key: { $ref: "#/components/schemas/TemplateKey" }
         channel: { type: string, enum: [email] }
@@ -3106,6 +3266,7 @@ components:
         is_default: { type: boolean }
         variables: { type: array, items: { type: string } }
         updated_at: { type: string, format: date-time, nullable: true }
+        version: { type: integer, description: Versão da personalização; 0 no template padrão }
     Notification:
       type: object
       required: [id, business_key, template_key, channel, recipient, subject, status, status_reason, send_after, attempts, created_at]
@@ -3207,7 +3368,7 @@ components:
 
     ApiCredential:
       type: object
-      required: [id, name, prefix, scopes, created_at]
+      required: [id, name, prefix, scopes, created_at, version]
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
@@ -3217,6 +3378,7 @@ components:
         expires_at: { type: string, format: date-time, nullable: true }
         last_used_at: { type: string, format: date-time, nullable: true }
         revoked_at: { type: string, format: date-time, nullable: true }
+        version: { type: integer }
     ApiCredentialWithSecret:
       type: object
       required: [credential, secret]

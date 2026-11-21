@@ -320,17 +320,20 @@ func TestAdvancedAPICoupons(t *testing.T) {
 	}
 
 	archivePath := "/api/v1/coupons/" + pct["id"].(string) + "/archive"
-	archived, _ := c.expect(http.StatusOK, http.MethodPost, archivePath, nil)
-	if archived["status"] != "archived" || archived["version"] != float64(2) || archived["code"] != "BOAS-VINDAS10" {
-		t.Fatalf("arquivamento: %v", archived)
+	c.expectProblem(http.StatusPreconditionRequired, "if_match_required", http.MethodPost, archivePath, nil)
+	c.expectProblem(http.StatusPreconditionFailed, "version_mismatch", http.MethodPost, archivePath, nil, matchVersion(2)...)
+	archived, h := c.expect(http.StatusOK, http.MethodPost, archivePath, nil, matchVersion(pct["version"])...)
+	if archived["status"] != "archived" || archived["version"] != float64(2) || archived["code"] != "BOAS-VINDAS10" || h.Get("ETag") != `"2"` {
+		t.Fatalf("arquivamento: %v (ETag %q)", archived, h.Get("ETag"))
 	}
-	// Arquivar de novo não altera o cupom.
-	again, _ := c.expect(http.StatusOK, http.MethodPost, archivePath, nil)
+	// Arquivar de novo, na versão atual, não altera o cupom; com a anterior, 412.
+	again, _ := c.expect(http.StatusOK, http.MethodPost, archivePath, nil, matchVersion(2)...)
 	if again["status"] != "archived" || again["version"] != float64(2) {
 		t.Fatalf("segundo arquivamento alterou o cupom: %v", again)
 	}
-	c.expectProblem(http.StatusNotFound, "coupon_not_found", http.MethodPost, "/api/v1/coupons/"+uuid.NewString()+"/archive", nil)
-	c.expectProblem(http.StatusNotFound, "not_found", http.MethodPost, "/api/v1/coupons/nao-e-uuid/archive", nil)
+	c.expectProblem(http.StatusPreconditionFailed, "version_mismatch", http.MethodPost, archivePath, nil, matchVersion(1)...)
+	c.expectProblem(http.StatusNotFound, "coupon_not_found", http.MethodPost, "/api/v1/coupons/"+uuid.NewString()+"/archive", nil, matchVersion(1)...)
+	c.expectProblem(http.StatusNotFound, "not_found", http.MethodPost, "/api/v1/coupons/nao-e-uuid/archive", nil, matchVersion(1)...)
 
 	list, _ = c.expect(http.StatusOK, http.MethodGet, "/api/v1/coupons", nil)
 	coupons = byField(t, objects(t, list["data"]), "code")
@@ -360,7 +363,7 @@ func TestAdvancedAPISubscriptionDiscounts(t *testing.T) {
 	coupon(map[string]any{"code": "OUTROPLANO", "name": "Outro plano", "discount_type": "percent", "percent_off_bp": 500, "duration": "forever",
 		"applies_to_plan_ids": []string{other.ID.String()}})
 	old := coupon(map[string]any{"code": "ARQUIVADO", "name": "Arquivado", "discount_type": "percent", "percent_off_bp": 100, "duration": "once"})
-	c.expect(http.StatusOK, http.MethodPost, "/api/v1/coupons/"+old["id"].(string)+"/archive", nil)
+	c.expect(http.StatusOK, http.MethodPost, "/api/v1/coupons/"+old["id"].(string)+"/archive", nil, matchVersion(old["version"])...)
 
 	d, _ := c.expect(http.StatusCreated, http.MethodPost, subPath+"/discounts", map[string]any{"coupon_code": " fidelidade "}, "Idempotency-Key", idemKey())
 	if d["coupon_code"] != "FIDELIDADE" || d["coupon_id"] != loyalty["id"] || d["remaining_cycles"] != float64(3) || d["status"] != "active" {
@@ -1113,7 +1116,7 @@ func TestAdvancedAPITenantIsolation(t *testing.T) {
 		code                           string
 	}{
 		{"arquivar cupom", http.MethodPost, "/api/v1/coupons/" + couponA["id"].(string) + "/archive", "/api/v1/coupons/" + random + "/archive",
-			nil, nil, "coupon_not_found"},
+			nil, matchVersion(1), "coupon_not_found"},
 		{"trocar plano", http.MethodPost, subAPath + "/change-plan", "/api/v1/subscriptions/" + random + "/change-plan",
 			map[string]any{"plan_id": planA.ID, "timing": "next_cycle"}, []string{"If-Match", etagA}, "subscription_not_found"},
 		{"trocar quantidade", http.MethodPost, subAPath + "/change-quantity", "/api/v1/subscriptions/" + random + "/change-quantity",

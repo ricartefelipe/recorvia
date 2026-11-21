@@ -142,9 +142,44 @@ func TestConfigureAccountRegistersWebhookAndSaves(t *testing.T) {
 	}
 
 	// Cada configuração gera um token novo.
+	in.ExpectedVersion = got.Account.Version
 	again, err := f.svc.ConfigureAccount(context.Background(), f.tenantID, f.actor, in)
-	if err != nil || again.EndpointURL == got.EndpointURL {
-		t.Fatalf("reconfiguração gera novo endpoint: %v", err)
+	if err != nil || again.EndpointURL == got.EndpointURL || again.Account.Version != 2 {
+		t.Fatalf("reconfiguração gera novo endpoint e a versão seguinte: %+v %v", again.Account, err)
+	}
+}
+
+// A configuração exige a versão vista por quem configura (If-Match): 0 para o
+// provedor ainda não configurado. Divergente, o provedor não é chamado e nada
+// é gravado; a condição da gravação recusa também a configuração concorrente
+// que passou pela recusa antecipada.
+func TestConfigureAccountRequiresCurrentVersion(t *testing.T) {
+	f := newAccountsFixture(t)
+	in := asaasInput()
+	in.ExpectedVersion = 1
+	_, err := f.svc.ConfigureAccount(context.Background(), f.tenantID, f.actor, in)
+	wantAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	if len(f.gw.configureCalls) != 0 || len(f.store.saved) != 0 || len(f.store.audits) != 0 {
+		t.Fatal("versão divergente não chama o provedor nem grava")
+	}
+	in.ExpectedVersion = 0
+	if _, err := f.svc.ConfigureAccount(context.Background(), f.tenantID, f.actor, in); err != nil {
+		t.Fatal(err)
+	}
+	// Outra pessoa configurou o provedor enquanto esta configuração consultava o provedor.
+	f.gw.onConfigure = func() {
+		for id, a := range f.store.accounts {
+			if a.Provider == "asaas" {
+				a.Version++
+				f.store.accounts[id] = a
+			}
+		}
+	}
+	in.ExpectedVersion = 1
+	_, err = f.svc.ConfigureAccount(context.Background(), f.tenantID, f.actor, in)
+	wantAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	if len(f.store.saved) != 1 || len(f.store.audits) != 1 {
+		t.Fatal("a configuração concorrente não pode ser gravada")
 	}
 }
 
@@ -153,12 +188,14 @@ func TestConfigureAccountReplacesExistingConfiguration(t *testing.T) {
 	existing := ProviderAccount{ID: uuid.New(), TenantID: f.tenantID, Provider: "asaas", Environment: "sandbox", IsDefault: true,
 		CreatedAt: payNow.AddDate(0, -2, 0), Version: 4}
 	f.store.accounts[existing.ID] = existing
-	got, err := f.svc.ConfigureAccount(context.Background(), f.tenantID, f.actor, asaasInput())
+	in := asaasInput()
+	in.ExpectedVersion = existing.Version
+	got, err := f.svc.ConfigureAccount(context.Background(), f.tenantID, f.actor, in)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a := got.Account
-	if a.ID != existing.ID || !a.CreatedAt.Equal(existing.CreatedAt) || a.Version != 4 || !a.IsDefault {
+	if a.ID != existing.ID || !a.CreatedAt.Equal(existing.CreatedAt) || a.Version != 5 || !a.IsDefault {
 		t.Fatalf("a configuração anterior é substituída preservando identidade e padrão: %+v", a)
 	}
 	if !a.UpdatedAt.Equal(payNow) || a.APIKey != validAPIKey {

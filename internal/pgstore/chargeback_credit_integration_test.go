@@ -38,7 +38,7 @@ func (h *payHarness) overpaidCharge(t *testing.T) (billing.Invoice, payments.Cha
 
 func (h *payHarness) creditBalance(t *testing.T, customerID uuid.UUID) int64 {
 	t.Helper()
-	bal, _, err := h.env.Store.Customers().Credits(context.Background(), h.tn.ID, customerID)
+	bal, _, _, err := h.env.Store.Customers().Credits(context.Background(), h.tn.ID, customerID, 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestChargebackConsumesOverpaymentCreditWithSimulator(t *testing.T) {
 			h.sum(t, `SELECT count(*) FROM disputes WHERE tenant_id = $1`) != 1 {
 			t.Fatalf("reenvio alterou a disputa: %+v", again)
 		}
-		list, err := h.env.Store.ListDisputes(ctx, h.tn.ID, &c.ID, 10)
+		list, _, err := h.env.Store.ListDisputes(ctx, h.tn.ID, &c.ID, 10, "")
 		if err != nil || len(list) != 1 || list[0].CreditAmount.Amount() != 2500 {
 			t.Fatalf("disputa listada: %+v %v", list, err)
 		}
@@ -241,12 +241,13 @@ func (h *payHarness) settlePendingRefund(t *testing.T, st *pendingRefunds, c pay
 	if err != nil || run.Status != payments.RunCompleted {
 		t.Fatalf("conciliação: %+v %v", run, err)
 	}
-	list, err := h.env.Store.ListDiscrepancies(ctx, h.tn.ID, "open", string(payments.DiscrepancyRefundPending), 10)
+	list, _, err := h.env.Store.ListDiscrepancies(ctx, h.tn.ID, "open", string(payments.DiscrepancyRefundPending), 10, "")
 	if err != nil || len(list) != 1 || list[0].RefundID == nil || *list[0].RefundID != r.ID {
 		t.Fatalf("reembolso pendente na conciliação: %+v %v", list, err)
 	}
 	if _, err := h.pay.ResolveDiscrepancy(ctx, h.tn.ID, h.tn.Actor, &h.tn.Owner.ID, payments.ResolveInput{ID: list[0].ID,
-		Resolution: payments.ResolutionAcceptProvider, Justification: "Resultado do reembolso conferido no extrato do provedor."}); err != nil {
+		Resolution: payments.ResolutionAcceptProvider, Justification: "Resultado do reembolso conferido no extrato do provedor.",
+		ExpectedVersion: discrepancyVersion(t, h.pay, h.tn.ID, list[0].ID)}); err != nil {
 		t.Fatalf("adoção do provedor: %v", err)
 	}
 }

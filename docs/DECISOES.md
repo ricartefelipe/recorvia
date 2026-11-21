@@ -2252,3 +2252,73 @@ códigos estáveis traduzidos na interface, como nos demais enums.
 **Consequências:** avisos de suspensão compostos fora da janela passam a sair na abertura seguinte. Não há
 migration: a regra é aplicada no envio, inclusive a avisos já agendados. Os eventos e as tentativas expostos
 seguem as regras de expurgo da ADR-060.
+
+## ADR-083 Concorrência otimista nas alterações versionadas e listagens por cursor com ordenação em allowlist
+**Status:** aceita. Substitui, na ADR-046, a listagem de credenciais sem cursor limitada a 200 itens.
+**Contexto:** o RF-15 pede paginação com limite, filtros e ordenação em allowlist, ordenação determinística e
+concorrência otimista (If-Match/version). Cerca de dez alterações de recursos com coluna `version` não exigiam
+`If-Match` (papel e remoção de membro, templates de e-mail, resolução de divergência, endereço de cobrança,
+arquivamento de cliente e de cupom, rotação do segredo e remoção de endpoint de webhook, nova versão de preço,
+provedor de pagamento, rotação e revogação de credencial): a última gravação vencia em silêncio. Oito listagens que
+crescem com a operação cortavam em 100 ou 200 itens sem `next_cursor` (disputas, divergências e execuções de
+conciliação, operações de pagamento, mensagens não processadas, convites, movimentos de crédito e credenciais de
+API), e `sort` fora da allowlist só era recusado na listagem de clientes; nas demais era ignorado.
+**Decisão:**
+- **Exigência central do If-Match.** As alterações versionadas ficam em `versionedRoutes`
+  (`internal/httpapi/versioning.go`): sem `If-Match`, a requisição é recusada com 428 `if_match_required` antes do
+  handler (depois da autenticação e da permissão). O handler lê a versão e o caso de uso a usa na condição da
+  gravação (`WHERE ... AND version = @version`), na mesma transação, sobre a linha bloqueada: versão divergente
+  responde 412 `version_mismatch` e nada é gravado nem auditado. Nos caminhos sem gravação (cliente ou cupom já
+  arquivado, credencial já revogada, endereço igual ao atual), a versão da linha bloqueada é conferida com a do
+  `If-Match`. A resposta de sucesso com corpo traz o `ETag` da versão gravada; as remoções respondem 204 sem `ETag`.
+- **Partes de outro recurso.** O endereço de cobrança faz parte da ficha do cliente (`CustomerDetails`, com o `ETag`
+  do cliente): o `If-Match` é a versão do cliente e a gravação gera a versão seguinte do cliente
+  (`BumpCustomerVersion`), sem coluna nova em `customer_billing_addresses`. A nova versão de preço troca o preço
+  vigente do plano (o que já gravava o plano): o `If-Match` e o `ETag` são a versão do plano. Os segredos fazem parte
+  do endpoint de webhook: a rotação passa a gerar a versão seguinte do endpoint.
+- **Versão 0 dos recursos ainda não gravados.** O template padrão (não personalizado) é exposto com `version` 0 e o
+  provedor ainda não configurado (somente em `available`) também tem versão 0: `If-Match: "0"` cria a
+  personalização ou a configuração com `INSERT ... ON CONFLICT DO NOTHING`, e a criação concorrente (que já gravou a
+  versão 1) recebe 412. Acima de 0, a gravação é um `UPDATE` condicionado à versão.
+- **Casos de uso em duas fases.** A resolução de divergência e a configuração do provedor consultam o provedor fora
+  da transação: a versão é conferida antes da chamada (recusa antecipada, sem chamar o provedor) e a condição da
+  gravação decide. Uma nova detecção da divergência durante a consulta gera outra versão e a resolução é recusada.
+- **Paginação por keyset.** As oito listagens aceitam `limit` (1 a 100, padrão 25) e `cursor` e devolvem
+  `next_cursor` (nulo na última página), ordenadas por colunas que não mudam depois da gravação, com desempate pelo
+  identificador: disputas por `(opened_at, id)`, divergências e operações por `(created_at, id)` (as operações
+  ordenavam por `updated_at`, que muda a cada tentativa e as deslocaria entre as páginas), execuções por
+  `(started_at, id)`, mensagens não processadas por `(failed_at, id)`, convites e movimentos de crédito por
+  `(created_at, id)`. A resposta dos créditos (`CreditBalance`) mantém o saldo e traz em `entries` a página dos
+  movimentos, com `next_cursor`. As credenciais continuam com as ativas primeiro: a posição é `(ativa, criação, id)`
+  e a situação é avaliada no instante da primeira página, levado no cursor (com tipo e aceito somente na forma
+  canônica), para que uma credencial que expira durante a navegação não seja repetida nem pulada. Cursor inválido
+  responde 422 `invalid_cursor`. A reexecução de operação deixa de procurar a operação na listagem e a lê pelo
+  identificador.
+- **Ordenação em allowlist.** `listRoutes` (`internal/httpapi/listing.go`) lista todas as listagens com a allowlist
+  de `sort` de cada uma (hoje só clientes ordena por parâmetro): `sort` fora da allowlist, repetido ou numa listagem
+  sem ordenação por parâmetro é recusado com 422 `invalid_sort` antes do handler.
+- **Contrato.** Os testes de contrato exigem que o parâmetro `IfMatch` apareça exatamente nas operações de
+  `versionedRoutes`, com as respostas 412 e 428 e o header `ETag` (componente `headers/ETag`) nas respostas de
+  sucesso com corpo; que toda listagem do contrato esteja em `listRoutes`, com o enum de `sort` igual à allowlist e
+  a resposta 422; e que as listagens com `next_cursor` declarem `limit` e `cursor`. Membros, credenciais,
+  divergências, contas de provedor e templates expõem `version`.
+
+**Alternativas:** opções por rota (como `idempotent()`) foram descartadas em favor das duas listas centrais, que
+valem também para as rotas da equipe e do portal e mantêm a regra num único ponto de `handle`. `If-None-Match: *`
+para criar o template personalizado e a conta do provedor foi descartado: seriam dois mecanismos de pré-condição, e o
+template padrão já é exposto com versão própria. Uma coluna `version` em `customer_billing_addresses` (migration) foi
+descartada: o endereço é lido e gravado como parte da ficha do cliente.
+**Consequências:** clientes da API passam a enviar `If-Match` nas alterações listadas (sem ele, 428) e a seguir
+`next_cursor` nas oito listagens, que devolvem 25 itens por padrão em vez de até 100 ou 200; as operações de
+pagamento passam a vir pela criação, não pela última atualização; `sort` não previsto passa a 422. Rotações
+concorrentes da mesma credencial na mesma versão não são mais todas gravadas: uma vence e as demais recebem 412. Quem
+perde a corrida da configuração do provedor depois de chamá-lo recebe 412 com o webhook já registrado no provedor
+com o token não gravado; a repetição com a versão atual registra o webhook de novo. Não há migration: todas as
+tabelas envolvidas já tinham `version`. Ficam sem `If-Match` as alterações de tabelas sem versão, que são transições
+de situação protegidas pela situação atual (409) ou atualizações parciais por campo (revogação de convite,
+cancelamento de reajuste programado, remoção de desconto, contatos do cliente, links do portal, reprocessamento de
+mensagens e de operações, reenvio de webhook), e, por ora, a troca do plano da plataforma e o atendimento dos
+pedidos de serviços adicionais, que têm versão mas não exigem `If-Match`. As listagens de catálogo e configuração
+(produtos, planos, cupons, métricas, membros, endpoints de webhook, políticas e templates) continuam sem cursor, com
+os limites atuais. A listagem de operações por criação não tem índice próprio, como a anterior por atualização. A
+interface envia o `If-Match` com a versão exibida e percorre as listagens pelo `next_cursor`.

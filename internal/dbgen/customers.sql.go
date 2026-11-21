@@ -50,6 +50,26 @@ func (q *Queries) AnonymizeCustomer(ctx context.Context, arg AnonymizeCustomerPa
 	return i, err
 }
 
+const bumpCustomerVersion = `-- name: BumpCustomerVersion :execrows
+UPDATE customers SET version = version + 1 WHERE tenant_id = $1 AND id = $2 AND version = $3
+`
+
+type BumpCustomerVersionParams struct {
+	TenantID uuid.UUID
+	ID       uuid.UUID
+	Version  int32
+}
+
+// Nova versão do cliente por alteração de parte da ficha gravada em outra
+// tabela (endereço de cobrança), condicionada à versão esperada (If-Match).
+func (q *Queries) BumpCustomerVersion(ctx context.Context, arg BumpCustomerVersionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, bumpCustomerVersion, arg.TenantID, arg.ID, arg.Version)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const customerAnonymizationDetails = `-- name: CustomerAnonymizationDetails :one
 SELECT details FROM audit_log
  WHERE tenant_id = $1 AND resource_type = 'customer' AND resource_id = $2 AND action = 'customer.anonymized'
@@ -540,16 +560,29 @@ func (q *Queries) ListContacts(ctx context.Context, arg ListContactsParams) ([]C
 }
 
 const listCreditEntries = `-- name: ListCreditEntries :many
-SELECT id, tenant_id, customer_id, amount, currency, kind, invoice_id, reason, created_by, request_key, created_at FROM customer_credit_entries WHERE tenant_id = $1 AND customer_id = $2 ORDER BY created_at DESC, id DESC LIMIT 200
+SELECT id, tenant_id, customer_id, amount, currency, kind, invoice_id, reason, created_by, request_key, created_at FROM customer_credit_entries
+ WHERE tenant_id = $1 AND customer_id = $2
+   AND ($3::timestamptz IS NULL OR (created_at, id) < ($3::timestamptz, $4::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT $5
 `
 
 type ListCreditEntriesParams struct {
 	TenantID   uuid.UUID
 	CustomerID uuid.UUID
+	CursorTs   *time.Time
+	CursorID   *uuid.UUID
+	RowLimit   int32
 }
 
 func (q *Queries) ListCreditEntries(ctx context.Context, arg ListCreditEntriesParams) ([]CustomerCreditEntry, error) {
-	rows, err := q.db.Query(ctx, listCreditEntries, arg.TenantID, arg.CustomerID)
+	rows, err := q.db.Query(ctx, listCreditEntries,
+		arg.TenantID,
+		arg.CustomerID,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

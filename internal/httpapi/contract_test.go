@@ -185,3 +185,111 @@ func TestFinancialCreationRoutesAreIdempotent(t *testing.T) {
 		}
 	}
 }
+
+// As alterações versionadas (versionedRoutes) e somente elas declaram o
+// parâmetro IfMatch no contrato, com as respostas 412 e 428 e o ETag na
+// resposta de sucesso com corpo (ADR-083).
+func TestVersionedRoutesMatchContract(t *testing.T) {
+	a, _ := NewRouter(Deps{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Clock: clock.System{}})
+	registered := map[string]bool{}
+	for _, r := range a.Routes() {
+		registered[r.Method+" "+r.Pattern] = true
+	}
+	for key := range versionedRoutes {
+		if !registered[key] {
+			t.Errorf("rota versionada sem registro: %s", key)
+		}
+	}
+	for key, op := range specOperations(t) {
+		declared := false
+		for _, p := range op.Parameters {
+			if p.Value != nil && p.Value.In == "header" && p.Value.Name == "If-Match" {
+				declared = true
+			}
+		}
+		if declared != versionedRoutes[key] {
+			t.Errorf("%s: If-Match no contrato = %v, em versionedRoutes = %v", key, declared, versionedRoutes[key])
+			continue
+		}
+		if !declared {
+			continue
+		}
+		for _, status := range []string{"412", "428"} {
+			if r := op.Responses.Value(status); r == nil || r.Ref != "#/components/responses/Problem" {
+				t.Errorf("%s: resposta %s (Problem) não declarada", key, status)
+			}
+		}
+		for status, r := range op.Responses.Map() {
+			if !strings.HasPrefix(status, "2") || r.Value == nil || len(r.Value.Content) == 0 {
+				continue
+			}
+			if _, ok := r.Value.Headers["ETag"]; !ok {
+				t.Errorf("%s: resposta %s sem o header ETag", key, status)
+			}
+		}
+	}
+}
+
+// Toda listagem do contrato (resposta com data em lista ou com next_cursor)
+// está em listRoutes, com a allowlist de sort igual ao enum do contrato e a
+// resposta 422; as listagens com next_cursor declaram limit e cursor.
+func TestListRoutesMatchContract(t *testing.T) {
+	a, _ := NewRouter(Deps{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Clock: clock.System{}})
+	registered := map[string]bool{}
+	for _, r := range a.Routes() {
+		registered[r.Method+" "+r.Pattern] = true
+	}
+	for key := range listRoutes {
+		if !registered[key] || !strings.HasPrefix(key, "GET ") {
+			t.Errorf("listagem sem rota GET registrada: %s", key)
+		}
+	}
+	doc, err := openapi3.NewLoader().LoadFromData(api.OpenAPI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, item := range doc.Paths.Map() {
+		op := item.Get
+		if op == nil {
+			continue
+		}
+		key := "GET " + path
+		props := map[string]*openapi3.SchemaRef{}
+		if r := op.Responses.Value("200"); r != nil && r.Value != nil {
+			if mt := r.Value.Content.Get("application/json"); mt != nil && mt.Schema != nil && mt.Schema.Value != nil {
+				props = mt.Schema.Value.Properties
+			}
+		}
+		data, paged := props["data"], props["next_cursor"] != nil
+		isList := paged || (data != nil && data.Value != nil && data.Value.Type.Is(openapi3.TypeArray))
+		allowed, listed := listRoutes[key]
+		if isList != listed {
+			t.Errorf("%s: listagem no contrato = %v, em listRoutes = %v", key, isList, listed)
+			continue
+		}
+		if !isList {
+			continue
+		}
+		if r := op.Responses.Value("422"); r == nil || r.Ref != "#/components/responses/Problem" {
+			t.Errorf("%s: resposta 422 (Problem) não declarada", key)
+		}
+		params := map[string]*openapi3.Parameter{}
+		for _, p := range append(append(openapi3.Parameters{}, item.Parameters...), op.Parameters...) {
+			if p.Value != nil && p.Value.In == "query" {
+				params[p.Value.Name] = p.Value
+			}
+		}
+		var enum []string
+		if p := params["sort"]; p != nil && p.Schema != nil && p.Schema.Value != nil {
+			for _, v := range p.Schema.Value.Enum {
+				enum = append(enum, v.(string))
+			}
+		}
+		if strings.Join(enum, ",") != strings.Join(allowed, ",") {
+			t.Errorf("%s: sort do contrato %v difere da allowlist %v", key, enum, allowed)
+		}
+		if paged != (params["limit"] != nil && params["cursor"] != nil) {
+			t.Errorf("%s: next_cursor = %v, mas limit e cursor declarados = %v", key, paged, params["limit"] != nil && params["cursor"] != nil)
+		}
+	}
+}
