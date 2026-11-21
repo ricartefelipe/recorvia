@@ -1581,6 +1581,54 @@ func TestHandleInvoiceIssued(t *testing.T) {
 	if err := h.svc.HandleInvoiceIssued(context.Background(), h.tenantID, hinv.ID, msg); !errors.Is(err, boom) {
 		t.Fatalf("falha no inbox: %v", err)
 	}
+	if len(h.store.charges) != 0 || len(h.gw.createCalls) != 0 {
+		t.Fatal("sem inbox, nenhuma cobrança é gravada nem solicitada")
+	}
+	// Falha depois da marcação desfaz também o inbox: a reentrega cria a cobrança.
+	k := newPayFixture(t)
+	kinv := k.addInvoice(t, 10000)
+	k.store.errs["InsertOperation"] = boom
+	if err := k.svc.HandleInvoiceIssued(context.Background(), k.tenantID, kinv.ID, msg); !errors.Is(err, boom) {
+		t.Fatalf("falha na gravação da operação: %v", err)
+	}
+	if len(k.store.inbox) != 0 || len(k.store.charges) != 0 {
+		t.Fatal("falha desfaz o inbox e a cobrança")
+	}
+	delete(k.store.errs, "InsertOperation")
+	if err := k.svc.HandleInvoiceIssued(context.Background(), k.tenantID, kinv.ID, msg); err != nil || len(k.store.charges) != 1 {
+		t.Fatalf("reentrega após falha: %v %d", err, len(k.store.charges))
+	}
+}
+
+// Regressão: o inbox era marcado depois da cobrança, numa transação própria,
+// e a reentrega depois de uma recusa do provedor chamava RequestCharge, que
+// criava a tentativa 2 no provedor. A reentrega da mensagem já registrada não
+// faz nada, depois de recusa ou de sucesso; uma mensagem nova (outro evento)
+// continua seguindo a regra da cobrança.
+func TestHandleInvoiceIssuedRedeliveryCreatesNoCharge(t *testing.T) {
+	for name, results := range map[string][]gwResult{"depois de recusa": {{err: errPermanent}}, "depois de sucesso": nil} {
+		t.Run(name, func(t *testing.T) {
+			f := newPayFixture(t)
+			inv := f.addInvoice(t, 10000)
+			f.gw.createResults = results
+			msg := uuid.New()
+			if err := f.svc.HandleInvoiceIssued(context.Background(), f.tenantID, inv.ID, msg); err != nil {
+				t.Fatal(err)
+			}
+			first := f.chargesOf(inv.ID)
+			if len(first) != 1 || len(f.gw.createCalls) != 1 {
+				t.Fatalf("primeira entrega: %+v", first)
+			}
+			for range 3 {
+				if err := f.svc.HandleInvoiceIssued(context.Background(), f.tenantID, inv.ID, msg); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := f.chargesOf(inv.ID); len(got) != 1 || got[0].Status != first[0].Status || len(f.gw.createCalls) != 1 {
+				t.Fatalf("reentrega criou cobrança: %+v, %d criações", got, len(f.gw.createCalls))
+			}
+		})
+	}
 }
 
 func TestRetryChargeAndGetters(t *testing.T) {
