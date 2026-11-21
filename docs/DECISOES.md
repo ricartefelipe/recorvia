@@ -1720,3 +1720,149 @@ há estorno da baixa nem operação para o recebimento de valor já baixado como
 `invoice.bad_debt_recovered` das faturas), que exige decisão do financeiro sobre o lançamento compensatório;
 o recebimento da baixa entra direto no disponível liquidado, sem conciliação com extrato bancário; disputas
 perdidas antes da ADR-070 continuam sem valor a recuperar (o crédito permaneceu com o cliente).
+
+## ADR-080 Ciclo do pagamento pelo provedor: confirmação, recebimento e liquidação em contas distintas
+**Status:** aceita.
+**Contexto:** o RF-12 pede contas distintas para faturamento, contas a receber, confirmação, taxas, valores
+em liquidação, reembolso e chargeback. As situações `CONFIRMED` e `RECEIVED` do Asaas (e `paid` do simulador,
+o único estado pago até então) caíam no mesmo lançamento `payment.confirmed`, com débito em
+`provider_clearing` e a taxa reconhecida na confirmação; `ledger.SettlementReceived`, a passagem para o
+disponível, não era chamada fora de testes. Os valores em liquidação só acumulavam, a confirmação não
+tinha conta própria e o pagamento de cartão ainda não creditado pelo provedor aparecia como se estivesse
+liquidado.
+**Decisão:**
+- **Plano de contas do provedor.** Nova conta `provider_confirmed` ("Pagamentos confirmados no provedor",
+  ativo): o valor bruto que o provedor confirmou e ainda não creditou (a confirmação). `provider_clearing`
+  ("Valores em liquidação no provedor", ativo) passa a ser a conta de passagem de toda movimentação com o
+  provedor, liquidada no disponível. `cash` ("Disponível liquidado", ativo) recebe o líquido creditado pelo
+  provedor, além dos recebimentos manuais e das baixas recebidas (ADR-073). Faturamento
+  (`billed_revenue`), contas a receber (`accounts_receivable`), taxas (`provider_fees`), reembolsos
+  (`refunds`) e chargebacks (`chargebacks`) continuam como estavam. A conta nova é criada com o plano no
+  primeiro lançamento do tenant que a usa (como as demais), sem migration.
+- **Situações.** Confirmado é a situação paga e ainda não creditada (Asaas `CONFIRMED`, simulador
+  `confirmed`, nova ação `confirm`). Recebido é qualquer situação paga além da confirmada
+  (`ProviderStatus.IsReceived`): Asaas `RECEIVED`, `RECEIVED_IN_CASH` e `DUNNING_RECEIVED`, simulador `paid`
+  (ações `pay` e `receive`), e as situações posteriores ao recebimento (reembolso, chargeback). Reembolso e
+  chargeback pressupõem valor processado pelo provedor: o pagamento ainda só confirmado é dado como recebido
+  antes da movimentação (`postChargeMovement`), para que essas movimentações usem sempre os valores em
+  liquidação e nada fique esquecido em `provider_confirmed`.
+- **Confirmação** (`payment.confirmed`, chave `payment.confirmed:<pagamento>`): D `provider_confirmed` /
+  C `accounts_receivable` pelo valor aplicado à fatura; o excedente (`payment.overpayment`) debita
+  `provider_confirmed` em vez de `provider_clearing`. A taxa não é lançada na confirmação: o provedor a retém
+  do valor creditado. O pagamento de fatura já quitada ou cancelada vira crédito integral do cliente, também
+  em `provider_confirmed`; o lançamento `payment.provider_fee` deixa de existir.
+- **Recebimento** (`payment.received`, chave `payment.received:<pagamento>`): D `provider_clearing` /
+  C `provider_confirmed` pelo valor ainda confirmado do pagamento (saldo de `provider_confirmed` nos
+  lançamentos que referenciam o pagamento) e D `provider_fees` / C `provider_clearing` pela taxa registrada
+  no pagamento. O valor ainda confirmado vem do próprio ledger (`GetChargePaymentPendingReceipt`): depois do
+  primeiro recebimento ele é zero, o que torna o recebimento idempotente e independente da ordem dos
+  webhooks, e um retrato antigo (confirmado depois de recebido) não tem efeito.
+- **Liquidação** (`ledger.Settlement`, chave `settlement:<chave do lançamento de origem>`, mesma referência
+  e mesmo instante): o efeito líquido de cada movimentação com o provedor nos valores em liquidação vai para
+  o disponível. Débito líquido vira `settlement.received` (D `cash` / C `provider_clearing`: recebimento,
+  liberação de retenção, estorno do chargeback na disputa ganha, ajuste a favor); crédito líquido vira
+  `settlement.debited` (D `provider_clearing` / C `cash`: reembolso, retenção de chargeback, chargeback de
+  reembolso recusado, ajuste contra). Os provedores integrados creditam e debitam o saldo no momento do
+  evento, por isso a liquidação acompanha cada movimentação e `provider_clearing` volta a zero; saldo nessa
+  conta indica movimentação ainda não liquidada.
+- **Reembolsos, disputas e conciliação.** `refund.succeeded`, `dispute.opened`, `dispute.hold_released`,
+  `dispute.hold_restored`, o estorno de `dispute.opened` (disputa ganha) e `reconciliation.adjustment` mantêm
+  as partidas contra `provider_clearing` e ganham a liquidação correspondente. `dispute.credit_reversed` não
+  movimenta o provedor e não tem liquidação. O ajuste de conciliação é liquidado na hora mesmo antes do
+  recebimento: o disponível fica com a diferença até o recebimento creditar o líquido local, e a soma final
+  é o líquido informado pelo provedor.
+- **Painel.** "Receita recebida" continua sendo a soma dos pagamentos confirmados no mês (o cliente pagou),
+  e o novo indicador `pending_provider_receipt` ("A receber do provedor") mostra o saldo atual de
+  `provider_confirmed`, a parte ainda não creditada pelo provedor.
+
+**Exemplo** (bruto R$ 100,00, taxa R$ 3,48, reembolso de R$ 30,00):
+
+| Lançamento | Débito | Crédito |
+|---|---|---|
+| `invoice.issued` | contas a receber 100,00 | receita faturada 100,00 |
+| `payment.confirmed` (cartão confirmado) | pagamentos confirmados 100,00 | contas a receber 100,00 |
+| `payment.received` (crédito do provedor) | valores em liquidação 100,00; taxas 3,48 | pagamentos confirmados 100,00; valores em liquidação 3,48 |
+| `settlement.received` | disponível 96,52 | valores em liquidação 96,52 |
+| `refund.succeeded` | reembolsos 30,00 | valores em liquidação 30,00 |
+| `settlement.debited` | valores em liquidação 30,00 | disponível 30,00 |
+
+No Pix ou boleto (recebido direto), `payment.confirmed`, `payment.received` e `settlement.received` são
+gravados no mesmo processamento. Saldo final: receita faturada 100,00, reembolsos 30,00, taxas 3,48,
+disponível 66,52 e as demais contas zeradas.
+
+**Alternativas:** fundir confirmação e valores em liquidação (o recebimento seria só a transferência para o
+disponível) foi descartado: o RF-12 pede contas distintas, e a confirmação ainda não creditada precisa
+aparecer separada do que já está em liquidação. Manter os valores em liquidação como saldo no provedor até um
+repasse ao banco foi descartado: os provedores integrados não informam repasses, a conta só acumularia e o
+saldo creditado no provedor, que o tenant já pode usar, não apareceria como disponível. Reconhecer a taxa na
+confirmação foi descartado: o provedor a retém no crédito, e a confirmação de cartão pode ser estornada antes
+dele. Uma coluna ou tabela de recebimento por pagamento foi descartada: o saldo de `provider_confirmed` por
+pagamento já é a informação, sem estado duplicado (e `payments` é imutável).
+**Consequências:** cada pagamento pelo provedor gera três lançamentos e cada movimentação com o provedor,
+dois.
+- **Recebimento perdido na conciliação.** A conciliação carrega em lote, para as cobranças comparadas, o valor
+  ainda em `provider_confirmed` (`ListChargesPendingReceipt`). Cobrança paga aqui, com valor pendente, e
+  recebida no provedor gera `payment_not_reflected` na direção `provider_received` (chave
+  `payment_not_reflected:<cobrança>:provider_received`, valor local 0 e do provedor o pendente). A resolução
+  `accept_provider` exige o provedor recebido na consulta, lança o recebimento e a liquidação
+  (`ensureReceived`) e confere que a divergência deixou de existir; a execução seguinte não a encontra mais, e
+  o webhook atrasado não lança nada de novo.
+
+**Limitações.** Dados anteriores a esta decisão não são reescritos (o ledger é imutável) nem recebem
+lançamento de transição: pagamentos confirmados antes dela não têm valor em `provider_confirmed`, e o
+recebimento posterior não lança nada; o saldo que eles deixaram em `provider_clearing` permanece, e reembolsos
+e chargebacks posteriores sobre eles são liquidados no disponível, que pode ficar negativo enquanto o saldo
+antigo continua nos valores em liquidação. Não há ambiente de produção com esses dados (só bancos locais de
+demonstração, que podem ser recriados com `make reset`), por isso a liquidação de recuperação desses
+lançamentos (por cobrança e por tenant) foi adiada; se for necessária, cada lançamento antigo que movimenta
+`provider_clearing` sem liquidação pode receber `settlement:<chave original>` de forma idempotente, pelo
+mesmo `ledger.Settlement`. Reembolso ou chargeback de pagamento só confirmado é tratado como posterior ao
+recebimento, inclusive a taxa: se o provedor devolver a taxa nesse caso, a diferença aparece na conciliação.
+
+## ADR-081 Aviso de suspensão na janela da régua; motivo e linha do tempo do histórico de envio
+**Status:** aceita.
+**Contexto:** o RF-13 pede a régua com "janela de horário e fuso do tenant", mas só os lembretes
+(notificações com `policy_id`) passavam pela janela no envio (ADR-040): o aviso de assinatura suspensa,
+composto na mesma execução da régua que suspende, saía no instante da suspensão, inclusive de madrugada no
+fuso do tenant. O histórico de envio também estava incompleto: a listagem não trazia o motivo da situação
+(`status_reason`), que ainda ficava vazio nos adiamentos, e a linha do tempo gravada em `notification_events`
+e as tentativas de `webhook_delivery_attempts` não eram expostas.
+**Decisão:**
+- **Janela no aviso de suspensão.** O aviso de suspensão faz parte da régua e respeita a janela
+  `[início, fim)` da política que aplicou a suspensão, no fuso do tenant, verificada no envio como nos
+  lembretes: fora da janela é adiado para a abertura seguinte (`outside_send_window`, com o instante no
+  detalhe do evento). A política vem da suspensão identificada pela chave de negócio
+  `subscription_suspended:<suspensão>` (consulta `GetSuspensionSendWindow`, `collection_suspensions` com
+  `collection_policies`), sem coluna nova: `policy_id` continua exclusivo dos lembretes, porque a constraint
+  `notifications_step` o amarra ao passo da régua e as contagens de lembretes usam `policy_id IS NOT NULL`. A
+  janela vale também para alterações da política depois da suspensão e para as retentativas. Aviso sem
+  suspensão identificável não tem janela.
+- **Aviso da suspensão encerrada.** O aviso é da suspensão da chave: antes do envio, a suspensão precisa estar
+  ativa em `collection_suspensions` (`GetSuspensionActive`). Encerrada (pagamento regularizado, reativação ou
+  cancelamento), o aviso adiado é cancelado com `subscription_not_suspended`, mesmo que a assinatura tenha
+  sido suspensa de novo: a nova suspensão tem aviso próprio, com a sua chave.
+- **Sem limite de frequência no aviso.** O limite diário de mensagens por cliente continua só nos lembretes: o
+  aviso de suspensão é único por suspensão e informa uma consequência já aplicada; adiá-lo para o dia seguinte
+  por causa de lembretes do mesmo dia atrasaria a informação de que o serviço foi suspenso. Ele também não
+  entra na contagem dos lembretes.
+- **Motivo da situação atual.** `status_reason` passa a acompanhar a situação corrente: além de cancelamento,
+  supressão e falha, registra o adiamento (`outside_send_window`, `frequency_limit`) e a nova tentativa agendada
+  (`retry_scheduled`); é limpo na reivindicação da tentativa e no envio. A listagem
+  (`GET /api/v1/notifications`) expõe `status_reason` (código estável, vazio sem motivo) e a interface traduz
+  os códigos na aba "Histórico de envios".
+- **Linha do tempo.** `GET /api/v1/notifications/{id}/events` devolve os eventos em ordem cronológica
+  (situação, motivo, tentativa, detalhe e instante), com a mesma permissão da listagem (`collections.read`): os
+  eventos não contêm dados além dos já exibidos na listagem (destinatários e último erro). Notificação de
+  outro tenant ou inexistente: 404.
+- **Tentativas de webhooks enviados.** `GET /api/v1/webhook-deliveries/{id}/attempts` devolve cada tentativa
+  (número, início, duração, código HTTP ou ausência de resposta, erro e quantidade de assinaturas), com
+  `webhooks.read`. Entrega de endpoint removido responde 404, como a listagem de entregas.
+
+**Alternativas:** gravar `policy_id` no aviso de suspensão foi descartado por misturá-lo aos lembretes
+(substituição por passo posterior, cancelamento na quitação e limite diário passariam a valer para ele). Usar
+a política padrão vigente no envio foi descartado: a suspensão registra a política que a aplicou, e a janela
+deve ser a dela mesmo que a padrão mude. Uma descrição em português no contrato foi descartada em favor de
+códigos estáveis traduzidos na interface, como nos demais enums.
+**Consequências:** avisos de suspensão compostos fora da janela passam a sair na abertura seguinte. Não há
+migration: a regra é aplicada no envio, inclusive a avisos já agendados. Os eventos e as tentativas expostos
+seguem as regras de expurgo da ADR-060.

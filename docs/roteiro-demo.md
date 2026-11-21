@@ -31,7 +31,11 @@ Mailpit em http://localhost:8025 e RabbitMQ em http://localhost:15672.
    pagamento*. O simulador envia o webhook assinado (HMAC com timestamp); a API persiste e
    responde 200; o worker aplica o pagamento.
 7. **Observar**: a fatura fica *paga*; em *Pagamentos*, o recebimento com taxa do provedor; em
-   *Ledger*, receita faturada, valores em liquidação e taxas (contas a receber zerada); em
+   *Ledger*, receita faturada, taxas e o líquido no disponível liquidado, com contas a receber, pagamentos
+   confirmados no provedor e valores em liquidação zerados (lançamentos `payment.confirmed`,
+   `payment.received` e `settlement.received` do pagamento). Para ver a etapa de confirmação (cartão no
+   prazo de recebimento), use *Confirmar com crédito posterior* no checkout: o valor fica em pagamentos
+   confirmados no provedor e em *A receber do provedor* no dashboard até *Creditar o recebimento*; em
    *Auditoria*, a sequência `invoice.issued → charge.requested → payment_operation.succeeded →
    payment.applied`; no *Dashboard*, MRR, faturado e recebido do mês.
 8. **Repetir o evento**: reenvie os webhooks da cobrança:
@@ -46,7 +50,8 @@ Mailpit em http://localhost:8025 e RabbitMQ em http://localhost:15672.
       (`POST /api/v1/charges/{id}/refunds` com `Idempotency-Key`) mostra *Reembolso concluído*; a cobrança
       fica *Parcialmente reembolsada*, o reembolsável cai para o saldo restante e a fatura continua paga,
       com a devolução no histórico. Em *Reembolsos* aparece o pedido com o identificador do provedor; no
-      *Ledger*, o lançamento `refund.succeeded` (débito em reembolsos, crédito em valores em liquidação).
+      *Ledger*, o lançamento `refund.succeeded` (débito em reembolsos, crédito em valores em liquidação) e a
+      liquidação `settlement.debited` (o valor sai do disponível liquidado).
       Valor acima do reembolsável é recusado no formulário e pela API (409 `refund_exceeds_balance`).
    2. *Divergência no provedor*: altere a taxa da cobrança no simulador sem notificar o Recorvia. O
       identificador no simulador aparece no detalhe da cobrança (*Identificador no provedor*) e no
@@ -101,7 +106,9 @@ curl -X POST http://localhost:8090/sim/scenarios -d '{"api_key":"sim_acme_demons
 | `refund_error_after_success` | próximo reembolso efetivado com resposta perdida: reembolso `unknown`, resolvido pela consulta sem repetir |
 | `cancel_unavailable` | próximo cancelamento no provedor indisponível: operação `cancel_charge` aguarda nova tentativa |
 
-Ações sobre uma cobrança: `pay`, `pay_silently` (sem webhook), `fail`, `refund`, `chargeback`
+Ações sobre uma cobrança: `pay` (pagamento já creditado, como Pix e boleto), `pay_silently` (sem webhook),
+`confirm` (pagamento confirmado e ainda não creditado, como cartão; webhook `charge.confirmed`), `receive`
+(crédito do pagamento confirmado; webhook `charge.received`), `fail`, `refund`, `chargeback`
 (`stage`: `requested`, `won`, `lost`), `diverge` e `replay`. Uma cobrança recusada (`fail`) ainda
 aceita `pay`, como o pagamento por outro meio depois da recusa do cartão; no Recorvia, a cobrança
 recusada passa a paga e o valor é aplicado à fatura. `refund` feito pelo painel do simulador aparece no

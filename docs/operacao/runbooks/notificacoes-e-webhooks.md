@@ -115,7 +115,9 @@ docker compose logs --since 30m worker | grep -E 'notifications.dispatch|falha n
 
 ### Sintomas
 - Notificações `failed` no histórico (`GET /api/v1/notifications`, permissão `collections.read`):
-  o destinatário não foi avisado.
+  o destinatário não foi avisado. `status_reason` indica a causa (`permanent_failure`,
+  `attempts_exhausted` ou `content_unavailable`) e `GET /api/v1/notifications/{id}/events` mostra cada
+  tentativa com o erro devolvido pelo servidor de e-mail.
 
 ### Métricas e alertas
 - `RecorviaNotificationsFailed`: mais de 5 falhas definitivas em 30 minutos.
@@ -159,7 +161,9 @@ SELECT tenant_id, template_key, status_reason, count(*), left(max(last_error), 2
 
 ### Sintomas
 - Integrações dos tenants sem eventos; entregas em `retrying` ou `exhausted` no histórico
-  (`GET /api/v1/webhook-endpoints/{id}/deliveries`, permissão `webhooks.read`) de vários tenants.
+  (`GET /api/v1/webhook-endpoints/{id}/deliveries`, permissão `webhooks.read`) de vários tenants. As
+  tentativas de cada entrega, com código HTTP, duração e erro, estão em
+  `GET /api/v1/webhook-deliveries/{id}/attempts` e na ação "Tentativas" do histórico de entregas.
 
 ### Métricas e alertas
 - `RecorviaWebhookDeliveriesFailing`: 10 ou mais tentativas falhando (`retrying` ou `exhausted`) e
