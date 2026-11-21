@@ -232,6 +232,14 @@ func constructorCases() []constructorCase {
 		{"chargeback de reembolso recusado com valor a recuperar", func() (Transaction, bool, error) {
 			return ChargebackCreditReversed(txID, tenantID, "refund", refID, brl(0), brl(700), instant)
 		}, "dispute.credit_reversed", "dispute.credit_reversed:refund:", "refund", map[AccountCode]int64{CustomerRecoverables: 700, Chargebacks: -700}},
+		{"valor a recuperar de cliente recebido", func() (Transaction, bool, error) {
+			return RecoveryReceived(txID, tenantID, refID, brl(1500), instant)
+		}, "dispute.recovery_received", "dispute.recovery_received:", "dispute_recovery_settlement",
+			map[AccountCode]int64{Cash: 1500, CustomerRecoverables: -1500}},
+		{"valor a recuperar de cliente baixado como perda", func() (Transaction, bool, error) {
+			return RecoveryWrittenOff(txID, tenantID, refID, brl(500), instant)
+		}, "dispute.recovery_written_off", "dispute.recovery_written_off:", "dispute_recovery_settlement",
+			map[AccountCode]int64{BadDebt: 500, CustomerRecoverables: -500}},
 		{"recuperação de valor baixado como incobrável", func() (Transaction, bool, error) {
 			return BadDebtRecovered(txID, tenantID, refID, brl(900), instant)
 		}, "invoice.bad_debt_recovered", "invoice.bad_debt_recovered:", "payment", map[AccountCode]int64{AccountsReceivable: 900, BadDebt: -900}},
@@ -322,7 +330,13 @@ func TestConstructorsWithZeroAmountsProduceNothing(t *testing.T) {
 		"retenção restaurada": func() (Transaction, bool, error) {
 			return ChargebackHoldRestored(txID, tenantID, refID, z, instant)
 		},
-		"baixa":             func() (Transaction, bool, error) { return InvoiceWrittenOff(txID, tenantID, refID, z, instant) },
+		"baixa": func() (Transaction, bool, error) { return InvoiceWrittenOff(txID, tenantID, refID, z, instant) },
+		"valor a recuperar recebido": func() (Transaction, bool, error) {
+			return RecoveryReceived(txID, tenantID, refID, z, instant)
+		},
+		"valor a recuperar perdido": func() (Transaction, bool, error) {
+			return RecoveryWrittenOff(txID, tenantID, refID, z, instant)
+		},
 		"nota de crédito":   func() (Transaction, bool, error) { return CreditNoteIssued(txID, tenantID, refID, z, instant) },
 		"crédito concedido": func() (Transaction, bool, error) { return CustomerCreditGranted(txID, tenantID, refID, z, instant) },
 		"liquidação":        func() (Transaction, bool, error) { return SettlementReceived(txID, tenantID, refID, z, instant) },

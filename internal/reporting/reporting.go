@@ -45,6 +45,7 @@ type Raw struct {
 	ActiveAtStart      int
 	Refunds            int64
 	Chargebacks        int64
+	OpenRecoverables   int64
 	UnknownOperations  int
 	OpenDiscrepancies  int
 }
@@ -68,6 +69,7 @@ type Dashboard struct {
 	CanceledSubscriptions int
 	Refunds               int64
 	Chargebacks           int64
+	OpenRecoverables      int64
 	OpenDiscrepancies     int
 	UnknownOperations     int
 	Definitions           map[string]string
@@ -89,7 +91,11 @@ var Definitions = map[string]string{
 		"retém o valor contestado; a disputa ganha estorna a retenção e a perdida libera a parte reembolsada ou reservada a reembolso " +
 		"e a parte que era pagamento excedente (crédito do cliente consumido ou valor a recuperar dele), " +
 		"o que reduz o valor do mês em que ocorrem (negativo quando a disputa aberta em mês anterior é ganha). No acumulado " +
-		"dos meses, somado aos reembolsos, nunca passa do valor pago.",
+		"dos meses, somado aos reembolsos, nunca passa do valor pago. A baixa do valor a recuperar não altera este indicador.",
+	"recoverables": "Valores a recuperar: saldo atual da conta de valores a recuperar de clientes, isto é, o crédito de pagamento " +
+		"excedente que o cliente já havia usado quando o pagamento foi estornado por chargeback, menos as baixas. A baixa recebida " +
+		"(paga pelo cliente fora do provedor) vai para o disponível liquidado e não entra em Recebido, que soma só pagamentos de " +
+		"faturas; a baixa perdida é reconhecida como perda com inadimplência.",
 }
 
 func ratio(num, den int64) int64 {
@@ -131,7 +137,7 @@ func Compute(month string, raw Raw) (Dashboard, error) {
 		OverdueReceivables: raw.OverdueReceivables, DelinquencyRateBP: ratio(raw.DelinquencyOpen, raw.DelinquencyBase),
 		ChurnRateBP: ratio(int64(raw.EndedInPeriod), int64(raw.ActiveAtStart)), ActiveSubscriptions: raw.ActiveNow,
 		NewSubscriptions: raw.CreatedInPeriod, CanceledSubscriptions: raw.EndedInPeriod, Refunds: raw.Refunds, Chargebacks: raw.Chargebacks,
-		OpenDiscrepancies: raw.OpenDiscrepancies, UnknownOperations: raw.UnknownOperations, Definitions: Definitions,
+		OpenRecoverables: raw.OpenRecoverables, OpenDiscrepancies: raw.OpenDiscrepancies, UnknownOperations: raw.UnknownOperations, Definitions: Definitions,
 	}, nil
 }
 

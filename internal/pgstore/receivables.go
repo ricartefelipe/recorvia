@@ -194,6 +194,7 @@ func disputeFromRow(r dbgen.Dispute) (payments.Dispute, error) {
 	}
 	return payments.Dispute{ID: r.ID, TenantID: r.TenantID, ChargeID: r.ChargeID, Provider: r.Provider, Status: payments.DisputeStatus(r.Status),
 		Amount: money.New(r.Amount, cur), CreditAmount: money.New(r.CreditAmount, cur), RecoveryAmount: money.New(r.RecoveryAmount, cur),
+		RecoveryReceived: money.New(r.RecoveryReceivedAmount, cur), RecoveryWrittenOff: money.New(r.RecoveryWrittenOffAmount, cur),
 		ProviderStatus: deref(r.ProviderStatus), OpenedAt: r.OpenedAt, ClosedAt: r.ClosedAt,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: int(r.Version)}, nil
 }
@@ -249,6 +250,68 @@ func (tx paymentsTx) InsertDisputeEvent(ctx context.Context, e payments.DisputeE
 	}
 	return tx.q.InsertDisputeEvent(ctx, dbgen.InsertDisputeEventParams{ID: e.ID, TenantID: tx.tenantID, DisputeID: e.DisputeID, FromStatus: from,
 		ToStatus: string(e.To), ProviderStatus: strPtr(e.ProviderStatus), OccurredAt: e.OccurredAt, RecordedAt: e.RecordedAt, Details: details})
+}
+
+func (tx paymentsTx) Dispute(ctx context.Context, id uuid.UUID, forUpdate bool) (payments.Dispute, error) {
+	var r dbgen.Dispute
+	var err error
+	if forUpdate {
+		r, err = tx.q.GetDisputeForUpdate(ctx, dbgen.GetDisputeForUpdateParams{TenantID: tx.tenantID, ID: id})
+	} else {
+		r, err = tx.q.GetDispute(ctx, dbgen.GetDisputeParams{TenantID: tx.tenantID, ID: id})
+	}
+	if err != nil {
+		return payments.Dispute{}, notFound(err, "dispute_not_found", "Disputa não encontrada.")
+	}
+	return disputeFromRow(r)
+}
+
+func recoverySettlementFromRow(r dbgen.DisputeRecoverySettlement) (payments.RecoverySettlement, error) {
+	cur, err := money.ParseCurrency(r.Currency)
+	if err != nil {
+		return payments.RecoverySettlement{}, err
+	}
+	return payments.RecoverySettlement{ID: r.ID, TenantID: r.TenantID, DisputeID: r.DisputeID, Outcome: payments.RecoveryOutcome(r.Outcome),
+		Amount: money.New(r.Amount, cur), EffectiveDate: dateFromPg(r.EffectiveDate), Justification: r.Justification, SettledBy: r.SettledBy,
+		RequestKey: deref(r.RequestKey), LedgerTransactionID: r.LedgerTransactionID, CreatedAt: r.CreatedAt}, nil
+}
+
+func (tx paymentsTx) InsertRecoverySettlement(ctx context.Context, st payments.RecoverySettlement) error {
+	err := tx.q.InsertRecoverySettlement(ctx, dbgen.InsertRecoverySettlementParams{ID: st.ID, TenantID: tx.tenantID, DisputeID: st.DisputeID,
+		Outcome: string(st.Outcome), Amount: st.Amount.Amount(), Currency: st.Amount.Currency().Code(), EffectiveDate: dateToPg(st.EffectiveDate),
+		Justification: st.Justification, SettledBy: st.SettledBy, RequestKey: strPtr(st.RequestKey), LedgerTransactionID: st.LedgerTransactionID,
+		CreatedAt: st.CreatedAt})
+	switch {
+	case postgres.IsNamedCheckViolation(err, "disputes_recovery_settled_within"):
+		return apperr.Conflict("recovery_exceeds_outstanding", "A baixa excede o saldo a recuperar da disputa.")
+	case postgres.IsUniqueViolation(err, "dispute_recovery_settlements_request_key"):
+		return apperr.Conflict("request_key_reused", "A chave do pedido já foi usada em outra baixa.")
+	}
+	return err
+}
+
+func (tx paymentsTx) RecoverySettlementByRequestKey(ctx context.Context, key string) (payments.RecoverySettlement, error) {
+	r, err := tx.q.GetRecoverySettlementByRequestKey(ctx, dbgen.GetRecoverySettlementByRequestKeyParams{TenantID: tx.tenantID, RequestKey: &key})
+	if err != nil {
+		return payments.RecoverySettlement{}, notFound(err, "recovery_settlement_not_found", "Baixa do valor a recuperar não encontrada.")
+	}
+	return recoverySettlementFromRow(r)
+}
+
+func (tx paymentsTx) RecoverySettlements(ctx context.Context, disputeID uuid.UUID) ([]payments.RecoverySettlement, error) {
+	rows, err := tx.q.ListDisputeRecoverySettlements(ctx, dbgen.ListDisputeRecoverySettlementsParams{TenantID: tx.tenantID, DisputeID: disputeID})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]payments.RecoverySettlement, 0, len(rows))
+	for _, r := range rows {
+		st, err := recoverySettlementFromRow(r)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, nil
 }
 
 func runFromRow(r dbgen.ReconciliationRun) payments.ReconciliationRun {

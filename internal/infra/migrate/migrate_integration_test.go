@@ -86,8 +86,9 @@ func TestChargebackCreditAndAsyncReconciliationMigrationDownAndUp(t *testing.T) 
 			t.Fatalf("esquema antes do Down: %s", q)
 		}
 	}
+	// As migrations posteriores, se houver, são revertidas antes.
 	reverted, err := migrate.DownTo(ctx, env.OwnerURL, 16)
-	if err != nil || len(reverted) != 1 || reverted[0] != name {
+	if err != nil || len(reverted) == 0 || reverted[len(reverted)-1] != name {
 		t.Fatalf("reversão: %v %v", reverted, err)
 	}
 	for _, q := range []string{
@@ -107,7 +108,63 @@ func TestChargebackCreditAndAsyncReconciliationMigrationDownAndUp(t *testing.T) 
 		}
 	}
 	applied, err := migrate.Up(ctx, env.OwnerURL)
-	if err != nil || len(applied) != 1 || applied[0] != name {
+	if err != nil || len(applied) != len(reverted) || applied[0] != name {
+		t.Fatalf("reaplicação: %v %v", applied, err)
+	}
+	for _, q := range present {
+		if !exists(t, pool, q) {
+			t.Fatalf("esquema após o Up: %s", q)
+		}
+	}
+}
+
+// A migration da baixa do valor a recuperar é reversível: o Down remove a
+// tabela de baixas, os gatilhos, as funções e os totais da disputa, sem tocar
+// nas colunas da migration anterior; o Up seguinte recria tudo, com a tabela
+// imutável, sob RLS e somente leitura e inclusão para o papel da aplicação.
+func TestRecoverySettlementMigrationDownAndUp(t *testing.T) {
+	ctx := context.Background()
+	env := pgtest.Start(t)
+	pool := pgtest.OwnerPool(t)
+	const name = "00018_baixa_de_valor_a_recuperar.sql"
+	const objects = `(SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'disputes'
+			AND column_name IN ('recovery_received_amount', 'recovery_written_off_amount'))
+		+ (SELECT count(*) FROM pg_proc WHERE proname IN ('app_dispute_recovery_settled', 'app_disputes_recovery_guard'))
+		+ (SELECT count(*) FROM pg_constraint WHERE conname IN ('disputes_recovery_settled_within', 'dispute_recovery_settlements_dispute_fk',
+			'dispute_recovery_settlements_ledger_fk', 'dispute_recovery_settlements_request_key'))
+		+ (SELECT count(*) FROM pg_trigger WHERE tgname IN ('disputes_recovery_guard', 'dispute_recovery_settlements_apply',
+			'dispute_recovery_settlements_immutable'))
+		+ (CASE WHEN to_regclass('public.dispute_recovery_settlements') IS NULL THEN 0 ELSE 1 END)`
+	present := []string{
+		`SELECT ` + objects + ` = 12`,
+		`SELECT c.relrowsecurity AND EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'dispute_recovery_settlements'
+		    AND policyname = 'tenant_isolation') FROM pg_class c WHERE c.relname = 'dispute_recovery_settlements'`,
+		`SELECT has_table_privilege('recorvia_app', 'dispute_recovery_settlements', 'SELECT')
+		    AND has_table_privilege('recorvia_app', 'dispute_recovery_settlements', 'INSERT')
+		    AND NOT has_table_privilege('recorvia_app', 'dispute_recovery_settlements', 'UPDATE')
+		    AND NOT has_table_privilege('recorvia_app', 'dispute_recovery_settlements', 'DELETE')`,
+	}
+	for _, q := range present {
+		if !exists(t, pool, q) {
+			t.Fatalf("esquema antes do Down: %s", q)
+		}
+	}
+	reverted, err := migrate.DownTo(ctx, env.OwnerURL, 17)
+	if err != nil || len(reverted) == 0 || reverted[len(reverted)-1] != name {
+		t.Fatalf("reversão: %v %v", reverted, err)
+	}
+	for _, q := range []string{
+		`SELECT ` + objects + ` = 0`,
+		// O esquema da migration anterior continua íntegro.
+		`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'disputes' AND column_name = 'recovery_amount')
+		    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'disputes_credit_within_amount')`,
+	} {
+		if !exists(t, pool, q) {
+			t.Fatalf("esquema após o Down: %s", q)
+		}
+	}
+	applied, err := migrate.Up(ctx, env.OwnerURL)
+	if err != nil || len(applied) != len(reverted) || applied[0] != name {
 		t.Fatalf("reaplicação: %v %v", applied, err)
 	}
 	for _, q := range present {

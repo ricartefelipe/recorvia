@@ -232,7 +232,7 @@ func secretKey(secret string) ([]byte, error) {
 var eventTypes = []string{
 	outbox.EventChargeCreated, outbox.EventChargeFailed,
 	outbox.EventCustomerCreated, outbox.EventCustomerUpdated,
-	outbox.EventDisputeClosed, outbox.EventDisputeOpened,
+	outbox.EventDisputeClosed, outbox.EventDisputeOpened, outbox.EventDisputeRecoverySettled,
 	outbox.EventInvoiceCredited, outbox.EventInvoiceIssued, outbox.EventInvoiceOverdue, outbox.EventInvoicePaid,
 	outbox.EventInvoicePartiallyPaid, outbox.EventInvoiceUncollectible, outbox.EventInvoiceVoided,
 	outbox.EventPaymentConfirmed,

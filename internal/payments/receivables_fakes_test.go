@@ -20,6 +20,9 @@ type receivables struct {
 	disputes      map[uuid.UUID]Dispute
 	disputeOrder  []uuid.UUID
 	disputeEvents []DisputeEvent
+	settlements   []RecoverySettlement
+	// disputeLocks registra as disputas bloqueadas (Dispute com forUpdate).
+	disputeLocks  []uuid.UUID
 	runs          map[uuid.UUID]ReconciliationRun
 	runOrder      []uuid.UUID
 	discrepancies map[uuid.UUID]Discrepancy
@@ -54,6 +57,8 @@ func (r receivables) clone() receivables {
 	c.disputes = maps.Clone(r.disputes)
 	c.disputeOrder = slices.Clone(r.disputeOrder)
 	c.disputeEvents = slices.Clone(r.disputeEvents)
+	c.settlements = slices.Clone(r.settlements)
+	c.disputeLocks = slices.Clone(r.disputeLocks)
 	c.runs = maps.Clone(r.runs)
 	c.runOrder = slices.Clone(r.runOrder)
 	c.discrepancies = maps.Clone(r.discrepancies)
@@ -261,6 +266,76 @@ func (s *payStore) InsertDisputeEvent(_ context.Context, e DisputeEvent) error {
 	}
 	s.disputeEvents = append(s.disputeEvents, e)
 	return nil
+}
+
+func (s *payStore) Dispute(_ context.Context, id uuid.UUID, forUpdate bool) (Dispute, error) {
+	if err := s.fail("Dispute"); err != nil {
+		return Dispute{}, err
+	}
+	d, ok := s.disputes[id]
+	if !ok || d.TenantID != s.current {
+		return Dispute{}, apperr.NotFound("dispute_not_found", "Disputa não encontrada.")
+	}
+	if forUpdate {
+		s.disputeLocks = append(s.disputeLocks, id)
+	}
+	return d, nil
+}
+
+// InsertRecoverySettlement reproduz o banco: a chave do pedido é única, o
+// gatilho acumula a baixa nos totais da disputa e a constraint recusa a soma
+// acima do valor a recuperar.
+func (s *payStore) InsertRecoverySettlement(_ context.Context, st RecoverySettlement) error {
+	if err := s.fail("InsertRecoverySettlement"); err != nil {
+		return err
+	}
+	for _, x := range s.settlements {
+		if st.RequestKey != "" && x.RequestKey == st.RequestKey {
+			return apperr.Conflict("request_key_reused", "A chave do pedido já foi usada em outra baixa.")
+		}
+	}
+	d := s.disputes[st.DisputeID]
+	zero := money.Zero(st.Amount.Currency())
+	var err error
+	if st.Outcome == RecoveryReceived {
+		d.RecoveryReceived, err = amountOrZero(d.RecoveryReceived, zero).Add(st.Amount)
+	} else {
+		d.RecoveryWrittenOff, err = amountOrZero(d.RecoveryWrittenOff, zero).Add(st.Amount)
+	}
+	if err != nil {
+		return err
+	}
+	if left, err := d.RecoveryOutstanding(); err != nil || left.IsNegative() {
+		return apperr.Conflict("recovery_exceeds_outstanding", "A baixa excede o saldo a recuperar da disputa.")
+	}
+	s.disputes[d.ID] = d
+	s.settlements = append(s.settlements, st)
+	return nil
+}
+
+func (s *payStore) RecoverySettlementByRequestKey(_ context.Context, key string) (RecoverySettlement, error) {
+	if err := s.fail("RecoverySettlementByRequestKey"); err != nil {
+		return RecoverySettlement{}, err
+	}
+	for _, x := range s.settlements {
+		if x.RequestKey == key {
+			return x, nil
+		}
+	}
+	return RecoverySettlement{}, apperr.NotFound("recovery_settlement_not_found", "Baixa do valor a recuperar não encontrada.")
+}
+
+func (s *payStore) RecoverySettlements(_ context.Context, disputeID uuid.UUID) ([]RecoverySettlement, error) {
+	if err := s.fail("RecoverySettlements"); err != nil {
+		return nil, err
+	}
+	var out []RecoverySettlement
+	for _, x := range s.settlements {
+		if x.DisputeID == disputeID {
+			out = append(out, x)
+		}
+	}
+	return out, nil
 }
 
 func (s *payStore) ReverseLedger(_ context.Context, key, description string, at time.Time) error {
