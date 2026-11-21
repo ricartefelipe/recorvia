@@ -1,6 +1,7 @@
 import { api } from '../../api/client';
 import type {
   ChangeTiming,
+  CursorPage,
   DataList,
   PriceAdjustment,
   PriceAdjustmentInput,
@@ -13,6 +14,8 @@ import type {
   SubscriptionUsage,
   UsageEventPage,
 } from '../../api/types';
+
+import type { PageRequest } from '../../lib/pages';
 
 const enc = encodeURIComponent;
 const base = (id: string) => `/api/v1/subscriptions/${enc(id)}`;
@@ -42,8 +45,9 @@ export const subscriptionsApi = {
     api.post<Subscription>(`${base(s.id)}/change-plan`, input, { ifMatch: s.version }),
   changeQuantity: (s: Subscription, input: { quantity: number; timing: ChangeTiming }) =>
     api.post<Subscription>(`${base(s.id)}/change-quantity`, input, { ifMatch: s.version }),
-  listAdjustments: (id: string, signal?: AbortSignal) =>
-    api.get<DataList<PriceAdjustment>>(`${base(id)}/price-adjustments`, { signal }),
+  /** Reajustes pela vigência, em páginas por cursor. */
+  listAdjustments: (id: string, page: PageRequest, signal?: AbortSignal) =>
+    api.get<CursorPage<PriceAdjustment>>(`${base(id)}/price-adjustments`, { query: { ...page }, signal }),
   scheduleAdjustment: (id: string, input: PriceAdjustmentInput, idempotencyKey: string) =>
     api.post<PriceAdjustment>(`${base(id)}/price-adjustments`, input, { idempotencyKey }),
   cancelAdjustment: (id: string, adjustmentId: string) => api.delete(`${base(id)}/price-adjustments/${enc(adjustmentId)}`),

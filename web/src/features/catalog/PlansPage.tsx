@@ -1,6 +1,7 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Anchor, Button, Code, Group, Modal, NumberInput, Select, SimpleGrid, Stack, Table, Text, Textarea, TextInput } from '@mantine/core';
 import { IconPlus } from '@tabler/icons-react';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Controller, FormProvider, useForm } from 'react-hook-form';
 import { Link, useNavigate } from 'react-router';
@@ -8,12 +9,12 @@ import { z } from 'zod';
 import type { PlanDetails, PlanInput } from '../../api/types';
 import { StatusBadge } from '../../components/format';
 import { EmptyState, QueryContent } from '../../components/states';
-import { LabeledSegmented } from '../../components/ui';
-import { useApiMutation } from '../../lib/hooks';
+import { CursorPager, LabeledSegmented } from '../../components/ui';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
 import { billingIntervalLabels, catalogStatusLabels, labelOf } from '../../lib/labels';
 import { optionalInt, optionalText, requiredText } from '../../lib/validation';
-import { Can } from '../../session/SessionContext';
-import { catalogApi, useMetrics, usePlans, useProducts } from './api';
+import { Can, useTenant } from '../../session/SessionContext';
+import { catalogApi, useMetrics, useProducts } from './api';
 import { describePrice, emptyPrice, PriceFields, priceSchema } from './PriceFields';
 
 export const planSchema = z.object({
@@ -132,9 +133,17 @@ export function PlansPage() {
   const [status, setStatus] = useState<'active' | 'archived' | 'all'>('active');
   const [productId, setProductId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const { keys } = useTenant();
   const products = useProducts();
   const metrics = useMetrics();
-  const query = usePlans({ status: status === 'all' ? undefined : status, product_id: productId ?? undefined });
+  const filters = { status: status === 'all' ? undefined : status, product_id: productId ?? undefined };
+  const pagination = useCursorPagination(`plans:${status}:${productId ?? ''}`);
+  const query = useQuery({
+    queryKey: keys('plans', 'page', filters, pagination.cursor),
+    queryFn: ({ signal }) => catalogApi.listPlans({ ...filters, cursor: pagination.cursor, limit: 25 }, signal),
+    placeholderData: keepPreviousData,
+  });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   const productName = new Map((products.data?.data ?? []).map((p) => [p.id, p.name]));
 
   return (
@@ -168,51 +177,61 @@ export function PlansPage() {
         </Can>
       </Group>
       <QueryContent query={query}>
-        {({ data }) =>
-          data.length === 0 ? (
+        {(page) =>
+          page.data.length === 0 ? (
             <EmptyState title="Nenhum plano" description="Crie um plano com seu preço para começar a vender assinaturas." />
           ) : (
-            <Table.ScrollContainer minWidth={820}>
-              <Table aria-label="Planos">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Plano</Table.Th>
-                    <Table.Th>Código</Table.Th>
-                    <Table.Th>Produto</Table.Th>
-                    <Table.Th>Periodicidade</Table.Th>
-                    <Table.Th>Preço atual</Table.Th>
-                    <Table.Th>Situação</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {data.map((p) => (
-                    <Table.Tr key={p.id}>
-                      <Table.Td>
-                        <Anchor component={Link} to={`/catalogo/planos/${p.id}`} fw={500}>
-                          {p.name}
-                        </Anchor>
-                      </Table.Td>
-                      <Table.Td>
-                        <Code>{p.code}</Code>
-                      </Table.Td>
-                      <Table.Td>{productName.get(p.product_id) ?? '—'}</Table.Td>
-                      <Table.Td>{labelOf(billingIntervalLabels, p.billing_interval)}</Table.Td>
-                      <Table.Td>
-                        <Text size="sm">{describePrice(p.current_price, metrics.data?.data, p.billing_interval)}</Text>
-                        {p.current_price && (
-                          <Text size="xs" c="dimmed">
-                            Versão {p.current_price.version}
-                          </Text>
-                        )}
-                      </Table.Td>
-                      <Table.Td>
-                        <StatusBadge status={p.status} labels={catalogStatusLabels} />
-                      </Table.Td>
+            <>
+              <Table.ScrollContainer minWidth={820}>
+                <Table aria-label="Planos">
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Plano</Table.Th>
+                      <Table.Th>Código</Table.Th>
+                      <Table.Th>Produto</Table.Th>
+                      <Table.Th>Periodicidade</Table.Th>
+                      <Table.Th>Preço atual</Table.Th>
+                      <Table.Th>Situação</Table.Th>
                     </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            </Table.ScrollContainer>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {page.data.map((p) => (
+                      <Table.Tr key={p.id}>
+                        <Table.Td>
+                          <Anchor component={Link} to={`/catalogo/planos/${p.id}`} fw={500}>
+                            {p.name}
+                          </Anchor>
+                        </Table.Td>
+                        <Table.Td>
+                          <Code>{p.code}</Code>
+                        </Table.Td>
+                        <Table.Td>{productName.get(p.product_id) ?? '—'}</Table.Td>
+                        <Table.Td>{labelOf(billingIntervalLabels, p.billing_interval)}</Table.Td>
+                        <Table.Td>
+                          <Text size="sm">{describePrice(p.current_price, metrics.data?.data, p.billing_interval)}</Text>
+                          {p.current_price && (
+                            <Text size="xs" c="dimmed">
+                              Versão {p.current_price.version}
+                            </Text>
+                          )}
+                        </Table.Td>
+                        <Table.Td>
+                          <StatusBadge status={p.status} labels={catalogStatusLabels} />
+                        </Table.Td>
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
+              <CursorPager
+                page={pagination.page}
+                hasPrevious={pagination.hasPrevious}
+                hasNext={!!page.next_cursor}
+                onPrevious={pagination.previous}
+                onNext={() => page.next_cursor && pagination.next(page.next_cursor)}
+                loading={query.isFetching}
+              />
+            </>
           )
         }
       </QueryContent>
