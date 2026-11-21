@@ -444,7 +444,7 @@ func (g *slowGetGateway) GetCharge(ctx context.Context, id string) (ProviderChar
 func TestRunReconciliationRotationInterruptedKeepsRunComplete(t *testing.T) {
 	t.Run("prazo da coleta esgotado", func(t *testing.T) {
 		f := newReconFixture(t)
-		f.svc = NewService(f.store, f.resolver, f.clock, Config{ManualReconciliationBudget: 80 * time.Millisecond, CallTimeout: time.Minute})
+		f.svc = NewService(f.store, f.resolver, f.clock, Config{ReconciliationBudget: 80 * time.Millisecond, CallTimeout: time.Minute})
 		slow, next := f.addRotationCharge("pay_antiga_lenta"), f.addRotationCharge("pay_antiga_seguinte")
 		f.resolver.override = &slowGetGateway{fakeGateway: f.gw, slow: slow.ProviderChargeID}
 		run := f.run(t, RunInput{})
@@ -505,28 +505,25 @@ func (g *partialListGateway) ListCharges(ctx context.Context, req ListRequest) (
 	return ListResult{}, &GatewayError{Kind: ErrKindAmbiguous, Message: "resposta não recebida", Err: ctx.Err()}
 }
 
-// A execução manual não depende do prazo da requisição que a iniciou: a
-// coleta tem prazo próprio e, esgotado o prazo, a execução é concluída com o
-// que foi coletado e com aviso de execução parcial, sem atribuir a falha ao
-// provedor.
+// A coleta tem prazo próprio (uma fração do lease da execução): esgotado o
+// prazo, a execução é concluída com o que foi coletado e com aviso de
+// execução parcial, sem atribuir a falha ao provedor.
 func TestRunReconciliationCollectionBudget(t *testing.T) {
 	f := newReconFixture(t)
 	const budget = 80 * time.Millisecond
-	f.svc = NewService(f.store, f.resolver, f.clock, Config{ManualReconciliationBudget: budget, CallTimeout: time.Minute})
+	f.svc = NewService(f.store, f.resolver, f.clock, Config{ReconciliationBudget: budget, CallTimeout: time.Minute})
 	f.gw.listPages[0].HasMore = true
 	gw := &partialListGateway{fakeGateway: f.gw}
 	f.resolver.override = gw
-	request, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancel()
-	run, err := f.svc.RunReconciliation(request, f.tenantID, f.actor, nil, RunInput{})
+	run, err := f.svc.RunReconciliation(context.Background(), f.tenantID, f.actor, nil, RunInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if run.Status != RunCompleted || !strings.Contains(run.Error, partialBudget) || strings.Contains(run.Error, "provedor:") {
 		t.Fatalf("execução parcial pelo prazo: %+v", run)
 	}
-	if len(gw.deadlines) != 2 || gw.deadlines[0] < budget/2 {
-		t.Fatalf("prazo da coleta independente da requisição: %v", gw.deadlines)
+	if len(gw.deadlines) != 2 || gw.deadlines[0] < budget/2 || gw.deadlines[0] > budget {
+		t.Fatalf("prazo da coleta: %v", gw.deadlines)
 	}
 	if fee := f.discrepancyOf(t, DiscrepancyFeeMismatch); *fee.ChargeID != f.b.ID {
 		t.Fatalf("página coletada é comparada: %+v", fee)
@@ -536,17 +533,14 @@ func TestRunReconciliationCollectionBudget(t *testing.T) {
 			t.Fatalf("cobrança não consultada não vira divergência: %+v", d)
 		}
 	}
-	t.Run("cancelamento da execução agendada encerra como falha", func(t *testing.T) {
-		f := newReconFixture(t)
-		f.store.plan = platformbilling.Plan{Features: []platformbilling.Feature{platformbilling.FeatureReconciliationRun}}
-		f.gw.listPages[0].HasMore = true
-		f.resolver.override = &partialListGateway{fakeGateway: f.gw}
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		f.gw.onList = cancel
-		run, err := f.svc.RunReconciliation(ctx, f.tenantID, f.actor, nil, RunInput{Trigger: TriggerScheduled})
-		if err != nil || run.Status != RunFailed || !strings.Contains(run.Error, "listagem do provedor") {
-			t.Fatalf("execução cancelada: %+v %v", run, err)
+	t.Run("prazo configurado nunca passa do lease", func(t *testing.T) {
+		for _, d := range []time.Duration{0, -time.Second, reconciliationLease} {
+			if got := NewService(f.store, f.resolver, f.clock, Config{ReconciliationBudget: d}).cfg.ReconciliationBudget; got != ReconciliationCollectionBudget {
+				t.Fatalf("prazo %v: %v", d, got)
+			}
+		}
+		if ReconciliationCollectionBudget >= reconciliationLease {
+			t.Fatal("a coleta precisa terminar antes do lease")
 		}
 	})
 }
@@ -577,14 +571,18 @@ func TestRunReconciliationRules(t *testing.T) {
 	t.Run("execução em andamento", func(t *testing.T) {
 		f := newReconFixture(t)
 		lease := f.clock.Now().Add(time.Minute)
-		running := ReconciliationRun{ID: uuid.New(), TenantID: f.tenantID, ProviderAccountID: f.account.ID, Status: RunRunning, LeaseUntil: &lease}
+		running := ReconciliationRun{ID: uuid.New(), TenantID: f.tenantID, ProviderAccountID: f.account.ID, Status: RunRunning, LeaseUntil: &lease,
+			Attempts: 1}
 		f.store.runs[running.ID] = running
 		_, err := f.svc.RunReconciliation(context.Background(), f.tenantID, f.actor, nil, RunInput{})
 		wantAppErr(t, err, apperr.KindConflict, "reconciliation_running")
-		// Lease expirado: a execução interrompida é encerrada como falha.
+		// Lease expirado: a execução interrompida continua sendo a execução
+		// em andamento da conta (será retomada), e outra não é registrada.
 		f.clock.Advance(time.Hour)
-		if run := f.run(t, RunInput{}); run.Status != RunCompleted || f.store.runs[running.ID].Status != RunFailed {
-			t.Fatalf("execução interrompida: %s", f.store.runs[running.ID].Status)
+		_, err = f.svc.StartReconciliation(context.Background(), f.tenantID, f.actor, nil, RunInput{})
+		wantAppErr(t, err, apperr.KindConflict, "reconciliation_running")
+		if f.store.runs[running.ID].Status != RunRunning || len(f.store.runs) != 1 {
+			t.Fatalf("execução interrompida: %+v", f.store.runs[running.ID])
 		}
 	})
 	t.Run("agendada exige o recurso do plano", func(t *testing.T) {
@@ -608,7 +606,7 @@ func TestRunReconciliationRules(t *testing.T) {
 		_, err := f.svc.RunReconciliation(context.Background(), f.tenantID, f.actor, nil, RunInput{})
 		wantAppErr(t, err, apperr.KindConflict, "reconciliation_run_interrupted")
 	})
-	for _, m := range []string{"ReconciliationRunByRequestKey", "PlatformPlan", "DefaultAccount", "FailStaleReconciliationRuns", "InsertReconciliationRun"} {
+	for _, m := range []string{"ReconciliationRunByRequestKey", "PlatformPlan", "DefaultAccount", "InsertReconciliationRun"} {
 		t.Run("falha ao iniciar: "+m, func(t *testing.T) {
 			f := newReconFixture(t)
 			f.store.plan = platformbilling.Plan{Features: []platformbilling.Feature{platformbilling.FeatureReconciliationRun}}
