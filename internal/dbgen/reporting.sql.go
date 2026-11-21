@@ -162,6 +162,23 @@ func (q *Queries) DashboardMRRComponents(ctx context.Context, tenantID uuid.UUID
 	return items, nil
 }
 
+const dashboardPendingProviderReceipt = `-- name: DashboardPendingProviderReceipt :one
+SELECT COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END), 0)::bigint AS balance
+  FROM ledger_entries e
+  JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+ WHERE e.tenant_id = $1 AND a.code = 'provider_confirmed'
+`
+
+// Saldo atual da conta de pagamentos confirmados no provedor (débitos menos
+// créditos): pagamentos já confirmados, contados em Recebido, cujo valor o
+// provedor ainda não creditou (ADR-080).
+func (q *Queries) DashboardPendingProviderReceipt(ctx context.Context, tenantID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, dashboardPendingProviderReceipt, tenantID)
+	var balance int64
+	err := row.Scan(&balance)
+	return balance, err
+}
+
 const dashboardReceivables = `-- name: DashboardReceivables :one
 SELECT COALESCE(sum(amount_due), 0)::bigint AS open_total,
        COALESCE(sum(amount_due) FILTER (WHERE due_at <= $1), 0)::bigint AS overdue_total

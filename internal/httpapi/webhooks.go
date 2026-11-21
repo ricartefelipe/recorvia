@@ -242,3 +242,33 @@ func (a *API) retryWebhookDelivery(w http.ResponseWriter, r *http.Request) {
 	}
 	a.writeJSON(w, r, http.StatusOK, deliveryView(d))
 }
+
+type webhookDeliveryAttemptDTO struct {
+	Attempt        int       `json:"attempt"`
+	StartedAt      time.Time `json:"started_at"`
+	DurationMS     int64     `json:"duration_ms"`
+	StatusCode     *int      `json:"status_code"`
+	Error          string    `json:"error"`
+	SignatureCount int       `json:"signature_count"`
+}
+
+// listWebhookDeliveryAttempts devolve as tentativas individuais de uma
+// entrega, da primeira à mais recente.
+func (a *API) listWebhookDeliveryAttempts(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	attempts, err := a.Webhooks.DeliveryAttempts(r.Context(), mustPrincipal(r).TenantID, id)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	out := make([]webhookDeliveryAttemptDTO, 0, len(attempts))
+	for _, at := range attempts {
+		out = append(out, webhookDeliveryAttemptDTO{Attempt: at.Number, StartedAt: at.StartedAt, DurationMS: at.Duration.Milliseconds(),
+			StatusCode: at.StatusCode, Error: at.Error, SignatureCount: at.SignatureCount})
+	}
+	a.writeJSON(w, r, http.StatusOK, list(out))
+}

@@ -727,9 +727,14 @@ func TestReceivablesAPIReconciliation(t *testing.T) {
 	if adj["debits"].(float64)-adj["credits"].(float64) != float64(500-paysim.Fee(10000)) {
 		t.Fatalf("ajuste de conciliação: %v", adj)
 	}
+	// O ajuste e a sua liquidação no disponível referenciam a divergência.
 	txs, _ := owner.expect(http.StatusOK, http.MethodGet, "/api/v1/ledger/transactions?reference_type=reconciliation_discrepancy&reference_id="+feeID, nil)
-	if len(objects(t, txs["data"])) != 1 {
-		t.Fatalf("lançamento do ajuste: %v", txs)
+	kinds := map[string]bool{}
+	for _, tx := range objects(t, txs["data"]) {
+		kinds[tx["kind"].(string)] = true
+	}
+	if len(kinds) != 2 || !kinds["reconciliation.adjustment"] || !kinds["settlement.debited"] {
+		t.Fatalf("lançamentos do ajuste: %v", txs)
 	}
 
 	// Pagamento não refletido: aceitar o provedor aplica o pagamento.

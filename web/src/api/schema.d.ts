@@ -1653,6 +1653,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/notifications/{id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Linha do tempo de uma notificação (agendamento, adiamentos, tentativas, envio, falha, cancelamento ou supressão) */
+        get: operations["listNotificationEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/webhook-event-types": {
         parameters: {
             query?: never;
@@ -1730,6 +1747,23 @@ export interface paths {
             cookie?: never;
         };
         get: operations["listWebhookDeliveries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/webhook-deliveries/{id}/attempts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Tentativas individuais de uma entrega, da primeira à mais recente */
+        get: operations["listWebhookDeliveryAttempts"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3215,6 +3249,8 @@ export interface components {
             subject: string;
             /** @enum {string} */
             status: "scheduled" | "sending" | "sent" | "failed" | "canceled" | "suppressed";
+            /** @description Código estável do motivo da situação atual; vazio quando não há motivo (em envio ou enviada). Cancelamento: invoice_paid, invoice_credited, invoice_voided, invoice_uncollectible, superseded, due_date_passed, subscription_not_suspended, invitation_not_pending, feature_unavailable. Supressão: no_recipient, invitation_link_unavailable. Adiamento: outside_send_window, frequency_limit, retry_scheduled. Falha: permanent_failure, attempts_exhausted, content_unavailable. */
+            status_reason: string;
             /** Format: date-time */
             send_after: string;
             attempts: number;
@@ -3223,6 +3259,18 @@ export interface components {
             sent_at?: string | null;
             /** Format: date-time */
             created_at: string;
+        };
+        NotificationEvent: {
+            /** @enum {string} */
+            status: "scheduled" | "sending" | "sent" | "failed" | "canceled" | "suppressed";
+            /** @description Código estável do evento: scheduled, attempt, sent, retry_scheduled e os motivos de status_reason da notificação. */
+            reason: string;
+            /** @description Número da tentativa corrente quando o evento ocorreu */
+            attempt: number;
+            /** @description Complemento (erro da tentativa ou instante do adiamento); vazio sem complemento */
+            detail: string;
+            /** Format: date-time */
+            occurred_at: string;
         };
         WebhookEndpointInput: {
             url: string;
@@ -3273,6 +3321,18 @@ export interface components {
             delivered_at?: string | null;
             /** Format: date-time */
             created_at: string;
+        };
+        WebhookDeliveryAttempt: {
+            attempt: number;
+            /** Format: date-time */
+            started_at: string;
+            duration_ms: number;
+            /** @description Código HTTP da resposta; nulo quando não houve resposta */
+            status_code: number | null;
+            /** @description Erro da tentativa; vazio quando o destino respondeu 2xx */
+            error: string;
+            /** @description Assinaturas enviadas (mais de uma durante a rotação do segredo) */
+            signature_count: number;
         };
         ApiCredential: {
             /** Format: uuid */
@@ -3347,7 +3407,7 @@ export interface components {
             billed_usage?: number;
             /**
              * Format: int64
-             * @description Pagamentos recebidos no mês
+             * @description Pagamentos confirmados no mês, pela data de pagamento, via provedor ou registro manual. Inclui os pagamentos confirmados pelo provedor e ainda não creditados por ele (pending_provider_receipt).
              */
             received: number;
             /** Format: int64 */
@@ -3376,6 +3436,11 @@ export interface components {
              * @description Saldo atual dos valores a recuperar de clientes (conta customer_recoverables): crédito de pagamento excedente já usado e estornado por chargeback, menos as baixas recebidas e perdidas. Não depende do mês consultado.
              */
             open_recoverables: number;
+            /**
+             * Format: int64
+             * @description Saldo atual dos pagamentos confirmados pelo provedor e ainda não creditados por ele (conta provider_confirmed), por exemplo cartão no prazo de recebimento. No recebimento, o bruto passa aos valores em liquidação, a taxa é reconhecida e o líquido vai para o disponível liquidado (ADR-080). Não depende do mês consultado.
+             */
+            pending_provider_receipt: number;
             open_discrepancies?: number;
             unknown_operations?: number;
             definitions: {
@@ -6932,6 +6997,34 @@ export interface operations {
             };
         };
     };
+    listNotificationEvents: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Eventos em ordem cronológica */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["NotificationEvent"][];
+                    };
+                };
+            };
+            404: components["responses"]["Problem"];
+        };
+    };
     listWebhookEventTypes: {
         parameters: {
             query?: never;
@@ -7135,6 +7228,34 @@ export interface operations {
                     };
                 };
             };
+        };
+    };
+    listWebhookDeliveryAttempts: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tentativas */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["WebhookDeliveryAttempt"][];
+                    };
+                };
+            };
+            404: components["responses"]["Problem"];
         };
     };
     retryWebhookDelivery: {

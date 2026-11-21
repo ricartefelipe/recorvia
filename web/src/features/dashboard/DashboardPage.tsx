@@ -34,6 +34,7 @@ const DEFINITION_LABELS: Record<string, string> = {
   refunds: 'Reembolsos',
   chargebacks: 'Chargebacks',
   recoverables: 'Valores a recuperar de clientes',
+  pending_receipt: 'A receber do provedor',
   open_discrepancies: 'Divergências abertas',
   unknown_operations: 'Operações com resultado desconhecido',
 };
@@ -118,7 +119,7 @@ function DashboardContent({ data }: { data: Dashboard }) {
         title="Receita do mês"
         description="Faturado e recebido são medidas diferentes: uma fatura emitida no mês pode ser paga em outro mês."
       >
-        <SimpleGrid cols={{ base: 1, sm: 2 }}>
+        <SimpleGrid cols={{ base: 1, sm: 3 }}>
           <StatCard
             label="Receita faturada"
             value={money(data.billed)}
@@ -136,6 +137,14 @@ function DashboardContent({ data }: { data: Dashboard }) {
             definitionKey="received"
             definitions={defs}
             hint="Pagamentos confirmados no mês"
+          />
+          <StatCard
+            label="A receber do provedor"
+            value={money(data.pending_provider_receipt)}
+            definitionKey="pending_receipt"
+            definitions={defs}
+            hint="Confirmado e ainda não creditado; saldo atual, sem relação com o mês"
+            href="/ledger"
           />
         </SimpleGrid>
       </Section>

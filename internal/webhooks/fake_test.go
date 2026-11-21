@@ -356,6 +356,17 @@ func (t fakeTx) InsertAttempt(ctx context.Context, a Attempt) error {
 	return t.err("InsertAttempt")
 }
 
+func (t fakeTx) Attempts(_ context.Context, deliveryID uuid.UUID) ([]Attempt, error) {
+	var out []Attempt
+	for _, a := range t.st.attempts {
+		if a.DeliveryID == deliveryID {
+			out = append(out, a)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Number < out[j].Number })
+	return out, t.err("Attempts")
+}
+
 func (t fakeTx) MarkInbox(_ context.Context, consumer string, id uuid.UUID) (bool, error) {
 	if err := t.err("MarkInbox"); err != nil {
 		return false, err

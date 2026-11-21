@@ -97,6 +97,11 @@ type Tx interface {
 
 	InsertPayment(ctx context.Context, p Payment) (bool, error)
 	PaymentByRequestKey(ctx context.Context, key string) (Payment, error)
+	// PaymentPendingReceipt devolve o pagamento da cobrança e o valor dele
+	// ainda em pagamentos confirmados no provedor (saldo da conta
+	// provider_confirmed nos lançamentos do pagamento), à espera do
+	// recebimento. ok=false quando a cobrança não tem pagamento.
+	PaymentPendingReceipt(ctx context.Context, chargeID uuid.UUID) (pay Payment, pending money.Money, ok bool, err error)
 	GrantCustomerCredit(ctx context.Context, customerID uuid.UUID, amount money.Money, kind string, invoiceID *uuid.UUID, reason string, at time.Time) error
 
 	InsertWebhook(ctx context.Context, w StoredWebhook) (bool, error)
@@ -1063,6 +1068,14 @@ func (s *Service) applyProviderStateFrom(ctx context.Context, tx Tx, c *Charge, 
 			return apperr.Conflict("provider_state_conflict", "Provedor informou cancelamento de cobrança já paga; verificar na conciliação.")
 		}
 	}
+	if IsSettledStatus(c.Status) && pc.Status.IsReceived() {
+		// Recebimento informado (ou implicado por situação posterior, como
+		// reembolso e chargeback) em qualquer ordem: idempotente, inclusive
+		// para retrato antigo que chega depois de uma situação posterior.
+		if err := s.ensureReceived(ctx, tx, c, now); err != nil {
+			return err
+		}
+	}
 	if IsSettledStatus(c.Status) {
 		if err := s.syncRefunds(ctx, tx, c, pc, now, actor); err != nil {
 			return err
@@ -1129,18 +1142,9 @@ var paidAfterClosureAudit = map[ChargeStatus]string{
 func (s *Service) applyToInvoice(ctx context.Context, tx Tx, inv *billing.Invoice, pay Payment, viaProvider bool, actor audit.Actor, now time.Time) error {
 	if inv.Status == billing.Void || inv.Status == billing.Paid {
 		// Fatura já quitada ou cancelada: o valor bruto vira crédito do
-		// cliente e a taxa do provedor é reconhecida como despesa.
-		if err := s.creditOverpayment(ctx, tx, inv, pay, pay.Amount, viaProvider, actor, now); err != nil {
-			return err
-		}
-		if !viaProvider || !pay.Fee.IsPositive() {
-			return nil
-		}
-		t, ok, err := ledger.ProviderFeeCharged(ids.New(), pay.TenantID, pay.ID, pay.Fee, now)
-		if err != nil || !ok {
-			return err
-		}
-		return tx.PostLedger(ctx, t)
+		// cliente. Pelo provedor, a taxa é reconhecida no recebimento, como
+		// nos demais pagamentos (ensureReceived).
+		return s.creditOverpayment(ctx, tx, inv, pay, pay.Amount, viaProvider, actor, now)
 	}
 	applied, excess, recovered, err := inv.ApplyPaymentWithRecovery(pay.Amount, now)
 	if err != nil {
@@ -1155,7 +1159,7 @@ func (s *Service) applyToInvoice(ctx context.Context, tx Tx, inv *billing.Invoic
 	var t ledger.Transaction
 	var ok bool
 	if viaProvider {
-		t, ok, err = ledger.ProviderPaymentReceived(ids.New(), pay.TenantID, pay.ID, applied, pay.Fee, now)
+		t, ok, err = ledger.ProviderPaymentConfirmed(ids.New(), pay.TenantID, pay.ID, applied, now)
 	} else {
 		t, ok, err = ledger.ManualPaymentReceived(ids.New(), pay.TenantID, pay.ID, applied, now)
 	}

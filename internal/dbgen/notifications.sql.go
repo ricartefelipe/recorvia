@@ -392,6 +392,49 @@ func (q *Queries) GetReminderRules(ctx context.Context, arg GetReminderRulesPara
 	return i, err
 }
 
+const getSuspensionActive = `-- name: GetSuspensionActive :one
+SELECT (status = 'active')::boolean AS active FROM collection_suspensions WHERE tenant_id = $1 AND id = $2
+`
+
+type GetSuspensionActiveParams struct {
+	TenantID uuid.UUID
+	ID       uuid.UUID
+}
+
+// Situação da suspensão do aviso de suspensão: o aviso só sai enquanto a
+// própria suspensão estiver ativa.
+func (q *Queries) GetSuspensionActive(ctx context.Context, arg GetSuspensionActiveParams) (bool, error) {
+	row := q.db.QueryRow(ctx, getSuspensionActive, arg.TenantID, arg.ID)
+	var active bool
+	err := row.Scan(&active)
+	return active, err
+}
+
+const getSuspensionSendWindow = `-- name: GetSuspensionSendWindow :one
+SELECT p.send_window_start_hour, p.send_window_end_hour
+  FROM collection_suspensions s
+  JOIN collection_policies p ON p.tenant_id = s.tenant_id AND p.id = s.policy_id
+ WHERE s.tenant_id = $1 AND s.id = $2
+`
+
+type GetSuspensionSendWindowParams struct {
+	TenantID uuid.UUID
+	ID       uuid.UUID
+}
+
+type GetSuspensionSendWindowRow struct {
+	SendWindowStartHour int32
+	SendWindowEndHour   int32
+}
+
+// Janela de envio da política que aplicou a suspensão (aviso de suspensão).
+func (q *Queries) GetSuspensionSendWindow(ctx context.Context, arg GetSuspensionSendWindowParams) (GetSuspensionSendWindowRow, error) {
+	row := q.db.QueryRow(ctx, getSuspensionSendWindow, arg.TenantID, arg.ID)
+	var i GetSuspensionSendWindowRow
+	err := row.Scan(&i.SendWindowStartHour, &i.SendWindowEndHour)
+	return i, err
+}
+
 const insertNotification = `-- name: InsertNotification :execrows
 INSERT INTO notifications (id, tenant_id, business_key, template_key, channel, recipients, subject, content_ciphertext, content_key_id,
                            customer_id, invoice_id, subscription_id, invitation_id, policy_id, step_offset_days, status, status_reason,

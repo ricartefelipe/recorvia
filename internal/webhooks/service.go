@@ -83,6 +83,8 @@ type Tx interface {
 	// expectedAttempts; false indica que outra execução a reivindicou.
 	UpdateDelivery(ctx context.Context, d Delivery, expectedAttempts int) (bool, error)
 	InsertAttempt(ctx context.Context, a Attempt) error
+	// Attempts lista as tentativas de uma entrega em ordem crescente.
+	Attempts(ctx context.Context, deliveryID uuid.UUID) ([]Attempt, error)
 
 	MarkInbox(ctx context.Context, consumer string, messageID uuid.UUID) (bool, error)
 	Audit(ctx context.Context, e audit.Entry) error
@@ -436,6 +438,32 @@ func (s *Service) Deliveries(ctx context.Context, tenantID, endpointID uuid.UUID
 		return err
 	})
 	return p, err
+}
+
+// DeliveryAttempts lista as tentativas individuais de uma entrega, da
+// primeira à mais recente. Entrega inexistente ou de endpoint removido: 404,
+// como na listagem das entregas.
+func (s *Service) DeliveryAttempts(ctx context.Context, tenantID, deliveryID uuid.UUID) ([]Attempt, error) {
+	var out []Attempt
+	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		d, err := tx.Delivery(ctx, deliveryID, false)
+		if err != nil {
+			return err
+		}
+		if _, err := liveEndpoint(ctx, tx, d.EndpointID, false, s.clock.Now()); err != nil {
+			if apperr.IsKind(err, apperr.KindNotFound) {
+				return errDeliveryNotFound()
+			}
+			return err
+		}
+		out, err = tx.Attempts(ctx, deliveryID)
+		return err
+	})
+	return out, err
+}
+
+func errDeliveryNotFound() error {
+	return apperr.NotFound("webhook_delivery_not_found", "Entrega de webhook não encontrada.")
 }
 
 // RetryDelivery agenda o reenvio manual de uma entrega (auditado).
