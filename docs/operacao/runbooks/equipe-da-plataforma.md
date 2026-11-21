@@ -38,7 +38,7 @@ SELECT id, email, status, last_login_at FROM users WHERE lower(email) = lower('p
 
 Inclusão (papel `support` ou `operations`):
 
-```sql
+```sql escrita
 INSERT INTO platform_staff (user_id, role)
 SELECT id, 'operations' FROM users WHERE lower(email) = lower('pessoa@recorvia.test')
 ON CONFLICT (user_id) DO NOTHING;
@@ -46,7 +46,7 @@ ON CONFLICT (user_id) DO NOTHING;
 
 Remoção:
 
-```sql
+```sql escrita
 DELETE FROM platform_staff
  WHERE user_id = (SELECT id FROM users WHERE lower(email) = lower('pessoa@recorvia.test'));
 ```

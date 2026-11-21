@@ -19,19 +19,22 @@ import (
 )
 
 // docStatement é uma consulta de um bloco SQL da documentação de operação,
-// com os comentários que a precedem.
+// com os comentários que a precedem. write indica um bloco declarado como de
+// escrita (```sql escrita): comandos de alteração deliberados, como incluir
+// alguém na equipe da plataforma.
 type docStatement struct {
 	file, comment, sql string
+	write              bool
 }
 
 var (
-	sqlBlock        = regexp.MustCompile("(?s)```sql\n(.*?)```")
+	sqlBlock        = regexp.MustCompile("(?s)```sql( escrita)?\n(.*?)```")
 	quotedParameter = regexp.MustCompile(`'<[^'>]+>'`)
 	bareParameter   = regexp.MustCompile(`<[a-z_]+>`)
 )
 
-// operationsDocStatements extrai as consultas dos blocos ```sql de
-// docs/operacao (guias e runbooks).
+// operationsDocStatements extrai as consultas dos blocos ```sql e
+// ```sql escrita de docs/operacao (guias e runbooks).
 func operationsDocStatements(t *testing.T) []docStatement {
 	t.Helper()
 	root := filepath.Join("..", "..", "docs", "operacao")
@@ -51,7 +54,8 @@ func operationsDocStatements(t *testing.T) []docStatement {
 		}
 		for _, block := range sqlBlock.FindAllStringSubmatch(string(b), -1) {
 			var comment, body []string
-			for line := range strings.SplitSeq(block[1], "\n") {
+			write := block[1] != ""
+			for line := range strings.SplitSeq(block[2], "\n") {
 				trimmed := strings.TrimSpace(line)
 				switch {
 				case strings.HasPrefix(trimmed, "--"):
@@ -60,7 +64,7 @@ func operationsDocStatements(t *testing.T) []docStatement {
 					body = append(body, line)
 				}
 				if strings.HasSuffix(trimmed, ";") {
-					out = append(out, docStatement{file: filepath.Base(f), comment: strings.Join(comment, " "), sql: strings.Join(body, "\n")})
+					out = append(out, docStatement{file: filepath.Base(f), comment: strings.Join(comment, " "), sql: strings.Join(body, "\n"), write: write})
 					comment, body = nil, nil
 				}
 			}
@@ -80,12 +84,18 @@ func (s docStatement) expectsNoRows() bool {
 	return strings.Contains(s.comment, "Esperado: nenhuma linha")
 }
 
-// runDocStatement executa a consulta como superusuário numa transação
-// somente leitura, com os parâmetros de exemplo ('<tenant>', <pid>) trocados
-// por NULL, e devolve o número de linhas.
+// runDocStatement executa a consulta como superusuário, com os parâmetros de
+// exemplo ('<tenant>', <pid>) trocados por NULL, e devolve o número de linhas.
+// Consultas de leitura rodam numa transação somente leitura; comandos de
+// escrita rodam numa transação que é sempre desfeita, o que confere nomes de
+// tabelas, colunas e constraints sem alterar o banco.
 func runDocStatement(ctx context.Context, conn *pgx.Conn, s docStatement) (int, error) {
 	q := bareParameter.ReplaceAllString(quotedParameter.ReplaceAllString(s.sql, "NULL"), "NULL")
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	mode := pgx.ReadOnly
+	if s.write {
+		mode = pgx.ReadWrite
+	}
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: mode})
 	if err != nil {
 		return 0, err
 	}
@@ -116,15 +126,23 @@ func superConn(t *testing.T, pg pgtest.Env) *pgx.Conn {
 
 // As consultas dos runbooks e do guia de backup executam contra o esquema
 // real (nomes de tabelas e colunas corretos) e, num banco íntegro, as
-// marcadas com "Esperado: nenhuma linha" não retornam linhas.
+// marcadas com "Esperado: nenhuma linha" não retornam linhas. Blocos ```sql
+// só trazem leitura; alterações deliberadas ficam em blocos ```sql escrita,
+// que precisam começar por INSERT, UPDATE ou DELETE e também são executados
+// (e desfeitos) contra o esquema.
 func TestOperationsDocsSQLRunsAgainstSchema(t *testing.T) {
 	pg := pgtest.Start(t)
 	conn := superConn(t, pg)
 	ctx := context.Background()
 	for _, s := range operationsDocStatements(t) {
 		upper := strings.ToUpper(strings.TrimSpace(s.sql))
-		if !strings.HasPrefix(upper, "SELECT") && !strings.HasPrefix(upper, "WITH") {
-			t.Errorf("%s: os documentos de operação só trazem consultas de leitura: %s", s.file, s.sql)
+		read := strings.HasPrefix(upper, "SELECT") || strings.HasPrefix(upper, "WITH")
+		switch {
+		case !s.write && !read:
+			t.Errorf("%s: blocos ```sql só trazem consultas de leitura; use ```sql escrita para alterações deliberadas: %s", s.file, s.sql)
+			continue
+		case s.write && !strings.HasPrefix(upper, "INSERT") && !strings.HasPrefix(upper, "UPDATE") && !strings.HasPrefix(upper, "DELETE"):
+			t.Errorf("%s: blocos ```sql escrita trazem só INSERT, UPDATE ou DELETE: %s", s.file, s.sql)
 			continue
 		}
 		n, err := runDocStatement(ctx, conn, s)
