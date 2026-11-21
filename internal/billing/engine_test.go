@@ -108,8 +108,9 @@ func newCycleFake() *cycleFake {
 	return &cycleFake{
 		cycleData: cycleData{discountUses: map[uuid.UUID]int{}, pendingBilled: map[uuid.UUID]uuid.UUID{}, credit: map[uuid.UUID]money.Money{},
 			invoiceKeys: map[string]bool{}, statusHistory: map[uuid.UUID][]StatusChange{}, usageBilled: map[uuid.UUID]uuid.UUID{}},
-		settings: TenantSettings{Location: saoPaulo, InvoicePrefix: "FAT", PaymentTermsDays: 5},
-		plans:    map[uuid.UUID]catalog.Plan{}, prices: map[uuid.UUID]catalog.PriceVersion{},
+		settings: TenantSettings{Location: saoPaulo, InvoicePrefix: "FAT", PaymentTermsDays: 5,
+			Issuer: Issuer{Name: "Acme Serviços", LegalName: "Acme Serviços Ltda.", DocumentNumber: "11444777000161"}},
+		plans: map[uuid.UUID]catalog.Plan{}, prices: map[uuid.UUID]catalog.PriceVersion{},
 		snapshot: customers.Snapshot{Name: "Padaria Central", DocumentType: "cnpj", DocumentNumber: "11222333000181"},
 		pending:  map[uuid.UUID][]PendingItem{}, existing: map[string]bool{}, errs: map[string]error{}, failTenant: map[uuid.UUID]error{},
 		changes: map[uuid.UUID]*subscriptions.ScheduledChange{}, adjustments: map[uuid.UUID][]subscriptions.PriceAdjustment{},
@@ -459,6 +460,10 @@ func TestEngineIssuesCycleInvoice(t *testing.T) {
 	}
 	if inv.Total.Amount() != 10000 || inv.AmountDue.Amount() != 10000 || inv.CustomerSnapshot.Name != "Padaria Central" {
 		t.Fatalf("valores: total=%v saldo=%v", inv.Total, inv.AmountDue)
+	}
+	// O emitente é gravado na emissão, como estava a organização.
+	if inv.Issuer == nil || *inv.Issuer != (Issuer{Name: "Acme Serviços", LegalName: "Acme Serviços Ltda.", DocumentNumber: "11444777000161"}) {
+		t.Fatalf("emitente gravado na emissão: %+v", inv.Issuer)
 	}
 	if !inv.IssuedAt.Equal(engineNow) || !inv.DueAt.Equal(local(2026, time.November, 22, 0, 0)) {
 		t.Fatalf("emissão/vencimento: %v %v", inv.IssuedAt, inv.DueAt)

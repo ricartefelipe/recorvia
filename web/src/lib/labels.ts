@@ -265,6 +265,33 @@ export const notificationStatusLabels: Labels = {
   suppressed: 'Suprimida',
 };
 
+/**
+ * Motivos da situação de uma notificação (status_reason) e dos eventos da
+ * linha do tempo, pelos códigos estáveis do contrato.
+ */
+export const notificationReasonLabels: Labels = {
+  scheduled: 'Agendada',
+  attempt: 'Tentativa de envio',
+  sent: 'Aceita pelo servidor de e-mail',
+  retry_scheduled: 'Nova tentativa agendada',
+  outside_send_window: 'Fora da janela de envio',
+  frequency_limit: 'Limite diário de mensagens atingido',
+  no_recipient: 'Sem destinatário',
+  invitation_link_unavailable: 'Link do convite indisponível',
+  invoice_paid: 'Fatura paga',
+  invoice_credited: 'Fatura quitada por nota de crédito',
+  invoice_voided: 'Fatura cancelada',
+  invoice_uncollectible: 'Fatura baixada como incobrável',
+  superseded: 'Substituída por um passo posterior da régua',
+  due_date_passed: 'O vencimento já passou',
+  invitation_not_pending: 'Convite não está mais pendente',
+  subscription_not_suspended: 'A assinatura não está mais suspensa',
+  feature_unavailable: 'Recurso indisponível no plano da plataforma',
+  permanent_failure: 'Falha permanente no envio',
+  attempts_exhausted: 'Tentativas esgotadas',
+  content_unavailable: 'Conteúdo da mensagem indisponível',
+};
+
 export const channelLabels: Labels = { email: 'E-mail' };
 
 export const webhookStatusLabels: Labels = { active: 'Ativo', disabled: 'Desativado' };

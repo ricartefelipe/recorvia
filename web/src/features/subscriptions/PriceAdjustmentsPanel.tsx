@@ -13,6 +13,7 @@ import { EmptyState, QueryContent } from '../../components/states';
 import { confirmAction, LabeledSegmented } from '../../components/ui';
 import { addDaysToCivilDate, todayInTimeZone } from '../../lib/dates';
 import { useApiMutation } from '../../lib/hooks';
+import { useIdempotencyKey } from '../../lib/idempotency';
 import { priceAdjustmentKindLabels, priceAdjustmentStatusLabels, labelOf } from '../../lib/labels';
 import { formatBasisPoints, parseMoneyToNumber, parsePercentToBasisPoints } from '../../lib/money';
 import { optionalText, reasonField } from '../../lib/validation';
@@ -62,8 +63,11 @@ function ScheduleModal({ subscription, opened, onClose }: { subscription: Subscr
     resolver: zodResolver(schema),
     defaultValues: { effective_date: null, kind: 'percent', percent: '', new_amount: '', index_name: '', reason: '' },
   });
+  const idempotency = useIdempotencyKey();
   const mutation = useApiMutation<PriceAdjustmentInput, PriceAdjustment, FormValues>({
-    mutationFn: (input) => subscriptionsApi.scheduleAdjustment(subscription.id, input),
+    mutationFn: (input) =>
+      subscriptionsApi.scheduleAdjustment(subscription.id, input, idempotency.keyFor({ subscription: subscription.id, ...input })),
+    idempotency,
     invalidate: ['subscriptions'],
     successMessage: 'Reajuste programado.',
     form,

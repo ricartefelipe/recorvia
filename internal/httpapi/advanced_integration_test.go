@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ricartefelipe/recorvia/internal/apicredentials"
 	"github.com/ricartefelipe/recorvia/internal/billing"
 	"github.com/ricartefelipe/recorvia/internal/catalog"
 	"github.com/ricartefelipe/recorvia/internal/httpapi"
@@ -49,7 +50,8 @@ func newAdvancedAPI(t *testing.T) *apiEnv {
 	a := newAPI(t)
 	env := a.env
 	idsvc := identity.NewService(stubIDP{}, a.sessions, env.Store.Users(), env.Clock, identity.DefaultPolicy())
-	cfg := &config.Config{Env: config.Test, CookieName: "recorvia_session", CookieSecure: false, RateLimitPerMinute: 10000}
+	cfg := &config.Config{Env: config.Test, CookieName: "recorvia_session", CookieSecure: false, RateLimitPerMinute: 10000,
+		APICredentialRateLimitPerMinute: 10000}
 	pay := env.Payments(gateways.NewResolver(time.Second), payments.Config{WebhookBaseURL: "http://api.test/webhooks/providers"})
 	_, router := httpapi.NewRouter(httpapi.Deps{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: cfg, Clock: env.Clock,
 		Store: env.Store, Sessions: a.sessions, Identity: idsvc, Tenancy: env.Tenancy, Platform: env.Platform, Customers: env.Customers,
@@ -59,12 +61,17 @@ func newAdvancedAPI(t *testing.T) *apiEnv {
 		Coupons:     catalog.NewCouponService(env.Store.Catalog(), env.Clock),
 		Terms:       subscriptions.NewTermsService(env.Store.Subscriptions(), env.Clock),
 		Metering:    metering.NewService(env.Store.Metering(), env.Clock),
-		Reporting:   reporting.NewService(env.Store.Reporting(), env.Clock)})
+		Reporting:   reporting.NewService(env.Store.Reporting(), env.Clock),
+		Credentials: apicredentials.NewService(env.Store.APICredentials(), a.sessions, env.Clock, apicredentials.DefaultPolicy())})
 	srv := httptest.NewServer(contract.Wrap(t, router))
 	t.Cleanup(srv.Close)
 	a.srv = srv
 	return a
 }
+
+// idemKey gera uma Idempotency-Key nova para um pedido de operação
+// financeira de criação.
+func idemKey() string { return "chave-" + uuid.NewString() }
 
 // expect executa a requisição e interrompe o teste quando o status diverge.
 func (c *client) expect(want int, method, path string, body any, extra ...string) (map[string]any, http.Header) {
@@ -356,7 +363,7 @@ func TestAdvancedAPISubscriptionDiscounts(t *testing.T) {
 	old := coupon(map[string]any{"code": "ARQUIVADO", "name": "Arquivado", "discount_type": "percent", "percent_off_bp": 100, "duration": "once"})
 	c.expect(http.StatusOK, http.MethodPost, "/api/v1/coupons/"+old["id"].(string)+"/archive", nil)
 
-	d, _ := c.expect(http.StatusCreated, http.MethodPost, subPath+"/discounts", map[string]any{"coupon_code": " fidelidade "})
+	d, _ := c.expect(http.StatusCreated, http.MethodPost, subPath+"/discounts", map[string]any{"coupon_code": " fidelidade "}, "Idempotency-Key", idemKey())
 	if d["coupon_code"] != "FIDELIDADE" || d["coupon_id"] != loyalty["id"] || d["remaining_cycles"] != float64(3) || d["status"] != "active" {
 		t.Fatalf("desconto aplicado: %v", d)
 	}
@@ -365,7 +372,7 @@ func TestAdvancedAPISubscriptionDiscounts(t *testing.T) {
 	if !ok || disc["id"] != d["id"] || disc["coupon_code"] != "FIDELIDADE" {
 		t.Fatalf("desconto ausente na assinatura: %v", got["discount"])
 	}
-	c.expectProblem(http.StatusConflict, "discount_already_active", http.MethodPost, subPath+"/discounts", map[string]any{"coupon_code": "UNICO"})
+	c.expectProblem(http.StatusConflict, "discount_already_active", http.MethodPost, subPath+"/discounts", map[string]any{"coupon_code": "UNICO"}, "Idempotency-Key", idemKey())
 
 	c.expect(http.StatusNoContent, http.MethodDelete, subPath+"/discounts", nil)
 	got, _ = c.expect(http.StatusOK, http.MethodGet, subPath, nil)
@@ -380,15 +387,15 @@ func TestAdvancedAPISubscriptionDiscounts(t *testing.T) {
 		{"INEXISTENTE", "coupon_not_found"},
 		{"OUTROPLANO", "coupon_not_applicable"},
 	} {
-		c.expectProblem(http.StatusUnprocessableEntity, tc.want, http.MethodPost, subPath+"/discounts", map[string]any{"coupon_code": tc.code})
+		c.expectProblem(http.StatusUnprocessableEntity, tc.want, http.MethodPost, subPath+"/discounts", map[string]any{"coupon_code": tc.code}, "Idempotency-Key", idemKey())
 	}
 
-	u, _ := c.expect(http.StatusCreated, http.MethodPost, subPath+"/discounts", map[string]any{"coupon_code": "UNICO"})
+	u, _ := c.expect(http.StatusCreated, http.MethodPost, subPath+"/discounts", map[string]any{"coupon_code": "UNICO"}, "Idempotency-Key", idemKey())
 	if u["coupon_id"] != single["id"] || u["remaining_cycles"] != float64(1) {
 		t.Fatalf("cupom de uso único: %v", u)
 	}
 	c.expect(http.StatusNoContent, http.MethodDelete, subPath+"/discounts", nil)
-	c.expectProblem(http.StatusConflict, "coupon_exhausted", http.MethodPost, subPath+"/discounts", map[string]any{"coupon_code": "UNICO"})
+	c.expectProblem(http.StatusConflict, "coupon_exhausted", http.MethodPost, subPath+"/discounts", map[string]any{"coupon_code": "UNICO"}, "Idempotency-Key", idemKey())
 
 	list, _ := c.expect(http.StatusOK, http.MethodGet, "/api/v1/coupons", nil)
 	coupons := byField(t, objects(t, list["data"]), "code")
@@ -406,7 +413,7 @@ func TestAdvancedAPISubscriptionDiscounts(t *testing.T) {
 		t.Fatalf("histórico de descontos: %v", events)
 	}
 	c.expectProblem(http.StatusNotFound, "subscription_not_found", http.MethodPost, "/api/v1/subscriptions/"+uuid.NewString()+"/discounts",
-		map[string]any{"coupon_code": "FIDELIDADE"})
+		map[string]any{"coupon_code": "FIDELIDADE"}, "Idempotency-Key", idemKey())
 }
 
 func TestAdvancedAPIChangePlanRequiresIfMatch(t *testing.T) {
@@ -574,19 +581,19 @@ func TestAdvancedAPIPriceAdjustments(t *testing.T) {
 	first, second := today.AddDays(30), today.AddDays(60)
 
 	adj, _ := c.expect(http.StatusCreated, http.MethodPost, path, map[string]any{"effective_date": first.String(), "kind": "percent",
-		"percent_bp": 450, "index_name": "IPCA", "reason": "Reajuste anual pelo IPCA"})
+		"percent_bp": 450, "index_name": "IPCA", "reason": "Reajuste anual pelo IPCA"}, "Idempotency-Key", idemKey())
 	if adj["status"] != "scheduled" || adj["effective_date"] != first.String() || adj["percent_bp"] != float64(450) || adj["index_name"] != "IPCA" ||
 		adj["applied_at"] != nil || adj["previous_amount"] != nil || adj["resulting_amount"] != nil || adj["previous_amount_decimal"] != nil ||
 		adj["resulting_amount_decimal"] != nil || adj["canceled_at"] != nil || adj["cancel_reason"] != nil {
 		t.Fatalf("reajuste percentual: %v", adj)
 	}
 	fixed, _ := c.expect(http.StatusCreated, http.MethodPost, path, map[string]any{"effective_date": second.String(), "kind": "fixed_amount",
-		"new_amount": 12000, "reason": "Novo valor contratual"})
+		"new_amount": 12000, "reason": "Novo valor contratual"}, "Idempotency-Key", idemKey())
 	if fixed["new_amount"] != float64(12000) || fixed["percent_bp"] != nil {
 		t.Fatalf("reajuste por valor: %v", fixed)
 	}
 	c.expectProblem(http.StatusConflict, "adjustment_date_taken", http.MethodPost, path, map[string]any{"effective_date": first.String(),
-		"kind": "percent", "percent_bp": 100, "reason": "Reajuste duplicado"})
+		"kind": "percent", "percent_bp": 100, "reason": "Reajuste duplicado"}, "Idempotency-Key", idemKey())
 
 	for _, tc := range []struct {
 		name string
@@ -602,7 +609,7 @@ func TestAdvancedAPIPriceAdjustments(t *testing.T) {
 		{"motivo curto", map[string]any{"effective_date": first.AddDays(1).String(), "kind": "percent", "percent_bp": 100, "reason": "ok"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c.expectProblem(http.StatusUnprocessableEntity, "invalid_adjustment", http.MethodPost, path, tc.body)
+			c.expectProblem(http.StatusUnprocessableEntity, "invalid_adjustment", http.MethodPost, path, tc.body, "Idempotency-Key", idemKey())
 		})
 	}
 
@@ -637,7 +644,7 @@ func TestAdvancedAPIPriceAdjustments(t *testing.T) {
 	}
 	// Cancelado o reajuste, a data fica livre para outro.
 	c.expect(http.StatusCreated, http.MethodPost, path, map[string]any{"effective_date": first.String(), "kind": "percent", "percent_bp": 300,
-		"reason": "Reajuste renegociado"})
+		"reason": "Reajuste renegociado"}, "Idempotency-Key", idemKey())
 
 	hist, _ := c.expect(http.StatusOK, http.MethodGet, subPath+"/history", nil)
 	events := map[string]int{}
@@ -662,10 +669,10 @@ func TestAdvancedAPIPerUnitAdjustmentExposesExactAmounts(t *testing.T) {
 	issuedInvoice(c, sub.ID)
 	path := "/api/v1/subscriptions/" + sub.ID.String() + "/price-adjustments"
 	c.expect(http.StatusCreated, http.MethodPost, path, map[string]any{"effective_date": tenantToday(t, a.env).AddDays(1).String(),
-		"kind": "percent", "percent_bp": 500, "reason": "Reajuste anual"})
+		"kind": "percent", "percent_bp": 500, "reason": "Reajuste anual"}, "Idempotency-Key", idemKey())
 	c.expectProblem(http.StatusUnprocessableEntity, "invalid_adjustment", http.MethodPost, path, map[string]any{
 		"effective_date": tenantToday(t, a.env).AddDays(2).String(), "kind": "fixed_amount", "new_amount": 1_000_000_000_000,
-		"reason": "Valor acima do limite"})
+		"reason": "Valor acima do limite"}, "Idempotency-Key", idemKey())
 
 	a.env.Clock.Set(sub.CurrentPeriod.End.Add(10 * time.Hour))
 	c = a.login(tn.Owner, &tn.ID)
@@ -988,7 +995,7 @@ func TestAdvancedAPIWritePermissions(t *testing.T) {
 		"discount_type": "percent", "percent_off_bp": 1000, "duration": "once"})
 	subPath := "/api/v1/subscriptions/" + sub.ID.String()
 	adj, _ := owner.expect(http.StatusCreated, http.MethodPost, subPath+"/price-adjustments", map[string]any{
-		"effective_date": tenantToday(t, a.env).AddDays(20).String(), "kind": "percent", "percent_bp": 500, "reason": "Reajuste programado"})
+		"effective_date": tenantToday(t, a.env).AddDays(20).String(), "kind": "percent", "percent_bp": 500, "reason": "Reajuste programado"}, "Idempotency-Key", idemKey())
 	etag := subscriptionETag(owner, sub.ID)
 	seatETag := subscriptionETag(owner, seatSub.ID)
 	at := a.env.Clock.Now().Truncate(time.Microsecond)
@@ -1007,9 +1014,9 @@ func TestAdvancedAPIWritePermissions(t *testing.T) {
 		{"trocar quantidade", http.MethodPost, "/api/v1/subscriptions/" + seatSub.ID.String() + "/change-quantity",
 			map[string]any{"quantity": 3, "timing": "next_cycle"}, []string{"If-Match", seatETag}},
 		{"programar reajuste", http.MethodPost, subPath + "/price-adjustments", map[string]any{"effective_date": tenantToday(t, a.env).AddDays(40).String(),
-			"kind": "percent", "percent_bp": 100, "reason": "Reajuste negado"}, nil},
+			"kind": "percent", "percent_bp": 100, "reason": "Reajuste negado"}, []string{"Idempotency-Key", idemKey()}},
 		{"cancelar reajuste", http.MethodDelete, subPath + "/price-adjustments/" + adj["id"].(string), nil, nil},
-		{"aplicar cupom", http.MethodPost, subPath + "/discounts", map[string]any{"coupon_code": "AUDITORIA"}, nil},
+		{"aplicar cupom", http.MethodPost, subPath + "/discounts", map[string]any{"coupon_code": "AUDITORIA"}, []string{"Idempotency-Key", idemKey()}},
 		{"remover desconto", http.MethodDelete, subPath + "/discounts", nil, nil},
 		{"enviar consumo", http.MethodPost, "/api/v1/usage-events", map[string]any{"events": []map[string]any{
 			usageEvent("aud-1", usageSub.ID, metric.Code, "1", at)}}, nil},
@@ -1059,7 +1066,7 @@ func TestAdvancedAPIWritePermissions(t *testing.T) {
 	}
 	operator.expect(http.StatusOK, http.MethodPost, "/api/v1/subscriptions/"+seatSub.ID.String()+"/change-quantity",
 		map[string]any{"quantity": 3, "timing": "next_cycle"}, "If-Match", seatETag)
-	operator.expect(http.StatusCreated, http.MethodPost, subPath+"/discounts", map[string]any{"coupon_code": "AUDITORIA"})
+	operator.expect(http.StatusCreated, http.MethodPost, subPath+"/discounts", map[string]any{"coupon_code": "AUDITORIA"}, "Idempotency-Key", idemKey())
 	operator.expectProblem(http.StatusForbidden, "forbidden", http.MethodPost, "/api/v1/coupons", map[string]any{"code": "OPERADOR", "name": "Operador",
 		"discount_type": "percent", "percent_off_bp": 100, "duration": "once"})
 	operator.expectProblem(http.StatusForbidden, "forbidden", http.MethodPost, invPath+"/credit-notes", map[string]any{"amount": 100,
@@ -1085,7 +1092,7 @@ func TestAdvancedAPITenantIsolation(t *testing.T) {
 		"discount_type": "percent", "percent_off_bp": 500, "duration": "once"})
 	subAPath := "/api/v1/subscriptions/" + subA.ID.String()
 	adjA, _ := ownerA.expect(http.StatusCreated, http.MethodPost, subAPath+"/price-adjustments", map[string]any{
-		"effective_date": start.AddDays(15).String(), "kind": "fixed_amount", "new_amount": 11000, "reason": "Reajuste do tenant A"})
+		"effective_date": start.AddDays(15).String(), "kind": "fixed_amount", "new_amount": 11000, "reason": "Reajuste do tenant A"}, "Idempotency-Key", idemKey())
 	at := a.env.Clock.Now().Truncate(time.Microsecond)
 	if r := ingest(ownerA, usageEvent("iso-1", usageSubA.ID, metricA.Code, "2", at)); r["iso-1"]["outcome"] != "accepted" {
 		t.Fatalf("evento do tenant A: %v", r["iso-1"])
@@ -1115,14 +1122,14 @@ func TestAdvancedAPITenantIsolation(t *testing.T) {
 		{"listar reajustes", http.MethodGet, subAPath + "/price-adjustments", "/api/v1/subscriptions/" + random + "/price-adjustments",
 			nil, nil, "subscription_not_found"},
 		{"programar reajuste", http.MethodPost, subAPath + "/price-adjustments", "/api/v1/subscriptions/" + random + "/price-adjustments",
-			map[string]any{"effective_date": start.AddDays(20).String(), "kind": "percent", "percent_bp": 100, "reason": "Tentativa do B"}, nil,
-			"subscription_not_found"},
+			map[string]any{"effective_date": start.AddDays(20).String(), "kind": "percent", "percent_bp": 100, "reason": "Tentativa do B"},
+			[]string{"Idempotency-Key", idemKey()}, "subscription_not_found"},
 		{"cancelar reajuste", http.MethodDelete, subAPath + "/price-adjustments/" + adjA["id"].(string),
 			"/api/v1/subscriptions/" + random + "/price-adjustments/" + random, nil, nil, "subscription_not_found"},
 		{"cancelar reajuste pela própria assinatura", http.MethodDelete, subBPath + "/price-adjustments/" + adjA["id"].(string),
 			subBPath + "/price-adjustments/" + random, nil, nil, "adjustment_not_found"},
 		{"aplicar cupom", http.MethodPost, subAPath + "/discounts", "/api/v1/subscriptions/" + random + "/discounts",
-			map[string]any{"coupon_code": "EXCLUSIVO-A"}, nil, "subscription_not_found"},
+			map[string]any{"coupon_code": "EXCLUSIVO-A"}, []string{"Idempotency-Key", idemKey()}, "subscription_not_found"},
 		{"remover desconto", http.MethodDelete, subAPath + "/discounts", "/api/v1/subscriptions/" + random + "/discounts", nil, nil,
 			"subscription_not_found"},
 		{"consumo do período", http.MethodGet, "/api/v1/subscriptions/" + usageSubA.ID.String() + "/usage", "/api/v1/subscriptions/" + random + "/usage",
@@ -1135,7 +1142,7 @@ func TestAdvancedAPITenantIsolation(t *testing.T) {
 			ownerB.expectProblem(http.StatusNotFound, tc.code, tc.method, tc.path, tc.body, tc.extra...)
 			extra := tc.extra
 			if len(extra) == 2 && extra[0] == "Idempotency-Key" {
-				extra = []string{"Idempotency-Key", "nota-" + uuid.NewString()}
+				extra = []string{"Idempotency-Key", idemKey()}
 			}
 			ownerB.expectProblem(http.StatusNotFound, tc.code, tc.method, tc.randomPath, tc.body, extra...)
 		})
@@ -1156,7 +1163,7 @@ func TestAdvancedAPITenantIsolation(t *testing.T) {
 		"discount_type": "amount", "amount_off": 500, "duration": "once"})
 	ownerB.expectProblem(http.StatusUnprocessableEntity, "invalid_coupon", http.MethodPost, "/api/v1/coupons", map[string]any{"code": "PLANO-A",
 		"name": "Plano alheio", "discount_type": "percent", "percent_off_bp": 100, "duration": "once", "applies_to_plan_ids": []string{planA.ID.String()}})
-	ownerB.expectProblem(http.StatusUnprocessableEntity, "coupon_not_found", http.MethodPost, subBPath+"/discounts", map[string]any{"coupon_code": "SOMENTE-A"})
+	ownerB.expectProblem(http.StatusUnprocessableEntity, "coupon_not_found", http.MethodPost, subBPath+"/discounts", map[string]any{"coupon_code": "SOMENTE-A"}, "Idempotency-Key", idemKey())
 
 	for _, path := range []string{"/api/v1/usage-events", "/api/v1/usage-events?subscription_id=" + usageSubA.ID.String(),
 		"/api/v1/usage-events?metric_id=" + metricA.ID.String()} {

@@ -86,6 +86,13 @@ func assertConservation(t testing.TB, inv *Invoice) {
 		}
 		sum += p.Amount()
 	}
+	if inv.Status == Void {
+		// Cancelada: o crédito aplicado volta ao cliente e não há saldo devedor.
+		if !inv.AmountDue.IsZero() || !inv.AmountPaid.IsZero() || !inv.AmountCredited.IsZero() || !inv.AmountWrittenOff.IsZero() {
+			t.Fatalf("fatura cancelada com saldo, pagamento, nota ou baixa: %+v", inv)
+		}
+		sum = inv.Total.Amount()
+	}
 	if sum != inv.Total.Amount() {
 		t.Fatalf("pago %d + saldo %d + creditado %d + baixado %d + crédito %d = %d, total %d",
 			inv.AmountPaid.Amount(), inv.AmountDue.Amount(), inv.AmountCredited.Amount(), inv.AmountWrittenOff.Amount(),
@@ -531,9 +538,10 @@ func TestVoid(t *testing.T) {
 		if err := inv.Void("emitida em duplicidade", at); err != nil {
 			t.Fatal(err)
 		}
-		if inv.Status != Void || !inv.VoidedAt.Equal(at) || inv.VoidReason != "emitida em duplicidade" {
+		if inv.Status != Void || !inv.VoidedAt.Equal(at) || inv.VoidReason != "emitida em duplicidade" || !inv.AmountDue.IsZero() {
 			t.Fatalf("cancelamento: %+v", inv)
 		}
+		assertConservation(t, inv)
 		if ch := inv.PopChanges(); len(ch) != 1 || ch[0].To != Void || ch[0].Reason != "emitida em duplicidade" {
 			t.Fatalf("histórico: %+v", ch)
 		}
@@ -551,6 +559,12 @@ func TestVoid(t *testing.T) {
 		if err := inv.Void("erro de cadastro", at); err != nil {
 			t.Fatal(err)
 		}
+		// O crédito aplicado volta ao cliente (Service.Void): a fatura
+		// cancelada não tem saldo, e o crédito aplicado fica registrado.
+		if !inv.AmountDue.IsZero() || inv.CreditApplied.Amount() != 2000 || inv.Total.Amount() != 10000 {
+			t.Fatalf("cancelada com crédito aplicado: saldo %v, crédito %v", inv.AmountDue, inv.CreditApplied)
+		}
+		assertConservation(t, inv)
 	})
 	t.Run("com pagamento parcial", func(t *testing.T) {
 		inv := issued(t, 10000)

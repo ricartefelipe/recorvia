@@ -319,8 +319,69 @@ export function WebhooksTab() {
   );
 }
 
+/** Tentativas individuais de uma entrega, da primeira à mais recente. */
+function DeliveryAttemptsModal({ delivery, onClose }: { delivery: WebhookDelivery; onClose: () => void }) {
+  const { keys } = useTenant();
+  const query = useQuery({
+    queryKey: keys('webhooks', 'attempts', delivery.id),
+    queryFn: ({ signal }) => integrationsApi.deliveryAttempts(delivery.id, signal),
+  });
+  return (
+    <Modal opened onClose={onClose} title="Tentativas da entrega" size="xl">
+      <Stack gap="sm">
+        <Text size="sm" ff="monospace">
+          {delivery.event_type} · {delivery.event_id}
+        </Text>
+        <QueryContent query={query} loading={<LoadingState />}>
+          {(list) =>
+            list.data.length === 0 ? (
+              <EmptyState title="Nenhuma tentativa" description="A entrega ainda não foi tentada." />
+            ) : (
+              <Table aria-label="Tentativas da entrega">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th ta="right">Nº</Table.Th>
+                    <Table.Th>Início</Table.Th>
+                    <Table.Th ta="right">Duração</Table.Th>
+                    <Table.Th>Código HTTP</Table.Th>
+                    <Table.Th>Erro</Table.Th>
+                    <Table.Th ta="right">Assinaturas</Table.Th>
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {list.data.map((a) => (
+                    <Table.Tr key={a.attempt}>
+                      <Table.Td ta="right">{a.attempt}</Table.Td>
+                      <Table.Td>
+                        <DateTime value={a.started_at} />
+                      </Table.Td>
+                      <Table.Td ta="right">{a.duration_ms} ms</Table.Td>
+                      <Table.Td>{a.status_code ?? 'Sem resposta'}</Table.Td>
+                      <Table.Td>
+                        {a.error ? (
+                          <Text size="xs" c="red" lineClamp={3} title={a.error}>
+                            {a.error}
+                          </Text>
+                        ) : (
+                          '—'
+                        )}
+                      </Table.Td>
+                      <Table.Td ta="right">{a.signature_count}</Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            )
+          }
+        </QueryContent>
+      </Stack>
+    </Modal>
+  );
+}
+
 export function WebhookDeliveriesPage() {
   const { id = '' } = useParams();
+  const [attempts, setAttempts] = useState<WebhookDelivery | null>(null);
   const { keys } = useTenant();
   const canWrite = usePermission('webhooks.write');
   const pagination = useCursorPagination(id);
@@ -362,7 +423,7 @@ export function WebhookDeliveriesPage() {
                       <Table.Th>Último código HTTP</Table.Th>
                       <Table.Th>Próxima tentativa</Table.Th>
                       <Table.Th>Entregue em</Table.Th>
-                      {canWrite && <Table.Th aria-label="Ações" />}
+                      <Table.Th aria-label="Ações" />
                     </Table.Tr>
                   </Table.Thead>
                   <Table.Tbody>
@@ -391,9 +452,14 @@ export function WebhookDeliveriesPage() {
                         <Table.Td>{d.last_status_code ?? '—'}</Table.Td>
                         <Table.Td>{d.next_attempt_at ? <DateTime value={d.next_attempt_at} /> : '—'}</Table.Td>
                         <Table.Td>{d.delivered_at ? <DateTime value={d.delivered_at} /> : '—'}</Table.Td>
-                        {canWrite && (
-                          <Table.Td>
-                            {(d.status === 'exhausted' || d.status === 'retrying' || d.status === 'succeeded') && (
+                        <Table.Td>
+                          <Group gap="xs" wrap="nowrap">
+                            {d.attempts > 0 && (
+                              <Button size="xs" variant="subtle" leftSection={<IconListDetails size={14} />} onClick={() => setAttempts(d)}>
+                                Tentativas
+                              </Button>
+                            )}
+                            {canWrite && (d.status === 'exhausted' || d.status === 'retrying' || d.status === 'succeeded') && (
                               <Button
                                 size="xs"
                                 variant="light"
@@ -404,8 +470,8 @@ export function WebhookDeliveriesPage() {
                                 Reenviar
                               </Button>
                             )}
-                          </Table.Td>
-                        )}
+                          </Group>
+                        </Table.Td>
                       </Table.Tr>
                     ))}
                   </Table.Tbody>
@@ -423,6 +489,7 @@ export function WebhookDeliveriesPage() {
           )
         }
       </QueryContent>
+      {attempts && <DeliveryAttemptsModal delivery={attempts} onClose={() => setAttempts(null)} />}
     </Stack>
   );
 }

@@ -80,7 +80,31 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /**
+         * Encerra a sessão atual
+         * @description Remove a sessão do servidor, revoga no provedor de identidade, pelo servidor, o refresh token da sessão e devolve o endereço de encerramento da sessão do navegador no provedor, com `client_id` e `post_logout_redirect_uri`. Nenhum token do provedor (nem o ID token) é devolvido ao navegador.
+         */
         post: operations["authLogout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/logout-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Encerra todas as sessões do usuário
+         * @description Remove todas as sessões do usuário no servidor (em qualquer navegador), revoga no provedor de identidade o refresh token de cada uma e devolve o endereço de encerramento da sessão do navegador atual no provedor, sem tokens.
+         */
+        post: operations["authLogoutAll"];
         delete?: never;
         options?: never;
         head?: never;
@@ -145,6 +169,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /**
+         * Aceita um convite com o usuário da sessão
+         * @description O convite é de uso único, expira e exige o mesmo e-mail do usuário. Convite inválido, expirado, revogado ou já usado responde 422 `invitation_invalid`; e-mail divergente, 403 `invitation_email_mismatch`; quem já participa da organização, 409 `already_member`; organização no limite de usuários do plano da plataforma (inclusive depois de um rebaixamento de plano), 403 `platform_user_limit`.
+         */
         post: operations["acceptInvitation"];
         delete?: never;
         options?: never;
@@ -366,6 +394,92 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/addon-orders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pedidos de serviços adicionais de todas as organizações (equipe da plataforma)
+         * @description Paginada por cursor. Sem `status`, lista os pedidos em aberto (solicitados e agendados), do mais antigo para o mais recente; `requested`, pela solicitação; `scheduled`, pela data do atendimento; `completed` e `canceled`, do encerramento mais recente para o mais antigo. O cursor vale somente para o mesmo filtro (`invalid_cursor`).
+         */
+        get: operations["adminListAddonOrders"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/schedule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organização do pedido (equipe da plataforma) */
+                tenant_id: components["parameters"]["AdminTenantID"];
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Agenda (ou reagenda) o atendimento do pedido */
+        post: operations["adminScheduleAddonOrder"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organização do pedido (equipe da plataforma) */
+                tenant_id: components["parameters"]["AdminTenantID"];
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Conclui o atendimento; o valor entra no próximo demonstrativo da plataforma
+         * @description O valor entra no demonstrativo do período em que a conclusão ocorreu (ou no seguinte, se esse já estiver fechado). Com a assinatura da plataforma da organização cancelada, responde 409 `platform_subscription_canceled`: o pedido deve ser cancelado.
+         */
+        post: operations["adminCompleteAddonOrder"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organização do pedido (equipe da plataforma) */
+                tenant_id: components["parameters"]["AdminTenantID"];
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancela o pedido em aberto, sem cobrança */
+        post: operations["adminCancelAddonOrder"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/customers": {
         parameters: {
             query?: never;
@@ -497,7 +611,8 @@ export interface paths {
         delete: operations["removeCustomerContact"];
         options?: never;
         head?: never;
-        patch?: never;
+        /** @description Altera os campos informados do contato; campo omitido mantém o valor atual (inclusive `receives_billing_email`, que o próprio cliente pode ter alterado pelo portal). `phone` vazio remove o telefone. Sem mudança, nada é gravado. O histórico do cliente registra `customer.contact_updated` com os nomes dos campos alterados, nunca os valores. Responde 404 `contact_not_found` para contato inexistente ou de outro cliente e 409 `customer_anonymized` para cliente anonimizado. */
+        patch: operations["updateCustomerContact"];
         trace?: never;
     };
     "/api/v1/customers/{id}/billing-address": {
@@ -508,7 +623,7 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** @description Grava o endereço de cobrança do cliente. Responde 409 `customer_anonymized` para cliente anonimizado, que não volta a receber dados pessoais. */
+        /** @description Grava o endereço de cobrança do cliente. Sem mudança, nada é gravado. O histórico do cliente registra `customer.address_updated` com os nomes dos campos alterados (`fields`) e se o endereço foi cadastrado agora (`created`), nunca os valores. Responde 409 `customer_anonymized` para cliente anonimizado, que não volta a receber dados pessoais. */
         put: operations["setCustomerAddress"];
         post?: never;
         delete?: never;
@@ -524,6 +639,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Histórico do cliente (auditoria), do evento mais recente para o mais antigo, em páginas por cursor: `next_cursor` pede a página seguinte e é nulo na última. */
         get: operations["getCustomerHistory"];
         put?: never;
         post?: never;
@@ -732,6 +848,7 @@ export interface paths {
         };
         get: operations["listSubscriptions"];
         put?: never;
+        /** @description Cria a assinatura com a versão de preço vigente do plano. Exige `Idempotency-Key`: a repetição devolve o resultado registrado (sem o header `ETag`; a versão está no corpo) e, depois de um processamento interrompido ou da validade do registro (24 h), a chave de negócio derivada da chave devolve a mesma assinatura em vez de criar outra. A mesma chave com outro conteúdo de negócio (cliente, plano, quantidade, início, avaliação ou prazo) responde 409 `request_key_reused`; 409 `subscription_in_progress` (com Retry-After) indica outra criação com a mesma chave ainda não confirmada. */
         post: operations["createSubscription"];
         delete?: never;
         options?: never;
@@ -984,6 +1101,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Gera o CSV das faturas sob demanda (não é armazenado), separado por ponto e vírgula, das mais recentes para as mais antigas. Colunas: numero, cliente, situacao, emissao, vencimento, periodo_inicio e periodo_fim (primeiro e último dia incluídos no período de faturamento), subtotal, desconto, total, creditos_aplicados, valor_creditado (notas de crédito), pago, valor_baixado, saldo e moeda. Valores em reais com ponto decimal; datas no fuso da organização. Textos que começam com =, +, -, @, tabulação ou retorno de carro recebem um apóstrofo na frente (neutralização de fórmulas). Cada arquivo tem no máximo `X-Recorvia-Export-Limit` faturas (50.000); quando há mais, `X-Recorvia-Export-Truncated` é `true`, `X-Recorvia-Export-Next-Cursor` traz o cursor da parte seguinte e `X-Recorvia-Export-Next-Part` o número dela; a parte seguinte é pedida com os mesmos filtros, `cursor` e `part`, e o arquivo de cada parte se chama `faturas-parte-N.csv`. As partes são consultas independentes, sem uma fotografia única: uma fatura alterada entre partes de modo a entrar ou sair do filtro (por exemplo, de situação) pode faltar ou aparecer numa parte, mas nenhuma fatura que continua no filtro se repete nem é pulada. Fatura cancelada sai com saldo zero. Cada exportação fica na auditoria (`invoices.exported`). */
         get: operations["exportInvoices"];
         put?: never;
         post?: never;
@@ -1016,6 +1134,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Documento comercial da fatura emitida, em HTML imprimível sem scripts. Traz o aviso de que a fatura comercial não é documento fiscal, o emitente (nome, razão social e CNPJ da organização gravados na emissão; faturas emitidas antes da migration 00019 usam os dados atuais), o cliente com documento e endereço de cobrança copiados na emissão, emissão, vencimento, condições de pagamento, período de faturamento, itens com período, e o quadro de totais que fecha com o saldo: subtotal, descontos, total, créditos aplicados, notas de crédito, pago, valor baixado e saldo. Na fatura cancelada, o documento informa o cancelamento e o quadro mostra o crédito devolvido ao cliente e o valor cancelado, com saldo zero. */
         get: operations["getInvoiceDocument"];
         put?: never;
         post?: never;
@@ -1535,6 +1654,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/notifications/{id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Linha do tempo de uma notificação (agendamento, adiamentos, tentativas, envio, falha, cancelamento ou supressão) */
+        get: operations["listNotificationEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/webhook-event-types": {
         parameters: {
             query?: never;
@@ -1612,6 +1748,23 @@ export interface paths {
             cookie?: never;
         };
         get: operations["listWebhookDeliveries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/webhook-deliveries/{id}/attempts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Tentativas individuais de uma entrega, da primeira à mais recente */
+        get: operations["listWebhookDeliveryAttempts"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2037,6 +2190,8 @@ export interface components {
             };
             usage: {
                 active_users: number;
+                /** @description Convites pendentes; reservam vagas de usuário do plano */
+                pending_invitations: number;
                 active_subscriptions: number;
             };
         };
@@ -2061,6 +2216,26 @@ export interface components {
             currency: string;
             /** Format: date-time */
             created_at: string;
+            /**
+             * Format: date-time
+             * @description Instante combinado para o atendimento
+             */
+            scheduled_for: string | null;
+            /** Format: date-time */
+            completed_at: string | null;
+            /** Format: date-time */
+            canceled_at: string | null;
+            cancel_reason: string | null;
+            /** @description O pedido concluído já entrou em um demonstrativo da plataforma */
+            billed: boolean;
+            version: number;
+        };
+        StaffAddonOrder: components["schemas"]["AddonOrder"] & {
+            /** Format: uuid */
+            tenant_id: string;
+            tenant_name: string;
+            tenant_slug: string;
+            addon_name: string;
         };
         PlatformStatement: {
             /** Format: uuid */
@@ -2167,6 +2342,14 @@ export interface components {
             role?: string;
             /** @default true */
             receives_billing_email: boolean;
+        };
+        /** @description Alteração parcial do contato; campo omitido mantém o valor atual. */
+        ContactPatch: {
+            name?: string;
+            email?: string;
+            phone?: string;
+            role?: string;
+            receives_billing_email?: boolean;
         };
         Contact: {
             /** Format: uuid */
@@ -2618,7 +2801,10 @@ export interface components {
             amount_credited: number;
             /** Format: int64 */
             amount_written_off: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Saldo devedor; zero na fatura cancelada (o crédito aplicado volta ao cliente).
+             */
             amount_due: number;
             overdue: boolean;
             /** Format: date-time */
@@ -3065,6 +3251,8 @@ export interface components {
             subject: string;
             /** @enum {string} */
             status: "scheduled" | "sending" | "sent" | "failed" | "canceled" | "suppressed";
+            /** @description Código estável do motivo da situação atual; vazio quando não há motivo (em envio ou enviada). Cancelamento: invoice_paid, invoice_credited, invoice_voided, invoice_uncollectible, superseded, due_date_passed, subscription_not_suspended, invitation_not_pending, feature_unavailable. Supressão: no_recipient, invitation_link_unavailable. Adiamento: outside_send_window, frequency_limit, retry_scheduled. Falha: permanent_failure, attempts_exhausted, content_unavailable. */
+            status_reason: string;
             /** Format: date-time */
             send_after: string;
             attempts: number;
@@ -3073,6 +3261,18 @@ export interface components {
             sent_at?: string | null;
             /** Format: date-time */
             created_at: string;
+        };
+        NotificationEvent: {
+            /** @enum {string} */
+            status: "scheduled" | "sending" | "sent" | "failed" | "canceled" | "suppressed";
+            /** @description Código estável do evento: scheduled, attempt, sent, retry_scheduled e os motivos de status_reason da notificação. */
+            reason: string;
+            /** @description Número da tentativa corrente quando o evento ocorreu */
+            attempt: number;
+            /** @description Complemento (erro da tentativa ou instante do adiamento); vazio sem complemento */
+            detail: string;
+            /** Format: date-time */
+            occurred_at: string;
         };
         WebhookEndpointInput: {
             url: string;
@@ -3123,6 +3323,18 @@ export interface components {
             delivered_at?: string | null;
             /** Format: date-time */
             created_at: string;
+        };
+        WebhookDeliveryAttempt: {
+            attempt: number;
+            /** Format: date-time */
+            started_at: string;
+            duration_ms: number;
+            /** @description Código HTTP da resposta; nulo quando não houve resposta */
+            status_code: number | null;
+            /** @description Erro da tentativa; vazio quando o destino respondeu 2xx */
+            error: string;
+            /** @description Assinaturas enviadas (mais de uma durante a rotação do segredo) */
+            signature_count: number;
         };
         ApiCredential: {
             /** Format: uuid */
@@ -3197,7 +3409,7 @@ export interface components {
             billed_usage?: number;
             /**
              * Format: int64
-             * @description Pagamentos recebidos no mês
+             * @description Pagamentos confirmados no mês, pela data de pagamento, via provedor ou registro manual. Inclui os pagamentos confirmados pelo provedor e ainda não creditados por ele (pending_provider_receipt).
              */
             received: number;
             /** Format: int64 */
@@ -3226,6 +3438,11 @@ export interface components {
              * @description Saldo atual dos valores a recuperar de clientes (conta customer_recoverables): crédito de pagamento excedente já usado e estornado por chargeback, menos as baixas recebidas e perdidas. Não depende do mês consultado.
              */
             open_recoverables: number;
+            /**
+             * Format: int64
+             * @description Saldo atual dos pagamentos confirmados pelo provedor e ainda não creditados por ele (conta provider_confirmed), por exemplo cartão no prazo de recebimento. No recebimento, o bruto passa aos valores em liquidação, a taxa é reconhecida e o líquido vai para o disponível liquidado (ADR-080). Não depende do mês consultado.
+             */
+            pending_provider_receipt: number;
             open_discrepancies?: number;
             unknown_operations?: number;
             definitions: {
@@ -3316,6 +3533,18 @@ export interface components {
                 "application/problem+json": components["schemas"]["Problem"];
             };
         };
+        /** @description Sessão encerrada */
+        LogoutRedirect: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    /** @description Encerramento no provedor (client_id e post_logout_redirect_uri), sem tokens */
+                    redirect_url: string;
+                };
+            };
+        };
         /** @description Acesso negado (RFC 9457). A operação exige a sessão de um usuário: credenciais de API recebem o código `user_session_required`, mesmo com escopos; outros códigos indicam permissão insuficiente. */
         UserSessionRequired: {
             headers: {
@@ -3348,9 +3577,11 @@ export interface components {
         CSRF: string;
         /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
         IfMatch: string;
-        /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+        /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
         IdempotencyKey: string;
         ID: string;
+        /** @description Organização do pedido (equipe da plataforma) */
+        AdminTenantID: string;
         Limit: number;
         Cursor: string;
     };
@@ -3439,17 +3670,23 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Sessão encerrada */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        redirect_url: string;
-                    };
-                };
+            200: components["responses"]["LogoutRedirect"];
+            403: components["responses"]["UserSessionRequired"];
+        };
+    };
+    authLogoutAll: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
+                "X-CSRF-Token"?: components["parameters"]["CSRF"];
             };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["LogoutRedirect"];
             403: components["responses"]["UserSessionRequired"];
         };
     };
@@ -3568,6 +3805,7 @@ export interface operations {
                 };
             };
             403: components["responses"]["UserSessionRequired"];
+            409: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
         };
     };
@@ -3959,11 +4197,13 @@ export interface operations {
     createAddonOrder: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path?: never;
             cookie?: never;
@@ -3987,6 +4227,8 @@ export interface operations {
                 };
             };
             403: components["responses"]["UserSessionRequired"];
+            409: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
         };
     };
     listPlatformStatements: {
@@ -4035,6 +4277,143 @@ export interface operations {
                 };
             };
             403: components["responses"]["Problem"];
+        };
+    };
+    adminListAddonOrders: {
+        parameters: {
+            query?: {
+                status?: "requested" | "scheduled" | "completed" | "canceled";
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Pedidos */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["StaffAddonOrder"][];
+                        next_cursor: string | null;
+                    };
+                };
+            };
+            403: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+        };
+    };
+    adminScheduleAddonOrder: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
+                "X-CSRF-Token"?: components["parameters"]["CSRF"];
+            };
+            path: {
+                /** @description Organização do pedido (equipe da plataforma) */
+                tenant_id: components["parameters"]["AdminTenantID"];
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /**
+                     * Format: date-time
+                     * @description Instante futuro, em até um ano
+                     */
+                    scheduled_for: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Pedido agendado */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddonOrder"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+        };
+    };
+    adminCompleteAddonOrder: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
+                "X-CSRF-Token"?: components["parameters"]["CSRF"];
+            };
+            path: {
+                /** @description Organização do pedido (equipe da plataforma) */
+                tenant_id: components["parameters"]["AdminTenantID"];
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Pedido concluído */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddonOrder"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+        };
+    };
+    adminCancelAddonOrder: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
+                "X-CSRF-Token"?: components["parameters"]["CSRF"];
+            };
+            path: {
+                /** @description Organização do pedido (equipe da plataforma) */
+                tenant_id: components["parameters"]["AdminTenantID"];
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    reason: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Pedido cancelado */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddonOrder"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
         };
     };
     listCustomers: {
@@ -4197,7 +4576,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -4288,6 +4667,41 @@ export interface operations {
             };
         };
     };
+    updateCustomerContact: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+                /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
+                "X-CSRF-Token"?: components["parameters"]["CSRF"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+                contact_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactPatch"];
+            };
+        };
+        responses: {
+            /** @description Contato alterado */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Contact"];
+                };
+            };
+            404: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+        };
+    };
     setCustomerAddress: {
         parameters: {
             query?: never;
@@ -4323,7 +4737,10 @@ export interface operations {
     };
     getCustomerHistory: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
@@ -4343,9 +4760,12 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["AuditEvent"][];
+                        next_cursor?: string | null;
                     };
                 };
             };
+            404: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
         };
     };
     getCustomerCredits: {
@@ -4381,7 +4801,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -4914,11 +5334,13 @@ export interface operations {
     createSubscription: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path?: never;
             cookie?: never;
@@ -4932,6 +5354,7 @@ export interface operations {
             /** @description Assinatura criada */
             201: {
                 headers: {
+                    ETag?: string;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4939,6 +5362,7 @@ export interface operations {
                 };
             };
             403: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
         };
     };
@@ -5236,11 +5660,13 @@ export interface operations {
     schedulePriceAdjustment: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
                 id: components["parameters"]["ID"];
@@ -5262,6 +5688,7 @@ export interface operations {
                     "application/json": components["schemas"]["PriceAdjustment"];
                 };
             };
+            409: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
         };
     };
@@ -5295,11 +5722,13 @@ export interface operations {
     applySubscriptionCoupon: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
                 id: components["parameters"]["ID"];
@@ -5475,6 +5904,10 @@ export interface operations {
                 status?: components["schemas"]["InvoiceStatus"];
                 issued_from?: string;
                 issued_to?: string;
+                /** @description Cursor da parte seguinte (X-Recorvia-Export-Next-Cursor da parte anterior) */
+                cursor?: string;
+                /** @description Número da parte (X-Recorvia-Export-Next-Part da parte anterior), usado no nome do arquivo e na auditoria */
+                part?: number;
             };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
@@ -5488,12 +5921,21 @@ export interface operations {
             /** @description CSV gerado sob demanda (não é armazenado) */
             200: {
                 headers: {
+                    /** @description Máximo de faturas por arquivo */
+                    "X-Recorvia-Export-Limit"?: number;
+                    /** @description true quando há faturas além deste arquivo */
+                    "X-Recorvia-Export-Truncated"?: "true" | "false";
+                    /** @description Cursor da parte seguinte (somente quando o arquivo foi cortado) */
+                    "X-Recorvia-Export-Next-Cursor"?: string;
+                    /** @description Número da parte seguinte (somente quando o arquivo foi cortado) */
+                    "X-Recorvia-Export-Next-Part"?: number;
                     [name: string]: unknown;
                 };
                 content: {
                     "text/csv": string;
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     getInvoice: {
@@ -5624,7 +6066,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5662,7 +6104,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5697,7 +6139,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5727,7 +6169,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path?: never;
@@ -5808,7 +6250,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5984,7 +6426,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -6232,7 +6674,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path?: never;
@@ -6570,6 +7012,34 @@ export interface operations {
             };
         };
     };
+    listNotificationEvents: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Eventos em ordem cronológica */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["NotificationEvent"][];
+                    };
+                };
+            };
+            404: components["responses"]["Problem"];
+        };
+    };
     listWebhookEventTypes: {
         parameters: {
             query?: never;
@@ -6773,6 +7243,34 @@ export interface operations {
                     };
                 };
             };
+        };
+    };
+    listWebhookDeliveryAttempts: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tentativas */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["WebhookDeliveryAttempt"][];
+                    };
+                };
+            };
+            404: components["responses"]["Problem"];
         };
     };
     retryWebhookDelivery: {

@@ -142,3 +142,46 @@ func TestAnonymizedCustomerConflictIsDeclared(t *testing.T) {
 		}
 	}
 }
+
+// idempotencyRequiredRoutes é a lista das operações financeiras de criação
+// (ADR-075) e das demais operações que exigem Idempotency-Key. Uma rota só
+// entra ou sai daqui junto com a ADR e o contrato.
+var idempotencyRequiredRoutes = []string{
+	// Operações financeiras de criação: criam valor a receber, recebido,
+	// devolvido ou abatido, ou geram faturamento futuro.
+	"POST /api/v1/invoices/{id}/payments",
+	"POST /api/v1/invoices/{id}/credit-notes",
+	"POST /api/v1/invoices/{id}/charges",
+	"POST /api/v1/charges/{id}/refunds",
+	"POST /api/v1/disputes/{id}/recovery-settlements",
+	"POST /api/v1/customers/{id}/credits",
+	"POST /api/v1/subscriptions",
+	"POST /api/v1/subscriptions/{id}/price-adjustments",
+	"POST /api/v1/subscriptions/{id}/discounts",
+	"POST /api/v1/platform/addon-orders",
+	"POST /api/v1/billing-runs",
+	// Execuções e atos irreversíveis que também não podem ser repetidos.
+	"POST /api/v1/reconciliation/runs",
+	"POST /api/v1/customers/{id}/anonymize",
+}
+
+func TestFinancialCreationRoutesAreIdempotent(t *testing.T) {
+	a, _ := NewRouter(Deps{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Clock: clock.System{}})
+	want := map[string]bool{}
+	for _, k := range idempotencyRequiredRoutes {
+		want[k] = true
+	}
+	got := map[string]bool{}
+	for _, r := range a.Routes() {
+		key := r.Method + " " + r.Pattern
+		got[key] = true
+		if r.Idempotent != want[key] {
+			t.Errorf("%s: exige Idempotency-Key = %v, a ADR-075 lista %v", key, r.Idempotent, want[key])
+		}
+	}
+	for k := range want {
+		if !got[k] {
+			t.Errorf("operação da ADR-075 sem rota: %s", k)
+		}
+	}
+}

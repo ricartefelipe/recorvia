@@ -101,16 +101,19 @@ type Notification struct {
 	PolicyID       *uuid.UUID
 	StepOffsetDays *int
 	Status         Status
-	StatusReason   string
-	SendAfter      time.Time
-	Attempts       int
-	MaxAttempts    int
-	LeaseUntil     *time.Time
-	LastError      string
-	MessageID      string
-	SentAt         *time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// StatusReason é o motivo da situação atual: cancelamento, supressão,
+	// falha ou adiamento (janela, limite de frequência, nova tentativa);
+	// vazio em envio e depois do envio.
+	StatusReason string
+	SendAfter    time.Time
+	Attempts     int
+	MaxAttempts  int
+	LeaseUntil   *time.Time
+	LastError    string
+	MessageID    string
+	SentAt       *time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 
 	pending []Event
 }
@@ -162,7 +165,7 @@ func (n *Notification) Claim(now, leaseUntil time.Time) error {
 	if !leaseUntil.After(now) {
 		return fmt.Errorf("notifications: lease deve terminar depois de %s", now)
 	}
-	n.Status, n.LeaseUntil, n.UpdatedAt = Sending, &leaseUntil, now
+	n.Status, n.StatusReason, n.LeaseUntil, n.UpdatedAt = Sending, "", &leaseUntil, now
 	n.Attempts++
 	n.record(ReasonAttempt, "", now)
 	return nil
@@ -200,7 +203,7 @@ func (n *Notification) MarkAttemptFailed(now time.Time, cause string, permanent 
 		n.Status, n.StatusReason = Failed, ReasonAttemptsExhausted
 		n.record(ReasonAttemptsExhausted, n.LastError, now)
 	default:
-		n.Status, n.SendAfter = Scheduled, retryAt
+		n.Status, n.StatusReason, n.SendAfter = Scheduled, ReasonRetryScheduled, retryAt
 		n.record(ReasonRetryScheduled, n.LastError, now)
 	}
 	return nil
@@ -244,7 +247,7 @@ func (n *Notification) Defer(now, until time.Time, reason string) error {
 	if n.Final() {
 		return errFinal()
 	}
-	n.Status, n.SendAfter, n.LeaseUntil, n.UpdatedAt = Scheduled, until, nil, now
+	n.Status, n.StatusReason, n.SendAfter, n.LeaseUntil, n.UpdatedAt = Scheduled, reason, until, nil, now
 	n.record(reason, until.UTC().Format(time.RFC3339), now)
 	return nil
 }

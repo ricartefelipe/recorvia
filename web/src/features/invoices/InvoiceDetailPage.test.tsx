@@ -37,6 +37,14 @@ describe('detalhe da fatura', () => {
     expect(screen.getByRole('link', { name: /Abrir checkout/ })).toHaveAttribute('href', 'https://pagamentos.exemplo.test/checkout/abc');
   });
 
+  it('avisa que a fatura comercial não é documento fiscal', async () => {
+    serveInvoice();
+    renderPage(<InvoiceDetailPage />, { path: '/faturas/:id', route });
+
+    const notice = await screen.findByRole('note', { name: 'Aviso fiscal' });
+    expect(notice).toHaveTextContent('Este documento é uma fatura comercial e não é documento fiscal. Não substitui a nota fiscal.');
+  });
+
   it('lista as notas de crédito emitidas com número, motivo e valor', async () => {
     serveInvoice(
       makeInvoice({

@@ -103,6 +103,8 @@ func TestCheckFollowsTheContract(t *testing.T) {
 		{"data-hora malformada", http.MethodGet, "/items", 200, json, `{"items":[{"id":"` + itemID + `","name":"a","created_at":"ontem"}]}`, "date-time"},
 		{"Content-Type divergente", http.MethodGet, "/items", 200, text, `{"items":[]}`, "Content-Type"},
 		{"caminho literal antes do parâmetro", http.MethodGet, "/items/export", 200, http.Header{"Content-Type": {"text/csv"}}, "id\n1\n", ""},
+		{"CSV com ponto e vírgula e aspas", http.MethodGet, "/items/export", 200, http.Header{"Content-Type": {"text/csv; charset=utf-8"}},
+			"numero;cliente\nACME-1;\"'=HIPERLINK(\"\"http://x.test\"\")\"\n", ""},
 		{"header obrigatório ausente", http.MethodGet, "/items/" + itemID, 200, json, `{"id":"` + itemID + `","name":"a"}`, "ETag"},
 		{"recurso com header", http.MethodGet, "/items/" + itemID, 200, jsonETag, `{"id":"` + itemID + `","name":"a"}`, ""},
 		{"erro declarado", http.MethodGet, "/items/" + itemID, 409, problem, problemBody(409), ""},

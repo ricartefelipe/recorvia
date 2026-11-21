@@ -55,9 +55,12 @@ type Validator struct {
 // New carrega e valida o documento.
 func New(spec []byte) (*Validator, error) {
 	registerDecoders.Do(func() {
-		// Documentos HTML (fatura para impressão) são texto; o schema do
-		// contrato, quando houver, é do tipo string.
+		// Documentos HTML (fatura para impressão) e exportações CSV são texto;
+		// o schema do contrato, quando houver, é do tipo string. O decodificador
+		// padrão do CSV lê vírgulas e recusaria a exportação de faturas, que
+		// usa ponto e vírgula e campos entre aspas.
 		openapi3filter.RegisterBodyDecoder("text/html", openapi3filter.PlainBodyDecoder)
+		openapi3filter.RegisterBodyDecoder("text/csv", openapi3filter.PlainBodyDecoder)
 	})
 	doc, err := openapi3.NewLoader().LoadFromData(spec)
 	if err != nil {

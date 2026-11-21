@@ -18,21 +18,31 @@ import {
   Text,
   Textarea,
   TextInput,
+  Tooltip,
 } from '@mantine/core';
-import { IconMail, IconPencil, IconPlus, IconTrash } from '@tabler/icons-react';
+import { IconListDetails, IconMail, IconPencil, IconPlus, IconTrash } from '@tabler/icons-react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useRef, useState } from 'react';
 import { Controller, useFieldArray, useForm, useWatch, type Control } from 'react-hook-form';
 import { Link } from 'react-router';
 import { z } from 'zod';
 import { api } from '../../api/client';
-import type { CollectionPolicy, CollectionPolicyInput, CursorPage, DataList, Notification, NotificationTemplate, TemplateKey } from '../../api/types';
+import type {
+  CollectionPolicy,
+  CollectionPolicyInput,
+  CursorPage,
+  DataList,
+  Notification,
+  NotificationEvent,
+  NotificationTemplate,
+  TemplateKey,
+} from '../../api/types';
 import { DateTime, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { CursorPager, PageHeader } from '../../components/ui';
 import { useApiMutation, useCursorPagination, useUrlFilters } from '../../lib/hooks';
 import { stableStringify } from '../../lib/idempotency';
-import { channelLabels, labelOf, notificationStatusLabels, optionsOf, templateKeyLabels } from '../../lib/labels';
+import { channelLabels, labelOf, notificationReasonLabels, notificationStatusLabels, optionsOf, templateKeyLabels } from '../../lib/labels';
 import { requiredText } from '../../lib/validation';
 import { Can, usePermission, useTenant } from '../../session/SessionContext';
 
@@ -48,6 +58,8 @@ const collectionsApi = {
     api.put<NotificationTemplate>(`/api/v1/notification-templates/${enc(key)}`, input),
   notifications: (params: { status?: string; invoice_id?: string; cursor?: string; limit?: number }, signal?: AbortSignal) =>
     api.get<CursorPage<Notification>>('/api/v1/notifications', { query: { ...params }, signal }),
+  notificationEvents: (id: string, signal?: AbortSignal) =>
+    api.get<DataList<NotificationEvent>>(`/api/v1/notifications/${enc(id)}/events`, { signal }),
 };
 
 export function formatOffsets(offsets: number[]): string {
@@ -486,8 +498,75 @@ function TemplatesTab() {
   );
 }
 
+/** Linha do tempo de uma notificação: agendamento, adiamentos, tentativas e desfecho. */
+function NotificationEventsModal({ notification, onClose }: { notification: Notification; onClose: () => void }) {
+  const { keys } = useTenant();
+  const query = useQuery({
+    queryKey: keys('notifications', 'events', notification.id),
+    queryFn: ({ signal }) => collectionsApi.notificationEvents(notification.id, signal),
+  });
+  return (
+    <Modal opened onClose={onClose} title="Linha do tempo da notificação" size="xl">
+      <Stack gap="sm">
+        <Text size="sm" c="dimmed">
+          {labelOf(templateKeyLabels, notification.template_key)} · {notification.subject}
+        </Text>
+        <QueryContent query={query} loading={<LoadingState />}>
+          {(list) =>
+            list.data.length === 0 ? (
+              <EmptyState title="Sem eventos" description="Nenhum evento registrado para esta notificação." />
+            ) : (
+              <Table aria-label="Linha do tempo da notificação">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Quando</Table.Th>
+                    <Table.Th>Evento</Table.Th>
+                    <Table.Th>Situação</Table.Th>
+                    <Table.Th ta="right">Tentativa</Table.Th>
+                    <Table.Th>Detalhe</Table.Th>
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {list.data.map((e, i) => (
+                    <Table.Tr key={`${e.occurred_at}-${i}`}>
+                      <Table.Td>
+                        <DateTime value={e.occurred_at} />
+                      </Table.Td>
+                      <Table.Td>{labelOf(notificationReasonLabels, e.reason)}</Table.Td>
+                      <Table.Td>
+                        <StatusBadge status={e.status} labels={notificationStatusLabels} />
+                      </Table.Td>
+                      <Table.Td ta="right">{e.attempt > 0 ? e.attempt : '—'}</Table.Td>
+                      <Table.Td>
+                        {e.detail ? (
+                          <Text size="xs" lineClamp={3} title={e.detail}>
+                            {e.reason === 'outside_send_window' || e.reason === 'frequency_limit' ? (
+                              <>
+                                Adiada para <DateTime value={e.detail} />
+                              </>
+                            ) : (
+                              e.detail
+                            )}
+                          </Text>
+                        ) : (
+                          '—'
+                        )}
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            )
+          }
+        </QueryContent>
+      </Stack>
+    </Modal>
+  );
+}
+
 function NotificationsTab() {
   const { keys } = useTenant();
+  const [timeline, setTimeline] = useState<Notification | null>(null);
   const [filters, setFilters] = useUrlFilters(['situacao', 'fatura'] as const);
   const params = { status: filters.situacao || undefined, invoice_id: filters.fatura || undefined, limit: 25 };
   const pagination = useCursorPagination(stableStringify(params));
@@ -532,6 +611,7 @@ function NotificationsTab() {
                       <Table.Th ta="right">Tentativas</Table.Th>
                       <Table.Th>Enviada em</Table.Th>
                       <Table.Th>Fatura</Table.Th>
+                      <Table.Th aria-label="Ações" />
                     </Table.Tr>
                   </Table.Thead>
                   <Table.Tbody>
@@ -549,6 +629,11 @@ function NotificationsTab() {
                         </Table.Td>
                         <Table.Td>
                           <StatusBadge status={n.status} labels={notificationStatusLabels} />
+                          {n.status_reason && (
+                            <Text size="xs" c="dimmed">
+                              {labelOf(notificationReasonLabels, n.status_reason)}
+                            </Text>
+                          )}
                           {n.last_error && (
                             <Text size="xs" c="red" lineClamp={2} title={n.last_error}>
                               {n.last_error}
@@ -565,6 +650,13 @@ function NotificationsTab() {
                           ) : (
                             '—'
                           )}
+                        </Table.Td>
+                        <Table.Td>
+                          <Tooltip label="Linha do tempo">
+                            <ActionIcon variant="subtle" aria-label={`Linha do tempo: ${n.subject}`} onClick={() => setTimeline(n)}>
+                              <IconListDetails size={16} />
+                            </ActionIcon>
+                          </Tooltip>
                         </Table.Td>
                       </Table.Tr>
                     ))}
@@ -583,6 +675,7 @@ function NotificationsTab() {
           )
         }
       </QueryContent>
+      {timeline && <NotificationEventsModal notification={timeline} onClose={() => setTimeline(null)} />}
     </Stack>
   );
 }

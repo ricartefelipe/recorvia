@@ -78,6 +78,10 @@ type ReconciliationTx interface {
 	// numa execução concluída.
 	MarkChargesReconciled(ctx context.Context, chargeIDs []uuid.UUID, at time.Time) error
 	RefundsForCharges(ctx context.Context, chargeIDs []uuid.UUID) ([]Refund, error)
+	// PendingReceipts devolve, por cobrança, o valor do pagamento ainda em
+	// pagamentos confirmados no provedor (somente as cobranças com
+	// pendência).
+	PendingReceipts(ctx context.Context, chargeIDs []uuid.UUID) (map[uuid.UUID]money.Money, error)
 	// UnknownOperations lista as operações com resultado desconhecido:
 	// situação unknown ou em execução com o lease expirado em now.
 	UnknownOperations(ctx context.Context, now time.Time, limit int) ([]Operation, error)

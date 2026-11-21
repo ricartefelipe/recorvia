@@ -56,6 +56,8 @@ type apiSetup struct {
 	// portalSessions, quando informado, envolve o armazenamento de sessões do
 	// portal (por exemplo, para simular falha do Redis em uma operação).
 	portalSessions func(portal.SessionStore) portal.SessionStore
+	// idp substitui o provedor de identidade simulado.
+	idp identity.IdentityProvider
 }
 
 func newAPI(t *testing.T, opts ...func(*apiSetup)) *apiEnv {
@@ -80,13 +82,13 @@ func newAPI(t *testing.T, opts ...func(*apiSetup)) *apiEnv {
 		t.Fatal(err)
 	}
 	sessions := redisstore.New(rdb, kr, "web")
-	idsvc := identity.NewService(stubIDP{}, sessions, env.Store.Users(), env.Clock, identity.DefaultPolicy())
 	setup := &apiSetup{cfg: &config.Config{Env: config.Test, CookieName: "recorvia_session", PortalCookieName: "recorvia_portal",
 		CookieSecure: false, RateLimitPerMinute: 10000, APICredentialRateLimitPerMinute: 10000},
-		portalPolicy: portal.DefaultPolicy(), credentialPolicy: apicredentials.DefaultPolicy()}
+		portalPolicy: portal.DefaultPolicy(), credentialPolicy: apicredentials.DefaultPolicy(), idp: stubIDP{}}
 	for _, o := range opts {
 		o(setup)
 	}
+	idsvc := identity.NewService(setup.idp, sessions, env.Store.Users(), env.Clock, identity.DefaultPolicy())
 	pay := env.Payments(gateways.NewResolver(time.Second), payments.Config{WebhookBaseURL: "http://api.test/webhooks/providers"})
 	var portalSessions portal.SessionStore = redisstore.NewPortalSessions(redisstore.New(rdb, kr, "portal"))
 	if setup.portalSessions != nil {
@@ -114,9 +116,13 @@ type client struct {
 func (a *apiEnv) login(user identity.User, tenantID *uuid.UUID) *client {
 	a.t.Helper()
 	now := a.env.Clock.Now()
+	gen, tenantGen, err := a.sessions.Generations(context.Background(), user.ID, tenantID)
+	if err != nil {
+		a.t.Fatal(err)
+	}
 	s := identity.Session{ID: identity.RandomToken(32), UserID: user.ID, ActiveTenantID: tenantID, CSRFToken: identity.RandomToken(16),
-		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(time.Hour)}
-	if err := a.sessions.Save(context.Background(), s, time.Hour); err != nil {
+		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(time.Hour), Generation: gen, TenantGeneration: tenantGen}
+	if err := a.sessions.Create(context.Background(), s, time.Hour); err != nil {
 		a.t.Fatal(err)
 	}
 	c := &client{a: a, cookie: s.ID, csrf: s.CSRFToken}

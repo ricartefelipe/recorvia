@@ -117,9 +117,35 @@ VALUES (@id, @tenant_id, @addon_code, @status, @notes, @price_amount, @requested
 -- name: ListAddonOrders :many
 SELECT * FROM platform_addon_orders WHERE tenant_id = @tenant_id ORDER BY created_at DESC, id DESC LIMIT 100;
 
--- name: SumCompletedAddons :one
+-- name: GetAddonOrderForUpdate :one
+SELECT * FROM platform_addon_orders WHERE tenant_id = @tenant_id AND id = @id FOR UPDATE;
+
+-- name: UpdateAddonOrder :execrows
+UPDATE platform_addon_orders
+   SET status = @status, scheduled_for = sqlc.narg(scheduled_for), completed_at = sqlc.narg(completed_at),
+       canceled_at = sqlc.narg(canceled_at), cancel_reason = sqlc.narg(cancel_reason), handled_by = sqlc.narg(handled_by),
+       updated_at = @updated_at, version = version + 1
+ WHERE tenant_id = @tenant_id AND id = @id AND version = @version;
+
+-- name: SumUnbilledCompletedAddons :one
+-- Pedidos concluídos antes do fim do período que ainda não entraram em
+-- demonstrativo (ADR-077).
 SELECT COALESCE(sum(price_amount), 0)::bigint FROM platform_addon_orders
- WHERE tenant_id = @tenant_id AND status = 'completed' AND updated_at >= @period_start AND updated_at < @period_end;
+ WHERE tenant_id = @tenant_id AND status = 'completed' AND statement_id IS NULL AND completed_at < @before;
+
+-- name: MarkAddonsBilled :exec
+UPDATE platform_addon_orders SET statement_id = @statement_id
+ WHERE tenant_id = @tenant_id AND status = 'completed' AND statement_id IS NULL AND completed_at < @before;
+
+-- name: StaffAddonOrders :many
+SELECT * FROM app_platform_addon_orders(sqlc.narg(status)::text, sqlc.narg(after_at)::timestamptz, sqlc.narg(after_id)::uuid,
+  @row_limit::int);
+
+-- name: PlatformTenantNames :many
+SELECT tenant_id::uuid AS tenant_id, name::text AS name, slug::text AS slug FROM app_platform_tenant_names(@ids::uuid[]);
+
+-- name: ListAllPlatformAddons :many
+SELECT * FROM platform_addons ORDER BY code;
 
 -- name: InsertPlatformStatement :execrows
 INSERT INTO platform_statements (id, tenant_id, period_start, period_end, plan_code, subscription_amount, addons_amount, total_amount, currency, status, created_at)

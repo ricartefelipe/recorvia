@@ -1,16 +1,16 @@
 import { Alert, Anchor, Badge, Breadcrumbs, Button, Group, Modal, Paper, SimpleGrid, Stack, Tabs, Text } from '@mantine/core';
 import { IconArchive, IconInfoCircle, IconLink, IconPencil, IconUserOff } from '@tabler/icons-react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Link, useParams } from 'react-router';
 import type { CustomerDetails } from '../../api/types';
 import { AuditEventList } from '../../components/AuditEventList';
 import { DateTime, StatusBadge } from '../../components/format';
 import { LoadingState, QueryContent } from '../../components/states';
-import { confirmAction, CopyField, KeyValue, PageHeader } from '../../components/ui';
+import { confirmAction, CopyField, CursorPager, KeyValue, PageHeader } from '../../components/ui';
 import { formatDateTime } from '../../lib/dates';
 import { formatDocument } from '../../lib/documents';
-import { useApiMutation, useUrlFilters } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useUrlFilters } from '../../lib/hooks';
 import { customerKindLabels, customerStatusLabels, labelOf } from '../../lib/labels';
 import { Can, usePermission, useTenant } from '../../session/SessionContext';
 import { AddressPanel } from './AddressPanel';
@@ -23,13 +23,32 @@ import { RelatedInvoices } from '../invoices/InvoicesTable';
 import { CustomerSubscriptions } from '../subscriptions/CustomerSubscriptions';
 import { CustomerForm } from './CustomerForm';
 
+/** Histórico do cliente, do evento mais recente para o mais antigo, em páginas. */
 function HistoryPanel({ customerId }: { customerId: string }) {
   const { keys } = useTenant();
+  const pagination = useCursorPagination(customerId);
   const query = useQuery({
-    queryKey: keys('customers', 'history', customerId),
-    queryFn: ({ signal }) => customersApi.history(customerId, signal),
+    queryKey: keys('customers', 'history', customerId, pagination.cursor ?? null),
+    queryFn: ({ signal }) => customersApi.history(customerId, { cursor: pagination.cursor }, signal),
+    placeholderData: keepPreviousData,
   });
-  return <QueryContent query={query}>{(page) => <AuditEventList events={page.data} showResource={false} />}</QueryContent>;
+  return (
+    <QueryContent query={query}>
+      {(page) => (
+        <>
+          <AuditEventList events={page.data} showResource={false} />
+          <CursorPager
+            page={pagination.page}
+            hasPrevious={pagination.hasPrevious}
+            hasNext={!!page.next_cursor}
+            onPrevious={pagination.previous}
+            onNext={() => page.next_cursor && pagination.next(page.next_cursor)}
+            loading={query.isFetching}
+          />
+        </>
+      )}
+    </QueryContent>
+  );
 }
 
 function PortalLinkAction({ customer }: { customer: CustomerDetails }) {

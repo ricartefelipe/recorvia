@@ -47,6 +47,11 @@ VALUES (@id, @tenant_id, @customer_id, @name, @email, sqlc.narg(phone), @role, @
 -- name: DeleteContact :execrows
 DELETE FROM customer_contacts WHERE tenant_id = @tenant_id AND customer_id = @customer_id AND id = @id;
 
+-- name: UpdateContact :execrows
+UPDATE customer_contacts
+   SET name = @name, email = @email, phone = sqlc.narg(phone), role = @role, receives_billing_email = @receives_billing_email
+ WHERE tenant_id = @tenant_id AND customer_id = @customer_id AND id = @id;
+
 -- name: SetContactBillingPreference :execrows
 UPDATE customer_contacts SET receives_billing_email = @receives_billing_email
  WHERE tenant_id = @tenant_id AND customer_id = @customer_id AND id = @id;

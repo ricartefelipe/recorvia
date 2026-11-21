@@ -166,6 +166,19 @@ func (t *memTx) InsertContact(_ context.Context, c Contact) error {
 	return nil
 }
 
+func (t *memTx) UpdateContact(_ context.Context, c Contact) error {
+	if err := t.s.hit("UpdateContact"); err != nil {
+		return err
+	}
+	list := t.st.contacts[c.CustomerID]
+	i := slices.IndexFunc(list, func(x Contact) bool { return x.ID == c.ID })
+	if i < 0 {
+		return apperr.NotFound("contact_not_found", "Contato não encontrado.")
+	}
+	list[i] = c
+	return nil
+}
+
 func (t *memTx) DeleteContact(_ context.Context, customerID, contactID uuid.UUID) error {
 	if err := t.s.hit("DeleteContact"); err != nil {
 		return err

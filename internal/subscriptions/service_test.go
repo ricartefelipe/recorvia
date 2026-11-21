@@ -28,6 +28,9 @@ type historyWrite struct {
 // fakeStore implementa Store e Tx em memória. Cada InTenant é atômico: se a
 // função falhar, as gravações feitas na transação são descartadas.
 type fakeStore struct {
+	// onInsert, quando definido, decide se outra transação já confirmou a
+	// assinatura com a mesma chave (true: o INSERT não grava nada).
+	onInsert     func(Subscription) bool
 	loc          *time.Location
 	customers    map[uuid.UUID]customers.Customer
 	plans        map[uuid.UUID]catalog.Plan
@@ -126,21 +129,40 @@ func (s *fakeStore) PriceVersion(_ context.Context, id uuid.UUID) (catalog.Price
 	return p, nil
 }
 
-func (s *fakeStore) PlatformPlan(context.Context) (platformbilling.Plan, error) {
-	return s.platformPlan, s.fail("PlatformPlan")
+func (s *fakeStore) LockPlatformPlan(context.Context) (platformbilling.Plan, error) {
+	return s.platformPlan, s.fail("LockPlatformPlan")
 }
 
 func (s *fakeStore) PlatformUsage(context.Context) (platformbilling.Usage, error) {
 	return s.usage, s.fail("PlatformUsage")
 }
 
-func (s *fakeStore) Insert(_ context.Context, sub Subscription) error {
+func (s *fakeStore) Insert(_ context.Context, sub Subscription) (bool, error) {
 	if err := s.fail("Insert"); err != nil {
-		return err
+		return false, err
+	}
+	if s.onInsert != nil {
+		// Simula outra transação que confirmou a mesma chave antes deste
+		// INSERT ... ON CONFLICT DO NOTHING.
+		if s.onInsert(sub) {
+			return false, nil
+		}
 	}
 	sub.pending = nil
 	s.subs[sub.ID] = sub
-	return nil
+	return true, nil
+}
+
+func (s *fakeStore) ByRequestKey(_ context.Context, key string) (Subscription, error) {
+	if err := s.fail("ByRequestKey"); err != nil {
+		return Subscription{}, err
+	}
+	for _, sub := range s.subs {
+		if sub.RequestKey == key {
+			return sub, nil
+		}
+	}
+	return Subscription{}, apperr.NotFound("subscription_not_found", "Assinatura não encontrada.")
 }
 
 func (s *fakeStore) Get(_ context.Context, id uuid.UUID, forUpdate bool) (Subscription, error) {
@@ -416,7 +438,7 @@ func TestServiceCreateAllowsUsageWithFeatureAndBelowLimit(t *testing.T) {
 }
 
 func TestServiceCreatePropagatesStoreFailures(t *testing.T) {
-	for _, method := range []string{"TenantLocation", "Customer", "Plan", "PriceVersion", "PlatformPlan", "PlatformUsage",
+	for _, method := range []string{"TenantLocation", "Customer", "Plan", "PriceVersion", "LockPlatformPlan", "PlatformUsage",
 		"Insert", "InsertHistory", "Emit", "Audit"} {
 		t.Run(method, func(t *testing.T) {
 			f := newServiceFixture(t, catalog.Flat)
@@ -428,6 +450,110 @@ func TestServiceCreatePropagatesStoreFailures(t *testing.T) {
 			}
 			f.assertNothingWritten(t)
 		})
+	}
+}
+
+// A chave de negócio do pedido (derivada do Idempotency-Key) torna a criação
+// repetível mesmo depois de um processamento interrompido: a repetição
+// devolve a assinatura já criada, sem nova assinatura, histórico, evento ou
+// auditoria. A mesma chave para outro cliente ou plano é recusada.
+func TestServiceCreateWithRequestKeyIsRepeatable(t *testing.T) {
+	f := newServiceFixture(t, catalog.Flat)
+	ctx := context.Background()
+	in := CreateInput{CustomerID: f.customer.ID, PlanID: f.plan.ID, RequestKey: "chave-de-negocio-1"}
+	first, err := f.svc.Create(ctx, f.tenantID, f.actor, in)
+	if err != nil || first.RequestKey != in.RequestKey {
+		t.Fatalf("criação: %+v %v", first, err)
+	}
+	f.store.histories, f.store.audits, f.store.events = nil, nil, nil
+	again, err := f.svc.Create(ctx, f.tenantID, f.actor, in)
+	if err != nil || again.ID != first.ID || len(f.store.subs) != 1 {
+		t.Fatalf("repetição devolve a assinatura criada: %+v %v (%d assinaturas)", again, err, len(f.store.subs))
+	}
+	if len(f.store.histories) != 0 || len(f.store.audits) != 0 || len(f.store.events) != 0 {
+		t.Fatal("repetição não grava histórico, auditoria nem evento")
+	}
+
+	other := customers.Customer{ID: uuid.New(), TenantID: f.tenantID, Name: "Mercado Bom Preço", Status: customers.Active}
+	f.store.customers[other.ID] = other
+	_, err = f.svc.Create(ctx, f.tenantID, f.actor, CreateInput{CustomerID: other.ID, PlanID: f.plan.ID, RequestKey: in.RequestKey})
+	if e, ok := apperr.As(err); !ok || e.Code != "request_key_reused" || e.Kind != apperr.KindConflict || len(f.store.subs) != 1 {
+		t.Fatalf("chave reutilizada para outro cliente: %v", err)
+	}
+	if _, err := f.svc.Create(ctx, f.tenantID, f.actor, CreateInput{CustomerID: f.customer.ID, PlanID: f.plan.ID, RequestKey: "outra-chave-2"}); err != nil ||
+		len(f.store.subs) != 2 {
+		t.Fatalf("outra chave cria outra assinatura: %v", err)
+	}
+
+	// Mesma chave com o mesmo cliente e plano, mas outro conteúdo de negócio
+	// (por exemplo, depois da validade do registro HTTP), é recusada.
+	for name, changed := range map[string]CreateInput{
+		"quantidade":   {CustomerID: f.customer.ID, PlanID: f.plan.ID, Quantity: 2, RequestKey: in.RequestKey},
+		"avaliação":    {CustomerID: f.customer.ID, PlanID: f.plan.ID, TrialDays: intPtr(7), RequestKey: in.RequestKey},
+		"prazo":        {CustomerID: f.customer.ID, PlanID: f.plan.ID, PaymentTermsDays: intPtr(0), RequestKey: in.RequestKey},
+		"data inicial": {CustomerID: f.customer.ID, PlanID: f.plan.ID, StartDate: &calendar.Date{Year: 2026, Month: 11, Day: 1}, RequestKey: in.RequestKey},
+	} {
+		_, err := f.svc.Create(ctx, f.tenantID, f.actor, changed)
+		if e, ok := apperr.As(err); !ok || e.Code != "request_key_reused" {
+			t.Fatalf("chave reutilizada com outra %s: %v", name, err)
+		}
+	}
+	// Quantidade omitida e quantidade 1 são o mesmo pedido.
+	if got, err := f.svc.Create(ctx, f.tenantID, f.actor, CreateInput{CustomerID: f.customer.ID, PlanID: f.plan.ID, Quantity: 1,
+		RequestKey: in.RequestKey}); err != nil || got.ID != first.ID {
+		t.Fatalf("quantidade 1 explícita: %v", err)
+	}
+
+	boom := errors.New("falha na consulta da chave")
+	f.store.errs["ByRequestKey"] = boom
+	if _, err := f.svc.Create(ctx, f.tenantID, f.actor, in); !errors.Is(err, boom) {
+		t.Fatalf("falha na consulta da chave: %v", err)
+	}
+	// Sem chave, a consulta não é feita.
+	if _, err := f.svc.Create(ctx, f.tenantID, f.actor, CreateInput{CustomerID: f.customer.ID, PlanID: f.plan.ID}); err != nil {
+		t.Fatalf("criação sem chave: %v", err)
+	}
+}
+
+// Duas transações com a mesma chave de negócio: a segunda não grava (ON
+// CONFLICT) e devolve a assinatura confirmada pela primeira, em vez de
+// responder um conflito que ficaria registrado na Idempotency-Key.
+func TestServiceCreateConcurrentSameRequestKeyReturnsConfirmed(t *testing.T) {
+	f := newServiceFixture(t, catalog.Flat)
+	ctx := context.Background()
+	in := CreateInput{CustomerID: f.customer.ID, PlanID: f.plan.ID, RequestKey: "chave-concorrente"}
+	var winner Subscription
+	f.store.onInsert = func(sub Subscription) bool {
+		winner = sub
+		winner.ID = uuid.New()
+		f.store.subs[winner.ID] = winner
+		return true
+	}
+	got, err := f.svc.Create(ctx, f.tenantID, f.actor, in)
+	if err != nil || got.ID != winner.ID || len(f.store.subs) != 1 {
+		t.Fatalf("devolve a assinatura confirmada pela outra transação: %+v %v", got, err)
+	}
+	if len(f.store.histories) != 0 || len(f.store.events) != 0 || len(f.store.audits) != 0 {
+		t.Fatal("a transação que perdeu não grava histórico, evento nem auditoria")
+	}
+
+	g := newServiceFixture(t, catalog.Flat)
+	g.store.onInsert = func(sub Subscription) bool {
+		other := sub
+		other.ID, other.RequestFingerprint = uuid.New(), RequestFingerprint(CreateInput{CustomerID: g.customer.ID, PlanID: g.plan.ID, Quantity: 3})
+		g.store.subs[other.ID] = other
+		return true
+	}
+	_, err = g.svc.Create(ctx, g.tenantID, g.actor, CreateInput{CustomerID: g.customer.ID, PlanID: g.plan.ID, RequestKey: "chave-concorrente"})
+	if e, ok := apperr.As(err); !ok || e.Code != "request_key_reused" {
+		t.Fatalf("a outra transação gravou outro conteúdo: %v", err)
+	}
+
+	h := newServiceFixture(t, catalog.Flat)
+	h.store.onInsert = func(Subscription) bool { return true }
+	_, err = h.svc.Create(ctx, h.tenantID, h.actor, CreateInput{CustomerID: h.customer.ID, PlanID: h.plan.ID, RequestKey: "chave-concorrente"})
+	if e, ok := apperr.As(err); !ok || e.Code != "subscription_in_progress" {
+		t.Fatalf("sem a assinatura confirmada visível: %v", err)
 	}
 }
 
@@ -571,6 +697,43 @@ func TestServiceMutateVersionMismatch(t *testing.T) {
 	wantKind(t, err, apperr.KindPreconditionFailed, "version_mismatch")
 	if f.store.updates != 0 || f.store.subs[sub.ID].Status != Active || len(f.store.events) != 0 || len(f.store.audits) != 0 {
 		t.Fatal("versão divergente não pode alterar nada")
+	}
+}
+
+// Assinaturas suspensas não contam como contratos ativos: reativar ocupa uma
+// vaga e confere o limite do plano da plataforma, com o plano lido sob
+// bloqueio. Sem isso, suspender, criar novas e reativar passaria do limite.
+func TestServiceReactivateChecksPlatformSubscriptionLimit(t *testing.T) {
+	f := newServiceFixture(t, catalog.Flat)
+	sub := f.create(t)
+	if _, err := f.svc.Suspend(context.Background(), f.tenantID, f.actor, sub.ID, "pausa", 0); err != nil {
+		t.Fatal(err)
+	}
+	limit := 1
+	f.store.platformPlan.MaxActiveSubscriptions = &limit
+	f.store.usage = platformbilling.Usage{ActiveSubscriptions: 1} // a vaga foi ocupada por outra assinatura
+	f.store.histories, f.store.audits, f.store.events = nil, nil, nil
+	updates := f.store.updates
+
+	_, err := f.svc.Reactivate(context.Background(), f.tenantID, f.actor, sub.ID, 0)
+	wantKind(t, err, apperr.KindLimitExceeded, "platform_subscription_limit")
+	if f.store.updates != updates || f.store.subs[sub.ID].Status != Suspended || len(f.store.events) != 0 || len(f.store.audits) != 0 {
+		t.Fatal("reativação acima do limite não pode alterar nada")
+	}
+
+	for _, op := range []string{"LockPlatformPlan", "PlatformUsage"} {
+		f.store.usage = platformbilling.Usage{}
+		f.store.errs = map[string]error{op: errors.New("banco indisponível")}
+		if _, err := f.svc.Reactivate(context.Background(), f.tenantID, f.actor, sub.ID, 0); err == nil || f.store.subs[sub.ID].Status != Suspended {
+			t.Fatalf("%s: falha deveria ser propagada sem reativar: %v", op, err)
+		}
+	}
+	f.store.errs = map[string]error{}
+
+	// Com a vaga livre, a reativação passa.
+	got, err := f.svc.Reactivate(context.Background(), f.tenantID, f.actor, sub.ID, 0)
+	if err != nil || got.Status != Active {
+		t.Fatalf("reativação dentro do limite: %v %s", err, got.Status)
 	}
 }
 

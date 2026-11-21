@@ -61,7 +61,7 @@ func newReconFixture(t *testing.T) *reconFixture {
 	rf := &reconFixture{payFixture: f, a: a}
 	invB := f.addInvoice(t, 5000)
 	rf.b = f.requestCharge(t, invB.ID)
-	f.process(t, f.storeWebhook(t, confirmedWebhook("evt_b", rf.b.ProviderChargeID, 5000, 150)))
+	f.process(t, f.storeWebhook(t, receivedWebhook("evt_b", rf.b.ProviderChargeID, 5000, 150)))
 	rf.b = f.store.charges[rf.b.ID]
 	invC := f.addInvoice(t, 3000)
 	rf.c = f.requestCharge(t, invC.ID)
@@ -758,6 +758,10 @@ func TestResolveFeeAndAmountMismatch(t *testing.T) {
 		if net[ledger.ReconciliationAdjustments] != 51 || net[ledger.ProviderClearing] != -51 || f.store.charges[c.ID].Fee.Amount() != 199 {
 			t.Fatalf("ledger: %v taxa %v", net, f.store.charges[c.ID].Fee)
 		}
+		// O ajuste é liquidado no disponível como as demais movimentações.
+		if all := ledgerNet(f.store.posted); all[ledger.Cash] != -51 || all[ledger.ProviderClearing] != 0 {
+			t.Fatalf("liquidação do ajuste: %v", all)
+		}
 	})
 	t.Run("taxa: aceita o valor do provedor", func(t *testing.T) {
 		f, _, c := paidFixture(t)
@@ -768,6 +772,9 @@ func TestResolveFeeAndAmountMismatch(t *testing.T) {
 		net := ledgerNet(postedByKind(f.store.posted, "reconciliation.adjustment"))
 		if net[ledger.ProviderClearing] != 49 || f.store.charges[c.ID].Fee.Amount() != 150 {
 			t.Fatalf("ledger: %v taxa %v", net, f.store.charges[c.ID].Fee)
+		}
+		if st := postedByKind(f.store.posted, "settlement.received"); len(st) != 1 || ledgerNet(st)[ledger.Cash] != 49 {
+			t.Fatalf("liquidação do ajuste a favor: %+v", st)
 		}
 	})
 	t.Run("taxa sem valores", func(t *testing.T) {
@@ -1048,4 +1055,77 @@ func TestResolveDiscrepancyStoreFailures(t *testing.T) {
 			})
 		}
 	})
+}
+
+// Recebimento perdido: a cobrança E foi confirmada aqui (webhook CONFIRMED) e
+// o webhook de recebimento não chegou, mas o provedor já a informa recebida.
+// A conciliação registra payment_not_reflected na direção provider_received
+// (local 0, provedor o valor pendente), e a adoção do provedor lança o
+// recebimento e a liquidação, zerando pagamentos confirmados (ADR-080).
+func TestReconciliationDetectsAndAppliesMissedReceipt(t *testing.T) {
+	f := newReconFixture(t)
+	invE := f.addInvoice(t, 4000)
+	e := f.requestCharge(t, invE.ID)
+	f.process(t, f.storeWebhook(t, confirmedWebhook("evt_e", e.ProviderChargeID, 4000, 120)))
+	e = f.store.charges[e.ID]
+	if e.Status != ChargePaid || ledgerNet(f.store.ledger)[ledger.ProviderConfirmed] != 4000 {
+		t.Fatalf("E confirmada e aguardando o recebimento: %s %v", e.Status, ledgerNet(f.store.ledger))
+	}
+	received := providerPaidView(e, 4000, 120)
+	page := &f.gw.listPages[0]
+	page.Charges = append(page.Charges, received)
+	f.run(t, RunInput{RequestKey: "rec-recebimento"})
+
+	var d Discrepancy
+	for _, x := range f.store.discrepancyList() {
+		if x.Kind == DiscrepancyPaymentNotReflected && x.ChargeID != nil && *x.ChargeID == e.ID {
+			d = x
+		}
+	}
+	if d.DedupeKey != "payment_not_reflected:"+e.ID.String()+":provider_received" || d.LocalValue["direction"] != DirectionProviderReceived ||
+		d.LocalAmount == nil || !d.LocalAmount.IsZero() || d.ProviderAmount == nil || d.ProviderAmount.Amount() != 4000 {
+		t.Fatalf("recebimento perdido: %+v", d)
+	}
+	for _, x := range f.store.discrepancyList() {
+		if x.ChargeID != nil && *x.ChargeID == e.ID && x.Kind != DiscrepancyPaymentNotReflected {
+			t.Fatalf("sem outras divergências da cobrança E: %s", x.Kind)
+		}
+	}
+	// A cobrança B, recebida aqui e no provedor, não tem recebimento pendente.
+	for _, x := range f.store.discrepancyList() {
+		if x.ChargeID != nil && *x.ChargeID == f.b.ID && x.Kind == DiscrepancyPaymentNotReflected {
+			t.Fatalf("cobrança recebida sem pendência: %+v", x)
+		}
+	}
+
+	// Provedor ainda só confirmado na consulta: a adoção é recusada.
+	confirmedOnly := received
+	confirmedOnly.Status, confirmedOnly.RawStatus = ProviderConfirmed, "confirmed"
+	f.gw.getByID = map[string]gwResult{e.ProviderChargeID: {pc: confirmedOnly}}
+	_, err := f.resolve(d, ResolutionAcceptProvider)
+	wantAppErr(t, err, apperr.KindConflict, "payment_not_applicable")
+
+	f.gw.getByID = map[string]gwResult{e.ProviderChargeID: {pc: received}}
+	got, err := f.resolve(d, ResolutionAcceptProvider)
+	if err != nil || got.Status != DiscrepancyResolved {
+		t.Fatalf("adoção do provedor: %+v %v", got, err)
+	}
+	net := ledgerNet(f.store.ledger)
+	if net[ledger.ProviderConfirmed] != 0 || net[ledger.ProviderClearing] != 0 {
+		t.Fatalf("recebimento e liquidação lançados: %v", net)
+	}
+	pay := f.store.payments[len(f.store.payments)-1]
+	for _, key := range []string{"payment.received:" + pay.ID.String(), "settlement:payment.received:" + pay.ID.String()} {
+		if !slices.ContainsFunc(f.store.ledger, func(tx ledger.Transaction) bool { return tx.IdempotencyKey == key }) {
+			t.Fatalf("lançamento %s ausente: %v", key, ledgerKindsOf(f.store.ledger))
+		}
+	}
+	// A execução seguinte não encontra mais a pendência.
+	f.clock.Advance(time.Minute)
+	f.run(t, RunInput{RequestKey: "rec-recebimento-2"})
+	for _, x := range f.store.discrepancyList() {
+		if x.ChargeID != nil && *x.ChargeID == e.ID && x.Status == DiscrepancyOpen {
+			t.Fatalf("pendência resolvida não reaparece: %+v", x)
+		}
+	}
 }

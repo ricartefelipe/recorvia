@@ -1721,6 +1721,455 @@ há estorno da baixa nem operação para o recebimento de valor já baixado como
 o recebimento da baixa entra direto no disponível liquidado, sem conciliação com extrato bancário; disputas
 perdidas antes da ADR-070 continuam sem valor a recuperar (o crédito permaneceu com o cliente).
 
+## ADR-075 Operações financeiras de criação: lista, critério e impressão do pedido
+**Status:** aceita (completa a ADR-022 e o RF-09).
+**Contexto:** o RF-09 exige `Idempotency-Key` nas operações financeiras de criação, mas a lista não estava
+escrita. Uma auditoria encontrou quatro rotas sem a exigência: `POST /api/v1/subscriptions` (a repetição de
+rede duplicava a assinatura e o faturamento), `POST /api/v1/platform/addon-orders`,
+`POST /api/v1/subscriptions/{id}/price-adjustments` e `POST /api/v1/subscriptions/{id}/discounts`. Também não
+estava documentado o que compõe a impressão do pedido nem o escopo da chave.
+**Decisão:**
+- **Critério.** É operação financeira de criação todo `POST` que cria um registro do qual decorre valor a
+  receber, recebido, devolvido ou abatido, ou faturamento futuro, e cuja repetição criaria um segundo efeito
+  (outro registro ou outra cobrança). Atos irreversíveis ou execuções que não podem ser repetidos sem efeito
+  também exigem a chave. Alterações de recursos existentes protegidas por `If-Match` (troca de plano e de
+  quantidade, cancelamento, suspensão) e operações sem efeito financeiro (cadastros, catálogo, cupons,
+  endpoints de webhook) ficam fora: a versão já impede a repetição ou a repetição não cria valor.
+- **Lista.** Exigem `Idempotency-Key`: pagamento manual (`POST /invoices/{id}/payments`), nota de crédito
+  (`POST /invoices/{id}/credit-notes`), nova cobrança (`POST /invoices/{id}/charges`), reembolso
+  (`POST /charges/{id}/refunds`), baixa de valor a recuperar (`POST /disputes/{id}/recovery-settlements`),
+  crédito do cliente (`POST /customers/{id}/credits`), criação de assinatura (`POST /subscriptions`), reajuste
+  programado (`POST /subscriptions/{id}/price-adjustments`), aplicação de cupom
+  (`POST /subscriptions/{id}/discounts`), pedido de serviço adicional (`POST /platform/addon-orders`) e
+  execução de faturamento (`POST /billing-runs`); fora do critério financeiro, também a execução de
+  conciliação (`POST /reconciliation/runs`) e a anonimização de cliente (`POST /customers/{id}/anonymize`). A
+  lista é a de `idempotencyRequiredRoutes` em `internal/httpapi/contract_test.go`; o teste falha se uma rota
+  ganhar ou perder a exigência sem a lista mudar, e o teste de contrato exige o parâmetro `IdempotencyKey`
+  nas mesmas operações do `api/openapi.yaml`.
+- **Chave de negócio onde não há chave natural.** A assinatura não tem chave natural (um cliente pode ter
+  várias assinaturas do mesmo plano): a criação grava a chave de negócio da ADR-022 em
+  `subscriptions.request_key` (migration `00022`, única por tenant) junto da impressão dos campos de negócio
+  do pedido (`subscriptions.request_fingerprint`: SHA-256 de cliente, plano, quantidade, com vazio valendo 1,
+  data de início, dias de avaliação e prazo de pagamento). A repetição depois de um processamento interrompido
+  (lease expirado antes do registro da resposta) ou da validade do registro HTTP devolve a mesma assinatura
+  quando a impressão confere; com outro conteúdo de negócio responde `409 request_key_reused`. Duas
+  transações com a mesma chave não disputam com erro: o `INSERT ... ON CONFLICT DO NOTHING` espera a outra
+  terminar e a perdedora relê e devolve a assinatura confirmada. `subscription_in_progress` (a assinatura
+  confirmada ainda não visível) e `credit_note_in_progress` (o mesmo caso na nota de crédito) passam a ser
+  conflitos transitórios, com `Retry-After`, e não ficam registrados na chave.
+- **Posse da execução.** Cada pedido HTTP com `Idempotency-Key` usa um token próprio
+  (`idempotency_keys.lease_token`, migration `00022`), gravado ao vencer a disputa ou ao assumir um
+  processamento interrompido. Registrar o resultado e liberar a chave exigem o mesmo token e a chave ainda
+  em processamento: a execução antiga, cujo lease outra assumiu, não sobrescreve o resultado da nova nem
+  apaga o processamento dela (antes, a última escrita vencia, e a chave podia repetir por 24 horas a
+  resposta da execução antiga). A regra vale para todas as rotas idempotentes. Reajuste e cupom
+  têm chave natural no banco (um reajuste programado por assinatura e data, um desconto ativo por
+  assinatura): a reexecução depois de uma interrupção é recusada com `adjustment_date_taken` ou
+  `discount_already_active`, sem segundo efeito, e não ganham coluna nova. O pedido de serviço adicional é
+  atendido manualmente pela equipe da plataforma e não gera cobrança automática; o registro HTTP basta.
+- **Impressão do pedido.** É o SHA-256 do método, do caminho e dos **bytes do corpo como enviados**. O JSON não
+  é normalizado: o mesmo conteúdo com outra ordem de campos, outros espaços ou um campo opcional explícito com
+  o valor padrão (por exemplo `"quantity": 1`) é outro pedido e responde `409 idempotency_key_reused`. Quem
+  repete um pedido deve reenviar exatamente os mesmos bytes; a interface serializa o mesmo objeto.
+- **Escopo.** O registro é por organização, cliente da API (usuário ou credencial) e operação (método e rota
+  do roteador, por exemplo `POST /api/v1/subscriptions/{id}/discounts`). A mesma chave em outra operação, ou
+  enviada por outro usuário, é independente. Na mesma rota, outro recurso no caminho muda a
+  impressão e a chave já usada é recusada.
+- **Interface.** Criação de assinatura, reajuste, cupom e pedido de serviço adicional passam a enviar a chave
+  pelo `useIdempotencyKey`, com a regra de descarte da ADR-022. O cliente HTTP serializa todo corpo em JSON
+  canônico (campos em ordem fixa, em qualquer nível): a mesma chave acompanha sempre os mesmos bytes.
+
+**Alternativas:** normalizar o JSON antes da impressão foi descartado: aceitaria como repetição corpos que o
+decodificador interpreta de forma diferente (campos duplicados, números fora da faixa) e exigiria definir uma
+forma canônica no contrato. Gravar a chave de negócio também em reajustes, descontos e pedidos de serviço
+adicional foi descartado: as constraints de unicidade já impedem o segundo efeito.
+**Consequências:** clientes da API precisam enviar `Idempotency-Key` nas quatro rotas novas na lista (`422
+idempotency_key_required` sem ela). A repetição registrada de `POST /subscriptions` sai sem `ETag` (a chave
+guarda status, corpo, `Content-Type` e `Location`); a versão continua no corpo. Na reexecução de reajuste ou
+cupom depois de uma interrupção, o cliente recebe o conflito de negócio em vez da resposta original. Chaves em
+processamento gravadas antes da migration `00022` ficam sem token e só são concluídas depois de assumidas por
+nova tentativa, após o lease (um minuto).
+
+## ADR-076 Consumidores de cobrança: inbox e cobrança na mesma transação
+**Status:** aceita (corrige a aplicação da ADR-009 em `payments.invoice_issued` e `payments.invoice_credited`).
+**Contexto:** os dois consumidores solicitavam a cobrança (`RequestCharge`, com transação própria) e só depois
+marcavam o inbox, em outra transação, sem olhar se a mensagem já tinha sido processada. A idempotência por
+fatura de `RequestCharge` só cobre a cobrança em andamento: depois de uma recusa do provedor, a cobrança fica
+`failed` e uma reentrega da mesma mensagem (confirmação perdida, republicação do relay depois do lease,
+reprocessamento da DLQ) criava uma nova tentativa no provedor.
+**Decisão:**
+- A marcação do inbox é a primeira escrita da transação do consumidor; mensagem já registrada encerra o
+  tratamento sem efeito. Na mesma transação: em `invoice_credited`, o cancelamento local das cobranças
+  divergentes com sua auditoria e as operações de cancelamento no provedor; nos dois, a cobrança pelo saldo e
+  a operação persistida que a cria no provedor (`chargeForInvoice`).
+- As chamadas ao provedor (cancelamentos e criação) acontecem depois do commit, como nas demais operações
+  externas; se falharem, a operação gravada é retomada pela recuperação agendada (`RecoverOperations`), não
+  pela reentrega da mensagem.
+- Nova tentativa depois de recusa é pedido explícito (`POST /invoices/{id}/charges`, "Nova tentativa de
+  cobrança" na interface), nunca efeito de uma reentrega.
+
+**Alternativas:** manter as transações separadas e consultar o inbox antes de `RequestCharge` foi descartado:
+a falha entre a cobrança e a marcação continuaria permitindo a duplicidade.
+**Consequências:** falha em qualquer passo desfaz também o inbox e o cancelamento local, e a reentrega refaz o
+ajuste inteiro (antes, o cancelamento local ficava confirmado sem o restante). Os testes de integração de
+`internal/pgstore/payments_redelivery_integration_test.go` provam que a reentrega depois de recusa e depois de
+sucesso não cria cobrança nem operação nova, e `internal/app/dlq_replay_integration_test.go` prova o
+reprocessamento da DLQ de ponta a ponta (ADR-024): reentrega direcionada à fila do consumidor que falhou, com
+o id original no inbox, sem chegar aos demais consumidores do evento.
+
+## ADR-077 Limites do plano da plataforma serializados na assinatura e implantação assistida atendida pela equipe
+**Status:** aceita (RF-16).
+**Contexto:** uma auditoria de RF-16 encontrou três furos nos limites do plano da plataforma e um serviço
+adicional que nunca era cobrado. (1) A troca de plano contava só os membros ativos e o aceite de convite não
+conferia o limite: descer de plano com convites pendentes e aceitá-los depois passava do limite de usuários.
+(2) Assinaturas suspensas não contam como contratos ativos e a reativação não conferia o limite: suspender,
+criar novas e reativar passava do limite de contratos. (3) Convites e criações de assinatura liam plano e
+contagem sem bloqueio, em READ COMMITTED: requisições simultâneas contavam o mesmo consumo e passavam do
+limite. Por fim, o pedido de implantação assistida (`POST /api/v1/platform/addon-orders`) ficava para sempre
+`requested`: ninguém o atendia, e o demonstrativo só somava pedidos `completed`.
+**Decisão:**
+- **Serialização.** Toda checagem de limite lê o plano com `LockPlatformPlan`, que bloqueia (`FOR UPDATE`) a
+  linha de `tenant_platform_subscriptions` do tenant até o fim da transação: convite, aceite de convite,
+  criação e reativação de assinatura. A troca de plano e o fechamento do demonstrativo já liam a mesma linha
+  com bloqueio. Assim, quem conta o consumo espera quem está gravando, como as credenciais de API (que
+  bloqueiam a linha do tenant). A ordem de bloqueio é sempre a assinatura da plataforma antes dos demais
+  registros da operação, exceto na reativação, que bloqueia a assinatura do cliente (passo comum das
+  mutações) e depois a da plataforma; nenhum caminho bloqueia na ordem inversa.
+- **Usuários.** Convites pendentes (não aceitos, não revogados e não expirados) reservam vagas:
+  `Usage.PendingInvitations` entra no convite (`CheckUserLimit`), na troca de plano (`CanChangeTo`, código
+  `platform_downgrade_users`) e na visão geral (`usage.pending_invitations`). O aceite confere de novo, só com
+  os membros ativos (`CheckJoinLimit`, 403 `platform_user_limit`): a vaga reservada pelo próprio convite deixa
+  de ser pendente, e o plano pode ter mudado por outro caminho depois do convite. Membro removido que volta
+  por convite também ocupa vaga.
+- **Contratos.** Suspensas continuam fora da contagem de contratos ativos (o plano limita contratos em
+  vigor); a reativação manual (`subscriptions.Reactivate`) ocupa uma vaga e confere o limite, como a criação.
+  A reativação automática pela régua de cobrança (pagamento regularizado, ADR-041) não é bloqueada: só
+  acontece para suspensão da própria régua, que o tenant não provoca à vontade, e bloqueá-la manteria
+  suspenso um cliente que pagou.
+- **Atendimento pela equipe da plataforma.** Rotas `PlatformStaff` (como `GET /api/v1/admin/tenants`):
+  `GET /api/v1/admin/addon-orders` (paginada por cursor; em aberto por padrão, do mais antigo para o mais
+  recente; agendados pela data do atendimento; concluídos e cancelados do encerramento mais recente para o
+  mais antigo; o cursor vale só para o mesmo filtro) e
+  `POST /api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/schedule|complete|cancel`. Agendar exige instante
+  futuro em até um ano (reagendar é permitido); concluir vale com ou sem agendamento; cancelar exige
+  justificativa (3 a 500 caracteres). Concluído e cancelado são finais. Cada transição ocorre na transação do
+  tenant do pedido (o tenant do caminho delimita o pedido: outro tenant responde 404) e grava auditoria na
+  trilha do tenant (`platform.addon_scheduled`, `platform.addon_completed`, `platform.addon_canceled`, ator
+  usuário com `platform_staff: true`). A lista usa as funções `SECURITY DEFINER` `app_platform_addon_orders`
+  e `app_platform_tenant_names`, sem dados dos clientes dos tenants. Tela "Atendimento de serviços"
+  (`/admin/servicos`) para a equipe, fora da organização ativa: quem é da equipe e não tem organização é
+  levado a ela (e não ao onboarding). A auditoria do tenant identifica o autor como "equipe da plataforma
+  Recorvia", já que ele não é membro da organização.
+- **Equipe no ambiente local.** O realm embutido tem o usuário de demonstração `equipe@recorvia.test` (ID
+  fixo, sem organização). O `migrate up`, que já roda como dono das tabelas, inclui esse usuário em
+  `platform_staff` quando `RECORVIA_DEMO_STAFF_SUBJECT` está definido (serviço `migrate` do `compose.yaml`);
+  a variável é recusada em produção, e a equipe real é mantida pelo runbook
+  `docs/operacao/runbooks/equipe-da-plataforma.md` (o papel da aplicação só lê `platform_staff`).
+- **Cobrança.** Migration `00021`: colunas `scheduled_for`, `completed_at`, `canceled_at`, `cancel_reason`,
+  `handled_by`, `statement_id` e `version`, constraints de coerência por situação e o gatilho
+  `platform_addon_orders_guard`, que impede reabrir pedido encerrado, mudar organização, serviço, preço ou
+  autor e desfazer ou refazer o vínculo com o demonstrativo. O fechamento soma os pedidos concluídos antes do
+  fim do período e ainda sem demonstrativo e, ao gravar o demonstrativo, vincula esses pedidos a ele
+  (`statement_id`), na mesma transação. O pedido entra, portanto, no demonstrativo do período em que a
+  conclusão ocorreu; concluído depois do fim de um período ainda não fechado, entra no do período seguinte.
+  A conclusão bloqueia a assinatura da plataforma antes do pedido, na ordem do fechamento: conclusão e
+  fechamento não se cruzam, e uma conclusão confirmada depois do fechamento do seu período (por exemplo,
+  com o relógio da API atrás do worker) entra no demonstrativo seguinte, sem ser perdida nem cobrada duas
+  vezes. A avaliação do plano não isenta o serviço adicional.
+- **Pedidos anteriores à migration.** O fechamento antigo somava os pedidos concluídos com `updated_at`
+  dentro do período. A `00021` vincula cada pedido concluído ao demonstrativo existente do tenant cujo
+  período contém o `updated_at` (o que o cobrou), antes de criar o gatilho; sem isso, o fechamento novo
+  cobraria esses pedidos de novo. O Down faz o inverso para o código anterior: os pedidos já cobrados passam
+  a ter `updated_at` no início do período do demonstrativo que os cobrou (não são cobrados de novo e são
+  revinculados por um Up seguinte), e os concluídos ainda não cobrados, no período corrente da assinatura.
+- **Assinatura da plataforma cancelada.** O fechamento não roda para assinaturas canceladas: a conclusão
+  de um pedido nessa situação é recusada com 409 `platform_subscription_canceled`, e o pedido deve ser
+  cancelado. Nenhum pedido fica concluído sem cobrança possível.
+**Alternativas:** contar as suspensas como contratos ativos fecharia o furo da reativação sem checagem nova,
+mas mudaria o significado do limite e bloquearia criações por contratos parados. `SERIALIZABLE` nas
+transações de limite exigiria retentativa em todos os casos de uso; o bloqueio da linha da assinatura da
+plataforma é pontual e já era usado pela troca de plano. Somar os pedidos pelo instante da conclusão dentro do
+período, sem vínculo, perderia a cobrança de conclusões confirmadas depois do fechamento.
+**Consequências:** convites, aceites e criações de assinatura de um mesmo tenant passam a se serializar (no
+volume esperado por tenant, imperceptível); planos já rebaixados acima do limite pelo comportamento anterior
+não perdem membros nem contratos, mas não aceitam novos até voltarem ao limite. Limitações: não há estorno
+de pedido concluído nem reabertura de pedido cancelado (um novo pedido é registrado); o tenant acompanha o
+agendamento pela tela da plataforma, sem notificação por e-mail.
+
+## ADR-078 Logout sem tokens no navegador e revogação das sessões
+**Status:** aceita (RF-14; complementa a ADR-012).
+**Contexto:** o logout devolvia ao navegador, em `redirect_url`, o ID token como `id_token_hint`, contrariando
+a regra de que os tokens do provedor ficam no servidor. A revogação em massa (`RevokeAll`/`DeleteAllForUser`)
+existia sem uso: não havia "encerrar todas as minhas sessões", o membro removido mantinha a sessão com a
+organização ativa (o acesso era negado a cada requisição, mas a sessão seguia válida) e o usuário desativado
+só perdia a sessão da requisição em que era detectado.
+**Decisão:**
+- **Logout.** `POST /auth/logout` remove a sessão do Redis, revoga pelo servidor o refresh token da sessão no
+  endpoint de revogação do provedor (RFC 7009, cliente confidencial, quando anunciado na descoberta) e devolve
+  o endereço de encerramento com `client_id` e `post_logout_redirect_uri`, sem `id_token_hint`. Sem a dica, o
+  Keycloak pede confirmação antes de encerrar a sessão do navegador. A falha na revogação no provedor é
+  registrada em log e não impede o logout local: o token expira sozinho.
+- **Encerrar todas as sessões.** `POST /auth/logout-all` (sessão de usuário, CSRF) remove todas as sessões do
+  usuário pelo índice por usuário do Redis e revoga no provedor o refresh token de cada uma; o navegador atual
+  segue para o encerramento no provedor como no logout. Menu do usuário: "Encerrar todas as sessões".
+- **Membro removido.** Depois de confirmada a remoção, as sessões do usuário com aquela organização ativa
+  são encerradas (`RevokeTenantSessions`); as demais continuam (ele pode participar de outras organizações).
+  Se o Redis falhar nesse passo, a remoção vale e o acesso continua negado em toda requisição
+  (`ResolveAccess`).
+- **Usuário desativado.** A primeira requisição que encontra o usuário desativado encerra todas as sessões
+  dele, não só a da requisição.
+- O `SessionStore` ganha `ListForUser`, que lê as sessões pelo índice por usuário e descarta do índice as
+  entradas de sessões já expiradas.
+- **Gerações de sessão.** Uma requisição em voo que lê a sessão antes de "encerrar todas as sessões" e a
+  regrava depois (toque, renovação de tokens, troca de organização) ressuscitaria a sessão. Por isso cada
+  sessão guarda a geração do usuário (e a do usuário no tenant ativo) em que foi criada. Encerrar todas as
+  sessões incrementa a geração do usuário e remove as sessões do índice e o índice num único script Lua
+  (nenhuma gravação se intercala entre a leitura do índice e a remoção); remover o membro incrementa a
+  geração do usuário naquele tenant. A gravação é condicional e atômica (script Lua): `Create` só grava se as
+  gerações informadas são as correntes, e `Save` exige ainda que a chave exista. A leitura recusa sessão de
+  geração antiga. O login usa a geração corrente; a troca de organização herda a da sessão anterior (se as
+  sessões foram encerradas no meio da troca, a nova não é gravada e o usuário entra de novo). As gerações
+  duram 48 horas, renovadas a cada sessão criada e a cada revogação: mais que a sessão mais longa.
+- **Revogação no provedor em paralelo.** "Encerrar todas as sessões" revoga os refresh tokens distintos em
+  paralelo, com prazo total de 5 segundos (`Policy.RevokeTimeout`): com o provedor fora do ar, a resposta não
+  soma o prazo de cada sessão.
+**Alternativas:** encerrar a sessão no Keycloak pelo endpoint de logout com o refresh token é específico do
+Keycloak e usa a URL pública anunciada na descoberta, inacessível ao backend no ambiente local
+(`KC_HOSTNAME_BACKCHANNEL_DYNAMIC` só torna internos os endpoints de canal de retorno, como o de revogação).
+Manter o `id_token_hint` evitaria a confirmação no Keycloak ao custo de expor o ID token ao navegador.
+**Consequências:** o logout passa por uma confirmação do Keycloak; "encerrar todas as sessões" não encerra
+sessões do navegador no provedor em outros dispositivos além do que a revogação dos refresh tokens provoca no
+Keycloak; quem ainda tiver sessão no provedor entra de novo sem senha, com sessão nova no Recorvia.
+
+## ADR-079 Fatura comercial completa, emissão congelada, cancelada sem saldo e exportação CSV em partes
+**Status:** aceita.
+**Contexto:** a auditoria de RF-03 a RF-06 encontrou lacunas na fatura comercial. O quadro de totais do
+documento HTML omitia o total, as notas de crédito e o valor baixado: com nota de crédito ou baixa, a conta
+exibida não fechava com o saldo. O gatilho `app_invoice_guard` (00006) não congelava a observação (`memo`)
+da fatura emitida, e o documento usava os dados atuais da organização como emitente, de modo que mudar a
+razão social alterava documentos já emitidos. A fatura cancelada mantinha saldo devedor (o total menos o
+crédito aplicado), embora o cancelamento devolva esse crédito ao cliente: o documento, visível no portal,
+e o CSV mostravam um saldo que ninguém deve. A exportação CSV parava em 50 mil linhas sem avisar, e as
+colunas não traziam desconto, créditos, notas de crédito, baixa nem período.
+**Decisão:**
+- **Documento.** O quadro de totais segue a ordem da conta: subtotal, descontos, total, créditos aplicados,
+  notas de crédito, pago, valor baixado e saldo; os abatimentos aparecem com sinal negativo e a soma fecha com
+  `amount_due`. O teste confere o fechamento em sequências reais de operações do domínio (emissão com
+  desconto e crédito, pagamentos, notas, baixa e sua recuperação, cancelamento), fixas e pseudoaleatórias com
+  semente fixa, e pela API com desconto, crédito, nota de crédito, pagamento parcial e baixa. No portal, a
+  baixa aparece como "Saldo encerrado pela organização", coerente com a situação "Encerrada". O documento
+  traz o aviso "Este documento é uma fatura comercial e não é documento fiscal. Não substitui a nota
+  fiscal." (o mesmo texto aparece na tela de detalhe da fatura), o emitente, o documento e o endereço de
+  cobrança do cliente copiados na emissão, o período de faturamento e o de cada item (primeiro e último dia
+  incluídos), o vencimento e as condições de pagamento calculadas das datas gravadas na emissão (não do prazo
+  atual da organização, que pode mudar), e a observação, quando houver.
+- **Emitente gravado na emissão.** A emissão (motor, prorrata e correção de consumo, todas por `issueDraft`)
+  grava em `invoices.issuer_snapshot` o nome, a razão social e o CNPJ da organização naquele momento, e o
+  gatilho recusa alterá-los ou removê-los depois. O documento do painel e o do portal usam esses dados.
+  Faturas emitidas antes da migration `00019` ficam com `issuer_snapshot` nulo e continuam usando os dados
+  atuais da organização (não há como reconstituir os dados da época).
+- **Observação congelada.** A migration `00019` recria `app_invoice_guard` para recusar, em fatura emitida, a
+  alteração de `memo`, `issuer_snapshot`, `tenant_id` e `created_at`, além dos campos que já eram congelados.
+  O teste do gatilho roda como dono das tabelas (que tem todos os privilégios e não está sujeito ao RLS) e
+  confere a mensagem do próprio gatilho, inclusive no ramo de exclusão; o papel da aplicação continua sem
+  privilégio de `DELETE`.
+- **Cancelada sem saldo.** `Invoice.Void` zera `amount_due`; `credit_applied` continua registrando o crédito
+  aplicado na emissão e devolvido no cancelamento (`Service.Void`). A constraint `invoices_due_consistency`
+  passa a exigir saldo zero na fatura cancelada e a conta antiga nas demais; a `00019` corrige as faturas já
+  canceladas. Os consumidores de `amount_due` (painel, régua de cobrança, portal, notificações, cobranças e
+  conciliação) já filtram por fatura em aberto ou tratam a cancelada à parte, e não mudam. O documento da
+  cancelada informa o cancelamento (com o motivo somente no painel), e o quadro mostra o crédito devolvido ao
+  cliente e o valor cancelado, fechando com saldo zero; o CSV exporta saldo zero.
+- **Exportação em partes.** Cada arquivo tem no máximo 50 mil faturas. Antes do primeiro byte, a API localiza
+  o corte com a mesma ordenação e os mesmos filtros da listagem (`InvoiceListPosition`, `OFFSET` sobre o
+  índice novo `invoices_tenant_created_idx (tenant_id, created_at DESC, id DESC)`, que também atende a
+  listagem) e informa nos cabeçalhos `X-Recorvia-Export-Limit`, `X-Recorvia-Export-Truncated` e, quando há
+  corte, `X-Recorvia-Export-Next-Cursor` e `X-Recorvia-Export-Next-Part`; a parte seguinte é pedida com os
+  mesmos filtros, `cursor` e `part`, e o arquivo de cada parte se chama `faturas-parte-N.csv`. O streaming para
+  na última fatura incluída (pela chave de ordenação, não pela contagem), e a parte seguinte começa
+  exatamente depois dela: nenhuma fatura que continua no filtro se repete nem é pulada entre partes, mesmo com
+  faturas novas emitidas durante a exportação (elas entram no início da listagem, fora das partes seguintes).
+  As partes são consultas independentes, sem uma fotografia única do conjunto: uma fatura alterada entre uma
+  parte e outra de modo a entrar ou sair do filtro (por exemplo, de situação ou de vencida) pode faltar ou
+  aparecer numa parte, e os valores de cada linha são os do momento em que a parte foi gerada. A interface
+  avisa o corte e oferece a próxima parte. A auditoria `invoices.exported` registra o filtro de situação, a
+  parte, se é continuação e se houve corte. Novas colunas: `periodo_inicio`, `periodo_fim`, `subtotal`,
+  `desconto`, `creditos_aplicados`, `valor_creditado` e `valor_baixado`.
+- **CORS.** Para as origens de `RECORVIA_ALLOWED_ORIGINS`, a resposta expõe ao navegador
+  (`Access-Control-Expose-Headers`) `ETag`, `Location`, `X-Request-ID`, `Idempotent-Replayed` e os cabeçalhos da exportação;
+  sem isso, o `fetch` de outra origem lê esses cabeçalhos como nulos e o corte voltaria a ser silencioso.
+- **Clientes.** O histórico do cliente (`GET /customers/{id}/history`) passa a ser paginado por cursor
+  (`limit` e `cursor`, padrão de 25 eventos), em vez de cortar em 100. `customer.address_updated` informa os
+  nomes dos campos alterados (`fields`) e se o endereço foi cadastrado agora (`created`), nunca os valores
+  (ADR-061); regravar o mesmo endereço não gera evento. Contatos ganham edição
+  (`PATCH /customers/{id}/contacts/{contact_id}`, auditada como `customer.contact_updated` com os nomes dos
+  campos) com semântica de alteração parcial: campo omitido mantém o valor atual, de modo que a preferência
+  de e-mail de cobrança desligada pelo cliente no portal não volta ao padrão em silêncio.
+
+**Alternativas:** contar as faturas do filtro antes da exportação informaria o corte, mas não daria o ponto
+exato de continuação; acrescentar ao fim do CSV uma linha de aviso misturaria texto com dados; trailers HTTP
+não são lidos pelo `fetch` do navegador; uma fotografia única (transação longa ou tabela temporária entre
+partes) foi descartada por segurar recursos do banco entre requisições. Guardar o arquivo para download
+posterior foi descartado: a exportação continua sob demanda e sem arquivos armazenados (multitenancy). Na
+fatura cancelada, manter o saldo e só escondê-lo na apresentação deixaria o dado da API e do CSV errado;
+zerar `credit_applied` foi descartado porque é campo de emissão congelado e registra o crédito que existiu.
+Versionar contatos para concorrência otimista exigiria coluna nova e mudaria a inclusão e a exclusão; a edição
+bloqueia o cliente na transação, como a inclusão, e vale a última gravação.
+**Consequências:** migration `00019` (função do gatilho, coluna `issuer_snapshot`, constraint de saldo,
+correção das canceladas e índice; o Down devolve o esquema da 00006 e o saldo antigo das canceladas e remove
+os emitentes gravados); consulta `InvoiceListPosition` e método `ListCutoff` no faturamento;
+`Deps.InvoiceExportMaxRows` permite reduzir o limite em testes. `amount_due` da fatura cancelada passa a ser
+zero na API. A resposta de `GET /customers/{id}/history` ganha `next_cursor` e passa a devolver 25 eventos por
+padrão (clientes que liam somente a primeira resposta precisam seguir o cursor). Limitações: o `OFFSET` do
+corte percorre até 50 mil entradas do índice por parte; o CSV não traz itens nem notas de crédito
+individualmente; faturas anteriores à `00019` mostram o emitente atual.
+
+## ADR-080 Ciclo do pagamento pelo provedor: confirmação, recebimento e liquidação em contas distintas
+**Status:** aceita.
+**Contexto:** o RF-12 pede contas distintas para faturamento, contas a receber, confirmação, taxas, valores
+em liquidação, reembolso e chargeback. As situações `CONFIRMED` e `RECEIVED` do Asaas (e `paid` do simulador,
+o único estado pago até então) caíam no mesmo lançamento `payment.confirmed`, com débito em
+`provider_clearing` e a taxa reconhecida na confirmação; `ledger.SettlementReceived`, a passagem para o
+disponível, não era chamada fora de testes. Os valores em liquidação só acumulavam, a confirmação não
+tinha conta própria e o pagamento de cartão ainda não creditado pelo provedor aparecia como se estivesse
+liquidado.
+**Decisão:**
+- **Plano de contas do provedor.** Nova conta `provider_confirmed` ("Pagamentos confirmados no provedor",
+  ativo): o valor bruto que o provedor confirmou e ainda não creditou (a confirmação). `provider_clearing`
+  ("Valores em liquidação no provedor", ativo) passa a ser a conta de passagem de toda movimentação com o
+  provedor, liquidada no disponível. `cash` ("Disponível liquidado", ativo) recebe o líquido creditado pelo
+  provedor, além dos recebimentos manuais e das baixas recebidas (ADR-073). Faturamento
+  (`billed_revenue`), contas a receber (`accounts_receivable`), taxas (`provider_fees`), reembolsos
+  (`refunds`) e chargebacks (`chargebacks`) continuam como estavam. A conta nova é criada com o plano no
+  primeiro lançamento do tenant que a usa (como as demais), sem migration.
+- **Situações.** Confirmado é a situação paga e ainda não creditada (Asaas `CONFIRMED`, simulador
+  `confirmed`, nova ação `confirm`). Recebido é qualquer situação paga além da confirmada
+  (`ProviderStatus.IsReceived`): Asaas `RECEIVED`, `RECEIVED_IN_CASH` e `DUNNING_RECEIVED`, simulador `paid`
+  (ações `pay` e `receive`), e as situações posteriores ao recebimento (reembolso, chargeback). Reembolso e
+  chargeback pressupõem valor processado pelo provedor: o pagamento ainda só confirmado é dado como recebido
+  antes da movimentação (`postChargeMovement`), para que essas movimentações usem sempre os valores em
+  liquidação e nada fique esquecido em `provider_confirmed`.
+- **Confirmação** (`payment.confirmed`, chave `payment.confirmed:<pagamento>`): D `provider_confirmed` /
+  C `accounts_receivable` pelo valor aplicado à fatura; o excedente (`payment.overpayment`) debita
+  `provider_confirmed` em vez de `provider_clearing`. A taxa não é lançada na confirmação: o provedor a retém
+  do valor creditado. O pagamento de fatura já quitada ou cancelada vira crédito integral do cliente, também
+  em `provider_confirmed`; o lançamento `payment.provider_fee` deixa de existir.
+- **Recebimento** (`payment.received`, chave `payment.received:<pagamento>`): D `provider_clearing` /
+  C `provider_confirmed` pelo valor ainda confirmado do pagamento (saldo de `provider_confirmed` nos
+  lançamentos que referenciam o pagamento) e D `provider_fees` / C `provider_clearing` pela taxa registrada
+  no pagamento. O valor ainda confirmado vem do próprio ledger (`GetChargePaymentPendingReceipt`): depois do
+  primeiro recebimento ele é zero, o que torna o recebimento idempotente e independente da ordem dos
+  webhooks, e um retrato antigo (confirmado depois de recebido) não tem efeito.
+- **Liquidação** (`ledger.Settlement`, chave `settlement:<chave do lançamento de origem>`, mesma referência
+  e mesmo instante): o efeito líquido de cada movimentação com o provedor nos valores em liquidação vai para
+  o disponível. Débito líquido vira `settlement.received` (D `cash` / C `provider_clearing`: recebimento,
+  liberação de retenção, estorno do chargeback na disputa ganha, ajuste a favor); crédito líquido vira
+  `settlement.debited` (D `provider_clearing` / C `cash`: reembolso, retenção de chargeback, chargeback de
+  reembolso recusado, ajuste contra). Os provedores integrados creditam e debitam o saldo no momento do
+  evento, por isso a liquidação acompanha cada movimentação e `provider_clearing` volta a zero; saldo nessa
+  conta indica movimentação ainda não liquidada.
+- **Reembolsos, disputas e conciliação.** `refund.succeeded`, `dispute.opened`, `dispute.hold_released`,
+  `dispute.hold_restored`, o estorno de `dispute.opened` (disputa ganha) e `reconciliation.adjustment` mantêm
+  as partidas contra `provider_clearing` e ganham a liquidação correspondente. `dispute.credit_reversed` não
+  movimenta o provedor e não tem liquidação. O ajuste de conciliação é liquidado na hora mesmo antes do
+  recebimento: o disponível fica com a diferença até o recebimento creditar o líquido local, e a soma final
+  é o líquido informado pelo provedor.
+- **Painel.** "Receita recebida" continua sendo a soma dos pagamentos confirmados no mês (o cliente pagou),
+  e o novo indicador `pending_provider_receipt` ("A receber do provedor") mostra o saldo atual de
+  `provider_confirmed`, a parte ainda não creditada pelo provedor.
+
+**Exemplo** (bruto R$ 100,00, taxa R$ 3,48, reembolso de R$ 30,00):
+
+| Lançamento | Débito | Crédito |
+|---|---|---|
+| `invoice.issued` | contas a receber 100,00 | receita faturada 100,00 |
+| `payment.confirmed` (cartão confirmado) | pagamentos confirmados 100,00 | contas a receber 100,00 |
+| `payment.received` (crédito do provedor) | valores em liquidação 100,00; taxas 3,48 | pagamentos confirmados 100,00; valores em liquidação 3,48 |
+| `settlement.received` | disponível 96,52 | valores em liquidação 96,52 |
+| `refund.succeeded` | reembolsos 30,00 | valores em liquidação 30,00 |
+| `settlement.debited` | valores em liquidação 30,00 | disponível 30,00 |
+
+No Pix ou boleto (recebido direto), `payment.confirmed`, `payment.received` e `settlement.received` são
+gravados no mesmo processamento. Saldo final: receita faturada 100,00, reembolsos 30,00, taxas 3,48,
+disponível 66,52 e as demais contas zeradas.
+
+**Alternativas:** fundir confirmação e valores em liquidação (o recebimento seria só a transferência para o
+disponível) foi descartado: o RF-12 pede contas distintas, e a confirmação ainda não creditada precisa
+aparecer separada do que já está em liquidação. Manter os valores em liquidação como saldo no provedor até um
+repasse ao banco foi descartado: os provedores integrados não informam repasses, a conta só acumularia e o
+saldo creditado no provedor, que o tenant já pode usar, não apareceria como disponível. Reconhecer a taxa na
+confirmação foi descartado: o provedor a retém no crédito, e a confirmação de cartão pode ser estornada antes
+dele. Uma coluna ou tabela de recebimento por pagamento foi descartada: o saldo de `provider_confirmed` por
+pagamento já é a informação, sem estado duplicado (e `payments` é imutável).
+**Consequências:** cada pagamento pelo provedor gera três lançamentos e cada movimentação com o provedor,
+dois.
+- **Recebimento perdido na conciliação.** A conciliação carrega em lote, para as cobranças comparadas, o valor
+  ainda em `provider_confirmed` (`ListChargesPendingReceipt`). Cobrança paga aqui, com valor pendente, e
+  recebida no provedor gera `payment_not_reflected` na direção `provider_received` (chave
+  `payment_not_reflected:<cobrança>:provider_received`, valor local 0 e do provedor o pendente). A resolução
+  `accept_provider` exige o provedor recebido na consulta, lança o recebimento e a liquidação
+  (`ensureReceived`) e confere que a divergência deixou de existir; a execução seguinte não a encontra mais, e
+  o webhook atrasado não lança nada de novo.
+
+**Limitações.** Dados anteriores a esta decisão não são reescritos (o ledger é imutável) nem recebem
+lançamento de transição: pagamentos confirmados antes dela não têm valor em `provider_confirmed`, e o
+recebimento posterior não lança nada; o saldo que eles deixaram em `provider_clearing` permanece, e reembolsos
+e chargebacks posteriores sobre eles são liquidados no disponível, que pode ficar negativo enquanto o saldo
+antigo continua nos valores em liquidação. Não há ambiente de produção com esses dados (só bancos locais de
+demonstração, que podem ser recriados com `make reset`), por isso a liquidação de recuperação desses
+lançamentos (por cobrança e por tenant) foi adiada; se for necessária, cada lançamento antigo que movimenta
+`provider_clearing` sem liquidação pode receber `settlement:<chave original>` de forma idempotente, pelo
+mesmo `ledger.Settlement`. Reembolso ou chargeback de pagamento só confirmado é tratado como posterior ao
+recebimento, inclusive a taxa: se o provedor devolver a taxa nesse caso, a diferença aparece na conciliação.
+
+## ADR-081 Aviso de suspensão na janela da régua; motivo e linha do tempo do histórico de envio
+**Status:** aceita.
+**Contexto:** o RF-13 pede a régua com "janela de horário e fuso do tenant", mas só os lembretes
+(notificações com `policy_id`) passavam pela janela no envio (ADR-040): o aviso de assinatura suspensa,
+composto na mesma execução da régua que suspende, saía no instante da suspensão, inclusive de madrugada no
+fuso do tenant. O histórico de envio também estava incompleto: a listagem não trazia o motivo da situação
+(`status_reason`), que ainda ficava vazio nos adiamentos, e a linha do tempo gravada em `notification_events`
+e as tentativas de `webhook_delivery_attempts` não eram expostas.
+**Decisão:**
+- **Janela no aviso de suspensão.** O aviso de suspensão faz parte da régua e respeita a janela
+  `[início, fim)` da política que aplicou a suspensão, no fuso do tenant, verificada no envio como nos
+  lembretes: fora da janela é adiado para a abertura seguinte (`outside_send_window`, com o instante no
+  detalhe do evento). A política vem da suspensão identificada pela chave de negócio
+  `subscription_suspended:<suspensão>` (consulta `GetSuspensionSendWindow`, `collection_suspensions` com
+  `collection_policies`), sem coluna nova: `policy_id` continua exclusivo dos lembretes, porque a constraint
+  `notifications_step` o amarra ao passo da régua e as contagens de lembretes usam `policy_id IS NOT NULL`. A
+  janela vale também para alterações da política depois da suspensão e para as retentativas. Aviso sem
+  suspensão identificável não tem janela.
+- **Aviso da suspensão encerrada.** O aviso é da suspensão da chave: antes do envio, a suspensão precisa estar
+  ativa em `collection_suspensions` (`GetSuspensionActive`). Encerrada (pagamento regularizado, reativação ou
+  cancelamento), o aviso adiado é cancelado com `subscription_not_suspended`, mesmo que a assinatura tenha
+  sido suspensa de novo: a nova suspensão tem aviso próprio, com a sua chave.
+- **Sem limite de frequência no aviso.** O limite diário de mensagens por cliente continua só nos lembretes: o
+  aviso de suspensão é único por suspensão e informa uma consequência já aplicada; adiá-lo para o dia seguinte
+  por causa de lembretes do mesmo dia atrasaria a informação de que o serviço foi suspenso. Ele também não
+  entra na contagem dos lembretes.
+- **Motivo da situação atual.** `status_reason` passa a acompanhar a situação corrente: além de cancelamento,
+  supressão e falha, registra o adiamento (`outside_send_window`, `frequency_limit`) e a nova tentativa agendada
+  (`retry_scheduled`); é limpo na reivindicação da tentativa e no envio. A listagem
+  (`GET /api/v1/notifications`) expõe `status_reason` (código estável, vazio sem motivo) e a interface traduz
+  os códigos na aba "Histórico de envios".
+- **Linha do tempo.** `GET /api/v1/notifications/{id}/events` devolve os eventos em ordem cronológica
+  (situação, motivo, tentativa, detalhe e instante), com a mesma permissão da listagem (`collections.read`): os
+  eventos não contêm dados além dos já exibidos na listagem (destinatários e último erro). Notificação de
+  outro tenant ou inexistente: 404.
+- **Tentativas de webhooks enviados.** `GET /api/v1/webhook-deliveries/{id}/attempts` devolve cada tentativa
+  (número, início, duração, código HTTP ou ausência de resposta, erro e quantidade de assinaturas), com
+  `webhooks.read`. Entrega de endpoint removido responde 404, como a listagem de entregas.
+
+**Alternativas:** gravar `policy_id` no aviso de suspensão foi descartado por misturá-lo aos lembretes
+(substituição por passo posterior, cancelamento na quitação e limite diário passariam a valer para ele). Usar
+a política padrão vigente no envio foi descartado: a suspensão registra a política que a aplicou, e a janela
+deve ser a dela mesmo que a padrão mude. Uma descrição em português no contrato foi descartada em favor de
+códigos estáveis traduzidos na interface, como nos demais enums.
+**Consequências:** avisos de suspensão compostos fora da janela passam a sair na abertura seguinte. Não há
+migration: a regra é aplicada no envio, inclusive a avisos já agendados. Os eventos e as tentativas expostos
+seguem as regras de expurgo da ADR-060.
+
 ## ADR-082 Correlação de logs, encerramento ordenado, saneamento de credenciais e verificações automáticas de contrato e fixação
 **Status:** aceita.
 **Contexto:** uma auditoria dos requisitos não funcionais e do RF-15 encontrou lacunas na infraestrutura

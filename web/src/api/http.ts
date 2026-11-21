@@ -1,3 +1,4 @@
+import { canonicalJSON } from '../lib/json';
 import type { components } from './schema';
 
 export type Problem = components['schemas']['Problem'];
@@ -62,9 +63,16 @@ export interface RequestOptions {
   ifMatch?: number;
   idempotencyKey?: string;
   signal?: AbortSignal;
-  responseType?: 'json' | 'text' | 'blob';
+  /** 'textWithHeaders' devolve { text, headers } (por exemplo, exportações que informam o corte nos cabeçalhos). */
+  responseType?: 'json' | 'text' | 'blob' | 'textWithHeaders';
   /** false omite X-Recorvia-Tenant (endpoints da própria sessão). */
   tenant?: boolean;
+}
+
+/** Corpo textual com os cabeçalhos da resposta (responseType 'textWithHeaders'). */
+export interface TextWithHeaders {
+  text: string;
+  headers: Headers;
 }
 
 export interface HttpClientConfig {
@@ -155,7 +163,8 @@ export function createHttpClient(config: HttpClientConfig): HttpClient {
       response = await fetchImpl(url, {
         method,
         headers,
-        body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+        // JSON canônico: a mesma Idempotency-Key sempre com os mesmos bytes.
+        body: options.body !== undefined ? canonicalJSON(options.body) : undefined,
         credentials: 'same-origin',
         signal: options.signal,
       });
@@ -173,6 +182,10 @@ export function createHttpClient(config: HttpClientConfig): HttpClient {
 
     if (response.status === 204) return undefined as T;
     if (responseType === 'text') return (await response.text()) as T;
+    if (responseType === 'textWithHeaders') {
+      const result: TextWithHeaders = { text: await response.text(), headers: response.headers };
+      return result as T;
+    }
     if (responseType === 'blob') return (await response.blob()) as T;
     const text = await response.text();
     return (text ? JSON.parse(text) : undefined) as T;

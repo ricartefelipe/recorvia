@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
+	"github.com/ricartefelipe/recorvia/internal/kernel/ids"
 	"github.com/ricartefelipe/recorvia/internal/pgstore"
 )
 
@@ -77,7 +79,8 @@ func (b *bufferedWriter) WriteHeader(code int) {
 //     estiver em processamento;
 //   - processamento interrompido (lease expirado) pode ser assumido por nova
 //     tentativa; os casos de uso usam a chave de negócio para não duplicar
-//     efeitos já confirmados.
+//     efeitos já confirmados. Cada execução tem um token próprio, e só a que
+//     detém a chave registra o resultado ou a libera.
 func (a *API) idempotency(info RouteInfo, next http.Handler) http.Handler {
 	operation := info.Method + " " + info.Pattern
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +100,9 @@ func (a *API) idempotency(info RouteInfo, next http.Handler) http.Handler {
 		h.Write([]byte(r.Method + "\n" + r.URL.Path + "\n"))
 		h.Write(body)
 		fingerprint := h.Sum(nil)
-		k := pgstore.IdempotencyKey{TenantID: p.TenantID, ClientID: p.ClientID(), Operation: operation, Key: key}
+		// Token próprio desta execução: só ela registra o resultado ou libera
+		// a chave, mesmo que outra assuma o processamento depois do lease.
+		k := pgstore.IdempotencyKey{TenantID: p.TenantID, ClientID: p.ClientID(), Operation: operation, Key: key, Lease: ids.New()}
 
 		rec, won, err := a.Store.IdempotencyBegin(r.Context(), k, fingerprint, idempotencyLease, idempotencyTTL)
 		if err != nil {
@@ -159,7 +164,11 @@ func (a *API) idempotency(info RouteInfo, next http.Handler) http.Handler {
 				a.log.WarnContext(r.Context(), "liberação de chave de idempotência falhou", slog.String("error", err.Error()))
 			}
 		} else if err := a.Store.IdempotencyComplete(persistCtx, k, bw.status, bw.buf.Bytes(), bw.header.Get("Content-Type"),
-			bw.header.Get("Location")); err != nil {
+			bw.header.Get("Location")); errors.Is(err, pgstore.ErrIdempotencyLeaseLost) {
+			// Outra execução assumiu a chave depois do lease: o resultado dela
+			// é o registrado; esta resposta vai só para o próprio cliente.
+			a.log.WarnContext(r.Context(), "resultado idempotente não registrado: a chave foi assumida por outra execução")
+		} else if err != nil {
 			a.log.ErrorContext(r.Context(), "registro do resultado idempotente falhou", slog.String("error", err.Error()))
 		}
 		for name, vals := range bw.header {

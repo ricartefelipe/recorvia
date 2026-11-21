@@ -201,3 +201,49 @@ func TestRefundStateMapping(t *testing.T) {
 		t.Fatalf("conversão: %+v", pc)
 	}
 }
+
+// O simulador distingue o pagamento confirmado e ainda não creditado (confirm)
+// do recebido (pay, ou receive depois de confirm), como o Asaas (CONFIRMED e
+// RECEIVED).
+func TestConfirmedAndReceivedStatuses(t *testing.T) {
+	e := newSimEnv(t)
+	ctx := context.Background()
+	pc := e.charge(t, 10000)
+	if _, err := e.sim.Apply(pc.ProviderChargeID, paysim.Action{Name: "receive"}); err == nil {
+		t.Fatal("cobrança pendente não pode ser creditada")
+	}
+	if _, err := e.sim.Apply(pc.ProviderChargeID, paysim.Action{Name: "confirm"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.gw.GetCharge(ctx, pc.ProviderChargeID)
+	if err != nil || got.Status != payments.ProviderConfirmed || got.RawStatus != "confirmed" || got.Fee == nil || got.Fee.Amount() != paysim.Fee(10000) ||
+		got.PaidAt == nil {
+		t.Fatalf("confirmada: %+v %v", got, err)
+	}
+	if _, err := e.sim.Apply(pc.ProviderChargeID, paysim.Action{Name: "refund"}); err == nil {
+		t.Fatal("o simulador só reembolsa cobrança creditada")
+	}
+	if _, err := e.sim.Apply(pc.ProviderChargeID, paysim.Action{Name: "receive"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = e.gw.GetCharge(ctx, pc.ProviderChargeID); err != nil || got.Status != payments.ProviderReceived || got.Fee.Amount() != paysim.Fee(10000) {
+		t.Fatalf("recebida: %+v %v", got, err)
+	}
+	e.sim.DispatchDue(ctx)
+	var types []string
+	var statuses []payments.ProviderStatus
+	for len(e.hooks) > 0 {
+		ev, err := Verifier{}.Parse(<-e.hooks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		types, statuses = append(types, ev.Type), append(statuses, ev.Status)
+	}
+	if strings.Join(types, ",") != "charge.created,charge.confirmed,charge.received" ||
+		statuses[1] != payments.ProviderConfirmed || statuses[2] != payments.ProviderReceived {
+		t.Fatalf("eventos: %v %v", types, statuses)
+	}
+	if MapStatus("confirmed", "") != payments.ProviderConfirmed || MapStatus("paid", "") != payments.ProviderReceived {
+		t.Fatal("mapeamento das situações")
+	}
+}

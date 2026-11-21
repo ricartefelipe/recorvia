@@ -231,7 +231,7 @@ func TestUserSessionRoutesRejectAPICredential(t *testing.T) {
 
 	// Pela sessão, o pedido de serviço adicional grava o membro como autor
 	// (requested_by é obrigatório).
-	order, _ := owner.expect(http.StatusCreated, http.MethodPost, "/api/v1/platform/addon-orders", map[string]any{"addon_code": "implantacao_assistida"})
+	order, _ := owner.expect(http.StatusCreated, http.MethodPost, "/api/v1/platform/addon-orders", map[string]any{"addon_code": "implantacao_assistida"}, "Idempotency-Key", idemKey())
 	if n := count(t, `SELECT count(*) FROM platform_addon_orders WHERE tenant_id = $1 AND id = $2 AND requested_by = $3`, tn.ID,
 		order["id"], tn.Owner.ID); n != 1 {
 		t.Fatalf("autoria do pedido pelo painel: %d", n)

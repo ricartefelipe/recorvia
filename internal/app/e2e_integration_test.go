@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -169,6 +170,13 @@ func (e *e2e) mailsWith(recipient, subject string) []mailpit.Message {
 
 func startWorker(t *testing.T, start time.Time) *e2e {
 	t.Helper()
+	return startWorkerWith(t, start, nil)
+}
+
+// startWorkerWith inicia o worker com variáveis de configuração adicionais
+// (substituem as padrão do teste).
+func startWorkerWith(t *testing.T, start time.Time, extra map[string]string) *e2e {
+	t.Helper()
 	ctx := context.Background()
 	ctr, err := tcrabbit.Run(ctx, "rabbitmq:4.2.9-management-alpine")
 	if err != nil {
@@ -191,6 +199,7 @@ func startWorker(t *testing.T, start time.Time) *e2e {
 		"RECORVIA_WEBHOOK_ALLOWED_PRIVATE_CIDRS": "127.0.0.1/32", "RECORVIA_WORKER_ID": "worker-e2e", "RECORVIA_SCHEDULER_TICK": "50ms",
 		"RECORVIA_WORKER_CONCURRENCY": "2", "RECORVIA_OUTBOX_LEASE": "10s", "RECORVIA_AMQP_URL": amqpURL,
 	}
+	maps.Copy(vars, extra)
 	cfg, err := config.Load(func(k string) string { return vars[k] })
 	if err != nil {
 		t.Fatal(err)

@@ -573,7 +573,7 @@ func (s *Service) settleRefund(ctx context.Context, tx Tx, c *Charge, r *Refund,
 		return err
 	}
 	if ok {
-		if err := tx.PostLedger(ctx, t); err != nil {
+		if err := s.postChargeMovement(ctx, tx, c, t, now); err != nil {
 			return err
 		}
 	}
@@ -636,7 +636,7 @@ func (s *Service) chargeBackFailedRefund(ctx context.Context, tx Tx, c *Charge, 
 		return err
 	}
 	if ok {
-		if err := tx.PostLedger(ctx, t); err != nil {
+		if err := s.postChargeMovement(ctx, tx, c, t, now); err != nil {
 			return err
 		}
 	}
