@@ -409,7 +409,10 @@ ok "rotação, fase 2 em andamento: API com dr2 ativa e worker ainda com dr1 ati
 login
 [[ $(jq -r '.active_tenant.slug' "$work/sessao.json") == acme ]] || die "organização ativa inesperada"
 session_call PUT /api/v1/platform/plan '{"plan_code":"escala"}' >/dev/null
-scopes=$(jq -c '[.active_tenant.permissions[] | select(. != "api_credentials.manage" and . != "members.manage" and . != "platform_billing.manage")]' "$work/sessao.json")
+# Permissões que nunca viram escopo de credencial (apicredentials.NonDelegable;
+# o teste TestNonDelegableListsStayInSync confere esta lista).
+non_delegable='["members.manage","platform_billing.manage","api_credentials.manage","customers.anonymize"]'
+scopes=$(jq -c --argjson nd "$non_delegable" '[.active_tenant.permissions[] | select(. as $p | $nd | index($p) | not)]' "$work/sessao.json")
 api_token=$(session_call POST /api/v1/api-credentials "$(jq -n --argjson s "$scopes" '{name: "exercicio-dr", scopes: $s}')" | jq -r .secret)
 [[ $api_token == rcv_* ]] || die "credencial de API não criada"
 ok "login OIDC, plano com webhooks e credencial de API da organização acme"
