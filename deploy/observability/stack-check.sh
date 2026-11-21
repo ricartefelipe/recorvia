@@ -164,6 +164,8 @@ for q in \
   'recorvia_notifications_dispatched_total{outcome="sent"}' \
   'recorvia_webhook_deliveries_total{outcome="succeeded"}' \
   'recorvia_collection_actions_total{action="reminder_scheduled"}' \
+  'recorvia_retention_purged_total{kind="inbox_messages"}' \
+  'recorvia_job_interval_seconds{task="retention.purge"}' \
   'recorvia_dead_letters_open{consumer="payments.invoice_issued"}' \
   'recorvia_dead_letters_oldest_open_seconds{consumer="other"}' \
   'recorvia_notifications_backlog{state="due"}' \

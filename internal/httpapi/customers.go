@@ -23,9 +23,11 @@ type customerDTO struct {
 	ExternalID       string    `json:"external_id"`
 	Status           string    `json:"status"`
 	PaymentTermsDays *int      `json:"payment_terms_days"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
-	Version          int       `json:"version"`
+	// AnonymizedAt é nulo enquanto o cliente não foi anonimizado.
+	AnonymizedAt *time.Time `json:"anonymized_at"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	Version      int        `json:"version"`
 }
 
 type contactDTO struct {
@@ -47,7 +49,7 @@ type customerDetailsDTO struct {
 func custDTO(c customers.Customer) customerDTO {
 	return customerDTO{ID: c.ID, Kind: string(c.Kind), Name: c.Name, LegalName: c.LegalName, DocumentType: string(c.DocumentType),
 		DocumentNumber: c.DocumentNumber, Email: c.Email, Phone: c.Phone, ExternalID: c.ExternalID, Status: string(c.Status),
-		PaymentTermsDays: c.PaymentTermsDays, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt, Version: c.Version}
+		PaymentTermsDays: c.PaymentTermsDays, AnonymizedAt: c.AnonymizedAt, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt, Version: c.Version}
 }
 
 func contDTO(c customers.Contact) contactDTO {
@@ -163,6 +165,69 @@ func (a *API) archiveCustomer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.getCustomer(w, r)
+}
+
+type providerCustomerDTO struct {
+	Provider           string `json:"provider"`
+	ProviderCustomerID string `json:"provider_customer_id"`
+}
+
+type anonymizationRemovedDTO struct {
+	Contacts                int  `json:"contacts"`
+	BillingAddress          bool `json:"billing_address"`
+	PortalLinksRevoked      int  `json:"portal_links_revoked"`
+	Notifications           int  `json:"notifications"`
+	ProviderWebhookPayloads int  `json:"provider_webhook_payloads"`
+}
+
+// customerAnonymizationDTO é a resposta da anonimização. provider_customers
+// traz os identificadores do cliente nos provedores de pagamento, já
+// removidos do cadastro, para que ele seja tratado também no provedor. Ficam
+// registrados na auditoria da anonimização e voltam na repetição do pedido.
+type customerAnonymizationDTO struct {
+	Customer          customerDetailsDTO      `json:"customer"`
+	AlreadyAnonymized bool                    `json:"already_anonymized"`
+	ProviderCustomers []providerCustomerDTO   `json:"provider_customers"`
+	Removed           anonymizationRemovedDTO `json:"removed"`
+}
+
+func anonymizationDTO(res customers.Anonymization) customerAnonymizationDTO {
+	out := customerAnonymizationDTO{
+		Customer:          customerDetailsDTO{customerDTO: custDTO(res.Customer), Contacts: []contactDTO{}},
+		AlreadyAnonymized: res.AlreadyAnonymized,
+		ProviderCustomers: []providerCustomerDTO{},
+		Removed: anonymizationRemovedDTO{Contacts: res.Erasure.Contacts, BillingAddress: res.Erasure.Address,
+			PortalLinksRevoked: res.Erasure.PortalLinksRevoked, Notifications: res.Erasure.Notifications,
+			ProviderWebhookPayloads: res.Erasure.ProviderWebhookPayloads},
+	}
+	for _, ref := range res.Erasure.ProviderRefs {
+		out.ProviderCustomers = append(out.ProviderCustomers, providerCustomerDTO{Provider: ref.Provider, ProviderCustomerID: ref.ProviderCustomerID})
+	}
+	return out
+}
+
+// anonymizeCustomer substitui de forma irreversível os dados pessoais do
+// cliente. Exige justificativa, que fica na auditoria.
+func (a *API) anonymizeCustomer(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	var in struct {
+		Reason string `json:"reason"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	p := mustPrincipal(r)
+	res, err := a.Customers.Anonymize(r.Context(), p.TenantID, p.Actor(), id, in.Reason)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	a.writeVersioned(w, r, http.StatusOK, res.Customer.Version, anonymizationDTO(res))
 }
 
 func (a *API) addContact(w http.ResponseWriter, r *http.Request) {

@@ -13,6 +13,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getCustomerAnonymizedAtForKeyShare = `-- name: GetCustomerAnonymizedAtForKeyShare :one
+SELECT anonymized_at FROM customers WHERE tenant_id = $1 AND id = $2 FOR KEY SHARE
+`
+
+type GetCustomerAnonymizedAtForKeyShareParams struct {
+	TenantID uuid.UUID
+	ID       uuid.UUID
+}
+
+// Situação do cliente lida pela ingestão de consumo. O bloqueio compartilhado
+// (o mesmo da chave estrangeira do evento) espera uma anonimização em
+// andamento, que mantém o cliente com bloqueio exclusivo, e lê o resultado
+// dela: nenhum consumo é gravado para um cliente anonimizado.
+func (q *Queries) GetCustomerAnonymizedAtForKeyShare(ctx context.Context, arg GetCustomerAnonymizedAtForKeyShareParams) (*time.Time, error) {
+	row := q.db.QueryRow(ctx, getCustomerAnonymizedAtForKeyShare, arg.TenantID, arg.ID)
+	var anonymized_at *time.Time
+	err := row.Scan(&anonymized_at)
+	return anonymized_at, err
+}
+
 const getInvoiceItemAmounts = `-- name: GetInvoiceItemAmounts :one
 SELECT amount, discount_amount, COALESCE(price_snapshot->>'discount_type', '')::text AS discount_type
   FROM invoice_items WHERE tenant_id = $1 AND id = $2
@@ -122,7 +142,7 @@ func (q *Queries) GetSubscriptionForShare(ctx context.Context, arg GetSubscripti
 }
 
 const getUsageAggregateForUpdate = `-- name: GetUsageAggregateForUpdate :one
-SELECT id, tenant_id, subscription_id, metric_id, period_start, period_end, aggregation, quantity, event_count, invoice_item_id, closed_at, price_version_id, corrected_quantity, corrected_amount FROM usage_aggregates
+SELECT id, tenant_id, subscription_id, metric_id, period_start, period_end, aggregation, quantity, event_count, invoice_item_id, closed_at, price_version_id, corrected_quantity, corrected_amount, events_purged_at FROM usage_aggregates
  WHERE tenant_id = $1 AND subscription_id = $2 AND metric_id = $3 AND period_start = $4
    FOR UPDATE
 `
@@ -157,6 +177,7 @@ func (q *Queries) GetUsageAggregateForUpdate(ctx context.Context, arg GetUsageAg
 		&i.PriceVersionID,
 		&i.CorrectedQuantity,
 		&i.CorrectedAmount,
+		&i.EventsPurgedAt,
 	)
 	return i, err
 }

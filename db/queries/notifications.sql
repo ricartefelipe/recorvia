@@ -119,8 +119,11 @@ SELECT id FROM invoices WHERE tenant_id = @tenant_id AND id = @id FOR KEY SHARE;
 -- name: LockSubscriptionKeyShare :exec
 SELECT id FROM subscriptions WHERE tenant_id = @tenant_id AND id = @id FOR KEY SHARE;
 
--- name: LockCustomerKeyShare :exec
-SELECT id FROM customers WHERE tenant_id = @tenant_id AND id = @id FOR KEY SHARE;
+-- name: LockCustomerKeyShare :one
+-- Bloqueia o cliente em modo compartilhado e devolve a anonimização: a
+-- anonimização mantém o cliente com bloqueio exclusivo, de modo que a
+-- gravação de uma notificação composta antes dela espera e é descartada.
+SELECT anonymized_at FROM customers WHERE tenant_id = @tenant_id AND id = @id FOR KEY SHARE;
 
 -- name: GetPaymentNotificationInfo :one
 SELECT id, invoice_id, amount, paid_at FROM payments WHERE tenant_id = @tenant_id AND id = @id;

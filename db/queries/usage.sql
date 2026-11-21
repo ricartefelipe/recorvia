@@ -17,6 +17,13 @@ SELECT * FROM usage_events WHERE tenant_id = @tenant_id AND external_id = @exter
 -- fechamento (UsageAggregateExists) já enxerga o agregado confirmado.
 SELECT * FROM subscriptions WHERE tenant_id = @tenant_id AND id = @id FOR SHARE;
 
+-- name: GetCustomerAnonymizedAtForKeyShare :one
+-- Situação do cliente lida pela ingestão de consumo. O bloqueio compartilhado
+-- (o mesmo da chave estrangeira do evento) espera uma anonimização em
+-- andamento, que mantém o cliente com bloqueio exclusivo, e lê o resultado
+-- dela: nenhum consumo é gravado para um cliente anonimizado.
+SELECT anonymized_at FROM customers WHERE tenant_id = @tenant_id AND id = @id FOR KEY SHARE;
+
 -- name: ListSubscriptionSuspensions :many
 -- Suspensões e reativações da assinatura em ordem cronológica: consumo
 -- ocorrido durante uma suspensão é rejeitado mesmo depois da reativação.

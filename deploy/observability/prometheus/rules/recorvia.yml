@@ -334,17 +334,17 @@ groups:
       # Proporcional ao intervalo de cada tarefa: as horárias e a diária
       # nunca chegam a três falhas em 30 minutos (a próxima execução é
       # agendada um intervalo depois, mesmo após falha). Três intervalos, no
-      # mínimo 15 minutos. O motor de faturamento e a coleta de métricas têm
-      # alertas próprios.
+      # mínimo 15 minutos. O motor de faturamento, a coleta de métricas e o
+      # expurgo por retenção têm alertas próprios.
       - alert: RecorviaScheduledTaskStale
         expr: |
           (
-            time() - max by (task) (recorvia_job_last_success_timestamp_seconds{task!~"billing\\.run_cycle|metrics\\.collect"})
+            time() - max by (task) (recorvia_job_last_success_timestamp_seconds{task!~"billing\\.run_cycle|metrics\\.collect|retention\\.purge"})
               > on (task) clamp_min(3 * max by (task) (recorvia_job_interval_seconds), 900)
           )
           or
           (
-            max by (task) (recorvia_job_interval_seconds{task!~"billing\\.run_cycle|metrics\\.collect"}) * 0
+            max by (task) (recorvia_job_interval_seconds{task!~"billing\\.run_cycle|metrics\\.collect|retention\\.purge"}) * 0
               + on () group_left () (time() - min(process_start_time_seconds{job="recorvia-worker"}))
               > on (task) clamp_min(3 * max by (task) (recorvia_job_interval_seconds), 900)
             unless on (task) max by (task) (recorvia_job_last_success_timestamp_seconds)
@@ -369,6 +369,39 @@ groups:
           summary: "Coleta de métricas do worker parada"
           description: "A tarefa metrics.collect não conclui há mais de 2 minutos, ou não concluiu nenhuma vez desde a partida do worker; as métricas da outbox, das operações e do banco estão desatualizadas."
           runbook: docs/operacao/runbooks/faturamento.md#tarefas-agendadas-falhando
+
+  - name: recorvia-retencao
+    rules:
+      # Expurgo por idade parado: a tarefa retention.purge é horária; sem
+      # sucesso há mais de três intervalos, ou sem nenhum sucesso desde a
+      # partida do worker (a série do último sucesso só existe depois de um
+      # sucesso real, como em RecorviaBillingCycleStale). A falha do expurgo
+      # de qualquer tipo de dado faz a execução terminar sem sucesso.
+      - alert: RecorviaRetentionPurgeStale
+        expr: |
+          time() - max(recorvia_job_last_success_timestamp_seconds{task="retention.purge"}) > 10800
+            or
+          (time() - min(process_start_time_seconds{job="recorvia-worker"}) > 10800
+            and on () absent(recorvia_job_last_success_timestamp_seconds{task="retention.purge"}))
+        labels:
+          severity: warning
+          area: retencao
+        annotations:
+          summary: "Expurgo por retenção sem sucesso há {{ $value | humanizeDuration }}"
+          description: "A tarefa retention.purge (intervalo de 1 hora) não conclui com sucesso há mais de 3 horas, ou não concluiu nenhuma vez desde a partida do worker: dados vencidos deixam de ser removidos."
+          runbook: docs/operacao/runbooks/retencao.md#expurgo-parado-ou-falhando
+      # Expurgo sem vazão: quase todas as execuções das últimas 24 horas
+      # pararam no orçamento de tempo ou no limite de lotes com registros
+      # vencidos restantes do mesmo tipo.
+      - alert: RecorviaRetentionPurgeBacklog
+        expr: sum by (kind) (increase(recorvia_retention_purge_incomplete_total[24h])) >= 20
+        labels:
+          severity: warning
+          area: retencao
+        annotations:
+          summary: "Expurgo de {{ $labels.kind }} sem vazão nas últimas 24 horas"
+          description: "As execuções do expurgo param com registros vencidos restantes: o volume vencido cresce mais rápido do que os lotes removem."
+          runbook: docs/operacao/runbooks/retencao.md#expurgo-sem-vazao
 
   - name: recorvia-notificacoes
     rules:

@@ -34,6 +34,11 @@
 //     de qualquer outra leitura ou gravação, e o faturamento as reivindica
 //     com bloqueio exclusivo: a decisão entre "accepted" e "late" nunca é
 //     tomada durante um fechamento ainda não confirmado.
+//   - Consumo de cliente anonimizado é rejeitado: a anonimização só é aceita
+//     sem faturamento pendente e, depois dela, nenhum evento novo é gravado
+//     para o cliente (o reenvio de um evento já gravado continua respondido
+//     como duplicata). A ingestão lê o cliente com bloqueio compartilhado, de
+//     modo que espera uma anonimização em andamento e lê o resultado dela.
 //   - Textos com caractere NUL ou UTF-8 inválido e properties com NUL são
 //     rejeitados por evento, sem desfazer o lote.
 package metering
@@ -175,6 +180,11 @@ type Tx interface {
 	// bloqueiam a assinatura com exclusividade, e a ingestão a mantém com
 	// bloqueio compartilhado.
 	PendingChange(ctx context.Context, subscriptionID uuid.UUID) (*subscriptions.ScheduledChange, error)
+	// CustomerAnonymized informa se o cliente foi anonimizado, lendo-o com
+	// bloqueio compartilhado até o fim da transação: a leitura espera uma
+	// anonimização em andamento (que bloqueia o cliente com exclusividade) e
+	// enxerga o resultado dela.
+	CustomerAnonymized(ctx context.Context, customerID uuid.UUID) (bool, error)
 	PriceVersion(ctx context.Context, id uuid.UUID) (catalog.PriceVersion, error)
 	Metric(ctx context.Context, id uuid.UUID) (catalog.Metric, error)
 	MetricByCode(ctx context.Context, code string) (catalog.Metric, error)
@@ -258,12 +268,27 @@ type batchCache struct {
 	prices      map[uuid.UUID]catalog.PriceVersion
 	suspensions map[uuid.UUID][]SuspensionChange
 	changes     map[uuid.UUID]*subscriptions.ScheduledChange
+	anonymized  map[uuid.UUID]bool
 }
 
 func newBatchCache(tx Tx) *batchCache {
 	return &batchCache{tx: tx, subs: map[uuid.UUID]*subscriptions.Subscription{}, metrics: map[string]*catalog.Metric{},
 		prices: map[uuid.UUID]catalog.PriceVersion{}, suspensions: map[uuid.UUID][]SuspensionChange{},
-		changes: map[uuid.UUID]*subscriptions.ScheduledChange{}}
+		changes: map[uuid.UUID]*subscriptions.ScheduledChange{}, anonymized: map[uuid.UUID]bool{}}
+}
+
+// customerAnonymized informa se o cliente da assinatura foi anonimizado; a
+// leitura com bloqueio ocorre uma vez por cliente no lote.
+func (c *batchCache) customerAnonymized(ctx context.Context, customerID uuid.UUID) (bool, error) {
+	if v, ok := c.anonymized[customerID]; ok {
+		return v, nil
+	}
+	v, err := c.tx.CustomerAnonymized(ctx, customerID)
+	if err != nil {
+		return false, err
+	}
+	c.anonymized[customerID] = v
+	return v, nil
 }
 
 // subscription lê a assinatura com bloqueio compartilhado na primeira vez
@@ -534,11 +559,18 @@ func parseEvent(tenantID uuid.UUID, sub subscriptions.Subscription, metric catal
 		Properties: in.Properties}, ""
 }
 
-// admit valida o evento contra o estado atual da métrica, da assinatura e
-// do período, e define o período e a situação do evento. Retorna a mensagem
-// de rejeição, se houver.
+// admit valida o evento contra o estado atual do cliente, da métrica, da
+// assinatura e do período, e define o período e a situação do evento.
+// Retorna a mensagem de rejeição, se houver.
 func admit(ctx context.Context, c *batchCache, sub subscriptions.Subscription, metric catalog.Metric, in EventInput, ev *Event,
 	now time.Time) (Outcome, string, error) {
+	anonymized, err := c.customerAnonymized(ctx, sub.CustomerID)
+	if err != nil {
+		return "", "", err
+	}
+	if anonymized {
+		return "", "Cliente anonimizado: consumo não é mais aceito.", nil
+	}
 	if msg := checkMetric(metric, in, *ev); msg != "" {
 		return "", msg, nil
 	}

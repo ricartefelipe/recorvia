@@ -20,7 +20,9 @@ const active: ApiCredential = {
 
 describe('credenciais de API', () => {
   it('oferece como escopos apenas permissões delegáveis do próprio papel', () => {
-    expect(grantableScopes(['usage.write', 'members.manage', 'customers.read', 'api_credentials.manage', 'platform_billing.manage'])).toEqual([
+    expect(
+      grantableScopes(['usage.write', 'members.manage', 'customers.read', 'api_credentials.manage', 'platform_billing.manage', 'customers.anonymize']),
+    ).toEqual([
       'customers.read',
       'usage.write',
     ]);

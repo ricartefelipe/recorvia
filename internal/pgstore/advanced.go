@@ -642,6 +642,16 @@ func (tx meteringTx) PendingChange(ctx context.Context, subscriptionID uuid.UUID
 	return &c, nil
 }
 
+// CustomerAnonymized lê a situação do cliente com FOR KEY SHARE: a ingestão
+// espera uma anonimização em andamento e não grava consumo depois dela.
+func (tx meteringTx) CustomerAnonymized(ctx context.Context, customerID uuid.UUID) (bool, error) {
+	at, err := tx.q.GetCustomerAnonymizedAtForKeyShare(ctx, dbgen.GetCustomerAnonymizedAtForKeyShareParams{TenantID: tx.tenantID, ID: customerID})
+	if err != nil {
+		return false, notFound(err, "customer_not_found", "Cliente não encontrado.")
+	}
+	return at != nil, nil
+}
+
 func (tx meteringTx) PriceVersion(ctx context.Context, id uuid.UUID) (catalog.PriceVersion, error) {
 	return tx.priceVersion(ctx, id)
 }

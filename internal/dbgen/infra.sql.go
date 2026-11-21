@@ -737,6 +737,75 @@ func (q *Queries) ResolveDeadLetter(ctx context.Context, arg ResolveDeadLetterPa
 	return err
 }
 
+const retentionPurge = `-- name: RetentionPurge :one
+SELECT purged::int AS purged, more::boolean AS more
+  FROM app_retention_purge($1, $2, $3, $4, $5)
+`
+
+type RetentionPurgeParams struct {
+	Kind      string
+	TenantID  uuid.UUID
+	Cutoff    time.Time
+	Now       time.Time
+	BatchSize int32
+}
+
+type RetentionPurgeRow struct {
+	Purged int32
+	More   bool
+}
+
+// Remove um lote vencido do tipo informado, na transação do tenant.
+func (q *Queries) RetentionPurge(ctx context.Context, arg RetentionPurgeParams) (RetentionPurgeRow, error) {
+	row := q.db.QueryRow(ctx, retentionPurge,
+		arg.Kind,
+		arg.TenantID,
+		arg.Cutoff,
+		arg.Now,
+		arg.BatchSize,
+	)
+	var i RetentionPurgeRow
+	err := row.Scan(&i.Purged, &i.More)
+	return i, err
+}
+
+const retentionTenants = `-- name: RetentionTenants :many
+SELECT t::uuid AS tenant_id FROM app_retention_tenants($1, $2, $3::uuid, $4) AS t
+`
+
+type RetentionTenantsParams struct {
+	Kind        string
+	Cutoff      time.Time
+	AfterTenant *uuid.UUID
+	MaxTenants  int32
+}
+
+// Tenants com dados do tipo informado vencidos no corte (somente IDs).
+func (q *Queries) RetentionTenants(ctx context.Context, arg RetentionTenantsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, retentionTenants,
+		arg.Kind,
+		arg.Cutoff,
+		arg.AfterTenant,
+		arg.MaxTenants,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var tenant_id uuid.UUID
+		if err := rows.Scan(&tenant_id); err != nil {
+			return nil, err
+		}
+		items = append(items, tenant_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const takeOverIdempotencyKey = `-- name: TakeOverIdempotencyKey :execrows
 UPDATE idempotency_keys SET locked_until = $1
  WHERE tenant_id = $2 AND client_id = $3 AND operation = $4 AND idempotency_key = $5

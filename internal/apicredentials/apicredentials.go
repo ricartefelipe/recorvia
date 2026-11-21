@@ -184,9 +184,12 @@ func (c Credential) MatchSecret(secret string, now time.Time) bool {
 
 // nonDelegable são permissões que não podem ser concedidas a credenciais:
 // a gestão de membros e do plano da plataforma exige uma pessoa
-// identificada, e uma credencial não emite nem administra outras
-// credenciais (o que permitiria perpetuar o acesso sem um membro).
-var nonDelegable = []tenancy.Permission{tenancy.PermMembersManage, tenancy.PermPlatformManage, tenancy.PermAPICredentials}
+// identificada, uma credencial não emite nem administra outras
+// credenciais (o que permitiria perpetuar o acesso sem um membro) e a
+// anonimização de um cliente é uma decisão irreversível, tomada por uma
+// pessoa que responde por ela (ADR-061).
+var nonDelegable = []tenancy.Permission{tenancy.PermMembersManage, tenancy.PermPlatformManage, tenancy.PermAPICredentials,
+	tenancy.PermCustomersAnonymize}
 
 // NonDelegable lista as permissões que nunca viram escopo de credencial.
 func NonDelegable() []tenancy.Permission { return slices.Clone(nonDelegable) }

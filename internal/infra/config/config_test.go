@@ -224,3 +224,89 @@ func TestPortalValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestRetentionDefaults(t *testing.T) {
+	c, err := Load(env(baseEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Retention{InboxDays: 90, DeadLettersDays: 180, WebhooksDays: 90, ProviderWebhookPayloadsDays: 90, NotificationContentDays: 90,
+		NotificationsDays: 365, PortalLinksDays: 90, UsageEventsDays: 400, InvitationsDays: 90, BatchSize: 500}
+	if c.Retention != want {
+		t.Fatalf("prazos padrão: %+v", c.Retention)
+	}
+	if err := c.ValidateWorker(); err != nil {
+		t.Fatalf("os prazos padrão devem ser válidos: %v", err)
+	}
+	// A API monta os mesmos serviços e recusa os mesmos valores.
+	m := baseEnv()
+	m["RECORVIA_RETENTION_INBOX_DAYS"] = "1"
+	c, err = Load(env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ValidateAPI(); err == nil || !strings.Contains(err.Error(), "RECORVIA_RETENTION_INBOX_DAYS deve ficar entre 14 e 3650") {
+		t.Fatalf("ValidateAPI com prazo abaixo do mínimo: %v", err)
+	}
+}
+
+// O worker não sobe com prazo de retenção abaixo do mínimo, acima do máximo
+// ou incoerente.
+func TestRetentionValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		set  map[string]string
+		want string // trecho esperado do erro; vazio = válido
+	}{
+		{"mínimos", map[string]string{"RECORVIA_RETENTION_INBOX_DAYS": "14", "RECORVIA_RETENTION_DEAD_LETTERS_DAYS": "30",
+			"RECORVIA_RETENTION_WEBHOOKS_DAYS": "7", "RECORVIA_RETENTION_PROVIDER_WEBHOOK_PAYLOADS_DAYS": "7",
+			"RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS": "7", "RECORVIA_RETENTION_NOTIFICATIONS_DAYS": "30",
+			"RECORVIA_RETENTION_PORTAL_LINKS_DAYS": "1", "RECORVIA_RETENTION_USAGE_EVENTS_DAYS": "30",
+			"RECORVIA_RETENTION_INVITATIONS_DAYS": "7", "RECORVIA_RETENTION_BATCH_SIZE": "10"}, ""},
+		{"máximos", map[string]string{"RECORVIA_RETENTION_USAGE_EVENTS_DAYS": "3650", "RECORVIA_RETENTION_BATCH_SIZE": "5000"}, ""},
+		{"inbox", map[string]string{"RECORVIA_RETENTION_INBOX_DAYS": "13"}, "RECORVIA_RETENTION_INBOX_DAYS deve ficar entre 14 e 3650"},
+		{"dead letters", map[string]string{"RECORVIA_RETENTION_DEAD_LETTERS_DAYS": "29"}, "RECORVIA_RETENTION_DEAD_LETTERS_DAYS deve ficar entre 30 e 3650"},
+		{"webhooks", map[string]string{"RECORVIA_RETENTION_WEBHOOKS_DAYS": "6"}, "RECORVIA_RETENTION_WEBHOOKS_DAYS deve ficar entre 7 e 3650"},
+		{"corpo de webhooks recebidos", map[string]string{"RECORVIA_RETENTION_PROVIDER_WEBHOOK_PAYLOADS_DAYS": "0"},
+			"RECORVIA_RETENTION_PROVIDER_WEBHOOK_PAYLOADS_DAYS deve ficar entre 7 e 3650"},
+		{"conteúdo", map[string]string{"RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS": "6"},
+			"RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS deve ficar entre 7 e 3650"},
+		{"notificações", map[string]string{"RECORVIA_RETENTION_NOTIFICATIONS_DAYS": "29", "RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS": "7"},
+			"RECORVIA_RETENTION_NOTIFICATIONS_DAYS deve ficar entre 30 e 3650"},
+		{"links do portal", map[string]string{"RECORVIA_RETENTION_PORTAL_LINKS_DAYS": "0"}, "RECORVIA_RETENTION_PORTAL_LINKS_DAYS deve ficar entre 1 e 3650"},
+		{"consumo", map[string]string{"RECORVIA_RETENTION_USAGE_EVENTS_DAYS": "29"}, "RECORVIA_RETENTION_USAGE_EVENTS_DAYS deve ficar entre 30 e 3650"},
+		{"convites", map[string]string{"RECORVIA_RETENTION_INVITATIONS_DAYS": "6"}, "RECORVIA_RETENTION_INVITATIONS_DAYS deve ficar entre 7 e 3650"},
+		{"acima do máximo", map[string]string{"RECORVIA_RETENTION_INBOX_DAYS": "3651"}, "RECORVIA_RETENTION_INBOX_DAYS deve ficar entre 14 e 3650"},
+		{"lote pequeno", map[string]string{"RECORVIA_RETENTION_BATCH_SIZE": "9"}, "RECORVIA_RETENTION_BATCH_SIZE deve ficar entre 10 e 5000"},
+		{"lote grande", map[string]string{"RECORVIA_RETENTION_BATCH_SIZE": "5001"}, "RECORVIA_RETENTION_BATCH_SIZE deve ficar entre 10 e 5000"},
+		{"notificações antes do conteúdo", map[string]string{"RECORVIA_RETENTION_NOTIFICATIONS_DAYS": "100",
+			"RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS": "120"}, "não pode ser menor que RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS"},
+		{"link expurgado antes do fim da sessão do portal", map[string]string{"RECORVIA_RETENTION_PORTAL_LINKS_DAYS": "1",
+			"RECORVIA_PORTAL_SESSION_TTL": "48h"}, "não pode ser menor que RECORVIA_PORTAL_SESSION_TTL"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := baseEnv()
+			for k, v := range tc.set {
+				m[k] = v
+			}
+			c, err := Load(env(m))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.ValidateWorker()
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatalf("erro inesperado: %v", err)
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+				t.Fatalf("erro %v, esperado conter %q", err, tc.want)
+			}
+		})
+	}
+	// Valor que não é inteiro é erro de formato, acumulado no carregamento.
+	m := baseEnv()
+	m["RECORVIA_RETENTION_INBOX_DAYS"] = "noventa"
+	if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), "RECORVIA_RETENTION_INBOX_DAYS") {
+		t.Fatalf("formato inválido: %v", err)
+	}
+}

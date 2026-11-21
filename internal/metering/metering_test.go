@@ -746,6 +746,7 @@ func TestIngestInfrastructureErrorRollsBackBatch(t *testing.T) {
 	}{
 		{"abertura da transação", "InTenant", 0},
 		{"consulta da assinatura", "SubscriptionForShare", 0},
+		{"consulta do cliente", "CustomerAnonymized", 0},
 		{"consulta do histórico de suspensões", "SuspensionHistory", 0},
 		{"consulta da métrica", "MetricByCode", 0},
 		{"consulta da mudança agendada", "PendingChange", 0},

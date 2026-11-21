@@ -472,7 +472,7 @@ func (q *Queries) GetProviderAccountByProvider(ctx context.Context, arg GetProvi
 }
 
 const getWebhookEvent = `-- name: GetWebhookEvent :one
-SELECT id, tenant_id, provider_account_id, provider, provider_event_id, event_type, provider_charge_id, occurred_at, received_at, payload, status, processed_at, error FROM provider_webhook_events WHERE tenant_id = $1 AND id = $2
+SELECT id, tenant_id, provider_account_id, provider, provider_event_id, event_type, provider_charge_id, occurred_at, received_at, payload, status, processed_at, error, payload_purged_at FROM provider_webhook_events WHERE tenant_id = $1 AND id = $2
 `
 
 type GetWebhookEventParams struct {
@@ -497,6 +497,7 @@ func (q *Queries) GetWebhookEvent(ctx context.Context, arg GetWebhookEventParams
 		&i.Status,
 		&i.ProcessedAt,
 		&i.Error,
+		&i.PayloadPurgedAt,
 	)
 	return i, err
 }

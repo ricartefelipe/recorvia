@@ -143,7 +143,8 @@ SELECT tenant_id, template_key, status_reason, count(*), left(max(last_error), 2
   cadastro atualizado.
 - Remetente recusado ou chave ausente: corrigir a configuração do worker (a chave precisa voltar ao
   keyring para que as notificações ainda agendadas sejam enviadas).
-- Não altere `notifications` à mão: o histórico em `notification_events` é imutável.
+- Não altere `notifications` à mão: o histórico em `notification_events` é imutável (só sai pelo
+  expurgo por idade, junto com a notificação).
 
 ### Verificação
 `increase(recorvia_notifications_dispatched_total{outcome="failed"}[30m])` volta a zero.

@@ -86,7 +86,8 @@ SELECT tenant_id, count(*), min(next_billing_at) AS vencida_desde
   (`recorvia_job_interval_seconds`, no mínimo 15 minutos), inclusive sem nenhum sucesso desde a
   partida do worker. É o alerta das tarefas horárias (`platform.close_statements`,
   `idempotency.purge`, após 3 horas) e da diária (`outbox.purge`, após 3 dias); o motor de
-  faturamento e a coleta de métricas têm alertas próprios.
+  faturamento, a coleta de métricas e o expurgo por retenção (`retention.purge`,
+  [runbook próprio](retencao.md)) têm alertas próprios.
 - `RecorviaMetricsCollectionStale`: `metrics.collect` sem sucesso há 2 minutos, ou sem nenhum
   sucesso desde a partida do worker (os gauges da outbox, das operações e das conexões do
   servidor ficam desatualizados).
