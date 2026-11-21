@@ -40,6 +40,24 @@ describe('operações', () => {
     await waitFor(() => expect(bodies).toEqual([{ reason: 'Provedor normalizado' }]));
   });
 
+  it('a listagem segue o next_cursor', async () => {
+    const cursors: (string | null)[] = [];
+    server.use(
+      http.get('/api/v1/dead-letters', ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('cursor');
+        cursors.push(cursor);
+        return cursor
+          ? HttpResponse.json({ data: [{ ...letter, id: 'd2', error: 'falha da segunda página' }], next_cursor: null })
+          : HttpResponse.json({ data: [letter], next_cursor: 'mensagens-2' });
+      }),
+    );
+    const { user } = renderPage(<OperationsPage />, { path: '/operacoes' });
+    expect(await screen.findByText('timeout ao chamar o provedor')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Próxima/ }));
+    expect(await screen.findByText('falha da segunda página')).toBeInTheDocument();
+    expect(cursors).toEqual([null, 'mensagens-2']);
+  });
+
   it('sem operations.reprocess não há ações', async () => {
     server.use(http.get('/api/v1/dead-letters', () => HttpResponse.json({ data: [letter] })));
     renderPage(<OperationsPage />, { path: '/operacoes', session: makeSession({ permissions: AUDITOR_PERMISSIONS }) });

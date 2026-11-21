@@ -24,10 +24,13 @@ type ProviderForm = z.input<typeof providerSchema>;
 
 function ConfigureProviderModal({
   provider,
+  version,
   onClose,
   onConfigured,
 }: {
   provider: ProviderCode;
+  /** Versão da conta do provedor (If-Match); 0 se ainda não configurado. */
+  version: number;
   onClose: () => void;
   onConfigured: (result: ProviderAccountConfigured) => void;
 }) {
@@ -36,7 +39,7 @@ function ConfigureProviderModal({
     defaultValues: { environment: provider === 'simulator' ? 'local' : 'sandbox', api_key: '', webhook_secret: '', make_default: true },
   });
   const mutation = useApiMutation<ProviderAccountInput, ProviderAccountConfigured, ProviderForm>({
-    mutationFn: (input) => integrationsApi.configureProvider(provider, input),
+    mutationFn: (input) => integrationsApi.configureProvider(provider, version, input),
     invalidate: ['payment-providers'],
     successMessage: `${labelOf(providerLabels, provider)} configurado.`,
     form,
@@ -99,7 +102,7 @@ function ConfigureProviderModal({
 
 export function ProvidersTab() {
   const { keys } = useTenant();
-  const [configuring, setConfiguring] = useState<ProviderCode | null>(null);
+  const [configuring, setConfiguring] = useState<{ provider: ProviderCode; version: number } | null>(null);
   const [configured, setConfigured] = useState<ProviderAccountConfigured | null>(null);
   const query = useQuery({ queryKey: keys('payment-providers', 'list'), queryFn: ({ signal }) => integrationsApi.providers(signal) });
   return (
@@ -125,7 +128,12 @@ export function ProvidersTab() {
                   </Text>
                   <Can permission="integrations.write">
                     {(p === 'simulator' || p === 'asaas') && (
-                      <Button size="xs" variant="light" leftSection={<IconKey size={14} />} onClick={() => setConfiguring(p)}>
+                      <Button
+                        size="xs"
+                        variant="light"
+                        leftSection={<IconKey size={14} />}
+                        onClick={() => setConfiguring({ provider: p, version: accounts[0]?.version ?? 0 })}
+                      >
                         {accounts.length > 0 ? 'Reconfigurar credenciais' : 'Configurar'}
                       </Button>
                     )}
@@ -166,7 +174,14 @@ export function ProvidersTab() {
               </Table>
             </Table.ScrollContainer>
           )}
-          {configuring && <ConfigureProviderModal provider={configuring} onClose={() => setConfiguring(null)} onConfigured={setConfigured} />}
+          {configuring && (
+            <ConfigureProviderModal
+              provider={configuring.provider}
+              version={configuring.version}
+              onClose={() => setConfiguring(null)}
+              onConfigured={setConfigured}
+            />
+          )}
           <SecretRevealModal
             opened={!!configured}
             title="Endpoint de webhook do provedor"

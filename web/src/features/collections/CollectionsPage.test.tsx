@@ -16,6 +16,7 @@ const template: NotificationTemplate = {
   is_default: true,
   variables: ['organization_name', 'customer_name', 'invoice_number', 'invoice_total', 'amount_due', 'due_date', 'days_overdue'],
   updated_at: null,
+  version: 0,
 };
 
 const notification: Notification = {
@@ -39,12 +40,14 @@ const notification: Notification = {
 describe('templates de e-mail', () => {
   it('mostra as variáveis com a marcação e insere {{nome}} no corpo', async () => {
     const bodies: unknown[] = [];
+    const versions: (string | null)[] = [];
     server.use(
       http.get('/api/v1/notification-templates', () => HttpResponse.json({ data: [template] })),
       http.put('/api/v1/notification-templates/:key', async ({ request, params }) => {
         const body = (await request.json()) as { subject: string; body: string };
         bodies.push({ key: params.key, ...body });
-        return HttpResponse.json({ ...template, ...body, is_default: false, updated_at: '2026-11-17T12:00:00Z' });
+        versions.push(request.headers.get('If-Match'));
+        return HttpResponse.json({ ...template, ...body, is_default: false, updated_at: '2026-11-17T12:00:00Z', version: 1 }, { headers: { ETag: '"1"' } });
       }),
     );
     const { user } = renderPage(<CollectionsPage />, { route: '/?aba=templates' });
@@ -60,6 +63,26 @@ describe('templates de e-mail', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Salvar template' }));
     await waitFor(() => expect(bodies).toHaveLength(1));
     expect(bodies[0]).toEqual({ key: 'reminder_after_due', subject: template.subject, body: 'Prezado cliente, atraso de {{days_overdue}}' });
+    // Template padrão, ainda não personalizado: versão 0.
+    expect(versions).toEqual(['"0"']);
+  });
+
+  it('template personalizado envia If-Match com a versão da personalização', async () => {
+    const versions: (string | null)[] = [];
+    const custom = { ...template, is_default: false, updated_at: '2026-11-17T12:00:00Z', version: 3 };
+    server.use(
+      http.get('/api/v1/notification-templates', () => HttpResponse.json({ data: [custom] })),
+      http.put('/api/v1/notification-templates/:key', async ({ request }) => {
+        versions.push(request.headers.get('If-Match'));
+        const body = (await request.json()) as { subject: string; body: string };
+        return HttpResponse.json({ ...custom, ...body, version: 4 }, { headers: { ETag: '"4"' } });
+      }),
+    );
+    const { user } = renderPage(<CollectionsPage />, { route: '/?aba=templates' });
+    await user.click(await screen.findByRole('button', { name: 'Editar' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Salvar template' }));
+    await waitFor(() => expect(versions).toEqual(['"3"']));
   });
 
   it('auditor consulta sem editar', async () => {

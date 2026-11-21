@@ -35,7 +35,6 @@ import type {
   Notification,
   NotificationEvent,
   NotificationTemplate,
-  TemplateKey,
 } from '../../api/types';
 import { DateTime, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
@@ -54,8 +53,9 @@ const collectionsApi = {
   updatePolicy: (p: CollectionPolicy, input: CollectionPolicyInput) =>
     api.patch<CollectionPolicy>(`/api/v1/collection-policies/${enc(p.id)}`, input, { ifMatch: p.version }),
   templates: (signal?: AbortSignal) => api.get<DataList<NotificationTemplate>>('/api/v1/notification-templates', { signal }),
-  updateTemplate: (key: TemplateKey, input: { subject: string; body: string }) =>
-    api.put<NotificationTemplate>(`/api/v1/notification-templates/${enc(key)}`, input),
+  /** If-Match é a versão da personalização; 0 no template padrão, ainda não personalizado. */
+  updateTemplate: (t: NotificationTemplate, input: { subject: string; body: string }) =>
+    api.put<NotificationTemplate>(`/api/v1/notification-templates/${enc(t.key)}`, input, { ifMatch: t.version }),
   notifications: (params: { status?: string; invoice_id?: string; cursor?: string; limit?: number }, signal?: AbortSignal) =>
     api.get<CursorPage<Notification>>('/api/v1/notifications', { query: { ...params }, signal }),
   notificationEvents: (id: string, signal?: AbortSignal) =>
@@ -361,7 +361,7 @@ function TemplateModal({ template, onClose }: { template: NotificationTemplate; 
   const bodyRef = useRef<HTMLTextAreaElement | null>(null);
   const form = useForm<TemplateForm>({ resolver: zodResolver(templateSchema), defaultValues: { subject: template.subject, body: template.body } });
   const mutation = useApiMutation<TemplateForm, NotificationTemplate, TemplateForm>({
-    mutationFn: (input) => collectionsApi.updateTemplate(template.key, input),
+    mutationFn: (input) => collectionsApi.updateTemplate(template, input),
     invalidate: ['notification-templates'],
     successMessage: 'Template gravado.',
     form,

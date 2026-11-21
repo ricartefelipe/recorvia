@@ -8,6 +8,7 @@ import {
   ComparisonTable,
   DiscrepancyDetailPage,
   discrepancyResolver,
+  ReconciliationPage,
   ResolveDiscrepancyForm,
   resolutionsFor,
   RunsTab,
@@ -21,6 +22,7 @@ const discrepancy: Discrepancy = {
   charge_id: '0195f1a0-0000-7000-8000-00000000c001',
   local_value: { amount: 15990, currency: 'BRL', status: 'paid' },
   provider_value: { amount: 15000, currency: 'BRL', status: 'paid' },
+  version: 2,
 };
 
 describe('resolução de divergência', () => {
@@ -37,10 +39,12 @@ describe('resolução de divergência', () => {
 
   it('exige justificativa de 10 caracteres e confirmação antes de enviar', async () => {
     const bodies: unknown[] = [];
+    const versions: (string | null)[] = [];
     server.use(
       http.post('/api/v1/reconciliation/discrepancies/:id/resolve', async ({ request }) => {
         bodies.push(await request.json());
-        return HttpResponse.json({ ...discrepancy, status: 'resolved' });
+        versions.push(request.headers.get('If-Match'));
+        return HttpResponse.json({ ...discrepancy, status: 'resolved', version: 3 }, { headers: { ETag: '"3"' } });
       }),
     );
     const { user } = renderPage(<ResolveDiscrepancyForm discrepancy={discrepancy} />);
@@ -56,6 +60,8 @@ describe('resolução de divergência', () => {
     await waitFor(() =>
       expect(bodies).toEqual([{ resolution: 'accept_provider', justification: 'curta demais: taxa conferida no extrato' }]),
     );
+    // A resolução leva a versão da divergência consultada.
+    expect(versions).toEqual(['"2"']);
     // A digitação caractere a caractere da justificativa é lenta sob carga.
   }, 30_000);
 });
@@ -157,6 +163,57 @@ describe('responsável pela resolução', () => {
     expect(discrepancyResolver(resolved({ resolved_by: null, history: [] }))).toBe('não identificado no histórico');
     renderPage(<>{discrepancyResolver(d)}</>);
     expect(screen.getByText('0195f1a0')).toHaveAttribute('title', d.resolved_by);
+  });
+});
+
+describe('listagens paginadas da conciliação', () => {
+  it('divergências seguem o next_cursor', async () => {
+    const cursors: (string | null)[] = [];
+    server.use(
+      http.get('/api/v1/reconciliation/discrepancies', ({ request }) => {
+        const url = new URL(request.url);
+        const cursor = url.searchParams.get('cursor');
+        cursors.push(cursor);
+        return cursor
+          ? HttpResponse.json({ data: [{ ...discrepancy, id: 'd2', provider_charge_id: 'pay_segunda' }], next_cursor: null })
+          : HttpResponse.json({ data: [{ ...discrepancy, provider_charge_id: 'pay_primeira' }], next_cursor: 'div-2' });
+      }),
+    );
+    const { user } = renderPage(<ReconciliationPage />, { route: '/?aba=divergencias' });
+    expect(await screen.findByText('pay_primeira')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Próxima/ }));
+    expect(await screen.findByText('pay_segunda')).toBeInTheDocument();
+    expect(cursors).toEqual([null, 'div-2']);
+  });
+
+  it('execuções seguem o next_cursor', async () => {
+    const run = (id: string, checked: number): ReconciliationRun => ({
+      id,
+      provider: 'simulator',
+      trigger: 'scheduled',
+      status: 'completed',
+      window_start: '2026-10-18T12:00:00Z',
+      window_end: '2026-11-17T12:00:00Z',
+      checked_count: checked,
+      discrepancy_count: 0,
+      error: '',
+      attempts: 1,
+      started_at: '2026-11-17T12:00:00Z',
+      finished_at: '2026-11-17T12:00:05Z',
+    });
+    const cursors: (string | null)[] = [];
+    server.use(
+      http.get('/api/v1/reconciliation/runs', ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('cursor');
+        cursors.push(cursor);
+        return cursor ? HttpResponse.json({ data: [run('r2', 777)], next_cursor: null }) : HttpResponse.json({ data: [run('r1', 555)], next_cursor: 'exec-2' });
+      }),
+    );
+    const { user } = renderPage(<RunsTab />);
+    expect(await screen.findByText('555')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Próxima/ }));
+    expect(await screen.findByText('777')).toBeInTheDocument();
+    expect(cursors).toEqual([null, 'exec-2']);
   });
 });
 

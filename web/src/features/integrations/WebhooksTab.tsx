@@ -146,7 +146,7 @@ function RotateSecretModal({ endpoint, onClose, onRotated }: { endpoint: Webhook
   const [hours, setHours] = useState<number | string>(24);
   const valid = typeof hours === 'number' && Number.isInteger(hours) && hours >= 0 && hours <= 168;
   const mutation = useApiMutation<number, WebhookEndpointWithSecret>({
-    mutationFn: (h) => integrationsApi.rotateSecret(endpoint.id, h),
+    mutationFn: (h) => integrationsApi.rotateSecret(endpoint, h),
     invalidate: ['webhooks'],
     successMessage: 'Segredo rotacionado.',
     onSuccess: (r) => {
@@ -188,7 +188,7 @@ export function WebhooksTab() {
   const [secret, setSecret] = useState<WebhookEndpointWithSecret | null>(null);
   const query = useQuery({ queryKey: keys('webhooks', 'endpoints'), queryFn: ({ signal }) => integrationsApi.endpoints(signal) });
   const remove = useApiMutation<WebhookEndpoint, unknown>({
-    mutationFn: (e) => integrationsApi.deleteEndpoint(e.id),
+    mutationFn: (e) => integrationsApi.deleteEndpoint(e),
     invalidate: ['webhooks'],
     successMessage: 'Endpoint removido.',
   });

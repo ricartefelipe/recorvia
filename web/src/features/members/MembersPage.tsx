@@ -1,16 +1,16 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { ActionIcon, Badge, Button, Code, Group, Modal, Select, Stack, Table, Tabs, Text, TextInput, ThemeIcon, Tooltip } from '@mantine/core';
 import { IconCheck, IconMinus, IconTrash, IconUserPlus, IconX } from '@tabler/icons-react';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { api } from '../../api/client';
-import type { DataList, Invitation, InvitationCreated, Member, Role, RolePermissions } from '../../api/types';
+import type { CursorPage, DataList, Invitation, InvitationCreated, Member, Role, RolePermissions } from '../../api/types';
 import { DateTime, StatusBadge } from '../../components/format';
 import { EmptyState, QueryContent } from '../../components/states';
-import { confirmAction, PageHeader, SecretRevealModal } from '../../components/ui';
-import { useApiMutation, useUrlFilters } from '../../lib/hooks';
+import { confirmAction, CursorPager, PageHeader, SecretRevealModal } from '../../components/ui';
+import { useApiMutation, useCursorPagination, useUrlFilters } from '../../lib/hooks';
 import { invitationStateLabels, labelOf, memberStatusLabels, roleLabels } from '../../lib/labels';
 import { requiredEmail } from '../../lib/validation';
 import { PERMISSIONS, permissionLabel } from '../../session/permissions';
@@ -22,9 +22,11 @@ const roleOptions = ROLES.map((r) => ({ value: r, label: roleLabels[r] }));
 
 export const membersApi = {
   members: (signal?: AbortSignal) => api.get<DataList<Member>>('/api/v1/members', { signal }),
-  updateRole: (userId: string, role: Role) => api.patch<Member>(`/api/v1/members/${enc(userId)}`, { role }),
-  remove: (userId: string) => api.delete(`/api/v1/members/${enc(userId)}`),
-  invitations: (signal?: AbortSignal) => api.get<DataList<Invitation>>('/api/v1/invitations', { signal }),
+  updateRole: (member: Member, role: Role) =>
+    api.patch<Member>(`/api/v1/members/${enc(member.user_id)}`, { role }, { ifMatch: member.version }),
+  remove: (member: Member) => api.delete(`/api/v1/members/${enc(member.user_id)}`, { ifMatch: member.version }),
+  invitations: (params: { cursor?: string; limit?: number }, signal?: AbortSignal) =>
+    api.get<CursorPage<Invitation>>('/api/v1/invitations', { query: params, signal }),
   invite: (input: { email: string; role: Role }) => api.post<InvitationCreated>('/api/v1/invitations', input),
   revoke: (id: string) => api.delete(`/api/v1/invitations/${enc(id)}`),
   roles: (signal?: AbortSignal) => api.get<DataList<RolePermissions>>('/api/v1/roles', { signal }),
@@ -41,12 +43,12 @@ function MembersTab() {
   const canManage = usePermission('members.manage');
   const query = useQuery({ queryKey: keys('members', 'list'), queryFn: ({ signal }) => membersApi.members(signal) });
   const changeRole = useApiMutation<{ member: Member; role: Role }, Member>({
-    mutationFn: ({ member, role }) => membersApi.updateRole(member.user_id, role),
+    mutationFn: ({ member, role }) => membersApi.updateRole(member, role),
     invalidate: ['members'],
     successMessage: (m) => `Papel de ${m.display_name} alterado para ${labelOf(roleLabels, m.role)}.`,
   });
   const remove = useApiMutation<Member, unknown>({
-    mutationFn: (m) => membersApi.remove(m.user_id),
+    mutationFn: (m) => membersApi.remove(m),
     invalidate: ['members'],
     successMessage: 'Membro removido.',
   });
@@ -201,7 +203,12 @@ function InvitationsTab() {
   const canManage = usePermission('members.manage');
   const [inviting, setInviting] = useState(false);
   const [created, setCreated] = useState<InvitationCreated | null>(null);
-  const query = useQuery({ queryKey: keys('invitations', 'list'), queryFn: ({ signal }) => membersApi.invitations(signal) });
+  const pagination = useCursorPagination('invitations');
+  const query = useQuery({
+    queryKey: keys('invitations', 'list', pagination.cursor),
+    queryFn: ({ signal }) => membersApi.invitations({ cursor: pagination.cursor, limit: 25 }, signal),
+    placeholderData: keepPreviousData,
+  });
   const revoke = useApiMutation<Invitation, unknown>({
     mutationFn: (i) => membersApi.revoke(i.id),
     invalidate: ['invitations'],
@@ -221,52 +228,62 @@ function InvitationsTab() {
         </Group>
       )}
       <QueryContent query={query}>
-        {({ data }) =>
-          data.length === 0 ? (
+        {(page) =>
+          page.data.length === 0 ? (
             <EmptyState title="Nenhum convite" description="Convide pessoas da sua equipe escolhendo o papel de cada uma." />
           ) : (
-            <Table.ScrollContainer minWidth={700}>
-              <Table aria-label="Convites">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>E-mail</Table.Th>
-                    <Table.Th>Papel</Table.Th>
-                    <Table.Th>Situação</Table.Th>
-                    <Table.Th>Expira em</Table.Th>
-                    <Table.Th>Criado em</Table.Th>
-                    {canManage && <Table.Th aria-label="Ações" />}
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {data.map((i) => (
-                    <Table.Tr key={i.id}>
-                      <Table.Td>{i.email}</Table.Td>
-                      <Table.Td>{labelOf(roleLabels, i.role)}</Table.Td>
-                      <Table.Td>
-                        <StatusBadge status={i.state} labels={invitationStateLabels} />
-                      </Table.Td>
-                      <Table.Td>
-                        <DateTime value={i.expires_at} />
-                      </Table.Td>
-                      <Table.Td>
-                        <DateTime value={i.created_at} />
-                      </Table.Td>
-                      {canManage && (
-                        <Table.Td>
-                          {i.state === 'pending' && (
-                            <Tooltip label="Revogar convite">
-                              <ActionIcon variant="subtle" color="red" aria-label={`Revogar convite de ${i.email}`} onClick={() => void onRevoke(i)}>
-                                <IconX size={16} />
-                              </ActionIcon>
-                            </Tooltip>
-                          )}
-                        </Table.Td>
-                      )}
+            <>
+              <Table.ScrollContainer minWidth={700}>
+                <Table aria-label="Convites">
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>E-mail</Table.Th>
+                      <Table.Th>Papel</Table.Th>
+                      <Table.Th>Situação</Table.Th>
+                      <Table.Th>Expira em</Table.Th>
+                      <Table.Th>Criado em</Table.Th>
+                      {canManage && <Table.Th aria-label="Ações" />}
                     </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            </Table.ScrollContainer>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {page.data.map((i) => (
+                      <Table.Tr key={i.id}>
+                        <Table.Td>{i.email}</Table.Td>
+                        <Table.Td>{labelOf(roleLabels, i.role)}</Table.Td>
+                        <Table.Td>
+                          <StatusBadge status={i.state} labels={invitationStateLabels} />
+                        </Table.Td>
+                        <Table.Td>
+                          <DateTime value={i.expires_at} />
+                        </Table.Td>
+                        <Table.Td>
+                          <DateTime value={i.created_at} />
+                        </Table.Td>
+                        {canManage && (
+                          <Table.Td>
+                            {i.state === 'pending' && (
+                              <Tooltip label="Revogar convite">
+                                <ActionIcon variant="subtle" color="red" aria-label={`Revogar convite de ${i.email}`} onClick={() => void onRevoke(i)}>
+                                  <IconX size={16} />
+                                </ActionIcon>
+                              </Tooltip>
+                            )}
+                          </Table.Td>
+                        )}
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
+              <CursorPager
+                page={pagination.page}
+                hasPrevious={pagination.hasPrevious}
+                hasNext={!!page.next_cursor}
+                onPrevious={pagination.previous}
+                onNext={() => page.next_cursor && pagination.next(page.next_cursor)}
+                loading={query.isFetching}
+              />
+            </>
           )
         }
       </QueryContent>

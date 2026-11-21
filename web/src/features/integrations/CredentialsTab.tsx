@@ -1,15 +1,15 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { ActionIcon, Badge, Button, Code, Group, Modal, MultiSelect, NumberInput, Stack, Table, Text, TextInput, Tooltip } from '@mantine/core';
 import { IconKey, IconPlus, IconRotate, IconTrash } from '@tabler/icons-react';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
 import type { ApiCredential, ApiCredentialWithSecret } from '../../api/types';
 import { DateTime } from '../../components/format';
 import { EmptyState, QueryContent } from '../../components/states';
-import { confirmAction, SecretRevealModal } from '../../components/ui';
-import { useApiMutation } from '../../lib/hooks';
+import { confirmAction, CursorPager, SecretRevealModal } from '../../components/ui';
+import { useApiMutation, useCursorPagination } from '../../lib/hooks';
 import { optionalInt, requiredText } from '../../lib/validation';
 import { PERMISSIONS, permissionLabel, type Permission } from '../../session/permissions';
 import { usePermission, useTenant } from '../../session/SessionContext';
@@ -173,19 +173,22 @@ export function CredentialsTab() {
   const [creating, setCreating] = useState(false);
   const [secret, setSecret] = useState<{ title: string; value: string } | null>(null);
   // A listagem exige api_credentials.manage: sem ela, a aba nem consulta a API.
+  // Páginas por cursor: as ativas primeiro, depois revogadas e expiradas.
+  const pagination = useCursorPagination('api-credentials');
   const query = useQuery({
-    queryKey: keys('api-credentials', 'list'),
-    queryFn: ({ signal }) => integrationsApi.credentials(signal),
+    queryKey: keys('api-credentials', 'list', pagination.cursor),
+    queryFn: ({ signal }) => integrationsApi.credentials({ cursor: pagination.cursor, limit: 25 }, signal),
     enabled: canManage,
+    placeholderData: keepPreviousData,
   });
   const rotate = useApiMutation<ApiCredential, ApiCredentialWithSecret>({
-    mutationFn: (c) => integrationsApi.rotateCredential(c.id),
+    mutationFn: (c) => integrationsApi.rotateCredential(c),
     invalidate: ['api-credentials'],
     successMessage: 'Segredo rotacionado. O segredo anterior continua válido por 24 horas.',
     onSuccess: (r) => setSecret({ title: `Novo segredo de ${r.credential.name}`, value: r.secret }),
   });
   const revoke = useApiMutation<ApiCredential, unknown>({
-    mutationFn: (c) => integrationsApi.revokeCredential(c.id),
+    mutationFn: (c) => integrationsApi.revokeCredential(c),
     invalidate: ['api-credentials'],
     successMessage: 'Credencial revogada.',
   });
@@ -210,59 +213,69 @@ export function CredentialsTab() {
         </Button>
       </Group>
       <QueryContent query={query}>
-        {({ data }) =>
-          data.length === 0 ? (
+        {(page) =>
+          page.data.length === 0 ? (
             <EmptyState title="Nenhuma credencial" description="Crie uma credencial para integrar seu ERP, CRM ou o envio de eventos de consumo." icon={<IconKey size={26} />} />
           ) : (
-            <Table.ScrollContainer minWidth={900}>
-              <Table aria-label="Credenciais de API">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Nome</Table.Th>
-                    <Table.Th>Prefixo</Table.Th>
-                    <Table.Th>Escopos</Table.Th>
-                    <Table.Th>Situação</Table.Th>
-                    <Table.Th>Criada em</Table.Th>
-                    <Table.Th>Expira em</Table.Th>
-                    <Table.Th>Último uso</Table.Th>
-                    <Table.Th aria-label="Ações" />
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {data.map((c) => {
-                    const state = credentialState(c);
-                    return (
-                      <Table.Tr key={c.id}>
-                        <Table.Td fw={500}>{c.name}</Table.Td>
-                        <Table.Td>
-                          <Code>{c.prefix}…</Code>
-                        </Table.Td>
-                        <Table.Td>
-                          <Tooltip label={c.scopes.join(', ')} multiline w={320}>
-                            <Badge variant="light" tabIndex={0}>
-                              {c.scopes.length} escopo(s)
+            <>
+              <Table.ScrollContainer minWidth={900}>
+                <Table aria-label="Credenciais de API">
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Nome</Table.Th>
+                      <Table.Th>Prefixo</Table.Th>
+                      <Table.Th>Escopos</Table.Th>
+                      <Table.Th>Situação</Table.Th>
+                      <Table.Th>Criada em</Table.Th>
+                      <Table.Th>Expira em</Table.Th>
+                      <Table.Th>Último uso</Table.Th>
+                      <Table.Th aria-label="Ações" />
+                    </Table.Tr>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {page.data.map((c) => {
+                      const state = credentialState(c);
+                      return (
+                        <Table.Tr key={c.id}>
+                          <Table.Td fw={500}>{c.name}</Table.Td>
+                          <Table.Td>
+                            <Code>{c.prefix}…</Code>
+                          </Table.Td>
+                          <Table.Td>
+                            <Tooltip label={c.scopes.join(', ')} multiline w={320}>
+                              <Badge variant="light" tabIndex={0}>
+                                {c.scopes.length} escopo(s)
+                              </Badge>
+                            </Tooltip>
+                          </Table.Td>
+                          <Table.Td>
+                            <Badge variant="light" color={state.color}>
+                              {state.label}
                             </Badge>
-                          </Tooltip>
-                        </Table.Td>
-                        <Table.Td>
-                          <Badge variant="light" color={state.color}>
-                            {state.label}
-                          </Badge>
-                        </Table.Td>
-                        <Table.Td>
-                          <DateTime value={c.created_at} />
-                        </Table.Td>
-                        <Table.Td>{c.expires_at ? <DateTime value={c.expires_at} /> : 'Sem expiração'}</Table.Td>
-                        <Table.Td>{c.last_used_at ? <DateTime value={c.last_used_at} /> : 'Nunca usada'}</Table.Td>
-                        <Table.Td>
-                          <CredentialActions credential={c} onRotate={() => rotate.mutate(c)} onRevoke={() => revoke.mutate(c)} />
-                        </Table.Td>
-                      </Table.Tr>
-                    );
-                  })}
-                </Table.Tbody>
-              </Table>
-            </Table.ScrollContainer>
+                          </Table.Td>
+                          <Table.Td>
+                            <DateTime value={c.created_at} />
+                          </Table.Td>
+                          <Table.Td>{c.expires_at ? <DateTime value={c.expires_at} /> : 'Sem expiração'}</Table.Td>
+                          <Table.Td>{c.last_used_at ? <DateTime value={c.last_used_at} /> : 'Nunca usada'}</Table.Td>
+                          <Table.Td>
+                            <CredentialActions credential={c} onRotate={() => rotate.mutate(c)} onRevoke={() => revoke.mutate(c)} />
+                          </Table.Td>
+                        </Table.Tr>
+                      );
+                    })}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
+              <CursorPager
+                page={pagination.page}
+                hasPrevious={pagination.hasPrevious}
+                hasNext={!!page.next_cursor}
+                onPrevious={pagination.previous}
+                onNext={() => page.next_cursor && pagination.next(page.next_cursor)}
+                loading={query.isFetching}
+              />
+            </>
           )
         }
       </QueryContent>

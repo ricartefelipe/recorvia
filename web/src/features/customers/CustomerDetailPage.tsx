@@ -106,7 +106,7 @@ function CustomerHeader({
 }) {
   const { timeZone } = useTenant();
   const archive = useApiMutation<void, CustomerDetails>({
-    mutationFn: () => customersApi.archive(customer.id),
+    mutationFn: () => customersApi.archive(customer.id, customer.version),
     invalidate: ['customers'],
     successMessage: 'Cliente arquivado.',
   });

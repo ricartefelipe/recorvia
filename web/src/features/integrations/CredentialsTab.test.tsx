@@ -16,6 +16,7 @@ const active: ApiCredential = {
   expires_at: '2099-11-01T12:00:00Z',
   last_used_at: null,
   revoked_at: null,
+  version: 2,
 };
 
 describe('credenciais de API', () => {
@@ -30,6 +31,7 @@ describe('credenciais de API', () => {
 
   it('lista sem segredos e exibe o segredo da rotação uma única vez', async () => {
     const rotated: string[] = [];
+    const versions: (string | null)[] = [];
     server.use(
       http.get('/api/v1/api-credentials', () =>
         HttpResponse.json({
@@ -40,9 +42,10 @@ describe('credenciais de API', () => {
           ],
         }),
       ),
-      http.post('/api/v1/api-credentials/:id/rotate', ({ params }) => {
+      http.post('/api/v1/api-credentials/:id/rotate', ({ params, request }) => {
         rotated.push(String(params.id));
-        return HttpResponse.json({ credential: active, secret: `${active.prefix}_${'a'.repeat(52)}` }, { status: 201 });
+        versions.push(request.headers.get('If-Match'));
+        return HttpResponse.json({ credential: { ...active, version: 3 }, secret: `${active.prefix}_${'a'.repeat(52)}` }, { status: 201, headers: { ETag: '"3"' } });
       }),
     );
     const { user } = renderPage(<CredentialsTab />);
@@ -59,8 +62,42 @@ describe('credenciais de API', () => {
     await user.click(await screen.findByRole('button', { name: 'Rotacionar' }));
     expect(await screen.findByLabelText('Segredo da credencial')).toHaveValue(`${active.prefix}_${'a'.repeat(52)}`);
     expect(rotated).toEqual(['cred-1']);
+    expect(versions).toEqual(['"2"']);
     await user.click(screen.getByRole('button', { name: 'Já copiei, fechar' }));
     await waitFor(() => expect(screen.queryByLabelText('Segredo da credencial')).not.toBeInTheDocument());
+  });
+
+  it('revogação envia If-Match com a versão da credencial', async () => {
+    const versions: (string | null)[] = [];
+    server.use(
+      http.get('/api/v1/api-credentials', () => HttpResponse.json({ data: [active], next_cursor: null })),
+      http.delete('/api/v1/api-credentials/:id', ({ request }) => {
+        versions.push(request.headers.get('If-Match'));
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const { user } = renderPage(<CredentialsTab />);
+    await user.click(await screen.findByRole('button', { name: 'Revogar credencial ERP interno' }));
+    await user.click(await screen.findByRole('button', { name: 'Revogar' }));
+    await waitFor(() => expect(versions).toEqual(['"2"']));
+  });
+
+  it('a listagem segue o next_cursor', async () => {
+    const cursors: (string | null)[] = [];
+    server.use(
+      http.get('/api/v1/api-credentials', ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('cursor');
+        cursors.push(cursor);
+        return cursor
+          ? HttpResponse.json({ data: [{ ...active, id: 'cred-9', name: 'Integração antiga', revoked_at: '2026-10-01T12:00:00Z' }], next_cursor: null })
+          : HttpResponse.json({ data: [active], next_cursor: 'cred-pagina-2' });
+      }),
+    );
+    const { user } = renderPage(<CredentialsTab />);
+    expect(await screen.findByText('ERP interno')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Próxima/ }));
+    expect(await screen.findByText('Integração antiga')).toBeInTheDocument();
+    expect(cursors).toEqual([null, 'cred-pagina-2']);
   });
 
   it('sem api_credentials.manage não consulta a API', async () => {

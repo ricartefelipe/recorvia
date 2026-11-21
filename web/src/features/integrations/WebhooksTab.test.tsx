@@ -67,6 +67,35 @@ describe('webhooks enviados', () => {
     expect(await screen.findByDisplayValue('whsec_segredo-exibido-uma-vez')).toBeInTheDocument();
   });
 
+  it('rotação de segredo e remoção enviam If-Match com a versão do endpoint', async () => {
+    const requests: Request[] = [];
+    server.use(
+      http.get('/api/v1/webhook-endpoints', () => HttpResponse.json({ data: [endpoint] })),
+      http.post('/api/v1/webhook-endpoints/:id/rotate-secret', ({ request }) => {
+        requests.push(request.clone());
+        return HttpResponse.json({ endpoint: { ...endpoint, version: 4 }, secret: 'whsec_segredo-novo' }, { headers: { ETag: '"4"' } });
+      }),
+      http.delete('/api/v1/webhook-endpoints/:id', ({ request }) => {
+        requests.push(request.clone());
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const { user } = renderPage(<WebhooksTab />);
+    await user.click(await screen.findByRole('button', { name: `Rotacionar segredo de ${endpoint.url}` }));
+    await user.click(await screen.findByRole('button', { name: 'Rotacionar' }));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0].headers.get('If-Match')).toBe('"3"');
+    expect(await requests[0].json()).toEqual({ previous_secret_valid_hours: 24 });
+    await user.click(screen.getByRole('button', { name: 'Já copiei, fechar' }));
+
+    await user.click(screen.getByRole('button', { name: `Remover endpoint ${endpoint.url}` }));
+    const dialog = (await screen.findByText(/Desativar e remover/)).closest('[role="dialog"]') as HTMLElement;
+    await user.click(within(dialog).getByRole('button', { name: 'Remover' }));
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[1].method).toBe('DELETE');
+    expect(requests[1].headers.get('If-Match')).toBe('"3"');
+  });
+
   it('reenvia entregas concluídas ou em retentativa, nunca as pendentes', async () => {
     const retried: string[] = [];
     server.use(

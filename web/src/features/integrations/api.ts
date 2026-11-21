@@ -21,25 +21,33 @@ export type ProviderCode = 'simulator' | 'asaas';
 export const integrationsApi = {
   providers: (signal?: AbortSignal) =>
     api.get<DataList<ProviderAccount> & { available: string[] }>('/api/v1/payment-providers', { signal }),
-  configureProvider: (provider: ProviderCode, input: ProviderAccountInput) =>
-    api.put<ProviderAccountConfigured>(`/api/v1/payment-providers/${enc(provider)}`, input),
+  /** If-Match é a versão da conta do provedor; 0 para o provedor ainda não configurado. */
+  configureProvider: (provider: ProviderCode, version: number, input: ProviderAccountInput) =>
+    api.put<ProviderAccountConfigured>(`/api/v1/payment-providers/${enc(provider)}`, input, { ifMatch: version }),
 
-  credentials: (signal?: AbortSignal) => api.get<DataList<ApiCredential>>('/api/v1/api-credentials', { signal }),
+  credentials: (params: { cursor?: string; limit?: number }, signal?: AbortSignal) =>
+    api.get<CursorPage<ApiCredential>>('/api/v1/api-credentials', { query: { ...params }, signal }),
   createCredential: (input: { name: string; scopes: string[]; expires_in_days?: number }) =>
     api.post<ApiCredentialWithSecret>('/api/v1/api-credentials', input),
-  rotateCredential: (id: string) => api.post<ApiCredentialWithSecret>(`/api/v1/api-credentials/${enc(id)}/rotate`),
-  revokeCredential: (id: string) => api.delete(`/api/v1/api-credentials/${enc(id)}`),
+  rotateCredential: (credential: ApiCredential) =>
+    api.post<ApiCredentialWithSecret>(`/api/v1/api-credentials/${enc(credential.id)}/rotate`, undefined, { ifMatch: credential.version }),
+  revokeCredential: (credential: ApiCredential) =>
+    api.delete(`/api/v1/api-credentials/${enc(credential.id)}`, { ifMatch: credential.version }),
 
   eventTypes: (signal?: AbortSignal) => api.get<DataList<string>>('/api/v1/webhook-event-types', { signal }),
   endpoints: (signal?: AbortSignal) => api.get<DataList<WebhookEndpoint>>('/api/v1/webhook-endpoints', { signal }),
   createEndpoint: (input: WebhookEndpointInput) => api.post<WebhookEndpointWithSecret>('/api/v1/webhook-endpoints', input),
   updateEndpoint: (endpoint: WebhookEndpoint, input: WebhookEndpointInput & { status: 'active' | 'disabled' }) =>
     api.patch<WebhookEndpoint>(`/api/v1/webhook-endpoints/${enc(endpoint.id)}`, input, { ifMatch: endpoint.version }),
-  deleteEndpoint: (id: string) => api.delete(`/api/v1/webhook-endpoints/${enc(id)}`),
-  rotateSecret: (id: string, previousSecretValidHours: number) =>
-    api.post<WebhookEndpointWithSecret>(`/api/v1/webhook-endpoints/${enc(id)}/rotate-secret`, {
-      previous_secret_valid_hours: previousSecretValidHours,
-    }),
+  deleteEndpoint: (endpoint: WebhookEndpoint) =>
+    api.delete(`/api/v1/webhook-endpoints/${enc(endpoint.id)}`, { ifMatch: endpoint.version }),
+  /** Os segredos fazem parte do endpoint: a rotação exige a versão do endpoint. */
+  rotateSecret: (endpoint: WebhookEndpoint, previousSecretValidHours: number) =>
+    api.post<WebhookEndpointWithSecret>(
+      `/api/v1/webhook-endpoints/${enc(endpoint.id)}/rotate-secret`,
+      { previous_secret_valid_hours: previousSecretValidHours },
+      { ifMatch: endpoint.version },
+    ),
   deliveries: (id: string, params: { cursor?: string; limit?: number }, signal?: AbortSignal) =>
     api.get<CursorPage<WebhookDelivery>>(`/api/v1/webhook-endpoints/${enc(id)}/deliveries`, { query: { ...params }, signal }),
   deliveryAttempts: (id: string, signal?: AbortSignal) =>
