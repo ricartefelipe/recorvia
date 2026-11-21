@@ -1,19 +1,25 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ricartefelipe/recorvia/internal/infra/postgres"
+	"github.com/ricartefelipe/recorvia/internal/infra/telemetry"
+	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
+	"github.com/ricartefelipe/recorvia/internal/pgstore"
 )
 
 func okDB(context.Context) error   { return nil }
@@ -140,5 +146,54 @@ func TestDBPoolStatsReadsPool(t *testing.T) {
 	s := DBPoolStats(postgres.New(pool))()
 	if s.Max != 7 || s.Acquired != 0 || s.Acquires != 0 {
 		t.Fatalf("estatísticas %+v", s)
+	}
+}
+
+// As contagens do banco chegam inteiras às métricas das execuções de
+// conciliação em andamento.
+func TestReconciliationRunStatsMapsEveryState(t *testing.T) {
+	got := reconciliationRunStats(pgstore.ReconciliationRunStats{Queued: 3, Executing: 2, Stalled: 1, OldestWaitingSeconds: 412.5})
+	if want := (telemetry.ReconciliationRunStats{Queued: 3, Executing: 2, Stalled: 1, OldestWaitingSeconds: 412.5}); got != want {
+		t.Fatalf("contagens %+v, esperado %+v", got, want)
+	}
+}
+
+// Sem acesso ao banco, a leitura feita pela API a cada coleta devolve o erro
+// (as séries mantêm o último valor) e registra a falha no log, sem travar a
+// exposição das métricas.
+func TestReconciliationRunStatsReportsReadFailure(t *testing.T) {
+	cfg, err := pgxpool.ParseConfig("postgres://recorvia_app@127.0.0.1:1/recorvia?sslmode=disable&connect_timeout=2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	var logs bytes.Buffer
+	store := pgstore.New(postgres.New(pool), nil, clock.NewManual(time.Date(2026, 3, 10, 15, 0, 0, 0, time.UTC)), nil)
+	metrics := telemetry.NewMetrics("api")
+	metrics.SetReconciliationRuns(telemetry.ReconciliationRunStats{Queued: 1, OldestWaitingSeconds: 480})
+	metrics.ObserveReconciliationRuns(5*time.Second, ReconciliationRunStats(store, slog.New(slog.NewTextHandler(&logs, nil))))
+	families, err := metrics.Registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range families {
+		if f.GetName() != "recorvia_reconciliation_oldest_waiting_seconds" {
+			continue
+		}
+		found = true
+		if v := f.GetMetric()[0].GetGauge().GetValue(); v != 480 {
+			t.Fatalf("espera mais longa = %v, esperado o último valor (480)", v)
+		}
+	}
+	if !found {
+		t.Fatal("série recorvia_reconciliation_oldest_waiting_seconds ausente")
+	}
+	if !strings.Contains(logs.String(), "leitura das execuções de conciliação em andamento falhou") {
+		t.Fatalf("falha de leitura sem registro no log: %q", logs.String())
 	}
 }
