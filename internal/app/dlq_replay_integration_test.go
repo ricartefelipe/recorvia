@@ -77,9 +77,15 @@ func newOpsAPI(t *testing.T, core *app.Core) *opsAPI {
 func (a *opsAPI) post(user identity.User, tenantID uuid.UUID, path string, body any) (int, map[string]any) {
 	a.t.Helper()
 	now := a.core.Clock.Now()
+	// A sessão nasce com as gerações correntes do usuário (ADR-078): uma
+	// sessão sem elas é recusada como revogada.
+	gen, tenantGen, err := a.sessions.Generations(context.Background(), user.ID, &tenantID)
+	if err != nil {
+		a.t.Fatal(err)
+	}
 	s := identity.Session{ID: identity.RandomToken(32), UserID: user.ID, ActiveTenantID: &tenantID, CSRFToken: identity.RandomToken(16),
-		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(24 * time.Hour)}
-	if err := a.sessions.Save(context.Background(), s, time.Hour); err != nil {
+		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(24 * time.Hour), Generation: gen, TenantGeneration: tenantGen}
+	if err := a.sessions.Create(context.Background(), s, time.Hour); err != nil {
 		a.t.Fatal(err)
 	}
 	raw, err := json.Marshal(body)
