@@ -36,6 +36,7 @@ function ProductModal({ product, opened, onClose }: { product: Product | null; o
     successMessage: product ? 'Produto atualizado.' : 'Produto criado.',
     form,
     onSuccess: onClose,
+    onConcurrentReload: onClose,
   });
   return (
     <Modal opened={opened} onClose={onClose} title={product ? 'Editar produto' : 'Novo produto'}>

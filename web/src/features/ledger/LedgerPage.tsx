@@ -7,7 +7,7 @@ import type { CursorPage, DataList, LedgerAccount, LedgerTransaction } from '../
 import { DateTime, Money } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { CursorPager, PageHeader } from '../../components/ui';
-import { useCursorPagination, useUrlFilters } from '../../lib/hooks';
+import { useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import { stableStringify } from '../../lib/idempotency';
 import { labelOf, ledgerAccountKindLabels, ledgerReferenceLabels, optionsOf } from '../../lib/labels';
 import { useTenant } from '../../session/SessionContext';
@@ -79,6 +79,7 @@ function Transactions() {
     placeholderData: keepPreviousData,
     enabled: refValid,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <Stack>
       <Group align="flex-end">

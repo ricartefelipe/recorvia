@@ -4,7 +4,7 @@ import type { Subscription } from '../../api/types';
 import { DateTime, Money, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { CursorPager } from '../../components/ui';
-import { useCursorPagination } from '../../lib/hooks';
+import { useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
 import { aggregationHelp, aggregationLabels, labelOf, usageEventStatusLabels } from '../../lib/labels';
 import { formatQuantity } from '../../lib/money';
 import { useTenant } from '../../session/SessionContext';
@@ -20,6 +20,7 @@ function UsageEvents({ subscription }: { subscription: Subscription }) {
     queryFn: ({ signal }) => subscriptionsApi.usageEvents({ subscription_id: subscription.id, cursor: pagination.cursor, limit: 25 }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   const metricName = new Map((metrics.data?.data ?? []).map((m) => [m.id, m.name]));
   return (
     <QueryContent query={query} loading={<LoadingState />}>

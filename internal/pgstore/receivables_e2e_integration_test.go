@@ -94,7 +94,7 @@ func (h *payHarness) run(t *testing.T) payments.ReconciliationRun {
 
 func (h *payHarness) openDiscrepancies(t *testing.T) map[payments.DiscrepancyKind]payments.Discrepancy {
 	t.Helper()
-	list, err := h.env.Store.ListDiscrepancies(context.Background(), h.tn.ID, "open", "", 100)
+	list, _, err := h.env.Store.ListDiscrepancies(context.Background(), h.tn.ID, "open", "", 100, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestChargebackOpenWonAndLostOutOfOrder(t *testing.T) {
 		gLost.AmountChargedBack.Amount() != 6000 || !gWon.AmountChargedBack.IsZero() {
 		t.Fatalf("cobranças: aberta=%s ganha=%s perdida=%s %v", gOpen.Status, gWon.Status, gLost.Status, gLost.AmountChargedBack)
 	}
-	disputes, err := h.env.Store.ListDisputes(ctx, h.tn.ID, nil, 10)
+	disputes, _, err := h.env.Store.ListDisputes(ctx, h.tn.ID, nil, 10, "")
 	if err != nil || len(disputes) != 3 {
 		t.Fatalf("disputas: %d %v", len(disputes), err)
 	}
@@ -308,16 +308,18 @@ func TestReconciliationDivergeResolvedWithBalancedLedger(t *testing.T) {
 	// Outro tenant não vê nem resolve as divergências.
 	other := h.env.NewTenant(t, "outro-conciliacao")
 	if _, err := h.pay.ResolveDiscrepancy(ctx, other.ID, other.Actor, &other.Owner.ID, payments.ResolveInput{ID: feeD.ID,
-		Resolution: payments.ResolutionDismiss, Justification: "Tentativa de outro tenant."}); !apperr.IsKind(err, apperr.KindNotFound) {
+		Resolution: payments.ResolutionDismiss, Justification: "Tentativa de outro tenant.",
+		ExpectedVersion: discrepancyVersion(t, h.pay, h.tn.ID, feeD.ID)}); !apperr.IsKind(err, apperr.KindNotFound) {
 		t.Fatalf("resolução por outro tenant: %v", err)
 	}
-	if l, err := h.env.Store.ListDiscrepancies(ctx, other.ID, "", "", 100); err != nil || len(l) != 0 {
+	if l, _, err := h.env.Store.ListDiscrepancies(ctx, other.ID, "", "", 100, ""); err != nil || len(l) != 0 {
 		t.Fatalf("isolamento: %d %v", len(l), err)
 	}
 
 	// Valor pago menor no provedor: o ajuste reconhece a diferença como despesa.
 	adjusted, err := h.pay.ResolveDiscrepancy(ctx, h.tn.ID, h.tn.Actor, &h.tn.Owner.ID, payments.ResolveInput{ID: amountD.ID,
-		Resolution: payments.ResolutionAdjustLedger, Justification: "Diferença confirmada no extrato do provedor."})
+		Resolution: payments.ResolutionAdjustLedger, Justification: "Diferença confirmada no extrato do provedor.",
+		ExpectedVersion: discrepancyVersion(t, h.pay, h.tn.ID, amountD.ID)})
 	if err != nil || adjusted.LedgerTransactionID == nil || adjusted.Status != payments.DiscrepancyResolved {
 		t.Fatalf("ajuste de valor: %+v %v", adjusted, err)
 	}
@@ -326,7 +328,8 @@ func TestReconciliationDivergeResolvedWithBalancedLedger(t *testing.T) {
 	}
 	// Taxa mantida como está no Recorvia, sem lançamento.
 	kept, err := h.pay.ResolveDiscrepancy(ctx, h.tn.ID, h.tn.Actor, &h.tn.Owner.ID, payments.ResolveInput{ID: feeD.ID,
-		Resolution: payments.ResolutionKeepLocal, Justification: "Taxa contratada difere da cobrada; contestada com o provedor."})
+		Resolution: payments.ResolutionKeepLocal, Justification: "Taxa contratada difere da cobrada; contestada com o provedor.",
+		ExpectedVersion: discrepancyVersion(t, h.pay, h.tn.ID, feeD.ID)})
 	if err != nil || kept.LedgerTransactionID != nil || kept.Resolution != payments.ResolutionKeepLocal {
 		t.Fatalf("manter local: %+v %v", kept, err)
 	}
@@ -434,11 +437,11 @@ func TestReceivablesTablesIsolatedByRLS(t *testing.T) {
 	if err != nil || len(refunds) != 0 {
 		t.Fatalf("reembolsos de outro tenant: %d %v", len(refunds), err)
 	}
-	disputes, err := h.env.Store.ListDisputes(ctx, other.ID, nil, 10)
+	disputes, _, err := h.env.Store.ListDisputes(ctx, other.ID, nil, 10, "")
 	if err != nil || len(disputes) != 0 {
 		t.Fatalf("disputas de outro tenant: %d %v", len(disputes), err)
 	}
-	runs, err := h.env.Store.ListReconciliationRuns(ctx, other.ID, 10)
+	runs, _, err := h.env.Store.ListReconciliationRuns(ctx, other.ID, 10, "")
 	if err != nil || len(runs) != 0 {
 		t.Fatalf("execuções de outro tenant: %d %v", len(runs), err)
 	}

@@ -972,6 +972,11 @@ func (s *Service) ResolveDiscrepancy(ctx context.Context, tenantID uuid.UUID, ac
 		if d, err = tx.Discrepancy(ctx, in.ID, false); err != nil {
 			return err
 		}
+		// Recusa antecipada da versão divergente, antes de consultar o
+		// provedor; a condição do UPDATE, adiante, é a que decide.
+		if d.Version != in.ExpectedVersion {
+			return errDiscrepancyVersion
+		}
 		if d.Status != DiscrepancyOpen {
 			return apperr.Conflict("discrepancy_not_open", "A divergência já foi resolvida.")
 		}
@@ -1024,6 +1029,9 @@ func (s *Service) ResolveDiscrepancy(ctx context.Context, tenantID uuid.UUID, ac
 		if cur.Status != DiscrepancyOpen {
 			return apperr.Conflict("discrepancy_not_open", "A divergência já foi resolvida.")
 		}
+		// A gravação da resolução é condicionada à versão esperada: se a
+		// divergência mudou (nova detecção ou outra resolução), nada é gravado.
+		cur.Version = in.ExpectedVersion
 		now := s.clock.Now()
 		if err := s.applyResolution(ctx, tx, &cur, in.Resolution, snapshot, notFound, actor, now); err != nil {
 			return err
@@ -1042,6 +1050,11 @@ func (s *Service) ResolveDiscrepancy(ctx context.Context, tenantID uuid.UUID, ac
 	})
 	return d, err
 }
+
+// errDiscrepancyVersion recusa a resolução com versão diferente da informada
+// no If-Match.
+var errDiscrepancyVersion = apperr.PreconditionFailed("version_mismatch",
+	"A divergência foi alterada depois da sua consulta. Recarregue e tente novamente.")
 
 func errNotApplicable(kind DiscrepancyKind, r Resolution) error {
 	return apperr.Conflict("resolution_not_applicable", fmt.Sprintf("A resolução %s não se aplica a divergências do tipo %s.", r, kind))

@@ -207,21 +207,37 @@ func (q *Queries) InsertAPICredential(ctx context.Context, arg InsertAPICredenti
 const listAPICredentials = `-- name: ListAPICredentials :many
 SELECT id, tenant_id, name, key_id, secret_hash, previous_secret_hash, previous_secret_expires_at, scopes, created_by, created_at, expires_at, rotated_by, rotated_at, last_used_at, revoked_by, revoked_at, version FROM api_credentials
  WHERE tenant_id = $1
- ORDER BY (revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $2)) DESC, created_at DESC, id DESC
- LIMIT 200
+   AND ($2::timestamptz IS NULL OR
+        ((revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $3))::int, created_at, id)
+          < ($4::int, $2::timestamptz, $5::uuid))
+ ORDER BY (revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $3)) DESC, created_at DESC, id DESC
+ LIMIT $6
 `
 
 type ListAPICredentialsParams struct {
-	TenantID uuid.UUID
-	Now      *time.Time
+	TenantID     uuid.UUID
+	CursorTs     *time.Time
+	Now          *time.Time
+	CursorActive *int32
+	CursorID     *uuid.UUID
+	RowLimit     int32
 }
 
-// As credenciais ativas (no máximo 50 por organização) vêm sempre primeiro,
-// para que nenhuma fique fora do limite da listagem e deixe de poder ser
-// revogada pela interface; revogadas e expiradas, que nunca são excluídas,
-// completam a lista a partir das mais recentes.
+// As credenciais ativas (no máximo 50 por organização) vêm sempre primeiro;
+// revogadas e expiradas, que nunca são excluídas, vêm depois, das mais
+// recentes para as mais antigas. A situação é avaliada no instante da
+// primeira página (@now, levado no cursor), para que uma credencial que
+// expira durante a navegação não mude de posição entre as páginas. O cursor é
+// a posição (ativa, criação, id) da última credencial da página.
 func (q *Queries) ListAPICredentials(ctx context.Context, arg ListAPICredentialsParams) ([]ApiCredential, error) {
-	rows, err := q.db.Query(ctx, listAPICredentials, arg.TenantID, arg.Now)
+	rows, err := q.db.Query(ctx, listAPICredentials,
+		arg.TenantID,
+		arg.CursorTs,
+		arg.Now,
+		arg.CursorActive,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +291,7 @@ func (q *Queries) LockTenantForAPICredentialIssuance(ctx context.Context, tenant
 const revokeAPICredential = `-- name: RevokeAPICredential :execrows
 UPDATE api_credentials
    SET revoked_at = $1, revoked_by = $2, version = version + 1
- WHERE tenant_id = $3 AND id = $4 AND revoked_at IS NULL
+ WHERE tenant_id = $3 AND id = $4 AND version = $5 AND revoked_at IS NULL
 `
 
 type RevokeAPICredentialParams struct {
@@ -283,6 +299,7 @@ type RevokeAPICredentialParams struct {
 	RevokedBy *uuid.UUID
 	TenantID  uuid.UUID
 	ID        uuid.UUID
+	Version   int32
 }
 
 func (q *Queries) RevokeAPICredential(ctx context.Context, arg RevokeAPICredentialParams) (int64, error) {
@@ -291,6 +308,7 @@ func (q *Queries) RevokeAPICredential(ctx context.Context, arg RevokeAPICredenti
 		arg.RevokedBy,
 		arg.TenantID,
 		arg.ID,
+		arg.Version,
 	)
 	if err != nil {
 		return 0, err

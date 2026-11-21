@@ -205,17 +205,19 @@ func TestListReturnsCredentials(t *testing.T) {
 	e.create(t, e.owner)
 	e.clock.Advance(time.Minute)
 	second := e.create(t, e.owner)
-	got, err := e.svc.List(context.Background(), e.tenantID)
-	if err != nil || len(got) != 2 || got[0].ID != second.Credential.ID {
+	got, err := e.svc.List(context.Background(), e.tenantID, 10, "cursor-da-pagina")
+	if err != nil || len(got.Items) != 2 || got.Items[0].ID != second.Credential.ID {
 		t.Fatalf("lista: %v %v", got, err)
 	}
 	// O instante da listagem vem do relógio do serviço: é ele que decide
-	// quais credenciais estão ativas e vêm primeiro.
-	if !e.store.listedAt.Equal(e.clock.Now()) {
-		t.Fatalf("instante da listagem: %v, esperado %v", e.store.listedAt, e.clock.Now())
+	// quais credenciais estão ativas e vêm primeiro. Limite e cursor chegam
+	// ao armazenamento como informados.
+	if !e.store.listedAt.Equal(e.clock.Now()) || e.store.listedLimit != 10 || e.store.listedCursor != "cursor-da-pagina" {
+		t.Fatalf("listagem: instante %v (esperado %v), limite %d, cursor %q", e.store.listedAt, e.clock.Now(), e.store.listedLimit,
+			e.store.listedCursor)
 	}
 	e.store.fail["Credentials"] = errBoom
-	if _, err := e.svc.List(context.Background(), e.tenantID); !errors.Is(err, errBoom) {
+	if _, err := e.svc.List(context.Background(), e.tenantID, 0, ""); !errors.Is(err, errBoom) {
 		t.Fatalf("falha da listagem: %v", err)
 	}
 }
@@ -402,7 +404,7 @@ func TestRotateKeepsPreviousSecretDuringGrace(t *testing.T) {
 	is := e.create(t, e.owner)
 	e.clock.Advance(time.Hour)
 	admin := e.addMember(tenancy.RoleAdmin)
-	rot, err := e.svc.Rotate(context.Background(), e.tenantID, admin, is.Credential.ID)
+	rot, err := e.svc.Rotate(context.Background(), e.tenantID, admin, is.Credential.ID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,11 +436,11 @@ func TestRotateKeepsPreviousSecretDuringGrace(t *testing.T) {
 	// Segunda rotação: o segredo de antes da primeira é descartado de imediato.
 	e.clock.Set(testNow.Add(2 * time.Hour))
 	first := e.create(t, e.owner)
-	r1, err := e.svc.Rotate(context.Background(), e.tenantID, e.owner, first.Credential.ID)
+	r1, err := e.svc.Rotate(context.Background(), e.tenantID, e.owner, first.Credential.ID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r2, err := e.svc.Rotate(context.Background(), e.tenantID, e.owner, first.Credential.ID)
+	r2, err := e.svc.Rotate(context.Background(), e.tenantID, e.owner, first.Credential.ID, r1.Credential.Version)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +458,7 @@ func TestRotateMovesResponsibilityToRotator(t *testing.T) {
 	e := newEnv(t)
 	admin := e.addMember(tenancy.RoleAdmin)
 	is := e.create(t, admin)
-	if _, err := e.svc.Rotate(context.Background(), e.tenantID, e.owner, is.Credential.ID); err != nil {
+	if _, err := e.svc.Rotate(context.Background(), e.tenantID, e.owner, is.Credential.ID, 1); err != nil {
 		t.Fatal(err)
 	}
 	// Quem criou sai da organização; a credencial continua com quem rotacionou.
@@ -473,7 +475,7 @@ func TestRotateGraceNeverExceedsExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.clock.Advance(20 * time.Hour)
-	if _, err := e.svc.Rotate(context.Background(), e.tenantID, e.owner, is.Credential.ID); err != nil {
+	if _, err := e.svc.Rotate(context.Background(), e.tenantID, e.owner, is.Credential.ID, 1); err != nil {
 		t.Fatal(err)
 	}
 	stored := e.d().credentials[is.Credential.ID]
@@ -498,6 +500,8 @@ func TestRotateRejections(t *testing.T) {
 			apperr.KindForbidden, "scope_exceeds_permissions"},
 		{"plano sem acesso à API", func(e *env, _ *Credential) { e.d().plan.Features = nil }, nil, nil,
 			apperr.KindForbidden, "platform_feature_unavailable"},
+		// A versão do If-Match vai na condição da gravação.
+		{"versão divergente", func(_ *env, c *Credential) { c.Version = 4 }, nil, nil, apperr.KindPreconditionFailed, "version_mismatch"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -516,7 +520,7 @@ func TestRotateRejections(t *testing.T) {
 			if tc.id != nil {
 				id = tc.id(c)
 			}
-			_, err := e.svc.Rotate(context.Background(), e.tenantID, g, id)
+			_, err := e.svc.Rotate(context.Background(), e.tenantID, g, id, 1)
 			assertErr(t, err, tc.kind, tc.code)
 			if !bytes.Equal(e.d().credentials[c.ID].SecretHash, is.Credential.SecretHash) {
 				t.Fatal("rotação recusada não pode trocar o segredo")
@@ -527,7 +531,7 @@ func TestRotateRejections(t *testing.T) {
 		e := newEnv(t)
 		is := e.create(t, e.owner)
 		e.store.fail[op] = errBoom
-		if _, err := e.svc.Rotate(context.Background(), e.tenantID, e.owner, is.Credential.ID); !errors.Is(err, errBoom) {
+		if _, err := e.svc.Rotate(context.Background(), e.tenantID, e.owner, is.Credential.ID, 1); !errors.Is(err, errBoom) {
 			t.Fatalf("%s: %v", op, err)
 		}
 		if _, err := e.authenticate(is.Token); err != nil {
@@ -539,12 +543,17 @@ func TestRotateRejections(t *testing.T) {
 func TestRevokeIsImmediateAndIdempotent(t *testing.T) {
 	e := newEnv(t)
 	is := e.create(t, e.owner)
-	rot, err := e.svc.Rotate(context.Background(), e.tenantID, e.owner, is.Credential.ID)
+	rot, err := e.svc.Rotate(context.Background(), e.tenantID, e.owner, is.Credential.ID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	admin := e.addMember(tenancy.RoleAdmin)
-	if err := e.svc.Revoke(context.Background(), e.tenantID, admin, is.Credential.ID); err != nil {
+	// Versão divergente (anterior à rotação): nada é revogado.
+	assertErr(t, e.svc.Revoke(context.Background(), e.tenantID, admin, is.Credential.ID, 1), apperr.KindPreconditionFailed, "version_mismatch")
+	if e.d().credentials[is.Credential.ID].RevokedAt != nil {
+		t.Fatal("revogação com versão divergente não pode gravar")
+	}
+	if err := e.svc.Revoke(context.Background(), e.tenantID, admin, is.Credential.ID, rot.Credential.Version); err != nil {
 		t.Fatal(err)
 	}
 	stored := e.d().credentials[is.Credential.ID]
@@ -560,23 +569,27 @@ func TestRevokeIsImmediateAndIdempotent(t *testing.T) {
 	if a := e.lastAudit(t); a.Action != "api_credential.revoked" || a.Actor != admin.Actor {
 		t.Fatalf("auditoria: %+v", a)
 	}
-	if err := e.svc.Revoke(context.Background(), e.tenantID, e.owner, is.Credential.ID); err != nil {
+	revoked := e.d().credentials[is.Credential.ID].Version
+	if err := e.svc.Revoke(context.Background(), e.tenantID, e.owner, is.Credential.ID, revoked); err != nil {
 		t.Fatalf("revogar de novo: %v", err)
 	}
-	if len(e.d().audits) != audits || e.store.calls["RevokeCredential"] != 1 {
+	if len(e.d().audits) != audits || e.store.calls["RevokeCredential"] != 2 {
 		t.Fatal("segunda revogação não deve gravar nada")
 	}
-	assertErr(t, e.svc.Revoke(context.Background(), e.tenantID, e.owner, uuid.New()), apperr.KindNotFound, "api_credential_not_found")
+	// Já revogada, a versão do If-Match ainda é conferida.
+	assertErr(t, e.svc.Revoke(context.Background(), e.tenantID, e.owner, is.Credential.ID, rot.Credential.Version), apperr.KindPreconditionFailed,
+		"version_mismatch")
+	assertErr(t, e.svc.Revoke(context.Background(), e.tenantID, e.owner, uuid.New(), 1), apperr.KindNotFound, "api_credential_not_found")
 	e2 := newEnv(t)
 	is2 := e2.create(t, e2.owner)
 	e2.store.fail["RevokeCredential"] = errBoom
-	if err := e2.svc.Revoke(context.Background(), e2.tenantID, e2.owner, is2.Credential.ID); !errors.Is(err, errBoom) {
+	if err := e2.svc.Revoke(context.Background(), e2.tenantID, e2.owner, is2.Credential.ID, 1); !errors.Is(err, errBoom) {
 		t.Fatalf("falha da revogação: %v", err)
 	}
 	// Revogação não depende do recurso do plano.
 	e2.store.fail["RevokeCredential"] = nil
 	e2.d().plan.Features = nil
-	if err := e2.svc.Revoke(context.Background(), e2.tenantID, e2.owner, is2.Credential.ID); err != nil {
+	if err := e2.svc.Revoke(context.Background(), e2.tenantID, e2.owner, is2.Credential.ID, 1); err != nil {
 		t.Fatalf("revogação após troca de plano: %v", err)
 	}
 }

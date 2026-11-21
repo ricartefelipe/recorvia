@@ -298,7 +298,8 @@ func TestReconciliationAppliesMissedReceiptWithSimulator(t *testing.T) {
 		t.Fatalf("somente a pendência de recebimento: %v", open)
 	}
 	got, err := h.pay.ResolveDiscrepancy(ctx, h.tn.ID, h.tn.Actor, &h.tn.Owner.ID, payments.ResolveInput{ID: d.ID,
-		Resolution: payments.ResolutionAcceptProvider, Justification: "Crédito conferido no painel do provedor."})
+		Resolution: payments.ResolutionAcceptProvider, Justification: "Crédito conferido no painel do provedor.",
+		ExpectedVersion: discrepancyVersion(t, h.pay, h.tn.ID, d.ID)})
 	if err != nil || got.Status != payments.DiscrepancyResolved {
 		t.Fatalf("adoção do provedor: %+v %v", got, err)
 	}

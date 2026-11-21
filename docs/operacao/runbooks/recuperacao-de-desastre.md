@@ -251,11 +251,13 @@ as outras chaves.
 5. Inicie a API e o worker. Consequências, por finalidade, até cada integração ser refeita:
    - **contas de provedor**: criação de cobranças, reembolsos, conciliação e webhooks do provedor
      respondem 503 `provider_credentials_unreadable` até a conta ser configurada de novo
-     (`PUT /api/v1/payment-providers/{provider}`, `integrations.write`, com a chave de API e um
-     novo segredo de webhook; a operação não depende das credenciais anteriores);
+     (`PUT /api/v1/payment-providers/{provider}`, `integrations.write`, com a chave de API, um
+     novo segredo de webhook e a `version` da conta no `If-Match`; a operação não depende das
+     credenciais anteriores);
    - **endpoints de webhook**: as entregas se encerram como `exhausted` ("nenhum segredo de assinatura
      válido pôde ser decifrado") até o tenant gerar um segredo novo
-     (`POST /api/v1/webhook-endpoints/{id}/rotate-secret`, com `previous_secret_valid_hours` igual a 0: o
+     (`POST /api/v1/webhook-endpoints/{id}/rotate-secret`, com a `version` do endpoint no `If-Match` e
+     `previous_secret_valid_hours` igual a 0: o
      segredo anterior não assina mais nada) e reenviar as entregas
      (`POST /api/v1/webhook-deliveries/{id}/retry`);
    - **notificações pendentes**: encerram-se como `failed` (`content_unavailable`) na tentativa

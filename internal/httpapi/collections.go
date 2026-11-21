@@ -208,6 +208,8 @@ type notificationTemplateDTO struct {
 	IsDefault bool       `json:"is_default"`
 	Variables []string   `json:"variables"`
 	UpdatedAt *time.Time `json:"updated_at"`
+	// Version é a versão da personalização; 0 no template padrão.
+	Version int `json:"version"`
 }
 
 func templateView(t notifications.Template) notificationTemplateDTO {
@@ -216,7 +218,7 @@ func templateView(t notifications.Template) notificationTemplateDTO {
 		vars = []string{}
 	}
 	return notificationTemplateDTO{Key: string(t.Key), Channel: notifications.ChannelEmail, Subject: t.Subject, Body: t.Body,
-		IsDefault: t.IsDefault, Variables: vars, UpdatedAt: t.UpdatedAt}
+		IsDefault: t.IsDefault, Variables: vars, UpdatedAt: t.UpdatedAt, Version: t.Version}
 }
 
 func (a *API) listNotificationTemplates(w http.ResponseWriter, r *http.Request) {
@@ -232,7 +234,14 @@ func (a *API) listNotificationTemplates(w http.ResponseWriter, r *http.Request) 
 	a.writeJSON(w, r, http.StatusOK, list(out))
 }
 
+// updateNotificationTemplate grava a personalização do template na versão do
+// If-Match: "0" para o template padrão, ainda não personalizado.
 func (a *API) updateNotificationTemplate(w http.ResponseWriter, r *http.Request) {
+	version, err := ifMatchOrDefault(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	var in struct {
 		Subject string `json:"subject"`
 		Body    string `json:"body"`
@@ -242,12 +251,12 @@ func (a *API) updateNotificationTemplate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	p := mustPrincipal(r)
-	t, err := a.Notifications.UpdateTemplate(r.Context(), p.TenantID, p.Actor(), p.UserID(), chi.URLParam(r, "key"), in.Subject, in.Body)
+	t, err := a.Notifications.UpdateTemplate(r.Context(), p.TenantID, p.Actor(), p.UserID(), chi.URLParam(r, "key"), in.Subject, in.Body, version)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, templateView(t))
+	a.writeVersioned(w, r, http.StatusOK, t.Version, templateView(t))
 }
 
 // --- histórico de notificações ---

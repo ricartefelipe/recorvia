@@ -8,7 +8,7 @@ import type { AuditEvent, CursorPage } from '../../api/types';
 import { AuditEventList } from '../../components/AuditEventList';
 import { AccessDenied, LoadingState, QueryContent } from '../../components/states';
 import { CursorPager, PageHeader } from '../../components/ui';
-import { useCursorPagination, useUrlFilters } from '../../lib/hooks';
+import { useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import { stableStringify } from '../../lib/idempotency';
 import { useTenant } from '../../session/SessionContext';
 
@@ -49,6 +49,7 @@ export function AuditPage() {
     placeholderData: keepPreviousData,
     enabled: can('audit.read'),
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
 
   if (!can('audit.read')) return <AccessDenied message="A trilha de auditoria exige a permissão “Ver auditoria”." />;
 

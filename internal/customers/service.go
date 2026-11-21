@@ -58,6 +58,10 @@ type Tx interface {
 	DeleteContact(ctx context.Context, customerID, contactID uuid.UUID) error
 	Address(ctx context.Context, customerID uuid.UUID) (*Address, error)
 	UpsertAddress(ctx context.Context, customerID uuid.UUID, a Address) error
+	// BumpVersion gera a nova versão do cliente quando muda uma parte da ficha
+	// gravada em outra tabela (endereço de cobrança), condicionada à versão
+	// informada (412 version_mismatch se a linha tiver outra versão).
+	BumpVersion(ctx context.Context, customerID uuid.UUID, version int) error
 	HasOpenObligations(ctx context.Context, customerID uuid.UUID) (bool, error)
 	// HasPendingBilling informa se ainda há faturamento do cliente por
 	// acontecer, mesmo sem assinatura ativa nem fatura em aberto: assinatura
@@ -193,8 +197,11 @@ func (s *Service) Update(ctx context.Context, tenantID uuid.UUID, actor audit.Ac
 	return c, err
 }
 
-// Archive arquiva o cliente quando não há assinaturas ativas nem faturas em aberto.
-func (s *Service) Archive(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, id uuid.UUID) (Customer, error) {
+// Archive arquiva o cliente quando não há assinaturas ativas nem faturas em
+// aberto, condicionado à versão esperada (If-Match): divergente, nada é
+// alterado (412). Arquivar um cliente já arquivado, na versão informada, não
+// tem efeito.
+func (s *Service) Archive(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, id uuid.UUID, expectedVersion int) (Customer, error) {
 	var c Customer
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		var err error
@@ -202,6 +209,9 @@ func (s *Service) Archive(ctx context.Context, tenantID uuid.UUID, actor audit.A
 			return err
 		}
 		if c.Status == Archived {
+			if c.Version != expectedVersion {
+				return errVersionMismatch
+			}
 			return nil
 		}
 		open, err := tx.HasOpenObligations(ctx, id)
@@ -211,7 +221,7 @@ func (s *Service) Archive(ctx context.Context, tenantID uuid.UUID, actor audit.A
 		if open {
 			return apperr.Conflict("customer_has_obligations", "O cliente possui assinaturas ativas ou faturas em aberto.")
 		}
-		c.Status = Archived
+		c.Status, c.Version = Archived, expectedVersion
 		if err := tx.Update(ctx, c); err != nil {
 			return err
 		}
@@ -220,6 +230,10 @@ func (s *Service) Archive(ctx context.Context, tenantID uuid.UUID, actor audit.A
 	})
 	return c, err
 }
+
+// errVersionMismatch recusa a alteração com versão diferente da informada no
+// If-Match.
+var errVersionMismatch = apperr.PreconditionFailed("version_mismatch", "O cliente foi alterado por outra pessoa. Recarregue e tente novamente.")
 
 // errAnonymized recusa a regravação de dados pessoais num cliente anonimizado.
 var errAnonymized = apperr.Conflict("customer_anonymized", "Cliente anonimizado não pode ser alterado.")
@@ -454,14 +468,20 @@ func (s *Service) RemoveContact(ctx context.Context, tenantID uuid.UUID, actor a
 	})
 }
 
-// SetAddress grava o endereço de cobrança. Sem mudança, nada é gravado nem
-// auditado; a auditoria informa os nomes dos campos alterados e se o
-// endereço foi cadastrado agora.
-func (s *Service) SetAddress(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, customerID uuid.UUID, a Address) (Address, error) {
+// SetAddress grava o endereço de cobrança. O endereço faz parte da ficha do
+// cliente (com a versão do cliente): a gravação exige a versão esperada
+// (If-Match) e gera a versão seguinte do cliente, na mesma transação.
+// Sem mudança, nada é gravado nem auditado (a versão informada ainda é
+// conferida); a auditoria informa os nomes dos campos alterados e se o
+// endereço foi cadastrado agora. Devolve o endereço e a versão do cliente
+// depois da gravação.
+func (s *Service) SetAddress(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, customerID uuid.UUID, a Address,
+	expectedVersion int) (Address, int, error) {
 	a, err := ValidateAddress(a)
 	if err != nil {
-		return Address{}, err
+		return Address{}, 0, err
 	}
+	version := 0
 	err = s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		c, err := tx.Get(ctx, customerID, true)
 		if err != nil {
@@ -476,8 +496,16 @@ func (s *Service) SetAddress(ctx context.Context, tenantID uuid.UUID, actor audi
 		}
 		changed := a.ChangedFields(prev)
 		if len(changed) == 0 {
+			if c.Version != expectedVersion {
+				return errVersionMismatch
+			}
+			version = c.Version
 			return nil
 		}
+		if err := tx.BumpVersion(ctx, customerID, expectedVersion); err != nil {
+			return err
+		}
+		version = expectedVersion + 1
 		if err := tx.UpsertAddress(ctx, customerID, a); err != nil {
 			return err
 		}
@@ -485,7 +513,10 @@ func (s *Service) SetAddress(ctx context.Context, tenantID uuid.UUID, actor audi
 		return tx.Audit(ctx, audit.New(tenantID, s.clock.Now(), actor, "customer.address_updated", "customer", customerID.String(),
 			map[string]any{"fields": changed, "created": prev == nil}))
 	})
-	return a, err
+	if err != nil {
+		return Address{}, 0, err
+	}
+	return a, version, nil
 }
 
 // Snapshot é a cópia dos dados do cliente gravada na fatura emitida.

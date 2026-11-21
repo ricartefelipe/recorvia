@@ -371,7 +371,7 @@ SELECT tenant_id, provider, count(*), min(received_at)
    nova conciliação da janela e acompanhar a execução até `completed`: ela fecha as divergências
    resolvidas pelo próprio fluxo.
 2. Resolver as restantes uma a uma: `POST /api/v1/reconciliation/discrepancies/{id}/resolve` com
-   `resolution` (`accept_provider`, `keep_local`, `adjust_ledger` ou `dismiss`) e `justification`
+   a `version` da divergência no `If-Match`, `resolution` (`accept_provider`, `keep_local`, `adjust_ledger` ou `dismiss`) e `justification`
    (mínimo de 10 caracteres). `adjust_ledger` gera lançamento compensatório; a resolução é
    auditada.
 3. Em caso de dúvida sobre valores, prevalece a confirmação do provedor para dinheiro recebido

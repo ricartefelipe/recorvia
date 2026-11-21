@@ -37,7 +37,7 @@ type Tx interface {
 	Invitation(ctx context.Context, id uuid.UUID, forUpdate bool) (Invitation, error)
 	InsertInvitation(ctx context.Context, inv Invitation) error
 	UpdateInvitation(ctx context.Context, inv Invitation) error
-	Invitations(ctx context.Context) ([]Invitation, error)
+	Invitations(ctx context.Context, limit int, cursor string) (InvitationPage, error)
 	PendingInvitations(ctx context.Context, now time.Time) (int, error)
 
 	DefaultPlatformPlan(ctx context.Context) (platformbilling.Plan, error)
@@ -249,12 +249,13 @@ func (s *Service) Members(ctx context.Context, tenantID uuid.UUID) ([]Member, er
 	return out, err
 }
 
-// Invitations lista os convites.
-func (s *Service) Invitations(ctx context.Context, tenantID uuid.UUID) ([]Invitation, error) {
-	var out []Invitation
+// Invitations lista os convites, dos mais recentes para os mais antigos, em
+// páginas por cursor.
+func (s *Service) Invitations(ctx context.Context, tenantID uuid.UUID, limit int, cursor string) (InvitationPage, error) {
+	var out InvitationPage
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		var err error
-		out, err = tx.Invitations(ctx)
+		out, err = tx.Invitations(ctx, limit, cursor)
 		return err
 	})
 	return out, err
@@ -414,8 +415,10 @@ func (s *Service) AcceptInvitation(ctx context.Context, user UserRef, token stri
 
 // ChangeRole altera o papel de um membro. Regras: somente proprietários
 // concedem ou retiram o papel de proprietário; a organização mantém ao menos
-// um proprietário ativo.
-func (s *Service) ChangeRole(ctx context.Context, tenantID uuid.UUID, actor Access, actorRef UserRef, target uuid.UUID, role Role) (Membership, error) {
+// um proprietário ativo. A gravação é condicionada à versão esperada da
+// associação (If-Match): divergente, nada é alterado (412).
+func (s *Service) ChangeRole(ctx context.Context, tenantID uuid.UUID, actor Access, actorRef UserRef, target uuid.UUID, role Role,
+	expectedVersion int) (Membership, error) {
 	if _, err := ParseRole(string(role)); err != nil {
 		return Membership{}, apperr.Invalid("invalid_role", "Papel inválido.", apperr.FieldError{Field: "role", Message: "Papel inválido."})
 	}
@@ -437,7 +440,7 @@ func (s *Service) ChangeRole(ctx context.Context, tenantID uuid.UUID, actor Acce
 			}
 		}
 		previous := m.Role
-		m.Role = role
+		m.Role, m.Version = role, expectedVersion
 		if err := tx.UpdateMembership(ctx, m); err != nil {
 			return err
 		}
@@ -448,9 +451,10 @@ func (s *Service) ChangeRole(ctx context.Context, tenantID uuid.UUID, actor Acce
 	return m, err
 }
 
-// RemoveMember desativa a associação. As sessões do usuário perdem o acesso
-// a esta organização na próxima requisição (ResolveAccess).
-func (s *Service) RemoveMember(ctx context.Context, tenantID uuid.UUID, actor Access, actorRef UserRef, target uuid.UUID) error {
+// RemoveMember desativa a associação, condicionada à versão esperada
+// (If-Match). As sessões do usuário perdem o acesso a esta organização na
+// próxima requisição (ResolveAccess).
+func (s *Service) RemoveMember(ctx context.Context, tenantID uuid.UUID, actor Access, actorRef UserRef, target uuid.UUID, expectedVersion int) error {
 	return s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		m, err := tx.Membership(ctx, target, true)
 		if err != nil {
@@ -467,7 +471,7 @@ func (s *Service) RemoveMember(ctx context.Context, tenantID uuid.UUID, actor Ac
 				return err
 			}
 		}
-		m.Status = MembershipRemoved
+		m.Status, m.Version = MembershipRemoved, expectedVersion
 		if err := tx.UpdateMembership(ctx, m); err != nil {
 			return err
 		}

@@ -128,13 +128,14 @@ func (t *fakeCouponTx) Coupons(context.Context) ([]Coupon, error) {
 	return out, nil
 }
 
-// ArchiveCoupon reproduz o UPDATE: arquiva e incrementa a versão.
-func (t *fakeCouponTx) ArchiveCoupon(_ context.Context, id uuid.UUID) error {
+// ArchiveCoupon reproduz o UPDATE condicionado à versão: arquiva e
+// incrementa a versão.
+func (t *fakeCouponTx) ArchiveCoupon(_ context.Context, id uuid.UUID, version int) error {
 	if err := t.s.hit("ArchiveCoupon"); err != nil {
 		return err
 	}
 	c, ok := t.st.coupons[id]
-	if !ok {
+	if !ok || c.Version != version {
 		return apperr.PreconditionFailed("version_mismatch", "O cupom foi alterado por outra pessoa.")
 	}
 	c.Status = Archived

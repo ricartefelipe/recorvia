@@ -197,7 +197,9 @@ type CouponTx interface {
 	InsertCoupon(ctx context.Context, c Coupon) error
 	Coupon(ctx context.Context, id uuid.UUID, forUpdate bool) (Coupon, error)
 	Coupons(ctx context.Context) ([]Coupon, error)
-	ArchiveCoupon(ctx context.Context, id uuid.UUID) error
+	// ArchiveCoupon arquiva o cupom na versão informada (412
+	// version_mismatch se a linha tiver outra versão).
+	ArchiveCoupon(ctx context.Context, id uuid.UUID, version int) error
 	CountPlans(ctx context.Context, ids []uuid.UUID) (int, error)
 	Audit(ctx context.Context, e audit.Entry) error
 }
@@ -256,9 +258,14 @@ func (s *CouponService) List(ctx context.Context, tenantID uuid.UUID) ([]Coupon,
 	return out, err
 }
 
-// Archive arquiva o cupom: novas aplicações são recusadas; descontos já
-// aplicados seguem até o fim da duração contratada.
-func (s *CouponService) Archive(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, id uuid.UUID) (Coupon, error) {
+// errCouponVersion recusa o arquivamento com versão diferente da informada
+// no If-Match.
+var errCouponVersion = apperr.PreconditionFailed("version_mismatch", "O cupom foi alterado por outra pessoa. Recarregue e tente novamente.")
+
+// Archive arquiva o cupom na versão esperada (If-Match): novas aplicações são
+// recusadas; descontos já aplicados seguem até o fim da duração contratada.
+// Arquivar um cupom já arquivado, na versão informada, não tem efeito.
+func (s *CouponService) Archive(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, id uuid.UUID, expectedVersion int) (Coupon, error) {
 	var c Coupon
 	err := s.store.InCouponTx(ctx, tenantID, func(tx CouponTx) error {
 		var err error
@@ -266,9 +273,12 @@ func (s *CouponService) Archive(ctx context.Context, tenantID uuid.UUID, actor a
 			return err
 		}
 		if c.Status == Archived {
+			if c.Version != expectedVersion {
+				return errCouponVersion
+			}
 			return nil
 		}
-		if err := tx.ArchiveCoupon(ctx, id); err != nil {
+		if err := tx.ArchiveCoupon(ctx, id, expectedVersion); err != nil {
 			return err
 		}
 		c.Status = Archived

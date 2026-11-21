@@ -82,12 +82,26 @@ func TestCustomerHistoryAndContactEditOverHTTP(t *testing.T) {
 
 	// Endereço: cadastro com todos os campos, alteração somente com os que
 	// mudaram e regravação igual sem evento.
+	// O endereço faz parte da ficha: If-Match e ETag são a versão do cliente,
+	// que muda a cada gravação e não muda na regravação igual.
 	addr := map[string]any{"street": "Rua das Flores", "number": "10", "district": "Centro", "city": "Curitiba", "state": "PR",
 		"postal_code": "80010-000"}
-	c.expect(http.StatusOK, http.MethodPut, custPath+"/billing-address", addr)
-	addr["city"], addr["complement"] = "Londrina", "Sala 2"
-	c.expect(http.StatusOK, http.MethodPut, custPath+"/billing-address", addr)
-	c.expect(http.StatusOK, http.MethodPut, custPath+"/billing-address", addr)
+	v := int(c.versionOf(custPath).(float64))
+	c.expectProblem(http.StatusPreconditionRequired, "if_match_required", http.MethodPut, custPath+"/billing-address", addr)
+	c.expectProblem(http.StatusPreconditionFailed, "version_mismatch", http.MethodPut, custPath+"/billing-address", addr, matchVersion(v+1)...)
+	// Cadastro, alteração e regravação igual.
+	for i, step := range []struct{ ifMatch, etag int }{{v, v + 1}, {v + 1, v + 2}, {v + 2, v + 2}} {
+		if i == 1 {
+			addr["city"], addr["complement"] = "Londrina", "Sala 2"
+		}
+		_, h := c.expect(http.StatusOK, http.MethodPut, custPath+"/billing-address", addr, matchVersion(step.ifMatch)...)
+		if h.Get("ETag") != fmt.Sprintf(`"%d"`, step.etag) {
+			t.Fatalf("gravação %d do endereço: ETag %q, esperado %d", i+1, h.Get("ETag"), step.etag)
+		}
+	}
+	if got := c.versionOf(custPath); got != float64(v+2) {
+		t.Fatalf("versão do cliente depois do endereço: %v", got)
+	}
 
 	// Contato: inclusão e edição.
 	ct, _ := c.expect(http.StatusCreated, http.MethodPost, custPath+"/contacts", map[string]any{"name": "Ana Lima", "email": "ana@historico.test"})

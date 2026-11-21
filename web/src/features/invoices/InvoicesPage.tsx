@@ -9,7 +9,7 @@ import { EmptyState, LoadingState, QueryContent } from '../../components/states'
 import { confirmAction, CursorPager, PageHeader } from '../../components/ui';
 import { todayInTimeZone } from '../../lib/dates';
 import { handleMutationError } from '../../lib/errors';
-import { useApiMutation, useCursorPagination, useUrlFilters } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import { stableStringify, useIdempotencyKey } from '../../lib/idempotency';
 import { invoiceStatusLabels, optionsOf } from '../../lib/labels';
 import { notifySuccess } from '../../lib/notify';
@@ -106,6 +106,7 @@ export function InvoicesPage() {
     queryFn: ({ signal }) => invoicesApi.list({ ...params, cursor: pagination.cursor }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   const filtered = Object.entries(params).some(([k, v]) => k !== 'limit' && v !== undefined);
 
   // A exportação tem limite de faturas por arquivo: quando a API informa o

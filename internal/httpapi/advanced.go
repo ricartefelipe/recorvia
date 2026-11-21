@@ -126,13 +126,18 @@ func (a *API) archiveCoupon(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	p := mustPrincipal(r)
-	c, err := a.Coupons.Archive(r.Context(), p.TenantID, p.Actor(), id)
+	version, err := ifMatch(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, couponView(c))
+	p := mustPrincipal(r)
+	c, err := a.Coupons.Archive(r.Context(), p.TenantID, p.Actor(), id, version)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	a.writeVersioned(w, r, http.StatusOK, c.Version, couponView(c))
 }
 
 // --- mudanças de plano e quantidade ---

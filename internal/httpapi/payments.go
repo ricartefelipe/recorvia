@@ -94,6 +94,8 @@ func operationDTO(o payments.Operation) map[string]any {
 		"created_at": o.CreatedAt, "updated_at": o.UpdatedAt}
 }
 
+// listOperations lista as operações externas, das criadas mais recentemente
+// para as mais antigas, em páginas por cursor.
 func (a *API) listOperations(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	switch payments.OperationStatus(status) {
@@ -102,7 +104,12 @@ func (a *API) listOperations(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, invalidField("status", "Situação desconhecida."))
 		return
 	}
-	items, err := a.Store.ListOperations(r.Context(), mustPrincipal(r).TenantID, status)
+	limit, cursor, err := pageParams(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	items, next, err := a.Store.ListOperations(r.Context(), mustPrincipal(r).TenantID, status, limit, cursor)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -111,7 +118,7 @@ func (a *API) listOperations(w http.ResponseWriter, r *http.Request) {
 	for _, o := range items {
 		out = append(out, operationDTO(o))
 	}
-	a.writeJSON(w, r, http.StatusOK, list(out))
+	a.writeJSON(w, r, http.StatusOK, newPage(out, next))
 }
 
 // retryOperation reexecuta agora uma operação pendente, com resultado
@@ -126,7 +133,7 @@ func (a *API) retryOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	if _, err := a.Store.OperationExists(r.Context(), p.TenantID, id); err != nil {
+	if _, err := a.Store.Operation(r.Context(), p.TenantID, id); err != nil {
 		a.writeError(w, r, err)
 		return
 	}
@@ -134,23 +141,17 @@ func (a *API) retryOperation(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	items, err := a.Store.ListOperations(r.Context(), p.TenantID, "")
+	op, err := a.Store.Operation(r.Context(), p.TenantID, id)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	for _, o := range items {
-		if o.ID == id {
-			a.writeJSON(w, r, http.StatusOK, operationDTO(o))
-			return
-		}
-	}
-	a.writeError(w, r, apperr.NotFound("operation_not_found", "Operação não encontrada."))
+	a.writeJSON(w, r, http.StatusOK, operationDTO(op))
 }
 
 func accountDTO(acc payments.ProviderAccount) map[string]any {
 	return map[string]any{"id": acc.ID, "provider": acc.Provider, "environment": acc.Environment, "status": acc.Status,
-		"is_default": acc.IsDefault, "api_key_hint": acc.APIKeyHint, "created_at": acc.CreatedAt}
+		"is_default": acc.IsDefault, "api_key_hint": acc.APIKeyHint, "created_at": acc.CreatedAt, "version": acc.Version}
 }
 
 func (a *API) listProviders(w http.ResponseWriter, r *http.Request) {
@@ -170,7 +171,14 @@ func (a *API) listProviders(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, r, http.StatusOK, map[string]any{"data": out, "available": available})
 }
 
+// configureProvider grava a configuração do provedor na versão do If-Match:
+// "0" para o provedor ainda não configurado.
 func (a *API) configureProvider(w http.ResponseWriter, r *http.Request) {
+	version, err := ifMatchOrDefault(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	var in struct {
 		Environment   string `json:"environment"`
 		APIKey        string `json:"api_key"`
@@ -183,12 +191,12 @@ func (a *API) configureProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	p := mustPrincipal(r)
 	res, err := a.Payments.ConfigureAccount(r.Context(), p.TenantID, p.Actor(), payments.AccountInput{Provider: chi.URLParam(r, "provider"),
-		Environment: in.Environment, APIKey: in.APIKey, WebhookSecret: in.WebhookSecret, MakeDefault: in.MakeDefault})
+		Environment: in.Environment, APIKey: in.APIKey, WebhookSecret: in.WebhookSecret, MakeDefault: in.MakeDefault, ExpectedVersion: version})
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, map[string]any{"account": accountDTO(res.Account), "webhook_endpoint_url": res.EndpointURL})
+	a.writeVersioned(w, r, http.StatusOK, res.Account.Version, map[string]any{"account": accountDTO(res.Account), "webhook_endpoint_url": res.EndpointURL})
 }
 
 // receiveProviderWebhook autentica e persiste o webhook antes de responder

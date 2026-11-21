@@ -133,6 +133,16 @@ func parseTimeCursor(c string) (*time.Time, *uuid.UUID, error) {
 	return &t, &id, nil
 }
 
+// keysetPage devolve as limit primeiras linhas e, quando a consulta trouxe uma
+// a mais (ela pede limit+1), o cursor da última linha da página.
+func keysetPage[R any](rows []R, limit int, key func(R) (time.Time, uuid.UUID)) ([]R, string) {
+	if len(rows) <= limit {
+		return rows, ""
+	}
+	t, id := key(rows[limit-1])
+	return rows[:limit], timeCursor(t, id)
+}
+
 // pageLimit aplica o limite padrão (25) e máximo (100).
 func pageLimit(n int) int {
 	switch {
@@ -233,6 +243,14 @@ func (tx customersTx) UpsertAddress(ctx context.Context, customerID uuid.UUID, a
 	return tx.q.UpsertAddress(ctx, dbgen.UpsertAddressParams{TenantID: tx.tenantID, CustomerID: customerID, Street: a.Street, Number: a.Number,
 		Complement: a.Complement, District: a.District, City: a.City, State: a.State, PostalCode: a.PostalCode, Country: a.Country,
 		UpdatedAt: tx.store.clock.Now()})
+}
+
+func (tx customersTx) BumpVersion(ctx context.Context, customerID uuid.UUID, version int) error {
+	n, err := tx.q.BumpCustomerVersion(ctx, dbgen.BumpCustomerVersionParams{TenantID: tx.tenantID, ID: customerID, Version: int32(version)})
+	if err != nil {
+		return err
+	}
+	return versionConflict(n, "O cliente foi alterado por outra pessoa.")
 }
 
 func (tx customersTx) HasOpenObligations(ctx context.Context, customerID uuid.UUID) (bool, error) {
@@ -377,11 +395,18 @@ func (b base) addCreditKeyed(ctx context.Context, customerID uuid.UUID, amount i
 	return id, n == 1, err
 }
 
-// Credits retorna saldo e movimentos de crédito do cliente.
-func (c *Customers) Credits(ctx context.Context, tenantID, customerID uuid.UUID) (money.Money, []CreditEntry, error) {
+// Credits retorna o saldo e uma página dos movimentos de crédito do cliente,
+// dos mais recentes para os mais antigos, com o cursor da página seguinte.
+func (c *Customers) Credits(ctx context.Context, tenantID, customerID uuid.UUID, limit int, cursor string) (money.Money, []CreditEntry, string, error) {
+	cts, cid, err := parseTimeCursor(cursor)
+	if err != nil {
+		return money.Money{}, nil, "", err
+	}
+	limit = pageLimit(limit)
 	var bal money.Money
 	var out []CreditEntry
-	err := c.s.inTenant(ctx, tenantID, func(b base) error {
+	next := ""
+	err = c.s.inTenant(ctx, tenantID, func(b base) error {
 		if _, err := b.q.GetCustomer(ctx, dbgen.GetCustomerParams{TenantID: tenantID, ID: customerID}); err != nil {
 			return notFound(err, "customer_not_found", "Cliente não encontrado.")
 		}
@@ -389,11 +414,16 @@ func (c *Customers) Credits(ctx context.Context, tenantID, customerID uuid.UUID)
 		if bal, err = b.creditBalance(ctx, customerID); err != nil {
 			return err
 		}
-		rows, err := b.q.ListCreditEntries(ctx, dbgen.ListCreditEntriesParams{TenantID: tenantID, CustomerID: customerID})
+		rows, err := b.q.ListCreditEntries(ctx, dbgen.ListCreditEntriesParams{TenantID: tenantID, CustomerID: customerID, CursorTs: cts,
+			CursorID: cid, RowLimit: int32(limit + 1)})
+		if err != nil {
+			return err
+		}
+		rows, next = keysetPage(rows, limit, func(r dbgen.CustomerCreditEntry) (time.Time, uuid.UUID) { return r.CreatedAt, r.ID })
 		for _, r := range rows {
 			out = append(out, CreditEntry{ID: r.ID, Amount: r.Amount, Kind: r.Kind, InvoiceID: r.InvoiceID, Reason: r.Reason, CreatedAt: r.CreatedAt})
 		}
-		return err
+		return nil
 	})
-	return bal, out, err
+	return bal, out, next, err
 }

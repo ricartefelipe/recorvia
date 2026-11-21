@@ -439,11 +439,11 @@ func TestConcurrentDemotionKeepsLastOwner(t *testing.T) {
 	svc := tenancy.NewService(store, env.Clock)
 	err1, err2 := concurrently(t, store.reached, release,
 		func() error {
-			_, err := svc.ChangeRole(ctx, tn.ID, firstAcc, firstRef, second.ID, tenancy.RoleAdmin)
+			_, err := svc.ChangeRole(ctx, tn.ID, firstAcc, firstRef, second.ID, tenancy.RoleAdmin, 1)
 			return err
 		},
 		func() error {
-			_, err := svc.ChangeRole(ctx, tn.ID, secondAcc, second, tn.Owner.ID, tenancy.RoleAdmin)
+			_, err := svc.ChangeRole(ctx, tn.ID, secondAcc, second, tn.Owner.ID, tenancy.RoleAdmin, 1)
 			return err
 		})
 	if err1 != nil {
@@ -488,7 +488,7 @@ func TestUserInTwoOrganizations(t *testing.T) {
 		}
 	}
 	accA, refA := ownerAccess(a)
-	if err := env.Tenancy.RemoveMember(ctx, a.ID, accA, refA, u.ID); err != nil {
+	if err := env.Tenancy.RemoveMember(ctx, a.ID, accA, refA, u.ID, 1); err != nil {
 		t.Fatal(err)
 	}
 	_, err = env.Tenancy.ResolveAccess(ctx, a.ID, u.ID)

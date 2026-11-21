@@ -7,7 +7,7 @@ import type { Dispute, PaymentOperation } from '../../api/types';
 import { DateTime, Money, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { confirmAction, CursorPager, PageHeader } from '../../components/ui';
-import { useApiMutation, useCursorPagination, useUrlFilters } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import {
   disputeStatusLabels,
   labelOf,
@@ -38,6 +38,7 @@ export function PaymentsPage() {
     queryFn: ({ signal }) => paymentsApi.listPayments({ cursor: pagination.cursor, limit: 25 }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <Stack gap={0}>
       <PageHeader title="Recebimentos" description="Pagamentos confirmados pelo provedor ou registrados manualmente, com as taxas descontadas." />
@@ -113,6 +114,7 @@ export function RefundsPage() {
     queryFn: ({ signal }) => paymentsApi.listRefunds({ cursor: pagination.cursor, limit: 25 }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <Stack gap={0}>
       <PageHeader title="Reembolsos" description="Reembolsos solicitados ao provedor. Resultado desconhecido é resolvido por reconsulta ou conciliação." />
@@ -176,7 +178,13 @@ export function DisputesPage() {
   const { keys } = useTenant();
   const canSettle = usePermission('payments.settle_recovery');
   const [selected, setSelected] = useState<Dispute | null>(null);
-  const query = useQuery({ queryKey: keys('disputes', 'list'), queryFn: ({ signal }) => paymentsApi.listDisputes(signal) });
+  const pagination = useCursorPagination('disputes');
+  const query = useQuery({
+    queryKey: keys('disputes', 'list', pagination.cursor),
+    queryFn: ({ signal }) => paymentsApi.listDisputes({ cursor: pagination.cursor, limit: 25 }, signal),
+    placeholderData: keepPreviousData,
+  });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <Stack gap={0}>
       <PageHeader
@@ -184,67 +192,77 @@ export function DisputesPage() {
         description="Contestações abertas pelo pagador junto ao provedor, inclusive as que chegam tardiamente. Na disputa perdida de um pagamento com excedente, o crédito gerado pelo excedente é consumido; a parte que o cliente já usou fica como valor a recuperar, baixado como recebido ou perdido."
       />
       <QueryContent query={query}>
-        {({ data }) =>
-          data.length === 0 ? (
+        {(page) =>
+          page.data.length === 0 ? (
             <EmptyState title="Nenhuma disputa" description="Contestações informadas pelo provedor aparecem aqui." />
           ) : (
-            <Table.ScrollContainer minWidth={1100}>
-              <Table aria-label="Disputas">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Aberta em</Table.Th>
-                    <Table.Th>Cobrança</Table.Th>
-                    <Table.Th ta="right">Valor contestado</Table.Th>
-                    <Table.Th>Situação</Table.Th>
-                    <Table.Th ta="right">Crédito consumido</Table.Th>
-                    <Table.Th ta="right">A recuperar do cliente</Table.Th>
-                    <Table.Th ta="right">Saldo a recuperar</Table.Th>
-                    <Table.Th>Encerrada em</Table.Th>
-                    <Table.Th aria-label="Ações" />
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {data.map((d) => {
-                    const outstanding = d.recovery_outstanding_amount;
-                    return (
-                      <Table.Tr key={d.id}>
-                        <Table.Td>
-                          <DateTime value={d.opened_at} />
-                        </Table.Td>
-                        <Table.Td>
-                          <ChargeLink id={d.charge_id} />
-                        </Table.Td>
-                        <Table.Td ta="right">
-                          <Money value={d.amount} currency={d.currency} />
-                        </Table.Td>
-                        <Table.Td>
-                          <StatusBadge status={d.status} labels={disputeStatusLabels} />
-                        </Table.Td>
-                        <Table.Td ta="right">{d.credit_amount > 0 ? <Money value={d.credit_amount} currency={d.currency} /> : '—'}</Table.Td>
-                        <Table.Td ta="right">{d.recovery_amount > 0 ? <Money value={d.recovery_amount} currency={d.currency} /> : '—'}</Table.Td>
-                        <Table.Td ta="right">
-                          {d.recovery_amount > 0 ? <Money value={outstanding} currency={d.currency} strong={outstanding > 0} /> : '—'}
-                        </Table.Td>
-                        <Table.Td>{d.closed_at ? <DateTime value={d.closed_at} /> : '—'}</Table.Td>
-                        <Table.Td>
-                          {d.recovery_amount > 0 && (
-                            <Button
-                              size="xs"
-                              variant="light"
-                              leftSection={<IconReceiptRefund size={14} />}
-                              onClick={() => setSelected(d)}
-                              aria-label={`${canSettle && outstanding > 0 ? 'Dar baixa' : 'Ver baixas'} da disputa da cobrança ${d.charge_id.slice(0, 8)}`}
-                            >
-                              {canSettle && outstanding > 0 ? 'Dar baixa' : 'Ver baixas'}
-                            </Button>
-                          )}
-                        </Table.Td>
-                      </Table.Tr>
-                    );
-                  })}
-                </Table.Tbody>
-              </Table>
-            </Table.ScrollContainer>
+            <>
+              <Table.ScrollContainer minWidth={1100}>
+                <Table aria-label="Disputas">
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Aberta em</Table.Th>
+                      <Table.Th>Cobrança</Table.Th>
+                      <Table.Th ta="right">Valor contestado</Table.Th>
+                      <Table.Th>Situação</Table.Th>
+                      <Table.Th ta="right">Crédito consumido</Table.Th>
+                      <Table.Th ta="right">A recuperar do cliente</Table.Th>
+                      <Table.Th ta="right">Saldo a recuperar</Table.Th>
+                      <Table.Th>Encerrada em</Table.Th>
+                      <Table.Th aria-label="Ações" />
+                    </Table.Tr>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {page.data.map((d) => {
+                      const outstanding = d.recovery_outstanding_amount;
+                      return (
+                        <Table.Tr key={d.id}>
+                          <Table.Td>
+                            <DateTime value={d.opened_at} />
+                          </Table.Td>
+                          <Table.Td>
+                            <ChargeLink id={d.charge_id} />
+                          </Table.Td>
+                          <Table.Td ta="right">
+                            <Money value={d.amount} currency={d.currency} />
+                          </Table.Td>
+                          <Table.Td>
+                            <StatusBadge status={d.status} labels={disputeStatusLabels} />
+                          </Table.Td>
+                          <Table.Td ta="right">{d.credit_amount > 0 ? <Money value={d.credit_amount} currency={d.currency} /> : '—'}</Table.Td>
+                          <Table.Td ta="right">{d.recovery_amount > 0 ? <Money value={d.recovery_amount} currency={d.currency} /> : '—'}</Table.Td>
+                          <Table.Td ta="right">
+                            {d.recovery_amount > 0 ? <Money value={outstanding} currency={d.currency} strong={outstanding > 0} /> : '—'}
+                          </Table.Td>
+                          <Table.Td>{d.closed_at ? <DateTime value={d.closed_at} /> : '—'}</Table.Td>
+                          <Table.Td>
+                            {d.recovery_amount > 0 && (
+                              <Button
+                                size="xs"
+                                variant="light"
+                                leftSection={<IconReceiptRefund size={14} />}
+                                onClick={() => setSelected(d)}
+                                aria-label={`${canSettle && outstanding > 0 ? 'Dar baixa' : 'Ver baixas'} da disputa da cobrança ${d.charge_id.slice(0, 8)}`}
+                              >
+                                {canSettle && outstanding > 0 ? 'Dar baixa' : 'Ver baixas'}
+                              </Button>
+                            )}
+                          </Table.Td>
+                        </Table.Tr>
+                      );
+                    })}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
+              <CursorPager
+                page={pagination.page}
+                hasPrevious={pagination.hasPrevious}
+                hasNext={!!page.next_cursor}
+                onPrevious={pagination.previous}
+                onNext={() => page.next_cursor && pagination.next(page.next_cursor)}
+                loading={query.isFetching}
+              />
+            </>
           )
         }
       </QueryContent>
@@ -258,16 +276,22 @@ export function PaymentOperationsPage() {
   const canRetry = usePermission('payments.charge');
   const [filters, setFilters] = useUrlFilters(['status'] as const);
   const status = (filters.status || undefined) as PaymentOperationStatus | undefined;
+  // O filtro volta à primeira página.
+  const pagination = useCursorPagination(`payment-operations:${status ?? 'all'}`);
   const query = useQuery({
-    queryKey: keys('payment-operations', 'list', status ?? 'all'),
-    queryFn: ({ signal }) => paymentsApi.listOperations(status, signal),
+    queryKey: keys('payment-operations', 'list', status ?? 'all', pagination.cursor),
+    queryFn: ({ signal }) => paymentsApi.listOperations({ status, cursor: pagination.cursor, limit: 25 }, signal),
+    placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
+  // Aviso das operações com resultado desconhecido: a primeira página com o
+  // limite máximo; havendo mais, o aviso informa que são pelo menos essas.
   const unknownQuery = useQuery({
-    queryKey: keys('payment-operations', 'list', 'unknown'),
-    queryFn: ({ signal }) => paymentsApi.listOperations('unknown', signal),
-    enabled: status !== 'unknown',
+    queryKey: keys('payment-operations', 'unknown-alert'),
+    queryFn: ({ signal }) => paymentsApi.listOperations({ status: 'unknown', limit: 100 }, signal),
   });
-  const unknownCount = status === 'unknown' ? (query.data?.data.length ?? 0) : (unknownQuery.data?.data.length ?? 0);
+  const unknownCount = unknownQuery.data?.data.length ?? 0;
+  const unknownLabel = unknownQuery.data?.next_cursor ? `${unknownCount} ou mais` : String(unknownCount);
   const retry = useApiMutation<PaymentOperation, PaymentOperation>({
     mutationFn: (op) => paymentsApi.retryOperation(op.id),
     invalidate: ['payment-operations', 'charges', 'refunds', 'invoices', 'dashboard'],
@@ -288,7 +312,7 @@ export function PaymentOperationsPage() {
         description="Chamadas externas ao provedor registradas antes do envio. Quando a resposta se perde, o resultado fica desconhecido até ser reconsultado."
       />
       {unknownCount > 0 && (
-        <Alert color="red" icon={<IconAlertTriangle />} title={`${unknownCount} operação(ões) com resultado desconhecido`} mb="md">
+        <Alert color="red" icon={<IconAlertTriangle />} title={`${unknownLabel} operação(ões) com resultado desconhecido`} mb="md">
           O provedor pode ter executado a operação. Reconsulte antes de qualquer nova tentativa: o Recorvia não cria cobrança às
           cegas.{' '}
           {status !== 'unknown' && (
@@ -310,76 +334,86 @@ export function PaymentOperationsPage() {
         />
       </Group>
       <QueryContent query={query}>
-        {({ data }) =>
-          data.length === 0 ? (
+        {(page) =>
+          page.data.length === 0 ? (
             <EmptyState title="Nenhuma operação" description={status ? 'Nenhuma operação nesta situação.' : 'As operações aparecem ao criar cobranças e reembolsos.'} />
           ) : (
-            <Table.ScrollContainer minWidth={980}>
-              <Table aria-label="Operações de pagamento">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Tipo</Table.Th>
-                    <Table.Th>Situação</Table.Th>
-                    <Table.Th>Referência externa</Table.Th>
-                    <Table.Th>Cobrança</Table.Th>
-                    <Table.Th ta="right">Tentativas</Table.Th>
-                    <Table.Th>Próxima tentativa</Table.Th>
-                    <Table.Th>Último erro</Table.Th>
-                    <Table.Th>Atualizada em</Table.Th>
-                    {canRetry && <Table.Th aria-label="Ações" />}
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {data.map((op) => (
-                    <Table.Tr key={op.id} bg={op.status === 'unknown' ? 'red.0' : undefined}>
-                      <Table.Td>{labelOf(paymentOperationKindLabels, op.kind)}</Table.Td>
-                      <Table.Td>
-                        {op.status === 'unknown' ? (
-                          <Badge color="red" variant="filled">
-                            {labelOf(paymentOperationStatusLabels, op.status)}
-                          </Badge>
-                        ) : (
-                          <StatusBadge status={op.status} labels={paymentOperationStatusLabels} />
-                        )}
-                      </Table.Td>
-                      <Table.Td>
-                        <Code>{op.external_reference}</Code>
-                      </Table.Td>
-                      <Table.Td>
-                        <ChargeLink id={op.charge_id} />
-                      </Table.Td>
-                      <Table.Td ta="right">{op.attempts}</Table.Td>
-                      <Table.Td>
-                        <DateTime value={op.next_attempt_at} />
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="xs" lineClamp={2} title={op.last_error}>
-                          {op.last_error || '—'}
-                        </Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <DateTime value={op.updated_at} />
-                      </Table.Td>
-                      {canRetry && (
+            <>
+              <Table.ScrollContainer minWidth={980}>
+                <Table aria-label="Operações de pagamento">
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Tipo</Table.Th>
+                      <Table.Th>Situação</Table.Th>
+                      <Table.Th>Referência externa</Table.Th>
+                      <Table.Th>Cobrança</Table.Th>
+                      <Table.Th ta="right">Tentativas</Table.Th>
+                      <Table.Th>Próxima tentativa</Table.Th>
+                      <Table.Th>Último erro</Table.Th>
+                      <Table.Th>Atualizada em</Table.Th>
+                      {canRetry && <Table.Th aria-label="Ações" />}
+                    </Table.Tr>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {page.data.map((op) => (
+                      <Table.Tr key={op.id} bg={op.status === 'unknown' ? 'red.0' : undefined}>
+                        <Table.Td>{labelOf(paymentOperationKindLabels, op.kind)}</Table.Td>
                         <Table.Td>
-                          {op.status === 'unknown' && (
-                            <Button
-                              size="xs"
-                              variant="light"
-                              leftSection={<IconRefreshDot size={14} />}
-                              onClick={() => void onRetry(op)}
-                              loading={retry.isPending && retry.variables?.id === op.id}
-                            >
-                              Reconsultar
-                            </Button>
+                          {op.status === 'unknown' ? (
+                            <Badge color="red" variant="filled">
+                              {labelOf(paymentOperationStatusLabels, op.status)}
+                            </Badge>
+                          ) : (
+                            <StatusBadge status={op.status} labels={paymentOperationStatusLabels} />
                           )}
                         </Table.Td>
-                      )}
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            </Table.ScrollContainer>
+                        <Table.Td>
+                          <Code>{op.external_reference}</Code>
+                        </Table.Td>
+                        <Table.Td>
+                          <ChargeLink id={op.charge_id} />
+                        </Table.Td>
+                        <Table.Td ta="right">{op.attempts}</Table.Td>
+                        <Table.Td>
+                          <DateTime value={op.next_attempt_at} />
+                        </Table.Td>
+                        <Table.Td>
+                          <Text size="xs" lineClamp={2} title={op.last_error}>
+                            {op.last_error || '—'}
+                          </Text>
+                        </Table.Td>
+                        <Table.Td>
+                          <DateTime value={op.updated_at} />
+                        </Table.Td>
+                        {canRetry && (
+                          <Table.Td>
+                            {op.status === 'unknown' && (
+                              <Button
+                                size="xs"
+                                variant="light"
+                                leftSection={<IconRefreshDot size={14} />}
+                                onClick={() => void onRetry(op)}
+                                loading={retry.isPending && retry.variables?.id === op.id}
+                              >
+                                Reconsultar
+                              </Button>
+                            )}
+                          </Table.Td>
+                        )}
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
+              <CursorPager
+                page={pagination.page}
+                hasPrevious={pagination.hasPrevious}
+                hasNext={!!page.next_cursor}
+                onPrevious={pagination.previous}
+                onNext={() => page.next_cursor && pagination.next(page.next_cursor)}
+                loading={query.isFetching}
+              />
+            </>
           )
         }
       </QueryContent>

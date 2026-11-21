@@ -241,7 +241,7 @@ export function CouponsPage() {
   const canWrite = usePermission('catalog.write');
   const query = useQuery({ queryKey: keys('coupons', 'list'), queryFn: ({ signal }) => catalogApi.listCoupons(signal) });
   const archive = useApiMutation<Coupon, Coupon>({
-    mutationFn: (c) => catalogApi.archiveCoupon(c.id),
+    mutationFn: (c) => catalogApi.archiveCoupon(c.id, c.version),
     invalidate: ['coupons'],
     successMessage: 'Cupom arquivado.',
   });

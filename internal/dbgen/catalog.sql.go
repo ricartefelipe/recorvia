@@ -14,16 +14,17 @@ import (
 )
 
 const archiveCoupon = `-- name: ArchiveCoupon :execrows
-UPDATE coupons SET status = 'archived', version = version + 1 WHERE tenant_id = $1 AND id = $2
+UPDATE coupons SET status = 'archived', version = version + 1 WHERE tenant_id = $1 AND id = $2 AND version = $3
 `
 
 type ArchiveCouponParams struct {
 	TenantID uuid.UUID
 	ID       uuid.UUID
+	Version  int32
 }
 
 func (q *Queries) ArchiveCoupon(ctx context.Context, arg ArchiveCouponParams) (int64, error) {
-	result, err := q.db.Exec(ctx, archiveCoupon, arg.TenantID, arg.ID)
+	result, err := q.db.Exec(ctx, archiveCoupon, arg.TenantID, arg.ID, arg.Version)
 	if err != nil {
 		return 0, err
 	}

@@ -490,17 +490,29 @@ func (s *Store) RecordDeadLetter(ctx context.Context, d DeadLetter) error {
 	})
 }
 
-// DeadLetters lista mensagens não processadas do tenant.
-func (s *Store) DeadLetters(ctx context.Context, tenantID uuid.UUID, status string) ([]DeadLetter, error) {
+// DeadLetters lista mensagens não processadas do tenant, das falhas mais
+// recentes para as mais antigas, em páginas por cursor.
+func (s *Store) DeadLetters(ctx context.Context, tenantID uuid.UUID, status string, limit int, cursor string) ([]DeadLetter, string, error) {
+	cts, cid, err := parseTimeCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	limit = pageLimit(limit)
 	var out []DeadLetter
-	err := s.inTenant(ctx, tenantID, func(b base) error {
-		rows, err := b.q.ListDeadLetters(ctx, dbgen.ListDeadLettersParams{TenantID: &tenantID, Status: strPtr(status)})
+	next := ""
+	err = s.inTenant(ctx, tenantID, func(b base) error {
+		rows, err := b.q.ListDeadLetters(ctx, dbgen.ListDeadLettersParams{TenantID: &tenantID, Status: strPtr(status), CursorTs: cts,
+			CursorID: cid, RowLimit: int32(limit + 1)})
+		if err != nil {
+			return err
+		}
+		rows, next = keysetPage(rows, limit, func(r dbgen.DeadLetter) (time.Time, uuid.UUID) { return r.FailedAt, r.ID })
 		for _, r := range rows {
 			out = append(out, deadLetterFromRow(r))
 		}
-		return err
+		return nil
 	})
-	return out, err
+	return out, next, err
 }
 
 func deadLetterFromRow(r dbgen.DeadLetter) DeadLetter {

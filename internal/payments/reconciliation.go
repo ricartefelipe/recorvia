@@ -481,6 +481,9 @@ type ResolveInput struct {
 	ID            uuid.UUID
 	Resolution    Resolution
 	Justification string
+	// ExpectedVersion é a versão da divergência vista por quem resolve
+	// (If-Match); divergente, nada é alterado (412 version_mismatch).
+	ExpectedVersion int
 }
 
 func validateResolve(in ResolveInput) (ResolveInput, error) {

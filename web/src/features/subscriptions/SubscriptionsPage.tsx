@@ -7,7 +7,7 @@ import type { Subscription, SubscriptionStatus } from '../../api/types';
 import { DateTime, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { CursorPager, PageHeader } from '../../components/ui';
-import { useCursorPagination, useUrlFilters } from '../../lib/hooks';
+import { useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import { stableStringify } from '../../lib/idempotency';
 import { optionsOf, subscriptionStatusLabels } from '../../lib/labels';
 import { Can, useTenant } from '../../session/SessionContext';
@@ -89,6 +89,7 @@ export function SubscriptionsPage() {
     queryFn: ({ signal }) => subscriptionsApi.list({ ...params, cursor: pagination.cursor }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   const filtered = !!params.status || !!params.customer_id || !!params.in_force;
 
   return (

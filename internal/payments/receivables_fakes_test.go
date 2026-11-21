@@ -555,9 +555,13 @@ func (s *payStore) InsertDiscrepancy(_ context.Context, d Discrepancy) error {
 	return nil
 }
 
+// UpdateDiscrepancy reproduz o UPDATE condicionado à versão.
 func (s *payStore) UpdateDiscrepancy(_ context.Context, d *Discrepancy) error {
 	if err := s.fail("UpdateDiscrepancy"); err != nil {
 		return err
+	}
+	if cur, ok := s.discrepancies[d.ID]; ok && cur.Version != d.Version {
+		return apperr.PreconditionFailed("version_mismatch", "A divergência foi alterada concorrentemente.")
 	}
 	d.Version++
 	s.discrepancies[d.ID] = *d

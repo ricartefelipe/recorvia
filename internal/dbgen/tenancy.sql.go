@@ -673,11 +673,27 @@ func (q *Queries) ListAllPlatformAddons(ctx context.Context) ([]PlatformAddon, e
 }
 
 const listInvitations = `-- name: ListInvitations :many
-SELECT id, tenant_id, email, role, token_hash, invited_by, expires_at, accepted_at, accepted_by, revoked_at, revoked_by, created_at FROM invitations WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT 200
+SELECT id, tenant_id, email, role, token_hash, invited_by, expires_at, accepted_at, accepted_by, revoked_at, revoked_by, created_at FROM invitations
+ WHERE tenant_id = $1
+   AND ($2::timestamptz IS NULL OR (created_at, id) < ($2::timestamptz, $3::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT $4
 `
 
-func (q *Queries) ListInvitations(ctx context.Context, tenantID uuid.UUID) ([]Invitation, error) {
-	rows, err := q.db.Query(ctx, listInvitations, tenantID)
+type ListInvitationsParams struct {
+	TenantID uuid.UUID
+	CursorTs *time.Time
+	CursorID *uuid.UUID
+	RowLimit int32
+}
+
+func (q *Queries) ListInvitations(ctx context.Context, arg ListInvitationsParams) ([]Invitation, error) {
+	rows, err := q.db.Query(ctx, listInvitations,
+		arg.TenantID,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

@@ -5,7 +5,7 @@ import type { Invoice } from '../../api/types';
 import { CivilDate, DateTime, Money, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { CursorPager } from '../../components/ui';
-import { useCursorPagination } from '../../lib/hooks';
+import { useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
 import { stableStringify } from '../../lib/idempotency';
 import { invoiceStatusLabels } from '../../lib/labels';
 import { useTenant } from '../../session/SessionContext';
@@ -78,6 +78,7 @@ export function RelatedInvoices({ params, emptyText }: { params: Pick<InvoiceLis
     queryFn: ({ signal }) => invoicesApi.list({ ...params, limit: 25, cursor: pagination.cursor }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <QueryContent query={query} loading={<LoadingState />}>
       {(page) =>

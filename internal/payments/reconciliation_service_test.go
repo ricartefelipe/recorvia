@@ -158,7 +158,7 @@ func TestRunReconciliationDeduplicatesAndAutoResolves(t *testing.T) {
 	}
 	// Resolvida manualmente: a mesma divergência não é reaberta.
 	if _, err := f.svc.ResolveDiscrepancy(context.Background(), f.tenantID, f.actor, &f.userID, ResolveInput{ID: fee.ID,
-		Resolution: ResolutionKeepLocal, Justification: "Taxa conferida no contrato com o provedor."}); err != nil {
+		Resolution: ResolutionKeepLocal, Justification: "Taxa conferida no contrato com o provedor.", ExpectedVersion: fee.Version}); err != nil {
 		t.Fatal(err)
 	}
 	f.clock.Advance(time.Hour)
@@ -709,9 +709,10 @@ func (f *payFixture) addDiscrepancy(t *testing.T, d Discrepancy) Discrepancy {
 	return d
 }
 
+// resolve resolve a divergência na versão atual (a do If-Match).
 func (f *payFixture) resolve(d Discrepancy, r Resolution) (Discrepancy, error) {
 	return f.svc.ResolveDiscrepancy(context.Background(), f.tenantID, f.actor, &f.userID, ResolveInput{ID: d.ID, Resolution: r,
-		Justification: "Conferido com o extrato do provedor."})
+		Justification: "Conferido com o extrato do provedor.", ExpectedVersion: f.store.discrepancies[d.ID].Version})
 }
 
 func mp(v int64) *money.Money { m := brl(v); return &m }
@@ -744,6 +745,37 @@ func TestResolveDiscrepancyBasicActions(t *testing.T) {
 		t.Fatalf("consulta: %v", err)
 	}
 	_ = c
+}
+
+// A resolução exige a versão da divergência vista por quem resolve: a
+// divergente é recusada antes de consultar o provedor e, se a divergência
+// mudar depois da consulta (nova detecção), a condição da gravação a recusa.
+func TestResolveDiscrepancyRequiresCurrentVersion(t *testing.T) {
+	f := newPayFixture(t)
+	_, c := awaitingCharge(t, f)
+	d := f.addDiscrepancy(t, Discrepancy{Kind: DiscrepancyPaymentNotReflected, ChargeID: &c.ID})
+	f.gw.getResult = *providerSnapshot(ProviderReceived, "RECEIVED", 10000, 199, nil)
+	_, err := f.svc.ResolveDiscrepancy(context.Background(), f.tenantID, f.actor, &f.userID, ResolveInput{ID: d.ID,
+		Resolution: ResolutionAcceptProvider, Justification: "Conferido com o extrato do provedor.", ExpectedVersion: d.Version + 1})
+	wantAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	if len(f.gw.getCalls) != 0 || f.store.discrepancies[d.ID].Status != DiscrepancyOpen {
+		t.Fatal("versão divergente não consulta o provedor nem resolve")
+	}
+	// Nova detecção da divergência durante a consulta ao provedor.
+	f.gw.onGet = func() {
+		x := f.store.discrepancies[d.ID]
+		x.Occurrences++
+		x.Version++
+		f.store.discrepancies[d.ID] = x
+	}
+	_, err = f.resolve(d, ResolutionAcceptProvider)
+	wantAppErr(t, err, apperr.KindPreconditionFailed, "version_mismatch")
+	if len(f.gw.getCalls) != 1 {
+		t.Fatalf("a versão atual passa pela recusa antecipada e consulta o provedor: %v", f.gw.getCalls)
+	}
+	if x := f.store.discrepancies[d.ID]; x.Status != DiscrepancyOpen || x.LedgerTransactionID != nil || x.Version != d.Version+1 {
+		t.Fatalf("divergência alterada durante a consulta não pode ser resolvida: %+v", x)
+	}
 }
 
 func TestResolveFeeAndAmountMismatch(t *testing.T) {

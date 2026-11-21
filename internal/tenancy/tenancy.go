@@ -221,6 +221,13 @@ type Invitation struct {
 	CreatedAt  time.Time
 }
 
+// InvitationPage é uma página de convites, dos mais recentes para os mais
+// antigos; NextCursor vazio indica a última página.
+type InvitationPage struct {
+	Items      []Invitation
+	NextCursor string
+}
+
 // State calcula a situação no instante now.
 func (i Invitation) State(now time.Time) InvitationState {
 	switch {

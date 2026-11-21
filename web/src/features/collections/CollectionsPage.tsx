@@ -35,12 +35,11 @@ import type {
   Notification,
   NotificationEvent,
   NotificationTemplate,
-  TemplateKey,
 } from '../../api/types';
 import { DateTime, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { CursorPager, PageHeader } from '../../components/ui';
-import { useApiMutation, useCursorPagination, useUrlFilters } from '../../lib/hooks';
+import { useApiMutation, useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import { stableStringify } from '../../lib/idempotency';
 import { channelLabels, labelOf, notificationReasonLabels, notificationStatusLabels, optionsOf, templateKeyLabels } from '../../lib/labels';
 import { requiredText } from '../../lib/validation';
@@ -54,8 +53,9 @@ const collectionsApi = {
   updatePolicy: (p: CollectionPolicy, input: CollectionPolicyInput) =>
     api.patch<CollectionPolicy>(`/api/v1/collection-policies/${enc(p.id)}`, input, { ifMatch: p.version }),
   templates: (signal?: AbortSignal) => api.get<DataList<NotificationTemplate>>('/api/v1/notification-templates', { signal }),
-  updateTemplate: (key: TemplateKey, input: { subject: string; body: string }) =>
-    api.put<NotificationTemplate>(`/api/v1/notification-templates/${enc(key)}`, input),
+  /** If-Match é a versão da personalização; 0 no template padrão, ainda não personalizado. */
+  updateTemplate: (t: NotificationTemplate, input: { subject: string; body: string }) =>
+    api.put<NotificationTemplate>(`/api/v1/notification-templates/${enc(t.key)}`, input, { ifMatch: t.version }),
   notifications: (params: { status?: string; invoice_id?: string; cursor?: string; limit?: number }, signal?: AbortSignal) =>
     api.get<CursorPage<Notification>>('/api/v1/notifications', { query: { ...params }, signal }),
   notificationEvents: (id: string, signal?: AbortSignal) =>
@@ -173,6 +173,7 @@ function PolicyModal({ policy, opened, onClose }: { policy: CollectionPolicy | n
     form,
     fieldMap: { reminder_offsets_days: 'offsets' },
     onSuccess: onClose,
+    onConcurrentReload: onClose,
   });
   // Erros da lista inteira (máximo, repetidos) chegam em root, como no
   // resolver do zod para arrays; mensagens do servidor, em message.
@@ -206,7 +207,13 @@ function PolicyModal({ policy, opened, onClose }: { policy: CollectionPolicy | n
                       max={90}
                       allowDecimal={false}
                       value={field.value}
-                      onChange={(v) => field.onChange(v === '' ? '' : Number(v))}
+                      onChange={(v) => {
+                        field.onChange(v === '' ? '' : Number(v));
+                        // A repetição é uma regra da lista inteira (offsets.root):
+                        // depois do primeiro envio, a lista é revalidada a cada
+                        // mudança para que o aviso suma assim que for corrigido.
+                        if (form.formState.isSubmitted) void form.trigger('offsets');
+                      }}
                       error={fieldState.error?.message}
                       w={140}
                     />
@@ -364,11 +371,12 @@ function TemplateModal({ template, onClose }: { template: NotificationTemplate; 
   const bodyRef = useRef<HTMLTextAreaElement | null>(null);
   const form = useForm<TemplateForm>({ resolver: zodResolver(templateSchema), defaultValues: { subject: template.subject, body: template.body } });
   const mutation = useApiMutation<TemplateForm, NotificationTemplate, TemplateForm>({
-    mutationFn: (input) => collectionsApi.updateTemplate(template.key, input),
+    mutationFn: (input) => collectionsApi.updateTemplate(template, input),
     invalidate: ['notification-templates'],
     successMessage: 'Template gravado.',
     form,
     onSuccess: onClose,
+    onConcurrentReload: onClose,
   });
   const { ref, ...bodyField } = form.register('body');
   const insert = (name: string) => {
@@ -578,6 +586,7 @@ function NotificationsTab() {
     queryFn: ({ signal }) => collectionsApi.notifications({ ...params, cursor: pagination.cursor }, signal),
     placeholderData: keepPreviousData,
   });
+  useReturnFromEmptyPage(pagination, query.data?.data, query.isPlaceholderData);
   return (
     <Stack>
       <Group align="flex-end">

@@ -1163,14 +1163,17 @@ SELECT id, tenant_id, run_id, last_run_id, kind, status, dedupe_key, provider, c
  WHERE tenant_id = $1
    AND ($2::text IS NULL OR status = $2)
    AND ($3::text IS NULL OR kind = $3)
+   AND ($4::timestamptz IS NULL OR (created_at, id) < ($4::timestamptz, $5::uuid))
  ORDER BY created_at DESC, id DESC
- LIMIT $4
+ LIMIT $6
 `
 
 type ListDiscrepanciesParams struct {
 	TenantID uuid.UUID
 	Status   *string
 	Kind     *string
+	CursorTs *time.Time
+	CursorID *uuid.UUID
 	RowLimit int32
 }
 
@@ -1179,6 +1182,8 @@ func (q *Queries) ListDiscrepancies(ctx context.Context, arg ListDiscrepanciesPa
 		arg.TenantID,
 		arg.Status,
 		arg.Kind,
+		arg.CursorTs,
+		arg.CursorID,
 		arg.RowLimit,
 	)
 	if err != nil {
@@ -1313,18 +1318,28 @@ const listDisputes = `-- name: ListDisputes :many
 SELECT id, tenant_id, charge_id, provider, status, amount, currency, provider_status, opened_at, closed_at, created_at, updated_at, version, credit_amount, recovery_amount, recovery_received_amount, recovery_written_off_amount FROM disputes
  WHERE tenant_id = $1
    AND ($2::uuid IS NULL OR charge_id = $2)
+   AND ($3::timestamptz IS NULL OR (opened_at, id) < ($3::timestamptz, $4::uuid))
  ORDER BY opened_at DESC, id DESC
- LIMIT $3
+ LIMIT $5
 `
 
 type ListDisputesParams struct {
 	TenantID uuid.UUID
 	ChargeID *uuid.UUID
+	CursorTs *time.Time
+	CursorID *uuid.UUID
 	RowLimit int32
 }
 
+// Paginação por keyset em (opened_at, id), que não mudam depois da abertura.
 func (q *Queries) ListDisputes(ctx context.Context, arg ListDisputesParams) ([]Dispute, error) {
-	rows, err := q.db.Query(ctx, listDisputes, arg.TenantID, arg.ChargeID, arg.RowLimit)
+	rows, err := q.db.Query(ctx, listDisputes,
+		arg.TenantID,
+		arg.ChargeID,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1433,16 +1448,28 @@ func (q *Queries) ListOpenDiscrepanciesForSubjects(ctx context.Context, arg List
 }
 
 const listReconciliationRuns = `-- name: ListReconciliationRuns :many
-SELECT id, tenant_id, provider_account_id, provider, trigger_type, status, window_start, window_end, checked_count, discrepancy_count, error, requested_by, request_key, lease_until, started_at, finished_at, updated_at, attempts FROM reconciliation_runs WHERE tenant_id = $1 ORDER BY started_at DESC, id DESC LIMIT $2
+SELECT id, tenant_id, provider_account_id, provider, trigger_type, status, window_start, window_end, checked_count, discrepancy_count, error, requested_by, request_key, lease_until, started_at, finished_at, updated_at, attempts FROM reconciliation_runs
+ WHERE tenant_id = $1
+   AND ($2::timestamptz IS NULL OR (started_at, id) < ($2::timestamptz, $3::uuid))
+ ORDER BY started_at DESC, id DESC
+ LIMIT $4
 `
 
 type ListReconciliationRunsParams struct {
 	TenantID uuid.UUID
+	CursorTs *time.Time
+	CursorID *uuid.UUID
 	RowLimit int32
 }
 
+// Paginação por keyset em (started_at, id), gravados no registro da execução.
 func (q *Queries) ListReconciliationRuns(ctx context.Context, arg ListReconciliationRunsParams) ([]ReconciliationRun, error) {
-	rows, err := q.db.Query(ctx, listReconciliationRuns, arg.TenantID, arg.RowLimit)
+	rows, err := q.db.Query(ctx, listReconciliationRuns,
+		arg.TenantID,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
