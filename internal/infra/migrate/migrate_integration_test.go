@@ -5,10 +5,14 @@ package migrate_test
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ricartefelipe/recorvia/internal/infra/migrate"
+	"github.com/ricartefelipe/recorvia/internal/kernel/money"
+	"github.com/ricartefelipe/recorvia/internal/testsupport/fixture"
 	"github.com/ricartefelipe/recorvia/internal/testsupport/pgtest"
 )
 
@@ -233,8 +237,8 @@ func TestDashboardIndexesMigrationDownAndUp(t *testing.T) {
 	if !exists(t, pool, `SELECT `+indexes+` = 5`) {
 		t.Fatal("índices do painel ausentes antes do Down")
 	}
-	reverted, err := migrate.DownTo(ctx, env.OwnerURL, 18)
-	if err != nil || len(reverted) != 1 || reverted[0] != name {
+	reverted, err := migrate.DownTo(ctx, env.OwnerURL, 22)
+	if err != nil || len(reverted) == 0 || reverted[len(reverted)-1] != name {
 		t.Fatalf("reversão: %v %v", reverted, err)
 	}
 	if !exists(t, pool, `SELECT `+indexes+` = 0 AND to_regclass('public.dispute_recovery_settlements') IS NOT NULL
@@ -242,10 +246,165 @@ func TestDashboardIndexesMigrationDownAndUp(t *testing.T) {
 		t.Fatal("esquema após o Down")
 	}
 	applied, err := migrate.Up(ctx, env.OwnerURL)
-	if err != nil || len(applied) != 1 || applied[0] != name {
+	if err != nil || len(applied) != len(reverted) || applied[0] != name {
 		t.Fatalf("reaplicação: %v %v", applied, err)
 	}
 	if !exists(t, pool, `SELECT `+indexes+` = 5`) {
 		t.Fatal("índices do painel ausentes após o Up")
+	}
+}
+
+// A migration do atendimento dos serviços adicionais é reversível: o Down
+// remove colunas, constraints, índices, o gatilho de proteção e as funções da
+// equipe da plataforma, sem tocar na tabela de pedidos; o Up seguinte recria
+// tudo, com a execução das funções restrita ao papel da aplicação.
+func TestAddonOrderHandlingMigrationDownAndUp(t *testing.T) {
+	ctx := context.Background()
+	env := pgtest.Start(t)
+	pool := pgtest.OwnerPool(t)
+	const name = "00021_atendimento_de_servicos_adicionais.sql"
+	const objects = `(SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'platform_addon_orders'
+			AND column_name IN ('scheduled_for', 'completed_at', 'canceled_at', 'cancel_reason', 'handled_by', 'statement_id', 'version'))
+		+ (SELECT count(*) FROM pg_constraint WHERE conname IN ('platform_addon_orders_statement_fk', 'platform_addon_orders_scheduled',
+			'platform_addon_orders_completion', 'platform_addon_orders_cancellation', 'platform_addon_orders_billed_when_completed'))
+		+ (SELECT count(*) FROM pg_indexes WHERE indexname IN ('platform_addon_orders_unbilled_idx', 'platform_addon_orders_status_idx'))
+		+ (SELECT count(*) FROM pg_trigger WHERE tgname = 'platform_addon_orders_guard')
+		+ (SELECT count(*) FROM pg_proc WHERE proname IN ('app_platform_addon_orders_guard', 'app_platform_addon_orders', 'app_platform_tenant_names'))`
+	present := []string{
+		`SELECT ` + objects + ` = 18`,
+		`SELECT has_function_privilege('recorvia_app', 'app_platform_addon_orders(text, timestamptz, uuid, integer)', 'EXECUTE')
+		    AND has_function_privilege('recorvia_app', 'app_platform_tenant_names(uuid[])', 'EXECUTE')
+		    AND NOT has_function_privilege('public', 'app_platform_addon_orders(text, timestamptz, uuid, integer)', 'EXECUTE')
+		    AND NOT has_function_privilege('public', 'app_platform_tenant_names(uuid[])', 'EXECUTE')`,
+	}
+	for _, q := range present {
+		if !exists(t, pool, q) {
+			t.Fatalf("esquema antes do Down: %s", q)
+		}
+	}
+	reverted, err := migrate.DownTo(ctx, env.OwnerURL, 20)
+	if err != nil || len(reverted) == 0 || reverted[len(reverted)-1] != name {
+		t.Fatalf("reversão: %v %v", reverted, err)
+	}
+	for _, q := range []string{
+		`SELECT ` + objects + ` = 0`,
+		`SELECT to_regclass('public.platform_addon_orders') IS NOT NULL AND to_regprocedure('app_platform_tenant_catalog()') IS NOT NULL`,
+	} {
+		if !exists(t, pool, q) {
+			t.Fatalf("esquema após o Down: %s", q)
+		}
+	}
+	applied, err := migrate.Up(ctx, env.OwnerURL)
+	if err != nil || len(applied) != len(reverted) || applied[0] != name {
+		t.Fatalf("reaplicação: %v %v", applied, err)
+	}
+	for _, q := range present {
+		if !exists(t, pool, q) {
+			t.Fatalf("esquema após o Up: %s", q)
+		}
+	}
+}
+
+// O usuário de demonstração da equipe da plataforma é incluído pelo dono das
+// tabelas de forma idempotente, antes ou depois do primeiro login dele.
+func TestEnsureDemoStaff(t *testing.T) {
+	ctx := context.Background()
+	env := pgtest.Start(t)
+	pool := pgtest.OwnerPool(t)
+	now := time.Now().UTC()
+	fresh := migrate.DemoStaff{Issuer: "https://idp.test/realms/x", Subject: uuid.New(), Email: "equipe@recorvia.test", Name: "Equipe"}
+	for range 2 {
+		if err := migrate.EnsureDemoStaff(ctx, env.OwnerURL, fresh, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !exists(t, pool, `SELECT count(*) = 1 FROM platform_staff s JOIN users u ON u.id = s.user_id
+		WHERE u.id = '`+fresh.Subject.String()+`' AND u.oidc_subject = '`+fresh.Subject.String()+`' AND u.email = 'equipe@recorvia.test'`) {
+		t.Fatal("usuário novo incluído na equipe uma única vez")
+	}
+	// Usuário que já entrou (ID próprio): a equipe aponta para ele.
+	logged := migrate.DemoStaff{Issuer: fresh.Issuer, Subject: uuid.New(), Email: "outra@recorvia.test", Name: "Outra"}
+	existing := uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO users (id, oidc_issuer, oidc_subject, email, display_name) VALUES ($1, $2, $3, $4, 'Outra')`,
+		existing, logged.Issuer, logged.Subject.String(), logged.Email); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate.EnsureDemoStaff(ctx, env.OwnerURL, logged, now); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(t, pool, `SELECT EXISTS (SELECT 1 FROM platform_staff WHERE user_id = '`+existing.String()+`')
+		AND NOT EXISTS (SELECT 1 FROM users WHERE id = '`+logged.Subject.String()+`')`) {
+		t.Fatal("a equipe deve apontar para o usuário existente")
+	}
+	if err := migrate.EnsureDemoStaff(ctx, env.OwnerURL, migrate.DemoStaff{Issuer: fresh.Issuer, Subject: uuid.New(), Email: "invalido"}, now); err == nil {
+		t.Fatal("dados inválidos deveriam ser recusados")
+	}
+}
+
+// A migration 00019 é reversível: o Down devolve o gatilho e a constraint de
+// saldo da 00006, remove os dados do emitente e o índice da listagem, e
+// devolve o saldo das faturas canceladas à conta antiga; o Up seguinte volta a
+// congelar a observação e o emitente, recria o índice e zera de novo o saldo
+// das canceladas (inclusive as já existentes).
+func TestInvoiceGuardMigrationDownAndUp(t *testing.T) {
+	ctx := context.Background()
+	env := pgtest.Start(t)
+	pool := pgtest.OwnerPool(t)
+	const name = "00019_fatura_emitida_congela_observacao.sql"
+	const frozen = `SELECT position('NEW.memo IS DISTINCT FROM OLD.memo' IN pg_get_functiondef('app_invoice_guard()'::regprocedure)) > 0
+		AND position('NEW.issuer_snapshot IS DISTINCT FROM OLD.issuer_snapshot' IN pg_get_functiondef('app_invoice_guard()'::regprocedure)) > 0`
+	const trigger = `SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'invoices_guard' AND tgrelid = 'invoices'::regclass)`
+	const objects = `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'invoices' AND column_name = 'issuer_snapshot')
+		AND EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'invoices_tenant_created_idx'
+		    AND indexdef LIKE '%(tenant_id, created_at DESC, id DESC)%')
+		AND position('void' IN pg_get_constraintdef((SELECT oid FROM pg_constraint WHERE conname = 'invoices_due_consistency'))) > 0`
+	const noObjects = `SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'invoices' AND column_name = 'issuer_snapshot')
+		AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'invoices_tenant_created_idx')
+		AND position('void' IN pg_get_constraintdef((SELECT oid FROM pg_constraint WHERE conname = 'invoices_due_consistency'))) = 0`
+
+	// Fatura cancelada com crédito aplicado: 180,00 com 15,00 de crédito.
+	fx := fixture.New(t, 2, time.Now().UTC())
+	tn := fx.NewTenant(t, "migracao-void")
+	cust := fx.NewCustomer(t, tn)
+	if err := fx.Billing.GrantCredit(ctx, tn.ID, tn.Actor, nil, cust.ID, money.New(1500, money.BRL), "Cortesia comercial", ""); err != nil {
+		t.Fatal(err)
+	}
+	fx.NewSubscription(t, tn, cust.ID, fx.NewFlatPlan(t, tn, 18000).ID, nil)
+	if _, err := fx.Engine.RunTenant(ctx, tn.ID, tn.Actor); err != nil {
+		t.Fatal(err)
+	}
+	var id uuid.UUID
+	var version int
+	if err := pool.QueryRow(ctx, `SELECT id, version FROM invoices WHERE tenant_id = $1`, tn.ID).Scan(&id, &version); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.Billing.Void(ctx, tn.ID, tn.Actor, id, "Emitida em duplicidade", version); err != nil {
+		t.Fatal(err)
+	}
+	due := func() int64 {
+		t.Helper()
+		var v int64
+		if err := pool.QueryRow(ctx, `SELECT amount_due FROM invoices WHERE id = $1`, id).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+
+	if !exists(t, pool, frozen) || !exists(t, pool, trigger) || !exists(t, pool, objects) || due() != 0 {
+		t.Fatalf("esquema antes do Down (saldo da cancelada %d)", due())
+	}
+	reverted, err := migrate.DownTo(ctx, env.OwnerURL, 18)
+	if err != nil || len(reverted) == 0 || reverted[len(reverted)-1] != name {
+		t.Fatalf("reversão: %v %v", reverted, err)
+	}
+	if exists(t, pool, frozen) || !exists(t, pool, trigger) || !exists(t, pool, noObjects) || due() != 16500 {
+		t.Fatalf("após o Down, deveria valer o esquema da 00006 (saldo da cancelada %d)", due())
+	}
+	applied, err := migrate.Up(ctx, env.OwnerURL)
+	if err != nil || len(applied) != len(reverted) || applied[0] != name {
+		t.Fatalf("reaplicação: %v %v", applied, err)
+	}
+	if !exists(t, pool, frozen) || !exists(t, pool, trigger) || !exists(t, pool, objects) || due() != 0 {
+		t.Fatalf("após o Up, o esquema da 00019 deveria voltar (saldo da cancelada %d)", due())
 	}
 }

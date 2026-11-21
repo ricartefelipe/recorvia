@@ -7,6 +7,7 @@ import { z } from 'zod';
 import type { Subscription, SubscriptionInput } from '../../api/types';
 import { addDaysToCivilDate, todayInTimeZone } from '../../lib/dates';
 import { useApiMutation } from '../../lib/hooks';
+import { useIdempotencyKey } from '../../lib/idempotency';
 import { optionalInt, requiredInt } from '../../lib/validation';
 import { useTenant } from '../../session/SessionContext';
 import { useMetrics, usePlans } from '../catalog/api';
@@ -43,8 +44,10 @@ export function SubscriptionCreateModal({
     resolver: zodResolver(schema),
     values: { customer_id: customerId ?? '', plan_id: '', quantity: 1, start_date: null, trial_days: '', payment_terms_days: '' },
   });
+  const idempotency = useIdempotencyKey();
   const mutation = useApiMutation<SubscriptionInput, Subscription, FormValues>({
-    mutationFn: subscriptionsApi.create,
+    mutationFn: (input) => subscriptionsApi.create(input, idempotency.keyFor(input)),
+    idempotency,
     invalidate: ['subscriptions', 'customers', 'dashboard'],
     successMessage: 'Assinatura criada.',
     form,

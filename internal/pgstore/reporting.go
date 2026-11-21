@@ -80,6 +80,10 @@ func (r *Reporting) Raw(ctx context.Context, tenantID uuid.UUID, w reporting.Win
 			PositionAt: positionAt}); err != nil {
 			return err
 		}
+		if raw.PendingProviderReceipt, err = b.q.DashboardPendingProviderReceipt(ctx, dbgen.DashboardPendingProviderReceiptParams{
+			TenantID: tenantID, PositionAt: positionAt}); err != nil {
+			return err
+		}
 		unknown, err := b.q.DashboardUnknownOperations(ctx, tenantID)
 		if err != nil {
 			return err

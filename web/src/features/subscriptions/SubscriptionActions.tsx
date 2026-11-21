@@ -17,6 +17,7 @@ import type { ChangeTiming, Subscription, SubscriptionDiscount } from '../../api
 import { confirmAction } from '../../components/ui';
 import { formatInstantDate } from '../../lib/dates';
 import { useApiMutation } from '../../lib/hooks';
+import { useIdempotencyKey } from '../../lib/idempotency';
 import { changeTimingLabels } from '../../lib/labels';
 import { optionalInt, optionalText, requiredInt } from '../../lib/validation';
 import { useSession, useTenant } from '../../session/SessionContext';
@@ -31,7 +32,11 @@ function TimingField({ value, onChange }: { value: ChangeTiming; onChange: (v: C
   return (
     <Radio.Group label="Quando aplicar" value={value} onChange={(v) => onChange(v as ChangeTiming)} required>
       <Stack gap="xs" mt="xs">
-        <Radio value="immediate" label={changeTimingLabels.immediate} description="Gera fatura de prorrata pela diferença no período corrente." />
+        <Radio
+          value="immediate"
+          label={changeTimingLabels.immediate}
+          description="Vale agora, com prorrata do período corrente: no aumento, gera fatura pela diferença; na redução, a diferença vira crédito do cliente, abatido nas próximas faturas."
+        />
         <Radio value="next_cycle" label={changeTimingLabels.next_cycle} description="Vale a partir da próxima renovação, sem prorrata." />
       </Stack>
     </Radio.Group>
@@ -244,8 +249,10 @@ const couponSchema = z.object({ coupon_code: z.string().trim().min(3, 'Informe o
 
 function ApplyCouponModal({ subscription, onClose }: { subscription: Subscription; onClose: () => void }) {
   const form = useForm<z.input<typeof couponSchema>>({ resolver: zodResolver(couponSchema), defaultValues: { coupon_code: '' } });
+  const idempotency = useIdempotencyKey();
   const mutation = useApiMutation<string, SubscriptionDiscount, z.input<typeof couponSchema>>({
-    mutationFn: (code) => subscriptionsApi.applyCoupon(subscription.id, code),
+    mutationFn: (code) => subscriptionsApi.applyCoupon(subscription.id, code, idempotency.keyFor({ subscription: subscription.id, code })),
+    idempotency,
     invalidate: ['subscriptions', 'coupons'],
     successMessage: (d) => `Cupom ${d.coupon_code} aplicado.`,
     form,
@@ -353,7 +360,12 @@ export function SubscriptionActions({ subscription }: { subscription: Subscripti
         key="reactivate"
         leftSection={<IconPlayerPlay size={16} />}
         onClick={async () => {
-          const ok = await confirmAction({ title: 'Reativar assinatura', message: 'A assinatura volta a gerar faturas a partir do próximo ciclo.', confirmLabel: 'Reativar' });
+          const ok = await confirmAction({
+            title: 'Reativar assinatura',
+            message:
+              'A assinatura volta a ser faturada a partir do período atual, se ele ainda não foi faturado. Os períodos inteiros em que ficou suspensa não são cobrados.',
+            confirmLabel: 'Reativar',
+          });
           if (ok) reactivate.mutate();
         }}
       >

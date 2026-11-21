@@ -92,16 +92,32 @@ sequenceDiagram
     W->>G: GetCharge (situação autoritativa, sem transação aberta)
   end
   W->>DB: tx: inbox + cobrança FOR UPDATE + aplica situação sem regredir
-  W->>DB: pagamento (único por cobrança), fatura, ledger (D liquidação, D taxas / C contas a receber, C liquidação), eventos, auditoria
+  W->>DB: pagamento (único por cobrança), fatura, ledger payment.confirmed (D confirmados no provedor / C contas a receber), eventos, auditoria
+  opt situação recebida (ou posterior: reembolso, chargeback)
+    W->>DB: ledger payment.received (D liquidação, D taxas / C confirmados no provedor, C liquidação) e settlement.received (D disponível / C liquidação)
+  end
 ```
 
 A ordem de chegada não decide o estado: eventos com situação anterior à local são registrados sem
 efeito; saltos (por exemplo, reembolso antes da confirmação) levam à consulta ao provedor.
 
+O ledger separa as etapas do pagamento pelo provedor (ADR-080): a confirmação (Asaas `CONFIRMED`,
+simulador `confirmed`) leva o bruto de `accounts_receivable` para `provider_confirmed` (pagamentos
+confirmados no provedor), sem taxa; o recebimento (Asaas `RECEIVED`, simulador `paid`, ou qualquer
+situação posterior, como reembolso e chargeback) transfere o bruto para `provider_clearing` (valores em
+liquidação), reconhece a taxa em `provider_fees` e liquida o líquido em `cash` (disponível liquidado).
+O recebimento é idempotente e independe da ordem: depois do primeiro, não resta valor em
+`provider_confirmed` para o pagamento, e as chaves dos lançamentos derivam dele. Reembolsos, retenções e
+liberações de chargeback e ajustes de conciliação passam por `provider_clearing` e são liquidados no
+disponível pelos lançamentos `settlement.received` (crédito do provedor) e `settlement.debited` (débito do
+provedor), com a chave `settlement:<chave do lançamento de origem>`. Recebimento perdido (cobrança paga aqui,
+com valor em `provider_confirmed`, e recebida no provedor) aparece na conciliação como `payment_not_reflected`
+na direção `provider_received`; `accept_provider` lança o recebimento e a liquidação.
+
 Dinheiro recebido nunca é descartado: a confirmação de pagamento de cobrança `failed` (recusada) ou
 `canceled` (cancelada só no Recorvia) leva a `paid` e segue a aplicação normal. O valor quita o
 saldo da fatura e o excedente vira crédito do cliente; se a fatura já estiver paga ou cancelada, o
-valor integral vira crédito. A taxa do provedor é sempre lançada no ledger, e a transição incomum é
+valor integral vira crédito. A taxa do provedor é sempre lançada no ledger (no recebimento), e a transição incomum é
 auditada (`charge.paid_after_failure` ou `charge.paid_after_local_cancellation`).
 
 ## Ordem de bloqueio
@@ -252,7 +268,9 @@ sequenceDiagram
    `ignored` com a causa, sem reserva presa; o próximo retrato do provedor aplica o reembolso.
 5. **Efeitos.** A fatura não é reaberta: a devolução fica no histórico (`reason = 'refund'`), no ledger
    (`refund.succeeded`: débito em `refunds` ou, para o excedente do próprio pagamento, em
-   `customer_credits`; crédito em `provider_clearing`) e no evento `refund.succeeded` (ADR-034). A parte do
+   `customer_credits`; crédito em `provider_clearing`, liquidado no disponível por `settlement.debited`) e no
+   evento `refund.succeeded` (ADR-034). O reembolso de pagamento ainda só confirmado registra antes o
+   recebimento (ADR-080). A parte do
    crédito é calculada com o crédito do cliente bloqueado (ordem: cobrança, fatura, cliente).
 
 ## Disputas e chargebacks
@@ -282,7 +300,7 @@ A situação de chargeback do provedor (webhook ou consulta) abre a disputa e re
 decisão ganha estorna a retenção; a perdida mantém em `chargebacks` somente o valor estornado, sem reabrir a
 fatura. O estorno não inclui o que foi devolvido ao pagador por reembolso confirmado durante a disputa
 nem o que está reservado por reembolso em andamento; essa parte da retenção volta a `provider_clearing`
-(`dispute.hold_released`), e a confirmação posterior do reembolso reservado cabe no saldo; se o reembolso
+(`dispute.hold_released`) e ao disponível pela liquidação, e a confirmação posterior do reembolso reservado cabe no saldo; se o reembolso
 reservado for recusado depois da perda, o valor passa ao chargeback (`dispute.hold_restored`). Assim,
 `chargebacks` e `refunds` nunca somam mais que o pago.
 
@@ -400,7 +418,13 @@ Configuração pela API (permissões `collections.read` e `collections.write`):
   corpo em texto simples com as variáveis da lista de cada template (`variables` traz os nomes;
   no texto, a marcação é `{{nome}}`).
 - `GET /api/v1/notifications`: histórico paginado (filtros por situação e fatura) com
-  destinatários, tentativas, último erro e instante de envio.
+  destinatários, tentativas, último erro, instante de envio e o motivo da situação atual
+  (`status_reason`: cancelamento, supressão, falha ou adiamento por janela, limite ou nova tentativa).
+- `GET /api/v1/notifications/{id}/events`: linha do tempo da notificação (agendamento, adiamentos,
+  tentativas, envio, falha, cancelamento ou supressão), com o motivo e o detalhe de cada evento.
+
+A janela de envio vale para os lembretes e para o aviso de assinatura suspensa (a janela da política
+que suspendeu, ADR-081); o limite diário por cliente vale só para os lembretes.
 
 Criação e alteração de políticas e templates são auditadas. O worker publica as métricas
 `recorvia_collection_actions_total{action}` (lembretes agendados, faturas vencidas, suspensões e
@@ -442,6 +466,8 @@ auditadas, sem o valor dos segredos):
 - `GET /api/v1/webhook-endpoints/{id}/deliveries` e `POST /api/v1/webhook-deliveries/{id}/retry`:
   histórico paginado e reenvio manual (uma tentativa adicional imediata; recusado enquanto a
   entrega está pendente ou em andamento e para endpoint desativado).
+- `GET /api/v1/webhook-deliveries/{id}/attempts`: tentativas individuais da entrega (início,
+  duração, código HTTP ou ausência de resposta, erro e quantidade de assinaturas).
 
 Verificação pelo destinatário: recalcular `HMAC-SHA256(segredo, webhook-id + "." +
 webhook-timestamp + "." + corpo)` (a chave é o base64 após o prefixo `whsec_`), aceitar se qualquer

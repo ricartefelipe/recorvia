@@ -220,8 +220,8 @@ func (tx tenancyTx) DefaultPlatformPlan(ctx context.Context) (platformbilling.Pl
 	return platformPlanFromRow(r), nil
 }
 
-func (tx tenancyTx) PlatformPlan(ctx context.Context) (platformbilling.Plan, error) {
-	return tx.platformPlan(ctx)
+func (tx tenancyTx) LockPlatformPlan(ctx context.Context) (platformbilling.Plan, error) {
+	return tx.lockedPlatformPlan(ctx)
 }
 
 func (tx tenancyTx) PlatformUsage(ctx context.Context) (platformbilling.Usage, error) {
@@ -248,6 +248,23 @@ func platformPlanFromRow(r dbgen.PlatformPlan) platformbilling.Plan {
 
 func (b base) platformPlan(ctx context.Context) (platformbilling.Plan, error) {
 	sub, err := b.q.GetTenantPlatformSubscription(ctx, b.tenantID)
+	if err != nil {
+		return platformbilling.Plan{}, notFound(err, "platform_subscription_not_found", "Assinatura da plataforma não encontrada.")
+	}
+	r, err := b.q.GetPlatformPlan(ctx, sub.PlanCode)
+	if err != nil {
+		return platformbilling.Plan{}, err
+	}
+	return platformPlanFromRow(r), nil
+}
+
+// lockedPlatformPlan lê o plano bloqueando a linha da assinatura do tenant na
+// plataforma (FOR UPDATE) até o fim da transação. As checagens de limite
+// (convites, aceites, criação e reativação de assinaturas) e a troca de
+// plano passam por esse bloqueio, o que serializa a contagem do consumo em
+// READ COMMITTED (ADR-077).
+func (b base) lockedPlatformPlan(ctx context.Context) (platformbilling.Plan, error) {
+	sub, err := b.q.GetTenantPlatformSubscriptionForUpdate(ctx, b.tenantID)
 	if err != nil {
 		return platformbilling.Plan{}, notFound(err, "platform_subscription_not_found", "Assinatura da plataforma não encontrada.")
 	}

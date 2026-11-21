@@ -26,6 +26,7 @@ const bases: Dashboard['bases'] = {
   refunds: 'month',
   chargebacks: 'month',
   open_recoverables: 'month_end',
+  pending_provider_receipt: 'month_end',
   open_discrepancies: 'current',
   unknown_operations: 'current',
 };
@@ -54,6 +55,7 @@ function makeDashboard(overrides: Partial<Dashboard> = {}): Dashboard {
     refunds: 1000,
     chargebacks: 0,
     open_recoverables: 0,
+    pending_provider_receipt: 35000,
     open_discrepancies: 4,
     unknown_operations: 1,
     definitions,
@@ -65,6 +67,7 @@ function makeDashboard(overrides: Partial<Dashboard> = {}): Dashboard {
 const CARDS: [string, IndicatorKey][] = [
   ['Receita faturada', 'billed'],
   ['Receita recebida', 'received'],
+  ['A receber do provedor', 'pending_provider_receipt'],
   ['MRR', 'mrr'],
   ['ARR', 'arr'],
   ['Assinaturas ativas', 'active_subscriptions'],

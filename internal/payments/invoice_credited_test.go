@@ -53,6 +53,13 @@ func confirmedWebhook(eventID, providerChargeID string, amount, fee int64) Webho
 	return WebhookEvent{EventID: eventID, Type: "PAYMENT_CONFIRMED", ProviderChargeID: providerChargeID, Status: ProviderConfirmed, Charge: snap}
 }
 
+// receivedWebhook informa o pagamento já recebido (creditado) pelo provedor.
+func receivedWebhook(eventID, providerChargeID string, amount, fee int64) WebhookEvent {
+	snap := providerSnapshot(ProviderReceived, "RECEIVED", amount, fee, nil)
+	snap.ProviderChargeID = providerChargeID
+	return WebhookEvent{EventID: eventID, Type: "PAYMENT_RECEIVED", ProviderChargeID: providerChargeID, Status: ProviderReceived, Charge: snap}
+}
+
 func TestHandleInvoiceCreditedReplacesDivergentCharge(t *testing.T) {
 	f := newPayFixture(t)
 	inv, old := awaitingCharge(t, f)
@@ -83,6 +90,34 @@ func TestHandleInvoiceCreditedReplacesDivergentCharge(t *testing.T) {
 	}
 	if len(f.chargesOf(inv.ID)) != 2 || len(f.gw.createCalls) != 2 {
 		t.Fatalf("reentrega não cria outra cobrança: %d cobranças, %d criações", len(f.chargesOf(inv.ID)), len(f.gw.createCalls))
+	}
+}
+
+// Regressão: o inbox era marcado depois do ajuste, numa transação própria.
+// Se a cobrança nova pelo saldo fosse recusada pelo provedor, a reentrega da
+// mesma mensagem solicitava outra cobrança (tentativa 3) no provedor.
+func TestHandleInvoiceCreditedRedeliveryAfterDeclineCreatesNoCharge(t *testing.T) {
+	f := newPayFixture(t)
+	inv, _ := awaitingCharge(t, f)
+	f.creditInvoice(t, inv.ID, 3000)
+	f.gw.createResults = []gwResult{{err: errPermanent}}
+	msg := uuid.New()
+	if err := f.svc.HandleInvoiceCredited(context.Background(), f.tenantID, inv.ID, msg); err != nil {
+		t.Fatal(err)
+	}
+	charges := f.chargesOf(inv.ID)
+	if len(charges) != 2 || charges[0].Status != ChargeCanceled || charges[1].Status != ChargeFailed || len(f.gw.createCalls) != 2 {
+		t.Fatalf("cobrança pelo saldo recusada: %+v, %d criações", charges, len(f.gw.createCalls))
+	}
+	cancels := len(f.gw.cancelCalls)
+	for range 2 {
+		if err := f.svc.HandleInvoiceCredited(context.Background(), f.tenantID, inv.ID, msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(f.chargesOf(inv.ID)) != 2 || len(f.gw.createCalls) != 2 || len(f.gw.cancelCalls) != cancels {
+		t.Fatalf("reentrega não cria cobrança nem cancela de novo: %d cobranças, %d criações, %d cancelamentos",
+			len(f.chargesOf(inv.ID)), len(f.gw.createCalls), len(f.gw.cancelCalls))
 	}
 }
 
@@ -137,8 +172,8 @@ func TestProviderPaymentOfChargeCanceledAfterCreditNoteIsApplied(t *testing.T) {
 		t.Fatalf("lançamentos: %v", kinds)
 	}
 	net := ledgerNet(f.store.posted)
-	if net[ledger.AccountsReceivable] != -7000 || net[ledger.CustomerCredits] != -3000 || net[ledger.ProviderFees] != 199 ||
-		net[ledger.ProviderClearing] != 10000-199 {
+	if net[ledger.AccountsReceivable] != -7000 || net[ledger.CustomerCredits] != -3000 || net[ledger.ProviderFees] != 0 ||
+		net[ledger.ProviderConfirmed] != 10000 {
 		t.Fatalf("ledger: %+v", net)
 	}
 	if a := f.auditActions(); len(a) == 0 || a[0] != "charge.paid_after_local_cancellation" || !slices.Contains(a, "payment.applied") {
@@ -179,7 +214,7 @@ func TestProviderPaymentOfChargeCanceledWithVoidedInvoiceBecomesCredit(t *testin
 	if len(f.store.credits) != 1 || f.store.credits[0].amount.Amount() != 10000 {
 		t.Fatalf("pagamento de fatura cancelada vira crédito integral: %+v", f.store.credits)
 	}
-	if net := ledgerNet(f.store.posted); net[ledger.ProviderFees] != 199 || net[ledger.CustomerCredits] != -10000 {
+	if net := ledgerNet(f.store.posted); net[ledger.ProviderConfirmed] != 10000 || net[ledger.CustomerCredits] != -10000 {
 		t.Fatalf("ledger: %+v", net)
 	}
 	if f.invoice(inv.ID).Status != billing.Void {
@@ -424,12 +459,10 @@ func TestHandleInvoiceCreditedFailures(t *testing.T) {
 			if len(f.store.inbox) != 0 {
 				t.Fatal("sem ajuste concluído, a mensagem não é marcada")
 			}
-			wantStatus := ChargeAwaitingPayment
-			if m == "DefaultAccount" || m == "MarkInbox" {
-				wantStatus = ChargeCanceled // o cancelamento local já foi confirmado; a reentrega conclui o restante
-			}
-			if got := f.store.charges[old.ID]; got.Status != wantStatus {
-				t.Fatalf("cobrança antiga: %s, esperado %s", got.Status, wantStatus)
+			// Inbox, cancelamentos e nova cobrança estão na mesma transação:
+			// qualquer falha desfaz tudo e a reentrega refaz o ajuste inteiro.
+			if got := f.store.charges[old.ID]; got.Status != ChargeAwaitingPayment || len(f.chargesOf(inv.ID)) != 1 || len(f.gw.cancelCalls) != 0 {
+				t.Fatalf("falha desfaz o ajuste: %s, %d cobranças, cancelamentos %v", got.Status, len(f.chargesOf(inv.ID)), f.gw.cancelCalls)
 			}
 		})
 	}

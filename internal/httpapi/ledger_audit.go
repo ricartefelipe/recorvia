@@ -202,7 +202,8 @@ func dashboardIndicators(d reporting.Dashboard) map[string]any {
 		"billed_usage": d.BilledUsage, "received": d.Received, "open_receivables": d.OpenReceivables, "overdue_receivables": d.OverdueReceivables,
 		"delinquency_rate_bp": d.DelinquencyRateBP, "churn_rate_bp": d.ChurnRateBP, "active_subscriptions": d.ActiveSubscriptions,
 		"new_subscriptions": d.NewSubscriptions, "canceled_subscriptions": d.CanceledSubscriptions, "refunds": d.Refunds, "chargebacks": d.Chargebacks,
-		"open_recoverables": d.OpenRecoverables, "open_discrepancies": d.OpenDiscrepancies, "unknown_operations": d.UnknownOperations}
+		"open_recoverables": d.OpenRecoverables, "pending_provider_receipt": d.PendingProviderReceipt,
+		"open_discrepancies": d.OpenDiscrepancies, "unknown_operations": d.UnknownOperations}
 }
 
 // structToMap converte um DTO em mapa para compor respostas.

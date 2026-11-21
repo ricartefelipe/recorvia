@@ -40,19 +40,30 @@ func (a *Webhooks) TenantsWithDueDeliveries(ctx context.Context, now time.Time, 
 func (a *Webhooks) Attempts(ctx context.Context, tenantID, deliveryID uuid.UUID) ([]webhooks.Attempt, error) {
 	var out []webhooks.Attempt
 	err := a.s.inTenant(ctx, tenantID, func(b base) error {
-		rows, err := b.q.ListWebhookDeliveryAttempts(ctx, dbgen.ListWebhookDeliveryAttemptsParams{TenantID: tenantID, DeliveryID: deliveryID})
-		for _, r := range rows {
-			at := webhooks.Attempt{ID: r.ID, DeliveryID: r.DeliveryID, Number: int(r.Attempt), StartedAt: r.StartedAt,
-				Duration: time.Duration(r.DurationMs) * time.Millisecond, Error: deref(r.Error), SignatureCount: int(r.SignatureCount)}
-			if r.StatusCode != nil {
-				c := int(*r.StatusCode)
-				at.StatusCode = &c
-			}
-			out = append(out, at)
-		}
+		var err error
+		out, err = webhooksTx{b}.Attempts(ctx, deliveryID)
 		return err
 	})
 	return out, err
+}
+
+// Attempts lista as tentativas de uma entrega em ordem crescente.
+func (tx webhooksTx) Attempts(ctx context.Context, deliveryID uuid.UUID) ([]webhooks.Attempt, error) {
+	rows, err := tx.q.ListWebhookDeliveryAttempts(ctx, dbgen.ListWebhookDeliveryAttemptsParams{TenantID: tx.tenantID, DeliveryID: deliveryID})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]webhooks.Attempt, 0, len(rows))
+	for _, r := range rows {
+		at := webhooks.Attempt{ID: r.ID, DeliveryID: r.DeliveryID, Number: int(r.Attempt), StartedAt: r.StartedAt,
+			Duration: time.Duration(r.DurationMs) * time.Millisecond, Error: deref(r.Error), SignatureCount: int(r.SignatureCount)}
+		if r.StatusCode != nil {
+			c := int(*r.StatusCode)
+			at.StatusCode = &c
+		}
+		out = append(out, at)
+	}
+	return out, nil
 }
 
 func (tx webhooksTx) PlatformPlan(ctx context.Context) (platformbilling.Plan, error) {

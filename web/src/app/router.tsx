@@ -80,6 +80,10 @@ export const routes: RouteObject[] = [
       { path: '/organizacoes/nova', Component: OnboardingPage },
       { path: '/convite', Component: AcceptInvitationPage },
       {
+        path: '/admin/servicos',
+        lazy: async () => ({ Component: (await import('../features/admin/AddonOrdersAdminPage')).AddonOrdersAdminPage }),
+      },
+      {
         path: '/',
         element: (
           <RequireTenant>

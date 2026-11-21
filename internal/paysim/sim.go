@@ -2,6 +2,7 @@ package paysim
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -258,7 +259,8 @@ func (s *Sim) emit(c *Charge, eventType string) {
 		s.log.Error("serialização do evento falhou", slog.String("error", err.Error()))
 		return
 	}
-	ev := &Event{ID: s.st.nextID("evt"), Type: eventType, CreatedAt: s.now(), Data: data, ChargeID: c.ID, Merchant: c.MerchantKey}
+	seq := s.st.nextSeq("evt")
+	ev := &Event{ID: fmt.Sprintf("evt_%06d", seq), Type: eventType, CreatedAt: s.now(), Data: data, ChargeID: c.ID, Merchant: c.MerchantKey, Seq: seq}
 	s.st.s.Events[ev.ID] = ev
 	if c.OutOfOrder && eventType == "charge.created" {
 		c.HeldEvents = append(c.HeldEvents, ev.ID)
@@ -291,9 +293,13 @@ type Action struct {
 	Stage  string `json:"stage"`
 }
 
-// Apply executa a ação: pay, pay_silently, fail, refund, chargeback,
-// diverge e replay. Uma cobrança recusada (fail) ainda pode ser paga, como no
-// pagamento por outro meio depois da recusa do cartão no mesmo checkout.
+// Apply executa a ação: pay, pay_silently, confirm, receive, fail, refund,
+// chargeback, diverge e replay. pay é o pagamento já recebido (creditado),
+// como Pix e boleto; confirm é o pagamento confirmado e ainda não creditado,
+// como o cartão no prazo de recebimento, e receive informa o crédito do
+// pagamento confirmado. Uma cobrança recusada (fail) ainda pode ser paga,
+// como no pagamento por outro meio depois da recusa do cartão no mesmo
+// checkout.
 func (s *Sim) Apply(id string, a Action) (Charge, error) {
 	s.st.mu.Lock()
 	defer s.st.mu.Unlock()
@@ -303,7 +309,7 @@ func (s *Sim) Apply(id string, a Action) (Charge, error) {
 	}
 	now := s.now()
 	switch a.Name {
-	case "pay", "pay_silently":
+	case "pay", "pay_silently", "confirm":
 		if c.Status != "pending" && c.Status != "failed" {
 			return *c, fmt.Errorf("cobrança não está pendente nem recusada")
 		}
@@ -315,10 +321,20 @@ func (s *Sim) Apply(id string, a Action) (Charge, error) {
 		if a.Fee != nil {
 			fee = *a.Fee
 		}
-		c.Status, c.PaidAmount, c.Fee, c.NetAmount, c.PaidAt, c.UpdatedAt = "paid", paid, fee, paid-fee, &now, now
-		if a.Name == "pay" {
-			s.emit(c, "charge.paid")
+		status, event := "paid", "charge.paid"
+		if a.Name == "confirm" {
+			status, event = "confirmed", "charge.confirmed"
 		}
+		c.Status, c.PaidAmount, c.Fee, c.NetAmount, c.PaidAt, c.UpdatedAt = status, paid, fee, paid-fee, &now, now
+		if a.Name != "pay_silently" {
+			s.emit(c, event)
+		}
+	case "receive":
+		if c.Status != "confirmed" {
+			return *c, fmt.Errorf("cobrança não está confirmada")
+		}
+		c.Status, c.UpdatedAt = "paid", now
+		s.emit(c, "charge.received")
 	case "fail":
 		if c.Status != "pending" {
 			return *c, fmt.Errorf("cobrança não está pendente")
@@ -363,10 +379,18 @@ func (s *Sim) Apply(id string, a Action) (Charge, error) {
 		}
 		c.NetAmount, c.UpdatedAt = c.PaidAmount-c.Fee, now
 	case "replay":
+		// Ordem de criação dos eventos (sequência numérica, não o relógio nem
+		// o texto do id), para que a mesma sequência de comandos produza as
+		// mesmas entregas.
+		var evs []*Event
 		for _, e := range s.st.s.Events {
 			if e.ChargeID == c.ID {
-				s.enqueue(e)
+				evs = append(evs, e)
 			}
+		}
+		slices.SortFunc(evs, func(a, b *Event) int { return cmp.Compare(a.Seq, b.Seq) })
+		for _, e := range evs {
+			s.enqueue(e)
 		}
 	default:
 		return *c, fmt.Errorf("ação desconhecida")

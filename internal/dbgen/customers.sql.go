@@ -738,6 +738,40 @@ func (q *Queries) SetContactBillingPreference(ctx context.Context, arg SetContac
 	return result.RowsAffected(), nil
 }
 
+const updateContact = `-- name: UpdateContact :execrows
+UPDATE customer_contacts
+   SET name = $1, email = $2, phone = $3, role = $4, receives_billing_email = $5
+ WHERE tenant_id = $6 AND customer_id = $7 AND id = $8
+`
+
+type UpdateContactParams struct {
+	Name                 string
+	Email                string
+	Phone                *string
+	Role                 string
+	ReceivesBillingEmail bool
+	TenantID             uuid.UUID
+	CustomerID           uuid.UUID
+	ID                   uuid.UUID
+}
+
+func (q *Queries) UpdateContact(ctx context.Context, arg UpdateContactParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateContact,
+		arg.Name,
+		arg.Email,
+		arg.Phone,
+		arg.Role,
+		arg.ReceivesBillingEmail,
+		arg.TenantID,
+		arg.CustomerID,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const updateCustomer = `-- name: UpdateCustomer :execrows
 UPDATE customers
    SET kind = $1, name = $2, legal_name = $3, document_type = $4, document_number = $5,

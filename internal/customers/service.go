@@ -52,6 +52,9 @@ type Tx interface {
 	List(ctx context.Context, f ListFilter) (Page, error)
 	Contacts(ctx context.Context, customerID uuid.UUID) ([]Contact, error)
 	InsertContact(ctx context.Context, c Contact) error
+	// UpdateContact grava os dados do contato do cliente; contact_not_found
+	// quando ele não existe ou é de outro cliente.
+	UpdateContact(ctx context.Context, c Contact) error
 	DeleteContact(ctx context.Context, customerID, contactID uuid.UUID) error
 	Address(ctx context.Context, customerID uuid.UUID) (*Address, error)
 	UpsertAddress(ctx context.Context, customerID uuid.UUID, a Address) error
@@ -393,6 +396,53 @@ func (s *Service) AddContact(ctx context.Context, tenantID uuid.UUID, actor audi
 	return ct, err
 }
 
+// UpdateContact altera os dados de um contato do cliente; os campos omitidos
+// na alteração mantêm o valor atual. Sem mudança, nada é gravado nem
+// auditado; a auditoria guarda somente os nomes dos campos alterados, nunca
+// os valores (ADR-061).
+func (s *Service) UpdateContact(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, customerID, contactID uuid.UUID, patch ContactPatch) (Contact, error) {
+	var ct Contact
+	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		c, err := tx.Get(ctx, customerID, true)
+		if err != nil {
+			return err
+		}
+		if c.Anonymized() {
+			return errAnonymized
+		}
+		contacts, err := tx.Contacts(ctx, customerID)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, existing := range contacts {
+			if existing.ID == contactID {
+				ct, found = existing, true
+				break
+			}
+		}
+		if !found {
+			return apperr.NotFound("contact_not_found", "Contato não encontrado.")
+		}
+		changed, err := ct.Apply(patch.Merge(ct))
+		if err != nil {
+			return err
+		}
+		if len(changed) == 0 {
+			return nil
+		}
+		if err := tx.UpdateContact(ctx, ct); err != nil {
+			return err
+		}
+		return tx.Audit(ctx, audit.New(tenantID, s.clock.Now(), actor, "customer.contact_updated", "customer", customerID.String(),
+			map[string]any{"contact_id": ct.ID, "fields": changed}))
+	})
+	if err != nil {
+		return Contact{}, err
+	}
+	return ct, nil
+}
+
 // RemoveContact remove um contato.
 func (s *Service) RemoveContact(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, customerID, contactID uuid.UUID) error {
 	return s.store.InTenant(ctx, tenantID, func(tx Tx) error {
@@ -404,7 +454,9 @@ func (s *Service) RemoveContact(ctx context.Context, tenantID uuid.UUID, actor a
 	})
 }
 
-// SetAddress grava o endereço de cobrança.
+// SetAddress grava o endereço de cobrança. Sem mudança, nada é gravado nem
+// auditado; a auditoria informa os nomes dos campos alterados e se o
+// endereço foi cadastrado agora.
 func (s *Service) SetAddress(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, customerID uuid.UUID, a Address) (Address, error) {
 	a, err := ValidateAddress(a)
 	if err != nil {
@@ -418,10 +470,20 @@ func (s *Service) SetAddress(ctx context.Context, tenantID uuid.UUID, actor audi
 		if c.Anonymized() {
 			return errAnonymized
 		}
+		prev, err := tx.Address(ctx, customerID)
+		if err != nil {
+			return err
+		}
+		changed := a.ChangedFields(prev)
+		if len(changed) == 0 {
+			return nil
+		}
 		if err := tx.UpsertAddress(ctx, customerID, a); err != nil {
 			return err
 		}
-		return tx.Audit(ctx, audit.New(tenantID, s.clock.Now(), actor, "customer.address_updated", "customer", customerID.String(), nil))
+		// Somente os nomes dos campos alterados, nunca os valores (ADR-061).
+		return tx.Audit(ctx, audit.New(tenantID, s.clock.Now(), actor, "customer.address_updated", "customer", customerID.String(),
+			map[string]any{"fields": changed, "created": prev == nil}))
 	})
 	return a, err
 }

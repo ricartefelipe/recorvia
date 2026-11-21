@@ -812,8 +812,9 @@ func TestProcessWebhookConfirmationAppliesPayment(t *testing.T) {
 		t.Fatalf("lançamentos: %v", got)
 	}
 	net := ledgerNet(f.store.posted)
-	if net[ledger.ProviderClearing] != 9801 || net[ledger.AccountsReceivable] != -10000 || net[ledger.ProviderFees] != 199 {
-		t.Fatalf("ledger: bruto sai de contas a receber, taxa é despesa: %+v", net)
+	if net[ledger.ProviderConfirmed] != 10000 || net[ledger.AccountsReceivable] != -10000 || net[ledger.ProviderFees] != 0 ||
+		net[ledger.ProviderClearing] != 0 || net[ledger.Cash] != 0 {
+		t.Fatalf("ledger: bruto confirmado sai de contas a receber, sem taxa nem liquidação antes do recebimento: %+v", net)
 	}
 	if got := f.store.eventTypes(); !slices.Equal(got, []string{outbox.EventPaymentConfirmed, outbox.EventInvoicePaid}) {
 		t.Fatalf("eventos: %v", got)
@@ -864,12 +865,13 @@ func TestProcessWebhookOverpaymentBecomesCustomerCredit(t *testing.T) {
 	if len(f.store.credits) != 1 || f.store.credits[0].amount.Amount() != 350 || f.store.credits[0].kind != "overpayment" || *f.store.credits[0].invoiceID != inv.ID {
 		t.Fatalf("excedente vira crédito do cliente: %+v", f.store.credits)
 	}
-	if got := f.store.ledgerKinds(); !slices.Equal(got, []string{"payment.confirmed", "payment.overpayment"}) {
+	if got := f.store.ledgerKinds(); !slices.Equal(got, []string{"payment.confirmed", "payment.overpayment", "payment.received", "settlement.received"}) {
 		t.Fatalf("lançamentos: %v", got)
 	}
 	net := ledgerNet(f.store.posted)
-	if net[ledger.ProviderClearing] != 10350-199 || net[ledger.CustomerCredits] != -350 || net[ledger.AccountsReceivable] != -10000 {
-		t.Fatalf("ledger do excedente via provedor: %+v", net)
+	if net[ledger.Cash] != 10350-199 || net[ledger.ProviderFees] != 199 || net[ledger.CustomerCredits] != -350 || net[ledger.AccountsReceivable] != -10000 ||
+		net[ledger.ProviderConfirmed] != 0 || net[ledger.ProviderClearing] != 0 {
+		t.Fatalf("ledger do excedente via provedor: bruto recebido, líquido no disponível: %+v", net)
 	}
 }
 
@@ -914,8 +916,18 @@ func TestProcessWebhookRepeatedConfirmationDoesNotDuplicatePayment(t *testing.T)
 	received := providerSnapshot(ProviderReceived, "RECEIVED", 10000, 199, nil)
 	wid := f.storeWebhook(t, WebhookEvent{EventID: "evt_2", ProviderChargeID: "pay_1", Status: ProviderReceived, Charge: received})
 	f.process(t, wid)
-	if len(f.store.payments) != 1 || len(f.store.posted) != 1 {
+	f.process(t, f.storeWebhook(t, WebhookEvent{EventID: "evt_3", ProviderChargeID: "pay_1", Status: ProviderReceived, Charge: received}))
+	if len(f.store.payments) != 1 {
 		t.Fatalf("confirmações sucessivas não duplicam: pagamentos=%d", len(f.store.payments))
+	}
+	// O recebimento leva o bruto confirmado aos valores em liquidação e o
+	// líquido ao disponível uma única vez.
+	if got := f.store.ledgerKinds(); !slices.Equal(got, []string{"payment.confirmed", "payment.received", "settlement.received"}) {
+		t.Fatalf("lançamentos: %v", got)
+	}
+	if net := ledgerNet(f.store.posted); net[ledger.Cash] != 9801 || net[ledger.ProviderFees] != 199 || net[ledger.ProviderConfirmed] != 0 ||
+		net[ledger.ProviderClearing] != 0 || net[ledger.AccountsReceivable] != -10000 {
+		t.Fatalf("ledger depois do recebimento: %+v", net)
 	}
 	if got := f.store.charges[c.ID]; got.Status != ChargePaid || got.ProviderStatus != "RECEIVED" {
 		t.Fatalf("situação do provedor atualizada: %+v", got)
@@ -1263,8 +1275,14 @@ func TestProviderPaymentForAlreadyPaidInvoiceRecognizesFee(t *testing.T) {
 	f.process(t, f.storeWebhook(t, WebhookEvent{EventID: "evt_1", ProviderChargeID: "pay_1", Status: ProviderConfirmed,
 		Charge: providerSnapshot(ProviderConfirmed, "CONFIRMED", 10000, 199, nil)}))
 	net := ledgerNet(f.store.posted)
-	if net[ledger.ProviderFees] != 199 || net[ledger.ProviderClearing] != 10000-199 {
-		t.Fatalf("a taxa do provedor deve ser reconhecida também neste caminho: %+v", net)
+	if net[ledger.ProviderConfirmed] != 10000 || net[ledger.CustomerCredits] != -10000 || net[ledger.ProviderFees] != 0 {
+		t.Fatalf("confirmado: bruto aguardando o recebimento, sem taxa: %+v", net)
+	}
+	f.process(t, f.storeWebhook(t, WebhookEvent{EventID: "evt_2", ProviderChargeID: "pay_1", Status: ProviderReceived,
+		Charge: providerSnapshot(ProviderReceived, "RECEIVED", 10000, 199, nil)}))
+	net = ledgerNet(f.store.posted)
+	if net[ledger.ProviderFees] != 199 || net[ledger.Cash] != 10000-199 || net[ledger.ProviderConfirmed] != 0 || net[ledger.ProviderClearing] != 0 {
+		t.Fatalf("a taxa do provedor deve ser reconhecida no recebimento também neste caminho: %+v", net)
 	}
 }
 
@@ -1580,6 +1598,54 @@ func TestHandleInvoiceIssued(t *testing.T) {
 	h.store.errs["MarkInbox"] = boom
 	if err := h.svc.HandleInvoiceIssued(context.Background(), h.tenantID, hinv.ID, msg); !errors.Is(err, boom) {
 		t.Fatalf("falha no inbox: %v", err)
+	}
+	if len(h.store.charges) != 0 || len(h.gw.createCalls) != 0 {
+		t.Fatal("sem inbox, nenhuma cobrança é gravada nem solicitada")
+	}
+	// Falha depois da marcação desfaz também o inbox: a reentrega cria a cobrança.
+	k := newPayFixture(t)
+	kinv := k.addInvoice(t, 10000)
+	k.store.errs["InsertOperation"] = boom
+	if err := k.svc.HandleInvoiceIssued(context.Background(), k.tenantID, kinv.ID, msg); !errors.Is(err, boom) {
+		t.Fatalf("falha na gravação da operação: %v", err)
+	}
+	if len(k.store.inbox) != 0 || len(k.store.charges) != 0 {
+		t.Fatal("falha desfaz o inbox e a cobrança")
+	}
+	delete(k.store.errs, "InsertOperation")
+	if err := k.svc.HandleInvoiceIssued(context.Background(), k.tenantID, kinv.ID, msg); err != nil || len(k.store.charges) != 1 {
+		t.Fatalf("reentrega após falha: %v %d", err, len(k.store.charges))
+	}
+}
+
+// Regressão: o inbox era marcado depois da cobrança, numa transação própria,
+// e a reentrega depois de uma recusa do provedor chamava RequestCharge, que
+// criava a tentativa 2 no provedor. A reentrega da mensagem já registrada não
+// faz nada, depois de recusa ou de sucesso; uma mensagem nova (outro evento)
+// continua seguindo a regra da cobrança.
+func TestHandleInvoiceIssuedRedeliveryCreatesNoCharge(t *testing.T) {
+	for name, results := range map[string][]gwResult{"depois de recusa": {{err: errPermanent}}, "depois de sucesso": nil} {
+		t.Run(name, func(t *testing.T) {
+			f := newPayFixture(t)
+			inv := f.addInvoice(t, 10000)
+			f.gw.createResults = results
+			msg := uuid.New()
+			if err := f.svc.HandleInvoiceIssued(context.Background(), f.tenantID, inv.ID, msg); err != nil {
+				t.Fatal(err)
+			}
+			first := f.chargesOf(inv.ID)
+			if len(first) != 1 || len(f.gw.createCalls) != 1 {
+				t.Fatalf("primeira entrega: %+v", first)
+			}
+			for range 3 {
+				if err := f.svc.HandleInvoiceIssued(context.Background(), f.tenantID, inv.ID, msg); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := f.chargesOf(inv.ID); len(got) != 1 || got[0].Status != first[0].Status || len(f.gw.createCalls) != 1 {
+				t.Fatalf("reentrega criou cobrança: %+v, %d criações", got, len(f.gw.createCalls))
+			}
+		})
 	}
 }
 

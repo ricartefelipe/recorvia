@@ -3,6 +3,7 @@ package pgstore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -318,12 +319,22 @@ type IdempotencyRecord struct {
 }
 
 // IdempotencyKey identifica a chave no escopo de tenant, cliente e operação.
+// Lease é o token da execução que tenta deter a chave: gravado ao vencer a
+// disputa (IdempotencyBegin) ou ao assumir um processamento interrompido
+// (IdempotencyTakeOver), e exigido para registrar o resultado ou liberar a
+// chave. Cada pedido HTTP usa um token próprio.
 type IdempotencyKey struct {
 	TenantID  uuid.UUID
 	ClientID  string
 	Operation string
 	Key       string
+	Lease     uuid.UUID
 }
+
+// ErrIdempotencyLeaseLost indica que a execução não detém mais a chave: o
+// lease expirou e outra execução a assumiu (ou já registrou o resultado). O
+// resultado desta execução não é registrado.
+var ErrIdempotencyLeaseLost = errors.New("pgstore: a execução não detém mais a Idempotency-Key")
 
 // IdempotencyBegin tenta registrar a chave em processamento. Retorna
 // (nil, true) se este pedido venceu a disputa; caso contrário, o registro
@@ -334,7 +345,7 @@ func (s *Store) IdempotencyBegin(ctx context.Context, k IdempotencyKey, hash []b
 	err := s.inTenant(ctx, k.TenantID, func(b base) error {
 		now := s.clock.Now()
 		n, err := b.q.InsertIdempotencyKey(ctx, dbgen.InsertIdempotencyKeyParams{TenantID: k.TenantID, ClientID: k.ClientID, Operation: k.Operation,
-			IdempotencyKey: k.Key, RequestHash: hash, LockedUntil: ptrTime(now.Add(lease)), Now: now, ExpiresAt: now.Add(ttl)})
+			IdempotencyKey: k.Key, RequestHash: hash, LockedUntil: ptrTime(now.Add(lease)), LeaseToken: k.Lease, Now: now, ExpiresAt: now.Add(ttl)})
 		if err != nil {
 			return err
 		}
@@ -363,7 +374,7 @@ func (s *Store) IdempotencyTakeOver(ctx context.Context, k IdempotencyKey, lease
 	var ok bool
 	err := s.inTenant(ctx, k.TenantID, func(b base) error {
 		now := s.clock.Now()
-		n, err := b.q.TakeOverIdempotencyKey(ctx, dbgen.TakeOverIdempotencyKeyParams{LockedUntil: ptrTime(now.Add(lease)), TenantID: k.TenantID,
+		n, err := b.q.TakeOverIdempotencyKey(ctx, dbgen.TakeOverIdempotencyKeyParams{LockedUntil: ptrTime(now.Add(lease)), LeaseToken: k.Lease, TenantID: k.TenantID,
 			ClientID: k.ClientID, Operation: k.Operation, IdempotencyKey: k.Key, Now: &now})
 		ok = n == 1
 		return err
@@ -378,7 +389,8 @@ const maxIdempotencyLocation = 2048
 // IdempotencyComplete grava o resultado: status, corpo, Content-Type e o
 // header Location da resposta (vazio quando ela não o traz), que a repetição
 // reproduz. Um Location acima do limite da coluna não é guardado, para não
-// perder o registro do resultado.
+// perder o registro do resultado. Só a execução que detém a chave (k.Lease)
+// registra; as demais recebem ErrIdempotencyLeaseLost.
 func (s *Store) IdempotencyComplete(ctx context.Context, k IdempotencyKey, status int, body []byte, contentType, location string) error {
 	return s.inTenant(ctx, k.TenantID, func(b base) error {
 		st := int32(status)
@@ -386,17 +398,24 @@ func (s *Store) IdempotencyComplete(ctx context.Context, k IdempotencyKey, statu
 		if location != "" && len(location) <= maxIdempotencyLocation {
 			loc = &location
 		}
-		return b.q.CompleteIdempotencyKey(ctx, dbgen.CompleteIdempotencyKeyParams{ResponseStatus: &st, ResponseBody: body,
+		n, err := b.q.CompleteIdempotencyKey(ctx, dbgen.CompleteIdempotencyKeyParams{ResponseStatus: &st, ResponseBody: body,
 			ResponseContentType: &contentType, ResponseLocation: loc, Now: ptrTime(s.clock.Now()), TenantID: k.TenantID, ClientID: k.ClientID,
-			Operation: k.Operation, IdempotencyKey: k.Key})
+			Operation: k.Operation, IdempotencyKey: k.Key, LeaseToken: k.Lease})
+		if err == nil && n == 0 {
+			return ErrIdempotencyLeaseLost
+		}
+		return err
 	})
 }
 
 // IdempotencyRelease remove a chave em processamento quando o pedido falhou
-// sem efeito (por exemplo, validação), permitindo nova tentativa.
+// sem efeito (por exemplo, validação), permitindo nova tentativa. Só a
+// execução que detém a chave (k.Lease) a remove: a liberação atrasada de uma
+// execução antiga não apaga o processamento de quem assumiu a chave.
 func (s *Store) IdempotencyRelease(ctx context.Context, k IdempotencyKey) error {
 	return s.inTenant(ctx, k.TenantID, func(b base) error {
-		return b.q.ReleaseIdempotencyKey(ctx, dbgen.ReleaseIdempotencyKeyParams{TenantID: k.TenantID, ClientID: k.ClientID, Operation: k.Operation, IdempotencyKey: k.Key})
+		return b.q.ReleaseIdempotencyKey(ctx, dbgen.ReleaseIdempotencyKeyParams{TenantID: k.TenantID, ClientID: k.ClientID, Operation: k.Operation,
+			IdempotencyKey: k.Key, LeaseToken: k.Lease})
 	})
 }
 

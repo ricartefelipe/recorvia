@@ -96,7 +96,7 @@ func (q *Queries) CancelScheduledPriceAdjustments(ctx context.Context, arg Cance
 }
 
 const claimDueSubscription = `-- name: ClaimDueSubscription :one
-SELECT id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date, trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at, cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days, created_at, updated_at, version, price_override_amount, price_override_adjustment_id, pending_usage_starts FROM subscriptions
+SELECT id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date, trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at, cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days, created_at, updated_at, version, price_override_amount, price_override_adjustment_id, pending_usage_starts, request_key, request_fingerprint FROM subscriptions
  WHERE tenant_id = $1 AND next_billing_at IS NOT NULL AND next_billing_at <= $2 AND status <> 'suspended'
    AND NOT (id = ANY ($3::uuid[]))
  ORDER BY next_billing_at, id
@@ -145,6 +145,8 @@ func (q *Queries) ClaimDueSubscription(ctx context.Context, arg ClaimDueSubscrip
 		&i.PriceOverrideAmount,
 		&i.PriceOverrideAdjustmentID,
 		&i.PendingUsageStarts,
+		&i.RequestKey,
+		&i.RequestFingerprint,
 	)
 	return i, err
 }
@@ -359,7 +361,7 @@ func (q *Queries) GetPriceAdjustmentForUpdate(ctx context.Context, arg GetPriceA
 }
 
 const getSubscription = `-- name: GetSubscription :one
-SELECT id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date, trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at, cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days, created_at, updated_at, version, price_override_amount, price_override_adjustment_id, pending_usage_starts FROM subscriptions WHERE tenant_id = $1 AND id = $2
+SELECT id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date, trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at, cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days, created_at, updated_at, version, price_override_amount, price_override_adjustment_id, pending_usage_starts, request_key, request_fingerprint FROM subscriptions WHERE tenant_id = $1 AND id = $2
 `
 
 type GetSubscriptionParams struct {
@@ -400,12 +402,62 @@ func (q *Queries) GetSubscription(ctx context.Context, arg GetSubscriptionParams
 		&i.PriceOverrideAmount,
 		&i.PriceOverrideAdjustmentID,
 		&i.PendingUsageStarts,
+		&i.RequestKey,
+		&i.RequestFingerprint,
+	)
+	return i, err
+}
+
+const getSubscriptionByRequestKey = `-- name: GetSubscriptionByRequestKey :one
+SELECT id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date, trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at, cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days, created_at, updated_at, version, price_override_amount, price_override_adjustment_id, pending_usage_starts, request_key, request_fingerprint FROM subscriptions WHERE tenant_id = $1 AND request_key = $2
+`
+
+type GetSubscriptionByRequestKeyParams struct {
+	TenantID   uuid.UUID
+	RequestKey *string
+}
+
+func (q *Queries) GetSubscriptionByRequestKey(ctx context.Context, arg GetSubscriptionByRequestKeyParams) (Subscription, error) {
+	row := q.db.QueryRow(ctx, getSubscriptionByRequestKey, arg.TenantID, arg.RequestKey)
+	var i Subscription
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.CustomerID,
+		&i.PlanID,
+		&i.PriceVersionID,
+		&i.Status,
+		&i.Quantity,
+		&i.BillingInterval,
+		&i.Timezone,
+		&i.AnchorDate,
+		&i.TrialEndsAt,
+		&i.StartedAt,
+		&i.CurrentPeriodStart,
+		&i.CurrentPeriodEnd,
+		&i.NextBillingIndex,
+		&i.NextBillingAt,
+		&i.CancelAtPeriodEnd,
+		&i.CanceledAt,
+		&i.CancelReason,
+		&i.EndedAt,
+		&i.SuspendedAt,
+		&i.SuspensionReason,
+		&i.PaymentTermsDays,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Version,
+		&i.PriceOverrideAmount,
+		&i.PriceOverrideAdjustmentID,
+		&i.PendingUsageStarts,
+		&i.RequestKey,
+		&i.RequestFingerprint,
 	)
 	return i, err
 }
 
 const getSubscriptionForUpdate = `-- name: GetSubscriptionForUpdate :one
-SELECT id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date, trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at, cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days, created_at, updated_at, version, price_override_amount, price_override_adjustment_id, pending_usage_starts FROM subscriptions WHERE tenant_id = $1 AND id = $2 FOR UPDATE
+SELECT id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date, trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at, cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days, created_at, updated_at, version, price_override_amount, price_override_adjustment_id, pending_usage_starts, request_key, request_fingerprint FROM subscriptions WHERE tenant_id = $1 AND id = $2 FOR UPDATE
 `
 
 type GetSubscriptionForUpdateParams struct {
@@ -446,6 +498,8 @@ func (q *Queries) GetSubscriptionForUpdate(ctx context.Context, arg GetSubscript
 		&i.PriceOverrideAmount,
 		&i.PriceOverrideAdjustmentID,
 		&i.PendingUsageStarts,
+		&i.RequestKey,
+		&i.RequestFingerprint,
 	)
 	return i, err
 }
@@ -607,16 +661,17 @@ func (q *Queries) InsertScheduledChange(ctx context.Context, arg InsertScheduled
 	return err
 }
 
-const insertSubscription = `-- name: InsertSubscription :exec
+const insertSubscription = `-- name: InsertSubscription :execrows
 
 INSERT INTO subscriptions (id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date,
                            trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at,
                            cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days,
-                           created_at, updated_at, version)
+                           request_key, request_fingerprint, created_at, updated_at, version)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
         $11, $12, $13, $14, $15, $16,
         $17, $18, $19, $20, $21,
-        $22, $23, $24, $24, 1)
+        $22, $23, $24, $25, $26, $26, 1)
+ON CONFLICT (tenant_id, request_key) DO NOTHING
 `
 
 type InsertSubscriptionParams struct {
@@ -643,12 +698,17 @@ type InsertSubscriptionParams struct {
 	SuspendedAt        *time.Time
 	SuspensionReason   *string
 	PaymentTermsDays   *int32
+	RequestKey         *string
+	RequestFingerprint []byte
 	CreatedAt          time.Time
 }
 
 // Assinaturas, histórico e descontos.
-func (q *Queries) InsertSubscription(ctx context.Context, arg InsertSubscriptionParams) error {
-	_, err := q.db.Exec(ctx, insertSubscription,
+// Sem linhas afetadas: outra transação já confirmou a assinatura com a mesma
+// chave de negócio (request_key); o ON CONFLICT espera a outra transação
+// terminar, e a releitura pela chave encontra a assinatura confirmada.
+func (q *Queries) InsertSubscription(ctx context.Context, arg InsertSubscriptionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertSubscription,
 		arg.ID,
 		arg.TenantID,
 		arg.CustomerID,
@@ -672,9 +732,14 @@ func (q *Queries) InsertSubscription(ctx context.Context, arg InsertSubscription
 		arg.SuspendedAt,
 		arg.SuspensionReason,
 		arg.PaymentTermsDays,
+		arg.RequestKey,
+		arg.RequestFingerprint,
 		arg.CreatedAt,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const insertSubscriptionDiscount = `-- name: InsertSubscriptionDiscount :exec
@@ -920,7 +985,7 @@ func (q *Queries) ListSubscriptionHistory(ctx context.Context, arg ListSubscript
 }
 
 const listSubscriptions = `-- name: ListSubscriptions :many
-SELECT s.id, s.tenant_id, s.customer_id, s.plan_id, s.price_version_id, s.status, s.quantity, s.billing_interval, s.timezone, s.anchor_date, s.trial_ends_at, s.started_at, s.current_period_start, s.current_period_end, s.next_billing_index, s.next_billing_at, s.cancel_at_period_end, s.canceled_at, s.cancel_reason, s.ended_at, s.suspended_at, s.suspension_reason, s.payment_terms_days, s.created_at, s.updated_at, s.version, s.price_override_amount, s.price_override_adjustment_id, s.pending_usage_starts, c.name AS customer_name, p.name AS plan_name
+SELECT s.id, s.tenant_id, s.customer_id, s.plan_id, s.price_version_id, s.status, s.quantity, s.billing_interval, s.timezone, s.anchor_date, s.trial_ends_at, s.started_at, s.current_period_start, s.current_period_end, s.next_billing_index, s.next_billing_at, s.cancel_at_period_end, s.canceled_at, s.cancel_reason, s.ended_at, s.suspended_at, s.suspension_reason, s.payment_terms_days, s.created_at, s.updated_at, s.version, s.price_override_amount, s.price_override_adjustment_id, s.pending_usage_starts, s.request_key, s.request_fingerprint, c.name AS customer_name, p.name AS plan_name
   FROM subscriptions s
   JOIN customers c ON c.tenant_id = s.tenant_id AND c.id = s.customer_id
   JOIN plans p ON p.tenant_id = s.tenant_id AND p.id = s.plan_id
@@ -973,6 +1038,8 @@ type ListSubscriptionsRow struct {
 	PriceOverrideAmount       pgtype.Numeric
 	PriceOverrideAdjustmentID *uuid.UUID
 	PendingUsageStarts        []time.Time
+	RequestKey                *string
+	RequestFingerprint        []byte
 	CustomerName              string
 	PlanName                  string
 }
@@ -1024,6 +1091,8 @@ func (q *Queries) ListSubscriptions(ctx context.Context, arg ListSubscriptionsPa
 			&i.PriceOverrideAmount,
 			&i.PriceOverrideAdjustmentID,
 			&i.PendingUsageStarts,
+			&i.RequestKey,
+			&i.RequestFingerprint,
 			&i.CustomerName,
 			&i.PlanName,
 		); err != nil {

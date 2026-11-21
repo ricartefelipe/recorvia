@@ -156,7 +156,7 @@ func TestComputeCopiesAggregates(t *testing.T) {
 	raw := Raw{
 		Billed: 100, BilledRecurring: 70, BilledUsage: 30, Received: 90, OpenReceivables: 40,
 		OverdueReceivables: 15, ActiveAtPosition: 12, StartedInPeriod: 3, EndedInPeriod: 4, ActiveAtStart: 11, ChurnedInPeriod: 2,
-		Refunds: 5, Chargebacks: 1, OpenRecoverables: 7, UnknownOperations: 2, OpenDiscrepancies: 4,
+		Refunds: 5, Chargebacks: 1, OpenRecoverables: 7, PendingProviderReceipt: 8, UnknownOperations: 2, OpenDiscrepancies: 4,
 	}
 	d, err := Compute("2026-10", position, raw)
 	if err != nil {
@@ -165,7 +165,8 @@ func TestComputeCopiesAggregates(t *testing.T) {
 	want := Dashboard{
 		Month: "2026-10", Currency: "BRL", PositionAt: position, Billed: 100, BilledRecurring: 70, BilledUsage: 30, Received: 90,
 		OpenReceivables: 40, OverdueReceivables: 15, ChurnRateBP: 1818, ActiveSubscriptions: 12,
-		NewSubscriptions: 3, CanceledSubscriptions: 4, Refunds: 5, Chargebacks: 1, OpenRecoverables: 7, OpenDiscrepancies: 4,
+		NewSubscriptions: 3, CanceledSubscriptions: 4, Refunds: 5, Chargebacks: 1, OpenRecoverables: 7, PendingProviderReceipt: 8,
+		OpenDiscrepancies: 4,
 		UnknownOperations: 2,
 	}
 	d.Definitions, d.Bases = nil, nil

@@ -45,6 +45,10 @@ var transientConflicts = map[string]int{
 	// Reembolso anterior da cobrança com resultado desconhecido, até a nova
 	// consulta ao provedor.
 	"refund_outcome_unknown": 60,
+	// Outra transação gravava o recurso com a mesma chave de negócio; a
+	// repetição encontra o recurso confirmado.
+	"subscription_in_progress": 5,
+	"credit_note_in_progress":  5,
 }
 
 var titles = map[int]string{

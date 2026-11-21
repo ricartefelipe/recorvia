@@ -290,8 +290,10 @@ func TestDisputeLostWithRefundsKeepsLedgerConsistent(t *testing.T) {
 				t.Fatalf("reembolso: %s", f.store.refunds[r.ID].Status)
 			}
 			net := ledgerNet(f.store.posted)
+			// Chargeback e reembolsos saem do disponível pela liquidação; os
+			// valores em liquidação voltam a zero.
 			if net[ledger.Chargebacks] != tc.chargedBack || net[ledger.Refunds] != tc.refunded ||
-				net[ledger.ProviderClearing] != -(tc.chargedBack+tc.refunded) {
+				net[ledger.Cash] != -(tc.chargedBack+tc.refunded) || net[ledger.ProviderClearing] != 0 {
 				t.Fatalf("ledger: %v", net)
 			}
 			released := postedByKind(f.store.posted, "dispute.hold_released")
@@ -377,7 +379,8 @@ func TestRefundNotSentAfterChargeback(t *testing.T) {
 		if ch.AmountChargedBack.Amount() != 8000 || ch.AmountRefunded.Amount() != 2000 || !ch.AmountRefundPending.IsZero() {
 			t.Fatalf("cobrança: estornado=%v reembolsado=%v reservado=%v", ch.AmountChargedBack, ch.AmountRefunded, ch.AmountRefundPending)
 		}
-		if net := ledgerNet(f.store.posted); net[ledger.Chargebacks] != 8000 || net[ledger.Refunds] != 2000 || net[ledger.ProviderClearing] != -10000 {
+		if net := ledgerNet(f.store.posted); net[ledger.Chargebacks] != 8000 || net[ledger.Refunds] != 2000 || net[ledger.Cash] != -10000 ||
+			net[ledger.ProviderClearing] != 0 {
 			t.Fatalf("ledger: %v", net)
 		}
 	})

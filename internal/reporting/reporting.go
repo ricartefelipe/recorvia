@@ -53,8 +53,11 @@ type Raw struct {
 	Refunds            int64
 	Chargebacks        int64
 	OpenRecoverables   int64
-	UnknownOperations  int
-	OpenDiscrepancies  int
+	// PendingProviderReceipt é o saldo, na posição, dos pagamentos
+	// confirmados no provedor e ainda não creditados por ele (ADR-080).
+	PendingProviderReceipt int64
+	UnknownOperations      int
+	OpenDiscrepancies      int
 }
 
 // Basis é a base temporal de um indicador.
@@ -92,10 +95,13 @@ type Dashboard struct {
 	Refunds               int64
 	Chargebacks           int64
 	OpenRecoverables      int64
-	OpenDiscrepancies     int
-	UnknownOperations     int
-	Definitions           map[string]string
-	Bases                 map[string]Basis
+	// PendingProviderReceipt: parte de Recebido ainda não creditada pelo
+	// provedor, em PositionAt.
+	PendingProviderReceipt int64
+	OpenDiscrepancies      int
+	UnknownOperations      int
+	Definitions            map[string]string
+	Bases                  map[string]Basis
 }
 
 // Indicator descreve um indicador devolvido pelo painel. Key é o nome do
@@ -127,7 +133,12 @@ var Indicators = []Indicator{
 	{"billed_usage", BasisMonth, "Faturado por consumo: parte da receita faturada nos itens de consumo medido e de excedente de " +
 		"franquia, líquida dos descontos distribuídos a esses itens."},
 	{"received", BasisMonth, "Receita recebida: soma dos pagamentos confirmados no mês (pela data de pagamento), via provedor ou " +
-		"registro manual."},
+		"registro manual. Inclui os pagamentos confirmados pelo provedor e ainda não creditados por ele (por exemplo, cartão no " +
+		"prazo de recebimento), mostrados em A receber do provedor."},
+	{"pending_provider_receipt", BasisMonthEnd, "A receber do provedor: saldo da conta de pagamentos confirmados no provedor, isto " +
+		"é, pagamentos já contados em Receita recebida cujo valor o provedor ainda não creditou. Quando o provedor informa o " +
+		"recebimento, o valor bruto passa aos valores em liquidação, a taxa é reconhecida e o líquido vai para o disponível " +
+		"liquidado (ADR-080)." + monthEndNote},
 	{"open_receivables", BasisMonthEnd, "Recebíveis em aberto: saldo de contas a receber no ledger por fatura (emissão menos " +
 		"crédito aplicado, pagamentos, notas de crédito e baixas como incobrável, com os estornos), somadas as faturas com saldo." +
 		monthEndNote},
@@ -224,7 +235,8 @@ func Compute(month string, positionAt time.Time, raw Raw) (Dashboard, error) {
 		DelinquencyRateBP: ratio(raw.DelinquencyOpen, raw.DelinquencyBase),
 		ChurnRateBP:       ratio(int64(raw.ChurnedInPeriod), int64(raw.ActiveAtStart)), ActiveSubscriptions: raw.ActiveAtPosition,
 		NewSubscriptions: raw.StartedInPeriod, CanceledSubscriptions: raw.EndedInPeriod, Refunds: raw.Refunds, Chargebacks: raw.Chargebacks,
-		OpenRecoverables: raw.OpenRecoverables, OpenDiscrepancies: raw.OpenDiscrepancies, UnknownOperations: raw.UnknownOperations,
+		OpenRecoverables: raw.OpenRecoverables, PendingProviderReceipt: raw.PendingProviderReceipt,
+		OpenDiscrepancies: raw.OpenDiscrepancies, UnknownOperations: raw.UnknownOperations,
 		Definitions: Definitions, Bases: Bases,
 	}, nil
 }

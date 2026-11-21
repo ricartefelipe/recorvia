@@ -268,7 +268,19 @@ func PaymentConfirmedKey(paymentID uuid.UUID) string {
 
 // SuspensionKey identifica o aviso de suspensão pela política.
 func SuspensionKey(suspensionID uuid.UUID) string {
-	return "subscription_suspended:" + suspensionID.String()
+	return suspensionKeyPrefix + suspensionID.String()
+}
+
+const suspensionKeyPrefix = "subscription_suspended:"
+
+// suspensionIDFromKey extrai a suspensão da chave do aviso de suspensão.
+func suspensionIDFromKey(key string) (uuid.UUID, bool) {
+	rest, ok := strings.CutPrefix(key, suspensionKeyPrefix)
+	if !ok {
+		return uuid.Nil, false
+	}
+	id, err := uuid.Parse(rest)
+	return id, err == nil
 }
 
 // InvitationKey identifica o e-mail de convite.

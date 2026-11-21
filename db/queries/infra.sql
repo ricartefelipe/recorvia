@@ -56,8 +56,9 @@ SELECT * FROM audit_log
  LIMIT @row_limit;
 
 -- name: InsertIdempotencyKey :execrows
-INSERT INTO idempotency_keys (tenant_id, client_id, operation, idempotency_key, request_hash, status, locked_until, created_at, expires_at)
-VALUES (@tenant_id, @client_id, @operation, @idempotency_key, @request_hash, 'in_progress', @locked_until, @now, @expires_at)
+INSERT INTO idempotency_keys (tenant_id, client_id, operation, idempotency_key, request_hash, status, locked_until, lease_token, created_at,
+                              expires_at)
+VALUES (@tenant_id, @client_id, @operation, @idempotency_key, @request_hash, 'in_progress', @locked_until, @lease_token::uuid, @now, @expires_at)
 ON CONFLICT DO NOTHING;
 
 -- name: GetIdempotencyKey :one
@@ -66,22 +67,27 @@ SELECT * FROM idempotency_keys
 
 -- name: TakeOverIdempotencyKey :execrows
 -- Recuperação de processamento interrompido: assume a chave apenas se o
--- lease anterior expirou (um único processo vence a disputa).
-UPDATE idempotency_keys SET locked_until = @locked_until
+-- lease anterior expirou (um único processo vence a disputa). O token novo
+-- passa a ser o único aceito para registrar o resultado ou liberar a chave.
+UPDATE idempotency_keys SET locked_until = @locked_until, lease_token = @lease_token::uuid
  WHERE tenant_id = @tenant_id AND client_id = @client_id AND operation = @operation AND idempotency_key = @idempotency_key
    AND status = 'in_progress' AND locked_until < @now;
 
--- name: CompleteIdempotencyKey :exec
+-- name: CompleteIdempotencyKey :execrows
+-- Só a execução que detém a chave (mesmo token, ainda em processamento)
+-- registra o resultado: a execução cujo lease foi assumido por outra não
+-- sobrescreve o resultado da nova.
 UPDATE idempotency_keys
    SET status = 'completed', response_status = @response_status, response_body = @response_body,
        response_content_type = @response_content_type, response_location = sqlc.narg(response_location), completed_at = @now,
        locked_until = NULL
- WHERE tenant_id = @tenant_id AND client_id = @client_id AND operation = @operation AND idempotency_key = @idempotency_key;
+ WHERE tenant_id = @tenant_id AND client_id = @client_id AND operation = @operation AND idempotency_key = @idempotency_key
+   AND status = 'in_progress' AND lease_token = @lease_token::uuid;
 
 -- name: ReleaseIdempotencyKey :exec
 DELETE FROM idempotency_keys
  WHERE tenant_id = @tenant_id AND client_id = @client_id AND operation = @operation AND idempotency_key = @idempotency_key
-   AND status = 'in_progress';
+   AND status = 'in_progress' AND lease_token = @lease_token::uuid;
 
 -- name: PurgeExpiredIdempotencyKeys :one
 SELECT app_idempotency_purge_expired()::int AS purged;

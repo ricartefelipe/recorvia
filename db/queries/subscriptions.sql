@@ -1,14 +1,21 @@
 -- Assinaturas, histórico e descontos.
 
--- name: InsertSubscription :exec
+-- name: InsertSubscription :execrows
+-- Sem linhas afetadas: outra transação já confirmou a assinatura com a mesma
+-- chave de negócio (request_key); o ON CONFLICT espera a outra transação
+-- terminar, e a releitura pela chave encontra a assinatura confirmada.
 INSERT INTO subscriptions (id, tenant_id, customer_id, plan_id, price_version_id, status, quantity, billing_interval, timezone, anchor_date,
                            trial_ends_at, started_at, current_period_start, current_period_end, next_billing_index, next_billing_at,
                            cancel_at_period_end, canceled_at, cancel_reason, ended_at, suspended_at, suspension_reason, payment_terms_days,
-                           created_at, updated_at, version)
+                           request_key, request_fingerprint, created_at, updated_at, version)
 VALUES (@id, @tenant_id, @customer_id, @plan_id, @price_version_id, @status, @quantity, @billing_interval, @timezone, @anchor_date,
         sqlc.narg(trial_ends_at), @started_at, @current_period_start, @current_period_end, @next_billing_index, sqlc.narg(next_billing_at),
         @cancel_at_period_end, sqlc.narg(canceled_at), sqlc.narg(cancel_reason), sqlc.narg(ended_at), sqlc.narg(suspended_at),
-        sqlc.narg(suspension_reason), sqlc.narg(payment_terms_days), @created_at, @created_at, 1);
+        sqlc.narg(suspension_reason), sqlc.narg(payment_terms_days), sqlc.narg(request_key), sqlc.narg(request_fingerprint), @created_at, @created_at, 1)
+ON CONFLICT (tenant_id, request_key) DO NOTHING;
+
+-- name: GetSubscriptionByRequestKey :one
+SELECT * FROM subscriptions WHERE tenant_id = @tenant_id AND request_key = @request_key;
 
 -- name: GetSubscription :one
 SELECT * FROM subscriptions WHERE tenant_id = @tenant_id AND id = @id;

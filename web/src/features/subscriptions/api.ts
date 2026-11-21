@@ -28,7 +28,8 @@ export const subscriptionsApi = {
   list: (params: SubscriptionListParams, signal?: AbortSignal) =>
     api.get<SubscriptionPage>('/api/v1/subscriptions', { query: { ...params }, signal }),
   get: (id: string, signal?: AbortSignal) => api.get<Subscription>(base(id), { signal }),
-  create: (input: SubscriptionInput) => api.post<Subscription>('/api/v1/subscriptions', input),
+  create: (input: SubscriptionInput, idempotencyKey: string) =>
+    api.post<Subscription>('/api/v1/subscriptions', input, { idempotencyKey }),
   history: (id: string, signal?: AbortSignal) =>
     api.get<DataList<SubscriptionHistoryEntry>>(`${base(id)}/history`, { signal }),
   cancel: (s: Subscription, input: { mode: 'immediate' | 'period_end'; reason?: string }) =>
@@ -43,11 +44,11 @@ export const subscriptionsApi = {
     api.post<Subscription>(`${base(s.id)}/change-quantity`, input, { ifMatch: s.version }),
   listAdjustments: (id: string, signal?: AbortSignal) =>
     api.get<DataList<PriceAdjustment>>(`${base(id)}/price-adjustments`, { signal }),
-  scheduleAdjustment: (id: string, input: PriceAdjustmentInput) =>
-    api.post<PriceAdjustment>(`${base(id)}/price-adjustments`, input),
+  scheduleAdjustment: (id: string, input: PriceAdjustmentInput, idempotencyKey: string) =>
+    api.post<PriceAdjustment>(`${base(id)}/price-adjustments`, input, { idempotencyKey }),
   cancelAdjustment: (id: string, adjustmentId: string) => api.delete(`${base(id)}/price-adjustments/${enc(adjustmentId)}`),
-  applyCoupon: (id: string, couponCode: string) =>
-    api.post<SubscriptionDiscount>(`${base(id)}/discounts`, { coupon_code: couponCode }),
+  applyCoupon: (id: string, couponCode: string, idempotencyKey: string) =>
+    api.post<SubscriptionDiscount>(`${base(id)}/discounts`, { coupon_code: couponCode }, { idempotencyKey }),
   removeDiscount: (id: string) => api.delete(`${base(id)}/discounts`),
   usage: (id: string, signal?: AbortSignal) => api.get<SubscriptionUsage>(`${base(id)}/usage`, { signal }),
   usageEvents: (params: { subscription_id?: string; metric_id?: string; cursor?: string; limit?: number }, signal?: AbortSignal) =>

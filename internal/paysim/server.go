@@ -275,10 +275,12 @@ button.secondary{background:#fff;color:#cf222e;border-color:#cf222e}.muted{color
 {{if .Charge}}{{with .Charge}}<div class="card"><h1>Pagamento da cobrança</h1>
 <p>{{.Description}}</p><p><strong>{{brl .Amount}}</strong>: vencimento {{.DueDate}}</p><p>Situação: <strong>{{.Status}}</strong></p>
 {{if eq .Status "pending"}}<form method="post" action="/checkout/{{.ID}}/pay"><button type="submit">Confirmar pagamento</button></form>
+<form method="post" action="/checkout/{{.ID}}/confirm" style="margin-top:.5rem"><button type="submit">Confirmar com crédito posterior</button></form>
 <form method="post" action="/checkout/{{.ID}}/fail" style="margin-top:.5rem"><button type="submit" class="secondary">Recusar pagamento</button></form>{{end}}
+{{if eq .Status "confirmed"}}<form method="post" action="/checkout/{{.ID}}/receive"><button type="submit">Creditar o recebimento</button></form>{{end}}
 </div>{{end}}{{else}}<div class="card"><h1>Cobranças simuladas</h1><table><thead><tr><th>ID</th><th>Referência</th><th>Valor</th><th>Situação</th><th>Atualização</th></tr></thead><tbody>
 {{range .Charges}}<tr><td><a href="/checkout/{{.ID}}">{{.ID}}</a></td><td>{{.ExternalReference}}</td><td>{{brl .Amount}}</td><td>{{.Status}}</td><td>{{.UpdatedAt.Format "02/01/2006 15:04:05"}}</td></tr>{{else}}<tr><td colspan="5">Nenhuma cobrança.</td></tr>{{end}}
-</tbody></table><p class="muted">Controles: POST /sim/scenarios e POST /sim/charges/{id}/actions (pay, pay_silently, fail, refund, chargeback, diverge, replay); DELETE /v1/charges/{id} cancela a cobrança pendente.</p></div>{{end}}
+</tbody></table><p class="muted">Controles: POST /sim/scenarios e POST /sim/charges/{id}/actions (pay, pay_silently, confirm, receive, fail, refund, chargeback, diverge, replay); DELETE /v1/charges/{id} cancela a cobrança pendente.</p></div>{{end}}
 </main></body></html>`))
 
 func (s *Sim) render(w http.ResponseWriter, data map[string]any) {
@@ -300,7 +302,7 @@ func (s *Sim) checkoutPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Sim) checkoutAction(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
-	if action != "pay" && action != "fail" {
+	if action != "pay" && action != "fail" && action != "confirm" && action != "receive" {
 		http.NotFound(w, r)
 		return
 	}

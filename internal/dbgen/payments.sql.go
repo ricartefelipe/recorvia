@@ -282,6 +282,55 @@ func (q *Queries) GetChargeForUpdate(ctx context.Context, arg GetChargeForUpdate
 	return i, err
 }
 
+const getChargePaymentPendingReceipt = `-- name: GetChargePaymentPendingReceipt :one
+SELECT p.id, p.tenant_id, p.invoice_id, p.charge_id, p.customer_id, p.amount, p.fee_amount, p.currency, p.method, p.source, p.paid_at, p.note, p.recorded_by, p.request_key, p.created_at,
+       COALESCE((SELECT sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END)
+                   FROM ledger_transactions t
+                   JOIN ledger_entries e ON e.tenant_id = t.tenant_id AND e.transaction_id = t.id
+                   JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+                  WHERE t.tenant_id = p.tenant_id AND t.reference_type = 'payment' AND t.reference_id = p.id
+                    AND a.code = 'provider_confirmed'), 0)::bigint AS pending_receipt
+  FROM payments p
+ WHERE p.tenant_id = $1 AND p.charge_id = $2
+`
+
+type GetChargePaymentPendingReceiptParams struct {
+	TenantID uuid.UUID
+	ChargeID *uuid.UUID
+}
+
+type GetChargePaymentPendingReceiptRow struct {
+	Payment        Payment
+	PendingReceipt int64
+}
+
+// Pagamento da cobrança e o valor dele ainda em pagamentos confirmados no
+// provedor (saldo de provider_confirmed nos lançamentos que referenciam o
+// pagamento: confirmação, excedente e recebimento), à espera do recebimento.
+func (q *Queries) GetChargePaymentPendingReceipt(ctx context.Context, arg GetChargePaymentPendingReceiptParams) (GetChargePaymentPendingReceiptRow, error) {
+	row := q.db.QueryRow(ctx, getChargePaymentPendingReceipt, arg.TenantID, arg.ChargeID)
+	var i GetChargePaymentPendingReceiptRow
+	err := row.Scan(
+		&i.Payment.ID,
+		&i.Payment.TenantID,
+		&i.Payment.InvoiceID,
+		&i.Payment.ChargeID,
+		&i.Payment.CustomerID,
+		&i.Payment.Amount,
+		&i.Payment.FeeAmount,
+		&i.Payment.Currency,
+		&i.Payment.Method,
+		&i.Payment.Source,
+		&i.Payment.PaidAt,
+		&i.Payment.Note,
+		&i.Payment.RecordedBy,
+		&i.Payment.RequestKey,
+		&i.Payment.CreatedAt,
+		&i.PendingReceipt,
+	)
+	return i, err
+}
+
 const getDefaultProviderAccount = `-- name: GetDefaultProviderAccount :one
 
 SELECT id, tenant_id, provider, environment, status, is_default, api_key_ciphertext, api_key_key_id, api_key_hint, webhook_secret_ciphertext, webhook_secret_key_id, webhook_endpoint_token_hash, created_at, updated_at, version FROM payment_provider_accounts WHERE tenant_id = $1 AND is_default AND status = 'active'
@@ -793,6 +842,50 @@ func (q *Queries) ListCharges(ctx context.Context, arg ListChargesParams) ([]Cha
 			&i.Version,
 			&i.AmountRefundPending,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listChargesPendingReceipt = `-- name: ListChargesPendingReceipt :many
+SELECT p.charge_id::uuid AS charge_id,
+       sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END)::bigint AS pending_receipt
+  FROM payments p
+  JOIN ledger_transactions t ON t.tenant_id = p.tenant_id AND t.reference_type = 'payment' AND t.reference_id = p.id
+  JOIN ledger_entries e ON e.tenant_id = t.tenant_id AND e.transaction_id = t.id
+  JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+ WHERE p.tenant_id = $1 AND p.charge_id = ANY ($2::uuid[]) AND a.code = 'provider_confirmed'
+ GROUP BY p.charge_id
+HAVING sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END) <> 0
+`
+
+type ListChargesPendingReceiptParams struct {
+	TenantID  uuid.UUID
+	ChargeIds []uuid.UUID
+}
+
+type ListChargesPendingReceiptRow struct {
+	ChargeID       uuid.UUID
+	PendingReceipt int64
+}
+
+// Valor ainda em pagamentos confirmados no provedor por cobrança, em lote
+// para a conciliação: só as cobranças com pendência de recebimento.
+func (q *Queries) ListChargesPendingReceipt(ctx context.Context, arg ListChargesPendingReceiptParams) ([]ListChargesPendingReceiptRow, error) {
+	rows, err := q.db.Query(ctx, listChargesPendingReceipt, arg.TenantID, arg.ChargeIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListChargesPendingReceiptRow
+	for rows.Next() {
+		var i ListChargesPendingReceiptRow
+		if err := rows.Scan(&i.ChargeID, &i.PendingReceipt); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

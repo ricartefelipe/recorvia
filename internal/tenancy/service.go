@@ -36,7 +36,10 @@ type Tx interface {
 	PendingInvitations(ctx context.Context, now time.Time) (int, error)
 
 	DefaultPlatformPlan(ctx context.Context) (platformbilling.Plan, error)
-	PlatformPlan(ctx context.Context) (platformbilling.Plan, error)
+	// LockPlatformPlan lê o plano da plataforma bloqueando a assinatura do
+	// tenant na plataforma até o fim da transação: convites, aceites, troca de
+	// plano e criação de assinaturas contam o consumo um de cada vez.
+	LockPlatformPlan(ctx context.Context) (platformbilling.Plan, error)
 	PlatformUsage(ctx context.Context) (platformbilling.Usage, error)
 	InsertPlatformSubscription(ctx context.Context, s platformbilling.Subscription) error
 
@@ -233,7 +236,9 @@ func (s *Service) Invitations(ctx context.Context, tenantID uuid.UUID) ([]Invita
 }
 
 // Invite cria um convite. Somente proprietários convidam proprietários. O
-// limite de usuários do plano considera membros ativos e convites pendentes.
+// limite de usuários do plano considera membros ativos e convites pendentes,
+// contados com a assinatura da plataforma bloqueada (convites simultâneos não
+// passam do limite).
 func (s *Service) Invite(ctx context.Context, tenantID uuid.UUID, inviter Access, inviterRef UserRef, email string, role Role) (Invitation, string, error) {
 	email, err := NormalizeEmail(email)
 	if err != nil {
@@ -252,7 +257,7 @@ func (s *Service) Invite(ctx context.Context, tenantID uuid.UUID, inviter Access
 		InvitedBy: inviter.UserID, ExpiresAt: now.Add(InvitationTTL), CreatedAt: now,
 	}
 	err = s.store.InTenant(ctx, tenantID, func(tx Tx) error {
-		plan, err := tx.PlatformPlan(ctx)
+		plan, err := tx.LockPlatformPlan(ctx)
 		if err != nil {
 			return err
 		}
@@ -260,11 +265,9 @@ func (s *Service) Invite(ctx context.Context, tenantID uuid.UUID, inviter Access
 		if err != nil {
 			return err
 		}
-		pending, err := tx.PendingInvitations(ctx, now)
-		if err != nil {
+		if usage.PendingInvitations, err = tx.PendingInvitations(ctx, now); err != nil {
 			return err
 		}
-		usage.ActiveUsers += pending
 		if err := platformbilling.CheckUserLimit(plan, usage); err != nil {
 			return err
 		}
@@ -311,7 +314,10 @@ func (s *Service) RevokeInvitation(ctx context.Context, tenantID uuid.UUID, acto
 }
 
 // AcceptInvitation associa o usuário autenticado à organização do convite.
-// O convite é de uso único, expira e exige o mesmo e-mail do usuário.
+// O convite é de uso único, expira e exige o mesmo e-mail do usuário. O
+// limite de usuários do plano é conferido de novo (o plano pode ter mudado
+// depois do convite), com a assinatura da plataforma bloqueada antes do
+// convite: aceites simultâneos contam os membros um de cada vez.
 func (s *Service) AcceptInvitation(ctx context.Context, user UserRef, token string) (Membership, error) {
 	invalid := apperr.Invalid("invitation_invalid", "Convite inválido, expirado ou já utilizado.")
 	if len(token) < 20 || len(token) > 200 {
@@ -327,6 +333,10 @@ func (s *Service) AcceptInvitation(ctx context.Context, user UserRef, token stri
 	now := s.clock.Now()
 	var m Membership
 	err = s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		plan, err := tx.LockPlatformPlan(ctx)
+		if err != nil {
+			return err
+		}
 		inv, err := tx.Invitation(ctx, invID, true)
 		if err != nil {
 			return err
@@ -338,9 +348,19 @@ func (s *Service) AcceptInvitation(ctx context.Context, user UserRef, token stri
 			return apperr.Forbidden("invitation_email_mismatch", "Este convite foi enviado para outro endereço de e-mail.")
 		}
 		existing, err := tx.Membership(ctx, user.ID, true)
-		switch {
-		case err == nil && existing.Status == MembershipActive:
+		if err == nil && existing.Status == MembershipActive {
 			return apperr.Conflict("already_member", "Você já participa desta organização.")
+		}
+		if err == nil || apperr.IsKind(err, apperr.KindNotFound) {
+			usage, uerr := tx.PlatformUsage(ctx)
+			if uerr != nil {
+				return uerr
+			}
+			if lerr := platformbilling.CheckJoinLimit(plan, usage); lerr != nil {
+				return lerr
+			}
+		}
+		switch {
 		case err == nil:
 			existing.Role, existing.Status = inv.Role, MembershipActive
 			if err := tx.UpdateMembership(ctx, existing); err != nil {

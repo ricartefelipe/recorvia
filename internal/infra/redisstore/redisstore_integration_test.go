@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -71,7 +72,7 @@ func TestSessionsLoginFlowAndRevocation(t *testing.T) {
 	}
 	user := uuid.New()
 	for _, id := range []string{"sessao-a", "sessao-b"} {
-		if err := st.Save(ctx, identity.Session{ID: id, UserID: user, CSRFToken: "c", ExpiresAt: time.Now().Add(time.Hour)}, time.Hour); err != nil {
+		if err := st.Create(ctx, identity.Session{ID: id, UserID: user, CSRFToken: "c", ExpiresAt: time.Now().Add(time.Hour)}, time.Hour); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -98,6 +99,174 @@ func TestSessionsLoginFlowAndRevocation(t *testing.T) {
 		if err != nil || ok != (i < 2) {
 			t.Fatalf("Allow #%d = %v %v", i, ok, err)
 		}
+	}
+}
+
+// ListForUser devolve só as sessões vigentes do usuário, decifradas, e limpa
+// do índice as que expiraram ou foram removidas.
+func TestSessionsListForUser(t *testing.T) {
+	ctx := context.Background()
+	rdb := startRedis(t)
+	st := redisstore.New(rdb, keyring(t), "web")
+	user, other := uuid.New(), uuid.New()
+	tenant := uuid.New()
+	for _, s := range []identity.Session{
+		{ID: "sessao-a", UserID: user, ActiveTenantID: &tenant, Tokens: identity.Tokens{RefreshToken: "rt-a"}},
+		{ID: "sessao-b", UserID: user},
+		{ID: "sessao-c", UserID: user},
+		{ID: "sessao-x", UserID: other},
+	} {
+		if err := st.Create(ctx, s, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.Delete(ctx, "sessao-c"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.ListForUser(ctx, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]identity.Session{}
+	for _, s := range got {
+		byID[s.ID] = s
+	}
+	if len(got) != 2 || byID["sessao-a"].Tokens.RefreshToken != "rt-a" || *byID["sessao-a"].ActiveTenantID != tenant || byID["sessao-b"].ID == "" {
+		t.Fatalf("sessões do usuário: %+v", got)
+	}
+	if n, err := rdb.SCard(ctx, "recorvia:web:user_sessions:"+user.String()).Result(); err != nil || n != 2 {
+		t.Fatalf("o índice deve descartar a sessão removida: %d %v", n, err)
+	}
+	if none, err := st.ListForUser(ctx, uuid.New()); err != nil || len(none) != 0 {
+		t.Fatalf("usuário sem sessões: %v %v", none, err)
+	}
+}
+
+// Uma sessão lida antes da revogação não volta a existir quando a
+// requisição em voo tenta regravá-la, e sessões emitidas com a geração
+// anterior são recusadas.
+func TestRevokedSessionsAreNotResurrected(t *testing.T) {
+	ctx := context.Background()
+	rdb := startRedis(t)
+	st := redisstore.New(rdb, keyring(t), "web")
+	user, tenant := uuid.New(), uuid.New()
+	exp := time.Now().Add(time.Hour)
+	plain := identity.Session{ID: "sessao-plana", UserID: user, ExpiresAt: exp}
+	if err := st.Save(ctx, plain, time.Hour); !errors.Is(err, identity.ErrSessionNotFound) {
+		t.Fatalf("Save não cria sessão inexistente: %v", err)
+	}
+	if err := st.Create(ctx, plain, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	inFlight, err := st.Get(ctx, plain.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteAllForUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	inFlight.LastSeenAt = time.Now()
+	if err := st.Save(ctx, inFlight, time.Hour); !errors.Is(err, identity.ErrSessionNotFound) {
+		t.Fatalf("a requisição em voo não pode regravar a sessão revogada: %v", err)
+	}
+	if _, err := st.Get(ctx, plain.ID); !errors.Is(err, identity.ErrSessionNotFound) {
+		t.Fatalf("sessão revogada: %v", err)
+	}
+	if n, err := rdb.Exists(ctx, "recorvia:web:user_sessions:"+user.String()).Result(); err != nil || n != 0 {
+		t.Fatalf("o índice não pode ser recriado: %d %v", n, err)
+	}
+	// Criação com a geração anterior (rotação iniciada antes da revogação).
+	if err := st.Create(ctx, identity.Session{ID: "rotacionada", UserID: user, ExpiresAt: exp}, time.Hour); !errors.Is(err, identity.ErrSessionNotFound) {
+		t.Fatalf("sessão com geração anterior não pode ser criada: %v", err)
+	}
+	gen, _, err := st.Generations(ctx, user, nil)
+	if err != nil || gen != 1 {
+		t.Fatalf("geração depois da revogação: %d %v", gen, err)
+	}
+	if ttl := rdb.TTL(ctx, "recorvia:web:user_gen:"+user.String()).Val(); ttl <= 12*time.Hour {
+		t.Fatalf("a geração dura mais que a sessão mais longa: %v", ttl)
+	}
+	fresh := identity.Session{ID: "nova", UserID: user, ExpiresAt: exp, Generation: gen}
+	if err := st.Create(ctx, fresh, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Get(ctx, fresh.ID); err != nil {
+		t.Fatalf("sessão com a geração corrente vale: %v", err)
+	}
+
+	// Organização: só as sessões com aquele tenant ativo deixam de valer.
+	inTenant := identity.Session{ID: "no-tenant", UserID: user, ActiveTenantID: &tenant, ExpiresAt: exp, Generation: gen}
+	if err := st.Create(ctx, inTenant, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InvalidateTenant(ctx, user, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Get(ctx, inTenant.ID); !errors.Is(err, identity.ErrSessionNotFound) {
+		t.Fatalf("sessão do tenant revogado: %v", err)
+	}
+	if err := st.Save(ctx, inTenant, time.Hour); !errors.Is(err, identity.ErrSessionNotFound) {
+		t.Fatalf("sessão do tenant revogado não pode ser regravada: %v", err)
+	}
+	if _, err := st.Get(ctx, fresh.ID); err != nil {
+		t.Fatalf("a sessão sem o tenant continua: %v", err)
+	}
+	_, tg, err := st.Generations(ctx, user, &tenant)
+	if err != nil || tg != 1 {
+		t.Fatalf("geração no tenant: %d %v", tg, err)
+	}
+	inTenant.ID, inTenant.TenantGeneration = "no-tenant-de-novo", tg
+	if err := st.Create(ctx, inTenant, time.Hour); err != nil {
+		t.Fatalf("nova sessão no tenant com a geração corrente: %v", err)
+	}
+}
+
+// revokingStore encerra todas as sessões do usuário logo depois da primeira
+// leitura, como um "encerrar todas as sessões" em outra aba enquanto a
+// requisição está em voo.
+type revokingStore struct {
+	*redisstore.Store
+	once sync.Once
+}
+
+func (s *revokingStore) Get(ctx context.Context, id string) (identity.Session, error) {
+	sess, err := s.Store.Get(ctx, id)
+	if err == nil {
+		s.once.Do(func() { err = s.DeleteAllForUser(ctx, sess.UserID) })
+	}
+	return sess, err
+}
+
+type activeUsers struct{ identity.UserStore }
+
+func (activeUsers) User(_ context.Context, id uuid.UUID) (identity.User, error) {
+	return identity.User{ID: id, Status: "active"}, nil
+}
+
+// Intercalação reproduzida com o Redis real: a requisição lê a sessão, as
+// sessões são revogadas e a requisição tenta regravar a sessão (toque). A
+// autenticação é recusada e a sessão não volta.
+func TestInFlightAuthenticationAfterLogoutAll(t *testing.T) {
+	ctx := context.Background()
+	rdb := startRedis(t)
+	st := &revokingStore{Store: redisstore.New(rdb, keyring(t), "web")}
+	clk := clock.NewManual(time.Now())
+	svc := identity.NewService(fakeIDP{}, st, activeUsers{}, clk, identity.DefaultPolicy())
+	user := uuid.New()
+	sess := identity.Session{ID: "sessao-em-voo", UserID: user, CSRFToken: "c", CreatedAt: clk.Now(), LastSeenAt: clk.Now(),
+		ExpiresAt: clk.Now().Add(time.Hour)}
+	if err := st.Create(ctx, sess, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(2 * time.Minute) // a requisição regrava a sessão (intervalo de toque)
+	if _, _, err := svc.Authenticate(ctx, sess.ID); !apperr.IsKind(err, apperr.KindUnauthenticated) {
+		t.Fatalf("a requisição em voo deve ser recusada: %v", err)
+	}
+	if n, err := rdb.Exists(ctx, "recorvia:web:user_sessions:"+user.String()).Result(); err != nil || n != 0 {
+		t.Fatalf("o índice não pode ser recriado: %d %v", n, err)
+	}
+	if _, err := st.Store.Get(ctx, sess.ID); !errors.Is(err, identity.ErrSessionNotFound) {
+		t.Fatalf("a sessão não pode voltar a existir: %v", err)
 	}
 }
 

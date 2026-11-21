@@ -191,6 +191,9 @@ func TestTransientConflictsCarryRetryAfter(t *testing.T) {
 	}{
 		{"reconciliation_running", "60"},
 		{"refund_outcome_unknown", "60"},
+		{"subscription_in_progress", "5"},
+		{"credit_note_in_progress", "5"},
+		{"request_key_reused", ""},
 		{"provider_not_configured", ""},
 		{"refund_exceeds_balance", ""},
 	}

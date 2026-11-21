@@ -3,6 +3,10 @@
 //	migrate bootstrap   cria papéis e banco (exige RECORVIA_BOOTSTRAP_DATABASE_URL de superusuário)
 //	migrate up          aplica migrations como recorvia_owner
 //	migrate status      lista migrations e estado
+//
+// No ambiente local, com RECORVIA_DEMO_STAFF_SUBJECT definido, o up também
+// inclui o usuário de demonstração da equipe da plataforma em
+// platform_staff (como dono das tabelas; recusado em produção).
 package main
 
 import (
@@ -12,6 +16,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/ricartefelipe/recorvia/internal/infra/config"
 	"github.com/ricartefelipe/recorvia/internal/infra/logging"
@@ -65,9 +72,45 @@ func run(ctx context.Context, args []string, log *slog.Logger) error {
 		}
 		applied, err := migrate.Up(ctx, cfg.MigrationsDBURL)
 		log.Info("migrations aplicadas", slog.Int("count", len(applied)), slog.Any("files", applied))
-		return err
+		if err != nil {
+			return err
+		}
+		staff, err := demoStaffFromEnv(os.Getenv, cfg.Env, cfg.OIDCIssuer)
+		if err != nil || staff == nil {
+			return err
+		}
+		if err := migrate.EnsureDemoStaff(ctx, cfg.MigrationsDBURL, *staff, time.Now().UTC()); err != nil {
+			return err
+		}
+		log.Info("equipe da plataforma de demonstração incluída", slog.String("email", staff.Email))
+		return nil
 	}
 	return fmt.Errorf("comando desconhecido %q", args[0])
+}
+
+// demoStaffFromEnv lê o usuário de demonstração da equipe da plataforma.
+// Sem RECORVIA_DEMO_STAFF_SUBJECT, não há inclusão; em produção, a variável
+// é recusada (a equipe real é mantida pelo runbook, com registro).
+func demoStaffFromEnv(getenv func(string) string, env config.Environment, issuer string) (*migrate.DemoStaff, error) {
+	raw := getenv("RECORVIA_DEMO_STAFF_SUBJECT")
+	if raw == "" {
+		return nil, nil
+	}
+	if env == config.Production {
+		return nil, fmt.Errorf("RECORVIA_DEMO_STAFF_SUBJECT não é aceito em produção")
+	}
+	subject, err := uuid.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("RECORVIA_DEMO_STAFF_SUBJECT: %w", err)
+	}
+	if issuer == "" {
+		return nil, fmt.Errorf("RECORVIA_OIDC_ISSUER é obrigatório com RECORVIA_DEMO_STAFF_SUBJECT")
+	}
+	name := getenv("RECORVIA_DEMO_STAFF_NAME")
+	if name == "" {
+		name = "Equipe Recorvia (demonstração)"
+	}
+	return &migrate.DemoStaff{Issuer: issuer, Subject: subject, Email: getenv("RECORVIA_DEMO_STAFF_EMAIL"), Name: name}, nil
 }
 
 func envOr(k, def string) string {

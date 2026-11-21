@@ -122,6 +122,7 @@ zero; uma cancelada depois do mês continua na base e no saldo daquele mês.
 | `refunds` | mês | Movimento líquido (débitos − créditos) da conta `refunds` com `occurred_at` no mês. |
 | `chargebacks` | mês | Movimento líquido da conta `chargebacks` no mês: retenção na abertura, menos a retenção liberada na disputa perdida (parte reembolsada ou reservada a reembolso), o estorno da disputa ganha e a parte que era pagamento excedente (ADR-070). Pode ser negativo no mês em que uma disputa de mês anterior é ganha. |
 | `open_recoverables` | fim do mês | Saldo (débitos − créditos) da conta `customer_recoverables` com `occurred_at` até a posição: excedente já usado estornado por chargeback menos as baixas recebidas e perdidas (ADR-073). |
+| `pending_provider_receipt` | fim do mês | Saldo (débitos − créditos) da conta `provider_confirmed` com `occurred_at` até a posição: pagamentos confirmados pelo provedor e ainda não creditados por ele. Esse valor já está em `received` (ADR-080). |
 | `open_discrepancies` | atual | Divergências de conciliação com `status = 'open'`, de qualquer mês. |
 | `unknown_operations` | atual | Operações de pagamento (`payment_operations`) com `status = 'unknown'`. |
 

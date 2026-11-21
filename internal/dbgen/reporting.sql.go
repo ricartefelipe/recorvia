@@ -175,6 +175,29 @@ func (q *Queries) DashboardOpenDiscrepancies(ctx context.Context, tenantID uuid.
 	return column_1, err
 }
 
+const dashboardPendingProviderReceipt = `-- name: DashboardPendingProviderReceipt :one
+SELECT COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END), 0)::bigint AS balance
+  FROM ledger_entries e
+  JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+  JOIN ledger_transactions t ON t.tenant_id = e.tenant_id AND t.id = e.transaction_id
+ WHERE e.tenant_id = $1 AND a.code = 'provider_confirmed' AND t.occurred_at <= $2
+`
+
+type DashboardPendingProviderReceiptParams struct {
+	TenantID   uuid.UUID
+	PositionAt time.Time
+}
+
+// Saldo da conta de pagamentos confirmados no provedor (débitos menos
+// créditos) no instante da posição: pagamentos já confirmados, contados em
+// Recebido, cujo valor o provedor ainda não creditou (ADR-080).
+func (q *Queries) DashboardPendingProviderReceipt(ctx context.Context, arg DashboardPendingProviderReceiptParams) (int64, error) {
+	row := q.db.QueryRow(ctx, dashboardPendingProviderReceipt, arg.TenantID, arg.PositionAt)
+	var balance int64
+	err := row.Scan(&balance)
+	return balance, err
+}
+
 const dashboardReceivablesAt = `-- name: DashboardReceivablesAt :one
 WITH candidates AS (
   SELECT i.id FROM invoices i
