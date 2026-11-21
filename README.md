@@ -28,7 +28,7 @@ tenant, RabbitMQ para eventos, Redis para sessões, Keycloak para identidade. De
 - [Modelo comercial (hipóteses)](docs/negocio/modelo-comercial.md)
 - [Roteiro demonstrativo](docs/roteiro-demo.md)
 - [Contrato da API (OpenAPI)](api/openapi.yaml)
-- [Guia de desenvolvimento](CLAUDE.md) · [Contribuição (GitFlow)](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
+- [Guia de desenvolvimento](docs/DESENVOLVIMENTO.md) · [Contribuição (GitFlow)](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
 ## Executar localmente (a partir de um checkout limpo)
 
@@ -74,23 +74,28 @@ e [retenção e anonimização](docs/operacao/retencao-e-anonimizacao.md).
 ### Observabilidade
 
 ```bash
-make up-obs          # ambiente completo + OpenTelemetry Collector, Jaeger, Prometheus e Grafana
-make obs-stack-check # confere alvos de coleta, regras, séries, dashboards e rastros da stack em execução
-make obs-check       # valida configurações, regras de alerta e dashboards (otelcol, jaeger, promtool)
+make up-obs          # ambiente completo + OpenTelemetry Collector, Jaeger, Prometheus, Alertmanager e Grafana
+make obs-stack-check # confere alvos de coleta, regras, séries, um alerta até o e-mail, dashboards e rastros da stack em execução
+make obs-check       # valida configurações, regras de alerta, roteamento e dashboards (otelcol, jaeger, promtool, amtool)
 ```
 
 | Serviço | Endereço |
 |---|---|
 | Grafana (pasta *Recorvia*; leitura anônima, administrador `admin` com `GRAFANA_ADMIN_PASSWORD`) | http://localhost:3000 |
 | Prometheus (alvos, regras e alertas) | http://localhost:9090 |
+| Alertmanager (alertas recebidos, silêncios e inibições; e-mails no Mailpit, http://localhost:8025) | http://localhost:9093 |
 | Jaeger (rastros da API e do worker) | http://localhost:16686 |
 
 Dashboards provisionados: *visão geral* (página inicial), *mensageria* (filas, retentativas, DLQs,
 consumidores e outbox) e *banco e processos* (pools de conexão, conexões do servidor e tarefas
-agendadas). Cada alerta do Prometheus aponta para a seção do runbook correspondente:
+agendadas). O Alertmanager roteia os alertas por severidade e os notifica por e-mail (no ambiente
+local, o Mailpit) e por um webhook genérico, configurados por variáveis `ALERTMANAGER_*`
+([encaminhamento de alertas](docs/operacao/observabilidade.md#encaminhamento-de-alertas)). Cada
+alerta aponta para a seção do runbook correspondente, com o link em cada notificação:
 [faturamento e cobrança](docs/operacao/runbooks/faturamento.md),
 [filas e DLQ](docs/operacao/runbooks/filas-e-dlq.md), [conciliação](docs/operacao/runbooks/conciliacao.md),
-[notificações e webhooks enviados](docs/operacao/runbooks/notificacoes-e-webhooks.md)
+[notificações e webhooks enviados](docs/operacao/runbooks/notificacoes-e-webhooks.md),
+[encaminhamento de alertas](docs/operacao/runbooks/alertas.md)
 e [isolamento de dados](docs/operacao/runbooks/isolamento-de-dados.md).
 
 Sondas: `/livez` indica que o processo responde, sem consultar dependências; `/readyz` exige

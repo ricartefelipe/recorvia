@@ -2,8 +2,8 @@
 // OpenTelemetry. Rótulos de métricas nunca incluem identificadores de
 // tenant, cliente, fatura ou usuário (cardinalidade controlada): somente
 // rota, método, classe de status, consumidor, tarefa, provedor, tipo,
-// situação e resultado. O catálogo das métricas e os alertas que as usam
-// estão em docs/operacao/observabilidade.md.
+// situação, estado da fila e resultado. O catálogo das métricas e os alertas
+// que as usam estão em docs/operacao/observabilidade.md.
 package telemetry
 
 import (
@@ -53,13 +53,22 @@ type Metrics struct {
 	// atualizada pela tarefa payments.recover_operations.
 	PaymentOperationsExhausted *prometheus.GaugeVec
 	Discrepancies              *prometheus.GaugeVec
-	Refunds                    *TotalsCounter
-	RefundsInProgress          *prometheus.GaugeVec
-	WebhooksReceived           *prometheus.CounterVec
-	InvoicesIssued             prometheus.Counter
-	DependencyUp               *prometheus.GaugeVec
-	DBServerConnections        prometheus.Gauge
-	DBServerMaxConns           prometheus.Gauge
+	// ReconciliationRuns conta as execuções de conciliação em andamento por
+	// estado: queued (aguardando um worker), executing (lease vigente) e
+	// stalled (lease expirado, aguardando a retomada).
+	ReconciliationRuns *prometheus.GaugeVec
+	// ReconciliationOldestWaiting é a espera mais longa, em segundos, entre
+	// as execuções que aguardam um worker ou a retomada. As duas métricas
+	// são atualizadas por SetReconciliationRuns: no worker, pela tarefa
+	// metrics.collect; na API, a cada coleta (ObserveReconciliationRuns).
+	ReconciliationOldestWaiting prometheus.Gauge
+	Refunds                     *TotalsCounter
+	RefundsInProgress           *prometheus.GaugeVec
+	WebhooksReceived            *prometheus.CounterVec
+	InvoicesIssued              prometheus.Counter
+	DependencyUp                *prometheus.GaugeVec
+	DBServerConnections         prometheus.Gauge
+	DBServerMaxConns            prometheus.Gauge
 	// NotificationsDispatched conta os resultados do envio de notificações
 	// (sent, retried, failed, deferred, skipped, lost_lease).
 	NotificationsDispatched *prometheus.CounterVec
@@ -80,6 +89,21 @@ type Metrics struct {
 	// orçamento de tempo ou pelo limite de lotes com registros vencidos
 	// restantes do tipo.
 	RetentionPurgeIncomplete *prometheus.CounterVec
+	// DeadLettersOpen e DeadLettersOldestOpenSeconds são as dead letters
+	// registradas e ainda não resolvidas por consumidor, em todos os tenants
+	// (inclusive as sem tenant), e a idade da mais antiga. O rótulo consumer
+	// tem conjunto fechado: os consumidores do worker e OtherConsumer.
+	DeadLettersOpen              *prometheus.GaugeVec
+	DeadLettersOldestOpenSeconds *prometheus.GaugeVec
+	// NotificationsBacklog e NotificationsBacklogOldestSeconds medem a fila
+	// de notificações por situação (NotificationBacklogStates).
+	NotificationsBacklog              *prometheus.GaugeVec
+	NotificationsBacklogOldestSeconds *prometheus.GaugeVec
+	// WebhookDeliveriesBacklog e WebhookDeliveriesBacklogOldestDueSeconds
+	// medem a fila de entregas de webhooks enviados por situação
+	// (WebhookBacklogStates).
+	WebhookDeliveriesBacklog                 *prometheus.GaugeVec
+	WebhookDeliveriesBacklogOldestDueSeconds *prometheus.GaugeVec
 }
 
 // NewMetrics registra os coletores.
@@ -123,6 +147,10 @@ func NewMetrics(service string) *Metrics {
 			[]string{"status"}),
 		Discrepancies: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_reconciliation_open_discrepancies", Help: "Divergências de conciliação abertas por tipo.", ConstLabels: cl},
 			[]string{"kind"}),
+		ReconciliationRuns: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_reconciliation_runs_in_progress",
+			Help: "Execuções de conciliação em andamento por estado (queued, executing, stalled).", ConstLabels: cl}, []string{"state"}),
+		ReconciliationOldestWaiting: prometheus.NewGauge(prometheus.GaugeOpts{Name: "recorvia_reconciliation_oldest_waiting_seconds",
+			Help: "Espera mais longa entre as execuções de conciliação que aguardam um worker ou a retomada.", ConstLabels: cl}),
 		Refunds: NewTotalsCounter("recorvia_refunds_total", "Reembolsos concluídos por resultado (succeeded, failed), totais mantidos no banco.", "outcome", cl),
 		RefundsInProgress: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_refunds_in_progress", Help: "Reembolsos sem conclusão por situação (requested, unknown).", ConstLabels: cl},
 			[]string{"status"}),
@@ -151,13 +179,34 @@ func NewMetrics(service string) *Metrics {
 		RetentionPurgeIncomplete: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "recorvia_retention_purge_incomplete_total",
 			Help: "Execuções do expurgo por idade interrompidas com registros vencidos restantes, por tipo de dado.", ConstLabels: cl},
 			[]string{"kind"}),
+		DeadLettersOpen: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_dead_letters_open",
+			Help: "Dead letters registradas e ainda não resolvidas por consumidor (todos os tenants).", ConstLabels: cl},
+			[]string{"consumer"}),
+		DeadLettersOldestOpenSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_dead_letters_oldest_open_seconds",
+			Help: "Idade da dead letter aberta mais antiga por consumidor (zero sem dead letters abertas).", ConstLabels: cl},
+			[]string{"consumer"}),
+		NotificationsBacklog: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_notifications_backlog",
+			Help: "Fila de notificações por situação: due (agendadas vencidas), sending (em envio) e failed (falha definitiva nas últimas 24 horas).", ConstLabels: cl},
+			[]string{"state"}),
+		NotificationsBacklogOldestSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_notifications_backlog_oldest_seconds",
+			Help: "Idade da notificação mais antiga por situação: atraso do envio (due), tempo desde a reivindicação (sending) ou desde a falha (failed).", ConstLabels: cl},
+			[]string{"state"}),
+		WebhookDeliveriesBacklog: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_webhook_deliveries_backlog",
+			Help: "Fila de entregas de webhooks enviados por situação (pending, retrying).", ConstLabels: cl},
+			[]string{"state"}),
+		WebhookDeliveriesBacklogOldestDueSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_webhook_deliveries_backlog_oldest_due_seconds",
+			Help: "Atraso da entrega de webhook devida mais antiga por situação (zero sem entregas devidas).", ConstLabels: cl},
+			[]string{"state"}),
 	}
 	reg.MustRegister(m.HTTPRequests, m.HTTPDuration, m.ConsumerProcessed, m.ConsumerDuration, m.ConsumerInFlight, m.ConsumerConcurrency,
 		m.OutboxPublished, m.OutboxPublishFailed, m.OutboxPending, m.OutboxOldestSeconds, m.JobRuns, m.JobDuration, m.JobLastSuccess,
-		m.JobInterval, m.ChargeFailures, m.PaymentOperations, m.PaymentOperationsExhausted, m.Discrepancies, m.Refunds, m.RefundsInProgress,
+		m.JobInterval, m.ChargeFailures, m.PaymentOperations, m.PaymentOperationsExhausted, m.Discrepancies, m.ReconciliationRuns,
+		m.ReconciliationOldestWaiting, m.Refunds, m.RefundsInProgress,
 		m.WebhooksReceived, m.InvoicesIssued, m.DependencyUp, m.DBServerConnections, m.DBServerMaxConns,
 		m.NotificationsDispatched, m.WebhookDeliveries, m.CollectionActions,
-		m.RetentionPurged, m.RetentionPurgeFailures, m.RetentionPurgeIncomplete)
+		m.RetentionPurged, m.RetentionPurgeFailures, m.RetentionPurgeIncomplete,
+		m.DeadLettersOpen, m.DeadLettersOldestOpenSeconds, m.NotificationsBacklog, m.NotificationsBacklogOldestSeconds,
+		m.WebhookDeliveriesBacklog, m.WebhookDeliveriesBacklogOldestDueSeconds)
 	return m
 }
 
@@ -202,6 +251,75 @@ func newDBPoolCollector(service string, stats func() DBPoolStats) *dbPoolCollect
 // stats a cada coleta.
 func (m *Metrics) RegisterDBPool(stats func() DBPoolStats) {
 	m.Registry.MustRegister(newDBPoolCollector(m.service, stats))
+}
+
+// ReconciliationRunStats são as execuções de conciliação em andamento, de
+// todos os tenants, por estado, e a espera mais longa entre as que aguardam
+// um worker (desde o registro) ou a retomada (desde o fim do lease).
+type ReconciliationRunStats struct {
+	Queued               int64
+	Executing            int64
+	Stalled              int64
+	OldestWaitingSeconds float64
+}
+
+// SetReconciliationRuns publica as execuções de conciliação em andamento.
+func (m *Metrics) SetReconciliationRuns(s ReconciliationRunStats) {
+	m.ReconciliationRuns.WithLabelValues("queued").Set(float64(s.Queued))
+	m.ReconciliationRuns.WithLabelValues("executing").Set(float64(s.Executing))
+	m.ReconciliationRuns.WithLabelValues("stalled").Set(float64(s.Stalled))
+	m.ReconciliationOldestWaiting.Set(s.OldestWaitingSeconds)
+}
+
+// reconciliationRunsCollector lê as execuções de conciliação em andamento a
+// cada coleta, para o processo que não tem a tarefa metrics.collect.
+type reconciliationRunsCollector struct {
+	m       *Metrics
+	timeout time.Duration
+	read    func(ctx context.Context) (ReconciliationRunStats, error)
+}
+
+// ObserveReconciliationRuns passa a atualizar, a cada coleta, as métricas das
+// execuções de conciliação em andamento com a leitura de read (prazo
+// timeout). É o modo da API, que registra os pedidos de conciliação e
+// continua em execução quando nenhum worker está: a execução registrada e
+// não assumida aparece nas métricas mesmo sem worker para exportá-las. Se a
+// leitura falhar ou não terminar no prazo, as séries mantêm o último valor
+// lido (a indisponibilidade do banco aparece em recorvia_dependency_up).
+// Deve ser chamada uma vez, antes de expor as métricas.
+func (m *Metrics) ObserveReconciliationRuns(timeout time.Duration, read func(ctx context.Context) (ReconciliationRunStats, error)) {
+	m.Registry.Unregister(m.ReconciliationRuns)
+	m.Registry.Unregister(m.ReconciliationOldestWaiting)
+	m.Registry.MustRegister(&reconciliationRunsCollector{m: m, timeout: timeout, read: read})
+}
+
+func (c *reconciliationRunsCollector) Describe(ch chan<- *prometheus.Desc) {
+	c.m.ReconciliationRuns.Describe(ch)
+	c.m.ReconciliationOldestWaiting.Describe(ch)
+}
+
+func (c *reconciliationRunsCollector) Collect(ch chan<- prometheus.Metric) {
+	type result struct {
+		stats ReconciliationRunStats
+		err   error
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+	done := make(chan result, 1)
+	go func() {
+		s, err := c.read(ctx)
+		done <- result{s, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err == nil {
+			c.m.SetReconciliationRuns(r.stats)
+		}
+	case <-ctx.Done():
+		// A leitura que ignora o cancelamento não trava a coleta.
+	}
+	c.m.ReconciliationRuns.Collect(ch)
+	c.m.ReconciliationOldestWaiting.Collect(ch)
 }
 
 // DependencyCheck verifica uma dependência; nil indica disponível.
@@ -408,6 +526,49 @@ var (
 	WebhookDeliveryOutcomes = []string{"succeeded", "retrying", "exhausted", "lost_lease", "deferred"}
 	CollectionActionKinds   = []string{"reminder_scheduled", "invoice_overdue", "subscription_suspended", "subscription_reactivated"}
 )
+
+// Situações das filas medidas pela tarefa metrics.collect (rótulo state de
+// recorvia_notifications_backlog e recorvia_webhook_deliveries_backlog, e
+// das respectivas idades).
+var (
+	NotificationBacklogStates = []string{"due", "sending", "failed"}
+	WebhookBacklogStates      = []string{"pending", "retrying"}
+)
+
+// OtherConsumer reúne, no rótulo consumer das dead letters abertas, os
+// registros de consumidores que o worker não conhece mais (removidos ou
+// renomeados): o nome vem do banco e não pode criar séries novas.
+const OtherConsumer = "other"
+
+// QueueGauge é o par de medidores de uma fila: tamanho e idade do item mais
+// antigo, com o mesmo rótulo.
+type QueueGauge struct {
+	Total, OldestSeconds *prometheus.GaugeVec
+}
+
+// Set grava o tamanho e a idade da fila identificada pelo valor do rótulo.
+func (g QueueGauge) Set(label string, total int64, oldestSeconds float64) {
+	g.Total.WithLabelValues(label).Set(float64(total))
+	g.OldestSeconds.WithLabelValues(label).Set(oldestSeconds)
+}
+
+// DeadLetters devolve os medidores das dead letters abertas (rótulo
+// consumer).
+func (m *Metrics) DeadLetters() QueueGauge {
+	return QueueGauge{Total: m.DeadLettersOpen, OldestSeconds: m.DeadLettersOldestOpenSeconds}
+}
+
+// NotificationQueue devolve os medidores da fila de notificações (rótulo
+// state).
+func (m *Metrics) NotificationQueue() QueueGauge {
+	return QueueGauge{Total: m.NotificationsBacklog, OldestSeconds: m.NotificationsBacklogOldestSeconds}
+}
+
+// WebhookDeliveryQueue devolve os medidores da fila de entregas de webhooks
+// enviados (rótulo state).
+func (m *Metrics) WebhookDeliveryQueue() QueueGauge {
+	return QueueGauge{Total: m.WebhookDeliveriesBacklog, OldestSeconds: m.WebhookDeliveriesBacklogOldestDueSeconds}
+}
 
 // InitDispatchResults cria com zero as séries de resultados do envio de
 // notificações, das entregas de webhooks e das ações da régua.

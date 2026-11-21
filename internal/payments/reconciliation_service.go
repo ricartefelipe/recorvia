@@ -29,19 +29,25 @@ const (
 	// ScheduledReconciliationEvery é o intervalo mínimo entre execuções
 	// agendadas do mesmo tenant.
 	ScheduledReconciliationEvery = 24 * time.Hour
-	// reconciliationLease limita a duração de uma execução; depois dele,
-	// outra execução pode encerrá-la como interrompida.
+	// reconciliationLease limita a duração de cada tentativa de execução;
+	// depois dele, a execução é considerada interrompida e outro worker a
+	// retoma.
 	reconciliationLease = 15 * time.Minute
-	// ManualReconciliationBudget é o prazo padrão da coleta (chamadas ao
-	// provedor) da execução manual, que responde na mesma requisição: fica
-	// abaixo do limite de escrita da resposta da API (60 s).
-	ManualReconciliationBudget = 40 * time.Second
-	// scheduledCollectionBudget é o prazo da coleta da execução agendada,
-	// com folga para a comparação e o registro dentro do lease.
-	scheduledCollectionBudget = reconciliationLease - 2*time.Minute
-	providerPageSize          = 100
-	maxProviderPages          = 20
-	maxIndividualLookups      = 100
+	// ReconciliationCollectionBudget é o prazo padrão da coleta (chamadas ao
+	// provedor) de uma tentativa, manual ou agendada, com folga para a
+	// comparação e o registro dentro do lease. Não depende de requisição
+	// HTTP: a execução manual é feita pelo worker.
+	ReconciliationCollectionBudget = reconciliationLease - 2*time.Minute
+	// MaxReconciliationAttempts limita as vezes em que uma execução é
+	// assumida: a interrompida (worker reiniciado, lease expirado) é retomada
+	// até esse limite e depois encerrada como falha, com a causa.
+	MaxReconciliationAttempts = 3
+	// reconciliationClaimBatch é o número de execuções descobertas por
+	// consulta do executor.
+	reconciliationClaimBatch = 20
+	providerPageSize         = 100
+	maxProviderPages         = 20
+	maxIndividualLookups     = 100
 	// maxLocalCharges limita as cobranças locais da janela. As presentes na
 	// listagem do provedor (no máximo duas por cobrança listada, pelo ID do
 	// provedor e pela referência) são carregadas primeiro e sempre cabem no
@@ -101,61 +107,57 @@ func (s *Service) runWindow(in RunInput) (time.Time, time.Time, error) {
 	return start, end, nil
 }
 
-// RunReconciliation executa a conciliação do provedor padrão do tenant sobre
-// a janela: lista as cobranças do provedor, consulta individualmente as
+// RunReconciliation registra a execução da conciliação do provedor padrão do
+// tenant sobre a janela e a executa em seguida, no próprio chamador (tarefa
+// agendada): lista as cobranças do provedor, consulta individualmente as
 // locais ausentes da listagem, compara e registra divergências. As chamadas
-// ao provedor ocorrem sem transação aberta. Execução manual é sempre
-// permitida; a agendada exige o recurso reconciliation_automation do plano
-// da plataforma. Há no máximo uma execução em andamento por conta.
+// ao provedor ocorrem sem transação aberta. A execução agendada exige o
+// recurso reconciliation_automation do plano da plataforma. Há no máximo uma
+// execução em andamento por conta. A execução manual pedida pela API é
+// apenas registrada (StartReconciliation) e executada pelo worker
+// (RunPendingReconciliations).
 func (s *Service) RunReconciliation(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, userID *uuid.UUID, in RunInput) (ReconciliationRun, error) {
-	st, err := s.StartReconciliation(ctx, tenantID, actor, userID, in)
-	if err != nil || st.Existing {
-		return st.Run, err
+	run, account, existing, err := s.registerRun(ctx, tenantID, actor, userID, in, true)
+	if err != nil || existing {
+		return run, err
 	}
-	return s.FinishReconciliation(ctx, tenantID, st)
+	done, _, err := s.executeRun(ctx, tenantID, run, account)
+	return done, err
 }
 
-// StartedRun é uma execução registrada pela StartReconciliation.
-type StartedRun struct {
-	Run ReconciliationRun
-	// Existing indica execução já registrada para a mesma chave do pedido;
-	// não há o que concluir.
-	Existing bool
-	account  ProviderAccount
+// StartReconciliation valida o pedido e registra a execução em andamento,
+// sem lease, para o worker assumir (ou devolve a já registrada para a mesma
+// chave do pedido, na situação atual). Não chama o provedor: quem pede não
+// espera a coleta.
+func (s *Service) StartReconciliation(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, userID *uuid.UUID, in RunInput) (ReconciliationRun, error) {
+	run, _, _, err := s.registerRun(ctx, tenantID, actor, userID, in, false)
+	return run, err
 }
 
-// StartReconciliation valida o pedido e registra a execução em andamento
-// (ou devolve a já registrada para a mesma chave). A conclusão
-// (FinishReconciliation) pode ocorrer fora da requisição que a iniciou.
-func (s *Service) StartReconciliation(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, userID *uuid.UUID, in RunInput) (StartedRun, error) {
+// registerRun registra a execução em andamento numa única transação: devolve
+// a execução já registrada para a mesma chave do pedido, exige o recurso
+// reconciliation_automation na execução agendada e grava a nova execução. O
+// índice único parcial das execuções em andamento recusa a segunda execução
+// simultânea da mesma conta (reconciliation_running), inclusive enquanto a
+// anterior aguarda um worker ou a retomada. claimed registra a execução já
+// assumida por quem chama (lease e primeira tentativa); sem ele, a execução
+// fica aguardando o worker.
+func (s *Service) registerRun(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, userID *uuid.UUID, in RunInput,
+	claimed bool) (ReconciliationRun, ProviderAccount, bool, error) {
 	if in.Trigger != TriggerScheduled {
 		in.Trigger = TriggerManual
 	}
 	start, end, err := s.runWindow(in)
 	if err != nil {
-		return StartedRun{}, err
+		return ReconciliationRun{}, ProviderAccount{}, false, err
 	}
-	run, account, existing, err := s.startRun(ctx, tenantID, actor, userID, in, start, end)
-	if err != nil {
-		return StartedRun{}, err
-	}
-	return StartedRun{Run: run, Existing: existing, account: account}, nil
-}
-
-// startRun registra a execução em andamento numa única transação: devolve a
-// execução já registrada para a mesma chave do pedido, exige o recurso
-// reconciliation_automation na execução agendada, encerra como falha as
-// execuções da conta com lease expirado e grava a nova execução com lease. O
-// índice único parcial das execuções em andamento recusa a segunda execução
-// simultânea da mesma conta (reconciliation_running).
-func (s *Service) startRun(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, userID *uuid.UUID, in RunInput,
-	start, end time.Time) (ReconciliationRun, ProviderAccount, bool, error) {
 	var (
 		run      ReconciliationRun
 		account  ProviderAccount
 		existing bool
 	)
-	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+	err = s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		existing = false
 		if in.RequestKey != "" {
 			prev, err := tx.ReconciliationRunByRequestKey(ctx, in.RequestKey)
 			switch {
@@ -185,20 +187,19 @@ func (s *Service) startRun(ctx context.Context, tenantID uuid.UUID, actor audit.
 			return err
 		}
 		now := s.clock.Now()
-		stale, err := tx.FailStaleReconciliationRuns(ctx, account.ID, now)
-		if err != nil {
-			return err
-		}
-		lease := now.Add(reconciliationLease)
 		run = ReconciliationRun{ID: ids.New(), TenantID: tenantID, ProviderAccountID: account.ID, Provider: account.Provider,
 			Trigger: in.Trigger, Status: RunRunning, WindowStart: start, WindowEnd: end, RequestedBy: userID, RequestKey: in.RequestKey,
-			LeaseUntil: &lease, StartedAt: now}
+			StartedAt: now}
+		if claimed {
+			lease := now.Add(reconciliationLease)
+			run.LeaseUntil, run.Attempts = &lease, 1
+		}
 		if err := tx.InsertReconciliationRun(ctx, run); err != nil {
 			return err
 		}
 		return tx.Audit(ctx, audit.New(tenantID, now, actor, "reconciliation.run_started", "reconciliation_run", run.ID.String(),
 			map[string]any{"trigger": string(run.Trigger), "provider": run.Provider, "window_start": start, "window_end": end,
-				"stale_runs_failed": stale}))
+				"queued": !claimed}))
 	})
 	if err != nil {
 		return ReconciliationRun{}, ProviderAccount{}, false, err
@@ -206,33 +207,233 @@ func (s *Service) startRun(ctx context.Context, tenantID uuid.UUID, actor audit.
 	return run, account, existing, nil
 }
 
-// FinishReconciliation coleta, compara e encerra a execução iniciada. As
-// chamadas ao provedor têm prazo próprio: na execução manual, o
-// Config.ManualReconciliationBudget, sem depender do prazo nem do
-// cancelamento da requisição que a iniciou; na agendada, uma fração do lease.
-// Esgotado o prazo, a execução é concluída com o que foi coletado e com aviso
-// de execução parcial. Falha do provedor ou da leitura encerra a execução
-// como failed (sem erro devolvido).
-func (s *Service) FinishReconciliation(ctx context.Context, tenantID uuid.UUID, st StartedRun) (ReconciliationRun, error) {
-	if st.Existing {
-		return st.Run, nil
-	}
-	run := st.Run
-	budget := scheduledCollectionBudget
-	if run.Trigger != TriggerScheduled {
-		ctx, budget = context.WithoutCancel(ctx), s.cfg.ManualReconciliationBudget
-	}
-	result, err := s.collectAndCompare(ctx, budget, tenantID, st.account, run)
+// RunOutcome é o resultado de uma tentativa de assumir e executar uma
+// execução registrada.
+type RunOutcome string
+
+const (
+	// RunOutcomeSkipped: a execução não pôde ser assumida (já encerrada ou
+	// com lease vigente de outra instância).
+	RunOutcomeSkipped RunOutcome = "skipped"
+	// RunOutcomeCompleted: concluída (inclusive com aviso de parcial).
+	RunOutcomeCompleted RunOutcome = "completed"
+	// RunOutcomeFailed: encerrada como falha, com a causa.
+	RunOutcomeFailed RunOutcome = "failed"
+	// RunOutcomeReleased: interrompida por quem executava (worker
+	// encerrando) e devolvida para ser retomada.
+	RunOutcomeReleased RunOutcome = "released"
+)
+
+// ExecuteReconciliationRun assume a execução registrada, se ela puder ser
+// assumida agora (aguardando ou com o lease expirado), e a executa: coleta,
+// compara e encerra. A execução interrompida é retomada do início; como as
+// divergências só são gravadas na transação que encerra a execução, e pela
+// chave de deduplicação, a retomada não as duplica. Depois de
+// MaxReconciliationAttempts tentativas interrompidas, a execução é encerrada
+// como falha, com a causa.
+func (s *Service) ExecuteReconciliationRun(ctx context.Context, tenantID, runID uuid.UUID) (ReconciliationRun, RunOutcome, error) {
+	run, account, claim, err := s.claimRun(ctx, tenantID, runID)
 	if err != nil {
-		return s.failRun(context.WithoutCancel(ctx), tenantID, run, err)
+		return ReconciliationRun{}, RunOutcomeSkipped, err
+	}
+	switch claim {
+	case claimExhausted:
+		return run, RunOutcomeFailed, nil
+	case claimSkipped:
+		return run, RunOutcomeSkipped, nil
+	}
+	done, released, err := s.executeRun(ctx, tenantID, run, account)
+	switch {
+	case released:
+		return done, RunOutcomeReleased, nil
+	case err != nil:
+		return done, RunOutcomeSkipped, err
+	case done.Status == RunCompleted:
+		return done, RunOutcomeCompleted, nil
+	case done.Status == RunFailed:
+		return done, RunOutcomeFailed, nil
+	}
+	return done, RunOutcomeSkipped, nil
+}
+
+// claimState é o resultado da tentativa de assumir uma execução.
+type claimState int
+
+const (
+	// claimSkipped: já encerrada ou com lease vigente de outra instância.
+	claimSkipped claimState = iota
+	// claimTaken: assumida por quem chamou.
+	claimTaken
+	// claimExhausted: esgotou as tentativas e foi encerrada como falha.
+	claimExhausted
+)
+
+// claimRun assume a execução numa transação: novo lease e mais uma
+// tentativa. Não assume a execução já encerrada ou com lease vigente
+// (claimSkipped); a que esgotou as tentativas é encerrada aqui como falha
+// (claimExhausted).
+func (s *Service) claimRun(ctx context.Context, tenantID, runID uuid.UUID) (ReconciliationRun, ProviderAccount, claimState, error) {
+	var (
+		run     ReconciliationRun
+		account ProviderAccount
+		state   claimState
+	)
+	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		state = claimSkipped
+		cur, err := tx.ReconciliationRun(ctx, runID, true)
+		if err != nil {
+			return err
+		}
+		run = cur
+		now := s.clock.Now()
+		if !cur.Claimable(now) {
+			return nil
+		}
+		if cur.Attempts >= MaxReconciliationAttempts {
+			cur.Status, cur.FinishedAt, cur.LeaseUntil = RunFailed, &now, nil
+			cur.Error = fmt.Sprintf("Execução interrompida %d vezes antes da conclusão (worker reiniciado ou prazo da tentativa esgotado); "+
+				"nenhuma divergência desta execução foi registrada. Execute a conciliação novamente.", cur.Attempts)
+			if err := tx.FinishReconciliationRun(ctx, cur); err != nil {
+				return err
+			}
+			run, state = cur, claimExhausted
+			return tx.Audit(ctx, audit.New(tenantID, now, reconciliationActor, "reconciliation.run_failed", "reconciliation_run", cur.ID.String(),
+				map[string]any{"error": cur.Error, "attempts": cur.Attempts}))
+		}
+		resumed := cur.Attempts > 0
+		lease := now.Add(reconciliationLease)
+		cur.Attempts, cur.LeaseUntil = cur.Attempts+1, &lease
+		if err := tx.UpdateReconciliationRunLease(ctx, cur); err != nil {
+			return err
+		}
+		if account, err = tx.Account(ctx, cur.ProviderAccountID); err != nil {
+			return err
+		}
+		run, state = cur, claimTaken
+		if !resumed {
+			return nil
+		}
+		return tx.Audit(ctx, audit.New(tenantID, now, reconciliationActor, "reconciliation.run_resumed", "reconciliation_run", cur.ID.String(),
+			map[string]any{"attempt": cur.Attempts}))
+	})
+	if err != nil {
+		return ReconciliationRun{}, ProviderAccount{}, claimSkipped, err
+	}
+	return run, account, state, nil
+}
+
+// executeRun coleta, compara e encerra a execução assumida (run.Attempts
+// identifica a tentativa). As chamadas ao provedor têm prazo próprio
+// (Config.ReconciliationBudget, uma fração do lease); esgotado o prazo, a
+// execução é concluída com o que foi coletado e com aviso de execução
+// parcial. Falha do provedor ou da leitura encerra a execução como failed
+// (sem erro devolvido). O cancelamento de quem executa (worker encerrando ou
+// prazo da tarefa agendada) não é falha da conciliação: a execução é
+// devolvida (released) para ser retomada.
+func (s *Service) executeRun(ctx context.Context, tenantID uuid.UUID, run ReconciliationRun, account ProviderAccount) (ReconciliationRun, bool, error) {
+	result, err := s.collectAndCompare(ctx, s.cfg.ReconciliationBudget, tenantID, account, run)
+	if err != nil {
+		if cause := ctx.Err(); cause != nil {
+			released, rerr := s.releaseRun(context.WithoutCancel(ctx), tenantID, run, cause)
+			if rerr != nil {
+				return run, false, errors.Join(cause, rerr)
+			}
+			return released, true, fmt.Errorf("conciliação interrompida e devolvida para retomada: %w", cause)
+		}
+		failed, ferr := s.failRun(context.WithoutCancel(ctx), tenantID, run, err)
+		return failed, false, ferr
 	}
 	done, err := s.completeRun(context.WithoutCancel(ctx), tenantID, run, result)
 	if err != nil && !apperr.IsKind(err, apperr.KindConflict) {
 		if _, ferr := s.failRun(context.WithoutCancel(ctx), tenantID, run, err); ferr != nil {
-			return run, errors.Join(err, ferr)
+			return run, false, errors.Join(err, ferr)
 		}
 	}
-	return done, err
+	return done, false, err
+}
+
+// releaseRun devolve a execução interrompida por quem a executava: remove o
+// lease, para que o próximo worker a retome sem esperar a expiração. Não faz
+// nada se outra instância já a assumiu ou encerrou.
+func (s *Service) releaseRun(ctx context.Context, tenantID uuid.UUID, run ReconciliationRun, cause error) (ReconciliationRun, error) {
+	if s.cfg.Log != nil {
+		s.cfg.Log.WarnContext(ctx, "conciliação interrompida e devolvida para retomada", slog.String("run_id", run.ID.String()),
+			slog.Int("attempt", run.Attempts), slog.String("error", cause.Error()))
+	}
+	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		cur, err := tx.ReconciliationRun(ctx, run.ID, true)
+		if err != nil {
+			return err
+		}
+		if !cur.ownedBy(run) {
+			run = cur
+			return nil
+		}
+		cur.LeaseUntil = nil
+		if err := tx.UpdateReconciliationRunLease(ctx, cur); err != nil {
+			return err
+		}
+		run = cur
+		return tx.Audit(ctx, audit.New(tenantID, s.clock.Now(), reconciliationActor, "reconciliation.run_released", "reconciliation_run",
+			cur.ID.String(), map[string]any{"attempt": cur.Attempts}))
+	})
+	return run, err
+}
+
+// PendingRunsResult resume uma passada do executor de conciliações.
+type PendingRunsResult struct {
+	Completed int
+	Failed    int
+	Released  int
+}
+
+// RunPendingReconciliations assume e executa, uma a uma, as execuções de
+// conciliação registradas que aguardam um worker ou cujo lease expirou
+// (worker interrompido), de todos os tenants, das mais antigas para as mais
+// novas. É a tarefa com lease da conciliação manual: a execução registrada é
+// o próprio registro da tarefa, e várias instâncias podem chamar este método
+// ao mesmo tempo (cada execução é assumida por uma só). Cada execução é
+// tentada no máximo uma vez por chamada; a falha de uma não impede as demais.
+func (s *Service) RunPendingReconciliations(ctx context.Context) (PendingRunsResult, error) {
+	var (
+		res  PendingRunsResult
+		errs []error
+	)
+	tried := map[uuid.UUID]bool{}
+	for {
+		if err := ctx.Err(); err != nil {
+			return res, errors.Join(append(errs, err)...)
+		}
+		refs, err := s.store.ClaimableReconciliationRuns(ctx, s.clock.Now(), reconciliationClaimBatch)
+		if err != nil {
+			return res, errors.Join(append(errs, err)...)
+		}
+		progressed := false
+		for _, ref := range refs {
+			if tried[ref.RunID] {
+				continue
+			}
+			tried[ref.RunID], progressed = true, true
+			_, outcome, err := s.ExecuteReconciliationRun(ctx, ref.TenantID, ref.RunID)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("conciliação %s do tenant %s: %w", ref.RunID, ref.TenantID, err))
+			}
+			switch outcome {
+			case RunOutcomeCompleted:
+				res.Completed++
+			case RunOutcomeFailed:
+				res.Failed++
+			case RunOutcomeReleased:
+				res.Released++
+			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		if !progressed {
+			return res, errors.Join(errs...)
+		}
+	}
 }
 
 // collectAndCompare busca os dois lados e compara. As chamadas ao provedor
@@ -502,7 +703,8 @@ func runFailureMessage(err error, runID uuid.UUID) string {
 }
 
 // failRun encerra a execução como falha (provedor indisponível, por exemplo).
-// A execução e a auditoria guardam somente a mensagem segura da falha.
+// A execução e a auditoria guardam somente a mensagem segura da falha. Não
+// faz nada se a execução já foi encerrada ou retomada por outra instância.
 func (s *Service) failRun(ctx context.Context, tenantID uuid.UUID, run ReconciliationRun, cause error) (ReconciliationRun, error) {
 	if s.cfg.Log != nil {
 		s.cfg.Log.WarnContext(ctx, "conciliação encerrada com falha", slog.String("run_id", run.ID.String()),
@@ -513,7 +715,7 @@ func (s *Service) failRun(ctx context.Context, tenantID uuid.UUID, run Reconcili
 		if err != nil {
 			return err
 		}
-		if cur.Status != RunRunning {
+		if !cur.ownedBy(run) {
 			run = cur
 			return nil
 		}
@@ -534,16 +736,20 @@ func (s *Service) failRun(ctx context.Context, tenantID uuid.UUID, run Reconcili
 
 // completeRun registra as divergências (deduplicadas pela chave), resolve
 // automaticamente as divergências abertas não constatadas nesta execução e
-// encerra a execução. Divergência repetida já resolvida manualmente não é
-// reaberta: a resolução cobre exatamente os mesmos valores.
+// encerra a execução, tudo numa transação: uma execução interrompida antes
+// dela não deixa divergência gravada, e a retomada não duplica nenhuma.
+// Divergência repetida já resolvida manualmente não é reaberta: a resolução
+// cobre exatamente os mesmos valores. Só conclui a tentativa que ainda detém
+// a execução (mesma contagem de tentativas); a de uma instância cujo lease
+// expirou e foi retomada por outra é recusada.
 func (s *Service) completeRun(ctx context.Context, tenantID uuid.UUID, run ReconciliationRun, res runResult) (ReconciliationRun, error) {
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		cur, err := tx.ReconciliationRun(ctx, run.ID, true)
 		if err != nil {
 			return err
 		}
-		if cur.Status != RunRunning {
-			return apperr.Conflict("reconciliation_run_interrupted", "A execução foi encerrada por outra instância antes da conclusão.")
+		if !cur.ownedBy(run) {
+			return apperr.Conflict("reconciliation_run_interrupted", "A execução foi encerrada ou retomada por outra instância antes da conclusão.")
 		}
 		now := s.clock.Now()
 		found := map[string]bool{}

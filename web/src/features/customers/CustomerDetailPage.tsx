@@ -1,6 +1,6 @@
 import { Alert, Anchor, Badge, Breadcrumbs, Button, Group, Modal, Paper, SimpleGrid, Stack, Tabs, Text } from '@mantine/core';
 import { IconArchive, IconInfoCircle, IconLink, IconPencil, IconUserOff } from '@tabler/icons-react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Link, useParams } from 'react-router';
 import type { CustomerDetails } from '../../api/types';
@@ -12,12 +12,13 @@ import { formatDateTime } from '../../lib/dates';
 import { formatDocument } from '../../lib/documents';
 import { useApiMutation, useUrlFilters } from '../../lib/hooks';
 import { customerKindLabels, customerStatusLabels, labelOf } from '../../lib/labels';
-import { Can, useTenant } from '../../session/SessionContext';
+import { Can, usePermission, useTenant } from '../../session/SessionContext';
 import { AddressPanel } from './AddressPanel';
 import { AnonymizeCustomerDialogs } from './AnonymizeCustomer';
 import { customersApi } from './api';
 import { ContactsPanel } from './ContactsPanel';
 import { CreditsPanel } from './CreditsPanel';
+import { PortalLinksPanel } from './PortalLinksPanel';
 import { RelatedInvoices } from '../invoices/InvoicesTable';
 import { CustomerSubscriptions } from '../subscriptions/CustomerSubscriptions';
 import { CustomerForm } from './CustomerForm';
@@ -32,11 +33,21 @@ function HistoryPanel({ customerId }: { customerId: string }) {
 }
 
 function PortalLinkAction({ customer }: { customer: CustomerDetails }) {
-  const { timeZone } = useTenant();
+  const { keys, timeZone } = useTenant();
+  const queryClient = useQueryClient();
   const [link, setLink] = useState<{ url: string; expires_at: string } | null>(null);
   const mutation = useApiMutation<void, { url: string; expires_at: string }>({
     mutationFn: () => customersApi.createPortalLink(customer.id),
-    onSuccess: setLink,
+    onSuccess: (created) => {
+      setLink(created);
+      // Recarrega a lista de links (novo link e substituição do anterior) e o
+      // histórico (a geração é auditada no cliente), nunca a ficha: este modal
+      // fica dentro do conteúdo da consulta da ficha e uma falha na recarga dela
+      // tiraria da tela o link, exibido uma única vez. As duas consultas
+      // recarregadas têm estado de erro próprio, fora do caminho do modal.
+      void queryClient.invalidateQueries({ queryKey: keys('customers', 'portal-links', customer.id) });
+      void queryClient.invalidateQueries({ queryKey: keys('customers', 'history', customer.id) });
+    },
   });
   return (
     <>
@@ -52,6 +63,7 @@ function PortalLinkAction({ customer }: { customer: CustomerDetails }) {
             </Text>
             <Text size="sm" c="dimmed">
               O link é exibido somente agora. Gerar um novo link invalida o anterior e encerra a sessão do portal aberta com ele.
+              Para encerrar o acesso sem gerar outro link, revogue-o na aba Portal.
             </Text>
             <CopyField label="Link do portal" value={link.url} />
             <Group justify="flex-end">
@@ -166,7 +178,7 @@ function Overview({ customer }: { customer: CustomerDetails }) {
   );
 }
 
-const TABS = ['dados', 'contatos', 'assinaturas', 'faturas', 'creditos', 'historico'] as const;
+const TABS = ['dados', 'contatos', 'assinaturas', 'faturas', 'creditos', 'portal', 'historico'] as const;
 
 export function CustomerDetailPage() {
   const { id = '' } = useParams();
@@ -175,7 +187,10 @@ export function CustomerDetailPage() {
   // Cliente cujo formulário de anonimização está aberto (o da rota em que foi aberto).
   const [anonymizingId, setAnonymizingId] = useState<string | null>(null);
   const [filters, setFilters] = useUrlFilters(['aba'] as const);
-  const tab = (TABS as readonly string[]).includes(filters.aba) ? filters.aba : 'dados';
+  // A aba Portal lista e revoga links: exige a mesma permissão da geração.
+  const canManagePortalLinks = usePermission('customers.portal_links');
+  const known = (TABS as readonly string[]).includes(filters.aba) && (filters.aba !== 'portal' || canManagePortalLinks);
+  const tab = known ? filters.aba : 'dados';
   const query = useQuery({
     queryKey: keys('customers', 'detail', id),
     queryFn: ({ signal }) => customersApi.get(id, signal),
@@ -210,6 +225,7 @@ export function CustomerDetailPage() {
                 <Tabs.Tab value="assinaturas">Assinaturas</Tabs.Tab>
                 <Tabs.Tab value="faturas">Faturas</Tabs.Tab>
                 <Tabs.Tab value="creditos">Créditos</Tabs.Tab>
+                {canManagePortalLinks && <Tabs.Tab value="portal">Portal</Tabs.Tab>}
                 <Tabs.Tab value="historico">Histórico</Tabs.Tab>
               </Tabs.List>
               <Tabs.Panel value="dados">
@@ -227,6 +243,11 @@ export function CustomerDetailPage() {
               <Tabs.Panel value="creditos">
                 <CreditsPanel customer={customer} />
               </Tabs.Panel>
+              {canManagePortalLinks && (
+                <Tabs.Panel value="portal">
+                  <PortalLinksPanel customer={customer} />
+                </Tabs.Panel>
+              )}
               <Tabs.Panel value="historico">
                 <HistoryPanel customerId={customer.id} />
               </Tabs.Panel>

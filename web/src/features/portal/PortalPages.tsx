@@ -1,15 +1,15 @@
 import { Alert, Anchor, Badge, Breadcrumbs, Button, Checkbox, Group, Paper, SimpleGrid, Stack, Table, Text, Title } from '@mantine/core';
 import { IconExternalLink, IconFileText, IconInfoCircle } from '@tabler/icons-react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { portalApi } from '../../api/client';
 import { isApiError } from '../../api/http';
 import { PORTAL_SESSION_KEY, portalKey } from '../../api/queryKeys';
-import type { DataList, PortalInvoice, PortalSession } from '../../api/types';
+import type { PortalInvoice, PortalInvoicePage, PortalSession } from '../../api/types';
 import { DocumentViewer } from '../../components/DocumentViewer';
 import { CivilDate, Money, StatusBadge } from '../../components/format';
-import { EmptyState, LoadingState, QueryContent } from '../../components/states';
+import { EmptyState, ErrorState, LoadingState, QueryContent } from '../../components/states';
 import { KeyValue } from '../../components/ui';
 import { formatInstantDate } from '../../lib/dates';
 import { handleMutationError } from '../../lib/errors';
@@ -19,7 +19,8 @@ import { portalTimeZone, usePortalSession } from './PortalLayout';
 
 const enc = encodeURIComponent;
 const portalInvoicesApi = {
-  list: (signal?: AbortSignal) => portalApi.get<DataList<PortalInvoice>>('/api/portal/v1/invoices', { signal }),
+  list: (cursor: string | undefined, signal?: AbortSignal) =>
+    portalApi.get<PortalInvoicePage>('/api/portal/v1/invoices', { query: { cursor }, signal }),
   get: (id: string, signal?: AbortSignal) => portalApi.get<PortalInvoice>(`/api/portal/v1/invoices/${enc(id)}`, { signal }),
   document: (id: string) => portalApi.get<string>(`/api/portal/v1/invoices/${enc(id)}/document`, { responseType: 'text' }),
   updatePreferences: (contacts: { id: string; receives_billing_email: boolean }[]) =>
@@ -55,62 +56,83 @@ function StatusBadges({ invoice }: { invoice: PortalInvoice }) {
 
 export function PortalInvoicesPage() {
   const session = usePortalSession();
-  const query = useQuery({ queryKey: portalKey(session.customer.id, 'invoices'), queryFn: ({ signal }) => portalInvoicesApi.list(signal) });
+  // Páginas acumuladas: "Carregar mais" busca a seguinte pelo cursor da última.
+  const query = useInfiniteQuery({
+    queryKey: portalKey(session.customer.id, 'invoices'),
+    queryFn: ({ pageParam, signal }) => portalInvoicesApi.list(pageParam, signal),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+  });
+  const invoices = query.data?.pages.flatMap((page) => page.data) ?? [];
+  const shown = `${invoices.length} ${invoices.length === 1 ? 'fatura exibida' : 'faturas exibidas'}`;
   return (
     <Stack>
       <Title order={1} size="h2">
         Suas faturas
       </Title>
-      <QueryContent query={query} loading={<LoadingState />}>
-        {({ data }) =>
-          data.length === 0 ? (
-            <EmptyState title="Nenhuma fatura" description="Quando houver faturas emitidas para você, elas aparecerão aqui." />
-          ) : (
-            <Table.ScrollContainer minWidth={720}>
-              <Table aria-label="Faturas">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Número</Table.Th>
-                    <Table.Th>Situação</Table.Th>
-                    <Table.Th>Emissão</Table.Th>
-                    <Table.Th>Vencimento</Table.Th>
-                    <Table.Th ta="right">Total</Table.Th>
-                    <Table.Th ta="right">A pagar</Table.Th>
-                    <Table.Th aria-label="Ações" />
+      {query.isPending ? (
+        <LoadingState />
+      ) : query.isError && invoices.length === 0 ? (
+        <ErrorState error={query.error} onRetry={() => void query.refetch()} />
+      ) : invoices.length === 0 ? (
+        <EmptyState title="Nenhuma fatura" description="Quando houver faturas emitidas para você, elas aparecerão aqui." />
+      ) : (
+        <>
+          <Table.ScrollContainer minWidth={720}>
+            <Table aria-label="Faturas">
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Número</Table.Th>
+                  <Table.Th>Situação</Table.Th>
+                  <Table.Th>Emissão</Table.Th>
+                  <Table.Th>Vencimento</Table.Th>
+                  <Table.Th ta="right">Total</Table.Th>
+                  <Table.Th ta="right">A pagar</Table.Th>
+                  <Table.Th aria-label="Ações" />
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {invoices.map((i) => (
+                  <Table.Tr key={i.id}>
+                    <Table.Td>
+                      <Anchor component={Link} to={`/portal/faturas/${i.id}`} fw={500}>
+                        {i.number}
+                      </Anchor>
+                    </Table.Td>
+                    <Table.Td>
+                      <StatusBadges invoice={i} />
+                    </Table.Td>
+                    <Table.Td>{formatInstantDate(i.issued_at, portalTimeZone)}</Table.Td>
+                    <Table.Td>
+                      <CivilDate value={i.due_date} />
+                    </Table.Td>
+                    <Table.Td ta="right">
+                      <Money value={i.total} currency={i.currency} />
+                    </Table.Td>
+                    <Table.Td ta="right">
+                      <Money value={i.amount_due} currency={i.currency} strong={i.amount_due > 0} />
+                    </Table.Td>
+                    <Table.Td>
+                      <PayButton invoice={i} size="xs" />
+                    </Table.Td>
                   </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {data.map((i) => (
-                    <Table.Tr key={i.id}>
-                      <Table.Td>
-                        <Anchor component={Link} to={`/portal/faturas/${i.id}`} fw={500}>
-                          {i.number}
-                        </Anchor>
-                      </Table.Td>
-                      <Table.Td>
-                        <StatusBadges invoice={i} />
-                      </Table.Td>
-                      <Table.Td>{formatInstantDate(i.issued_at, portalTimeZone)}</Table.Td>
-                      <Table.Td>
-                        <CivilDate value={i.due_date} />
-                      </Table.Td>
-                      <Table.Td ta="right">
-                        <Money value={i.total} currency={i.currency} />
-                      </Table.Td>
-                      <Table.Td ta="right">
-                        <Money value={i.amount_due} currency={i.currency} strong={i.amount_due > 0} />
-                      </Table.Td>
-                      <Table.Td>
-                        <PayButton invoice={i} size="xs" />
-                      </Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            </Table.ScrollContainer>
-          )
-        }
-      </QueryContent>
+                ))}
+              </Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
+          {query.isFetchNextPageError && <ErrorState error={query.error} onRetry={() => void query.fetchNextPage()} />}
+          <Group justify="space-between" component="nav" aria-label="Paginação">
+            <Text size="sm" c="dimmed" role="status">
+              {query.hasNextPage ? `${shown}; há faturas mais antigas.` : `${shown}; não há mais faturas.`}
+            </Text>
+            {query.hasNextPage && (
+              <Button variant="default" onClick={() => void query.fetchNextPage()} loading={query.isFetchingNextPage}>
+                Carregar mais faturas
+              </Button>
+            )}
+          </Group>
+        </>
+      )}
     </Stack>
   );
 }

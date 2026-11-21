@@ -256,6 +256,8 @@ type Dispute struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 	Version        int32
+	CreditAmount   int64
+	RecoveryAmount int64
 }
 
 type DisputeEvent struct {
@@ -284,6 +286,7 @@ type IdempotencyKey struct {
 	CreatedAt           time.Time
 	CompletedAt         *time.Time
 	ExpiresAt           time.Time
+	ResponseLocation    *string
 }
 
 type Invitation struct {
@@ -694,6 +697,7 @@ type ReconciliationRun struct {
 	StartedAt         time.Time
 	FinishedAt        *time.Time
 	UpdatedAt         time.Time
+	Attempts          int32
 }
 
 type Refund struct {

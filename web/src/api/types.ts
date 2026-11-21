@@ -106,6 +106,9 @@ export type Dashboard = S['Dashboard'];
 
 export type PortalSession = S['PortalSession'];
 export type PortalInvoice = S['PortalInvoice'];
+export type PortalInvoicePage = S['PortalInvoicePage'];
+export type PortalLink = S['PortalLink'];
+export type PortalLinkPage = S['PortalLinkPage'];
 
 /** Resposta de lista simples do contrato. */
 export interface DataList<T> {

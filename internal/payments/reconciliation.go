@@ -102,9 +102,32 @@ type ReconciliationRun struct {
 	Error             string
 	RequestedBy       *uuid.UUID
 	RequestKey        string
-	LeaseUntil        *time.Time
-	StartedAt         time.Time
-	FinishedAt        *time.Time
+	// LeaseUntil é o fim do lease de quem está executando; nulo enquanto a
+	// execução aguarda um worker e depois de encerrada.
+	LeaseUntil *time.Time
+	// Attempts conta as vezes em que a execução foi assumida (primeira
+	// execução e retomadas); identifica a tentativa que pode encerrá-la.
+	Attempts   int
+	StartedAt  time.Time
+	FinishedAt *time.Time
+}
+
+// Claimable informa se a execução pode ser assumida agora: em andamento e
+// aguardando um worker (sem lease) ou com o lease expirado (interrompida).
+func (r ReconciliationRun) Claimable(now time.Time) bool {
+	return r.Status == RunRunning && (r.LeaseUntil == nil || r.LeaseUntil.Before(now))
+}
+
+// ownedBy informa se a tentativa attempt (a execução como foi assumida) ainda
+// detém a execução: em andamento e sem ter sido retomada por outra instância.
+func (r ReconciliationRun) ownedBy(attempt ReconciliationRun) bool {
+	return r.Status == RunRunning && r.Attempts == attempt.Attempts
+}
+
+// RunRef identifica uma execução de conciliação entre tenants.
+type RunRef struct {
+	TenantID uuid.UUID
+	RunID    uuid.UUID
 }
 
 // Discrepancy é uma divergência registrada pela conciliação.

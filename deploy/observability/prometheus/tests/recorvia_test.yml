@@ -203,6 +203,81 @@ tests:
         alertname: RecorviaReconciliationDiscrepanciesHigh
         exp_alerts: []
 
+  # Conciliação registrada que nenhum worker assume (executores ocupados ou
+  # falhando): a espera cresce em todas as instâncias, do worker e da API
+  # (mesmo valor); a execução assumida logo depois do registro não alerta.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_reconciliation_oldest_waiting_seconds{service="worker", instance="worker-a:9091", job="recorvia-worker"}'
+        values: '0 60 120 180 240 300 360 420 480 540 600 660 720'
+      - series: 'recorvia_reconciliation_oldest_waiting_seconds{service="worker", instance="worker-b:9091", job="recorvia-worker"}'
+        values: '0 60 120 180 240 300 360 420 480 540 600 660 720'
+      - series: 'recorvia_reconciliation_oldest_waiting_seconds{service="api", instance="api:9090", job="recorvia-api"}'
+        values: '0 60 120 180 240 300 360 420 480 540 600 660 720'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: RecorviaReconciliationRunsWaiting
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: RecorviaReconciliationRunsWaiting
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: conciliacao
+            exp_annotations:
+              summary: "Execução de conciliação sem worker há mais de 5 minutos"
+              description: "Uma conciliação registrada aguarda ser assumida ou retomada por um worker; enquanto isso, a conta do provedor não aceita outra execução."
+              runbook: docs/operacao/runbooks/conciliacao.md#execucoes-paradas
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_reconciliation_oldest_waiting_seconds{service="worker", instance="worker-a:9091", job="recorvia-worker"}'
+        values: '0 2 0 0 1 0 0 2 0 0 0 0 0'
+      - series: 'recorvia_reconciliation_oldest_waiting_seconds{service="api", instance="api:9090", job="recorvia-api"}'
+        values: '0 2 0 0 1 0 0 2 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: RecorviaReconciliationRunsWaiting
+        exp_alerts: []
+  # Nenhum worker em execução: o único worker cai no minuto 2 (séries
+  # obsoletas, alvo fora do ar) e a conciliação pedida em seguida fica
+  # aguardando. A API, que registrou o pedido, continua exportando a espera,
+  # e o alerta dispara junto com o do alvo fora do ar.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_reconciliation_oldest_waiting_seconds{service="worker", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 0 stale _x12'
+      - series: 'up{job="recorvia-worker", instance="worker:9091"}'
+        values: '1 1 0x13'
+      - series: 'recorvia_reconciliation_oldest_waiting_seconds{service="api", instance="api:9090", job="recorvia-api"}'
+        values: '0 0 0 60 120 180 240 300 360 420 480 540 600 660 720'
+      - series: 'up{job="recorvia-api", instance="api:9090"}'
+        values: '1x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: RecorviaReconciliationRunsWaiting
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: RecorviaReconciliationRunsWaiting
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: conciliacao
+            exp_annotations:
+              summary: "Execução de conciliação sem worker há mais de 5 minutos"
+              description: "Uma conciliação registrada aguarda ser assumida ou retomada por um worker; enquanto isso, a conta do provedor não aceita outra execução."
+              runbook: docs/operacao/runbooks/conciliacao.md#execucoes-paradas
+    promql_expr_test:
+      # Sem a série da API, a expressão não teria amostra e o alerta não
+      # dispararia com o worker fora do ar.
+      - expr: max(recorvia_reconciliation_oldest_waiting_seconds{service="worker"})
+        eval_time: 15m
+        exp_samples: []
+      - expr: max(recorvia_reconciliation_oldest_waiting_seconds)
+        eval_time: 15m
+        exp_samples:
+          - labels: '{}'
+            value: 720
+
   # Motor de faturamento parado: último sucesso fica para trás.
   - interval: 1m
     input_series:
@@ -619,3 +694,276 @@ tests:
               summary: "Reembolsos recusados pelo provedor na última hora"
               description: "O valor não foi devolvido ao cliente; o reembolso precisa de nova solicitação ou de devolução por outro meio."
               runbook: docs/operacao/runbooks/conciliacao.md#reembolsos-sem-confirmacao
+
+  # Dead letters abertas (medidor global por consumidor): aviso depois de 30
+  # minutos sem triagem; um consumidor sem dead letters não alerta, e duas
+  # instâncias do worker geram um único alerta por consumidor.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_dead_letters_open{service="worker", consumer="payments.provider_webhooks", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 0 2x60'
+      - series: 'recorvia_dead_letters_open{service="worker", consumer="payments.provider_webhooks", instance="worker-2:9091", job="recorvia-worker"}'
+        values: '0 0 1x60'
+      - series: 'recorvia_dead_letters_open{service="worker", consumer="webhooks.fanout", instance="worker:9091", job="recorvia-worker"}'
+        values: '0x62'
+      - series: 'recorvia_dead_letters_oldest_open_seconds{service="worker", consumer="payments.provider_webhooks", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 0 60+60x60'
+      - series: 'recorvia_dead_letters_oldest_open_seconds{service="worker", consumer="webhooks.fanout", instance="worker:9091", job="recorvia-worker"}'
+        values: '0x62'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: RecorviaDeadLettersOpen
+        exp_alerts: []
+      - eval_time: 33m
+        alertname: RecorviaDeadLettersOpen
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: mensageria
+              consumer: payments.provider_webhooks
+            exp_annotations:
+              summary: "2 dead letters abertas do consumidor payments.provider_webhooks"
+              description: "Mensagens registradas em dead_letters aguardam reprocessamento ou descarte há mais de 30 minutos; o efeito do evento não foi aplicado."
+              runbook: docs/operacao/runbooks/filas-e-dlq.md#dead-letters-abertas
+  # Dead letter sem triagem há mais de 24 horas: a regra crítica dispara com
+  # o mesmo nome e os mesmos rótulos da de aviso (inibida no Alertmanager).
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_dead_letters_open{service="worker", consumer="payments.provider_webhooks", instance="worker:9091", job="recorvia-worker"}'
+        values: '3x60'
+      - series: 'recorvia_dead_letters_oldest_open_seconds{service="worker", consumer="payments.provider_webhooks", instance="worker:9091", job="recorvia-worker"}'
+        values: '86000+60x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RecorviaDeadLettersOpen
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: RecorviaDeadLettersOpen
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              area: mensageria
+              consumer: payments.provider_webhooks
+            exp_annotations:
+              summary: "Dead letter do consumidor payments.provider_webhooks aberta há 1d 0h 18m 20s"
+              description: "A dead letter mais antiga está sem triagem há mais de 24 horas: cobranças, pagamentos ou notificações desse evento continuam sem efeito."
+              runbook: docs/operacao/runbooks/filas-e-dlq.md#dead-letters-abertas
+      - eval_time: 35m
+        alertname: RecorviaDeadLettersOpen
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: mensageria
+              consumer: payments.provider_webhooks
+            exp_annotations:
+              summary: "3 dead letters abertas do consumidor payments.provider_webhooks"
+              description: "Mensagens registradas em dead_letters aguardam reprocessamento ou descarte há mais de 30 minutos; o efeito do evento não foi aplicado."
+              runbook: docs/operacao/runbooks/filas-e-dlq.md#dead-letters-abertas
+          - exp_labels:
+              severity: critical
+              area: mensageria
+              consumer: payments.provider_webhooks
+            exp_annotations:
+              summary: "Dead letter do consumidor payments.provider_webhooks aberta há 1d 0h 28m 20s"
+              description: "A dead letter mais antiga está sem triagem há mais de 24 horas: cobranças, pagamentos ou notificações desse evento continuam sem efeito."
+              runbook: docs/operacao/runbooks/filas-e-dlq.md#dead-letters-abertas
+
+  # Fila de notificações: aviso com 15 minutos de atraso e crítico com uma
+  # hora, ambos por 10 minutos; a idade das falhas definitivas (failed) e um
+  # envio em andamento recente não alertam.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_notifications_backlog_oldest_seconds{service="worker", state="due", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 0 1000+60x80'
+      - series: 'recorvia_notifications_backlog_oldest_seconds{service="worker", state="sending", instance="worker:9091", job="recorvia-worker"}'
+        values: '30x82'
+      - series: 'recorvia_notifications_backlog_oldest_seconds{service="worker", state="failed", instance="worker:9091", job="recorvia-worker"}'
+        values: '80000x82'
+      - series: 'recorvia_notifications_backlog{service="worker", state="due", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 0 40x80'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: RecorviaNotificationsBacklog
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: RecorviaNotificationsBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: notificacoes
+              state: due
+            exp_annotations:
+              summary: "Notificações em fila (due) há 27m 40s"
+              description: "Há notificações com o horário de envio vencido (due) ou presas em envio (sending) há mais de 15 minutos: a tarefa notifications.dispatch está parada ou não dá vazão."
+              runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#fila-de-notificacoes-acumulada
+      - eval_time: 58m
+        alertname: RecorviaNotificationsBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: notificacoes
+              state: due
+            exp_annotations:
+              summary: "Notificações em fila (due) há 1h 12m 40s"
+              description: "Há notificações com o horário de envio vencido (due) ou presas em envio (sending) há mais de 15 minutos: a tarefa notifications.dispatch está parada ou não dá vazão."
+              runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#fila-de-notificacoes-acumulada
+          - exp_labels:
+              severity: critical
+              area: notificacoes
+              state: due
+            exp_annotations:
+              summary: "Notificações em fila (due) há 1h 12m 40s"
+              description: "Faturas, lembretes e convites estão sem e-mail há mais de uma hora: a tarefa notifications.dispatch está parada ou não dá vazão."
+              runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#fila-de-notificacoes-acumulada
+  # Notificação presa em envio (lease vencido sem nova reivindicação).
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_notifications_backlog_oldest_seconds{service="worker", state="due", instance="worker:9091", job="recorvia-worker"}'
+        values: '0x30'
+      - series: 'recorvia_notifications_backlog_oldest_seconds{service="worker", state="sending", instance="worker:9091", job="recorvia-worker"}'
+        values: '960+60x30'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: RecorviaNotificationsBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: notificacoes
+              state: sending
+            exp_annotations:
+              summary: "Notificações em fila (sending) há 28m 0s"
+              description: "Há notificações com o horário de envio vencido (due) ou presas em envio (sending) há mais de 15 minutos: a tarefa notifications.dispatch está parada ou não dá vazão."
+              runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#fila-de-notificacoes-acumulada
+
+  # Fila de entregas de webhooks: atraso da entrega devida mais antiga; a
+  # espera do backoff (atraso zero em retrying) não alerta.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_webhook_deliveries_backlog_oldest_due_seconds{service="worker", state="pending", instance="worker:9091", job="recorvia-worker"}'
+        values: '0x5 1200+10x40'
+      - series: 'recorvia_webhook_deliveries_backlog_oldest_due_seconds{service="worker", state="retrying", instance="worker:9091", job="recorvia-worker"}'
+        values: '0x46'
+      - series: 'recorvia_webhook_deliveries_backlog{service="worker", state="retrying", instance="worker:9091", job="recorvia-worker"}'
+        values: '500x46'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: RecorviaWebhookDeliveriesBacklog
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: RecorviaWebhookDeliveriesBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: notificacoes
+              state: pending
+            exp_annotations:
+              summary: "Entregas de webhooks (pending) atrasadas em 21m 50s"
+              description: "Há entregas com o horário da tentativa vencido há mais de 15 minutos: a tarefa webhooks.deliver está parada ou não dá vazão."
+              runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#fila-de-entregas-de-webhooks-acumulada
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_webhook_deliveries_backlog_oldest_due_seconds{service="worker", state="retrying", instance="worker:9091", job="recorvia-worker"}'
+        values: '4000+60x30'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: RecorviaWebhookDeliveriesBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: notificacoes
+              state: retrying
+            exp_annotations:
+              summary: "Entregas de webhooks (retrying) atrasadas em 1h 18m 40s"
+              description: "Há entregas com o horário da tentativa vencido há mais de 15 minutos: a tarefa webhooks.deliver está parada ou não dá vazão."
+              runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#fila-de-entregas-de-webhooks-acumulada
+          - exp_labels:
+              severity: critical
+              area: notificacoes
+              state: retrying
+            exp_annotations:
+              summary: "Entregas de webhooks (retrying) atrasadas em 1h 18m 40s"
+              description: "As integrações dos tenants estão sem eventos há mais de uma hora: a tarefa webhooks.deliver está parada ou não dá vazão."
+              runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#fila-de-entregas-de-webhooks-acumulada
+
+  # Caminho dos alertas: o Watchdog está sempre ativo; falhas de envio do
+  # Prometheus ao Alertmanager e do Alertmanager a um receptor alertam, e o
+  # Alertmanager fora do ar entra no alerta de coleta.
+  - interval: 1m
+    input_series:
+      - series: 'prometheus_notifications_errors_total{alertmanager="http://alertmanager:9093/api/v2/alerts", instance="localhost:9090", job="prometheus"}'
+        values: '0x30'
+      - series: 'prometheus_notifications_dropped_total{instance="localhost:9090", job="prometheus"}'
+        values: '0x30'
+      - series: 'alertmanager_notifications_failed_total{integration="email", reason="other", instance="alertmanager:9093", job="alertmanager"}'
+        values: '0x30'
+      - series: 'up{instance="alertmanager:9093", job="alertmanager"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RecorviaWatchdog
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              area: alertas
+            exp_annotations:
+              summary: "Verificação do caminho de alertas"
+              description: "Alerta sempre ativo: esta notificação confirma que o Prometheus avalia as regras, o Alertmanager recebe os alertas e o destinatário é alcançado. A ausência da notificação periódica indica falha no caminho."
+              runbook: docs/operacao/runbooks/alertas.md#verificacao-do-caminho-de-alertas
+      - eval_time: 25m
+        alertname: RecorviaAlertDeliveryFailing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: RecorviaAlertNotificationsFailing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: RecorviaTargetDown
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'prometheus_notifications_errors_total{alertmanager="http://alertmanager:9093/api/v2/alerts", instance="localhost:9090", job="prometheus"}'
+        values: '0 0 1+1x30'
+      - series: 'prometheus_notifications_dropped_total{instance="localhost:9090", job="prometheus"}'
+        values: '0x32'
+      - series: 'alertmanager_notifications_failed_total{integration="email", reason="other", instance="alertmanager:9093", job="alertmanager"}'
+        values: '0 0 1+1x30'
+      - series: 'alertmanager_notifications_failed_total{integration="webhook", reason="other", instance="alertmanager:9093", job="alertmanager"}'
+        values: '0x32'
+      - series: 'up{instance="alertmanager:9093", job="alertmanager"}'
+        values: '1 1 0x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RecorviaAlertDeliveryFailing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RecorviaAlertDeliveryFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              area: alertas
+            exp_annotations:
+              summary: "Prometheus não consegue enviar alertas ao Alertmanager"
+              description: "Envios de alertas ao Alertmanager falhando ou descartados há mais de 5 minutos: nenhuma notificação é encaminhada. Os alertas continuam visíveis no Prometheus e no Grafana."
+              runbook: docs/operacao/runbooks/alertas.md#alertas-nao-chegam-aos-destinatarios
+      - eval_time: 10m
+        alertname: RecorviaAlertNotificationsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              area: alertas
+              integration: email
+            exp_annotations:
+              summary: "Alertmanager não consegue notificar por email"
+              description: "Notificações de alerta falhando no receptor (servidor SMTP ou endpoint do webhook) há mais de 5 minutos: os destinatários desse canal não são avisados."
+              runbook: docs/operacao/runbooks/alertas.md#alertas-nao-chegam-aos-destinatarios
+      - eval_time: 5m
+        alertname: RecorviaTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              area: plataforma
+              job: alertmanager
+              instance: alertmanager:9093
+            exp_annotations:
+              summary: "Coleta de métricas falhando para alertmanager"
+              description: "O Prometheus não consegue coletar alertmanager:9093 há 2 minutos: processo parado, reiniciando ou inacessível."
+              runbook: docs/operacao/runbooks/filas-e-dlq.md#processo-ou-broker-indisponivel

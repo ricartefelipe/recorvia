@@ -2,16 +2,22 @@
 # Conferência da stack de observabilidade em execução (make up-obs), pelas
 # portas publicadas em 127.0.0.1. Usada pelo job observability-stack da CI e
 # disponível localmente com make obs-stack-check. Confere:
-#   - Prometheus: os seis alvos de coleta com health=up, todas as regras de
-#     alerta do arquivo de regras carregadas e avaliadas sem erro e as séries
-#     da aplicação e do RabbitMQ das quais os alertas dependem;
+#   - Prometheus: os sete alvos de coleta com health=up, todas as regras de
+#     alerta do arquivo de regras carregadas e avaliadas sem erro, com o link
+#     do runbook (runbook_url), e as séries da aplicação, do RabbitMQ e do
+#     Alertmanager das quais os alertas dependem;
+#   - caminho dos alertas: o Prometheus descobre o Alertmanager, o alerta
+#     sempre ativo RecorviaWatchdog dispara, chega ao Alertmanager pela rota
+#     recorvia-watchdog e o e-mail da notificação aparece no Mailpit com o
+#     link do runbook;
 #   - Grafana: banco interno saudável, fonte de dados provisionada consultando
 #     o Prometheus e os dashboards provisionados na pasta Recorvia;
 #   - Jaeger: rastros da API e do worker recebidos pelo Collector.
 #
-# Variáveis (opcionais): PROMETHEUS_PORT, GRAFANA_PORT, JAEGER_UI_PORT e
-# GRAFANA_ADMIN_PASSWORD (padrão: valores do .env, se existir, ou do
-# .env.example) e OBS_CHECK_TIMEOUT (prazo de cada verificação, em segundos).
+# Variáveis (opcionais): PROMETHEUS_PORT, ALERTMANAGER_PORT, MAILPIT_UI_PORT,
+# GRAFANA_PORT, JAEGER_UI_PORT e GRAFANA_ADMIN_PASSWORD (padrão: valores do
+# .env, se existir, ou do .env.example) e OBS_CHECK_TIMEOUT (prazo de cada
+# verificação, em segundos).
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 obs="$root/deploy/observability"
@@ -34,10 +40,14 @@ env_value() {
 }
 
 : "${PROMETHEUS_PORT:=$(env_value PROMETHEUS_PORT)}"
+: "${ALERTMANAGER_PORT:=$(env_value ALERTMANAGER_PORT)}"
+: "${MAILPIT_UI_PORT:=$(env_value MAILPIT_UI_PORT)}"
 : "${GRAFANA_PORT:=$(env_value GRAFANA_PORT)}"
 : "${JAEGER_UI_PORT:=$(env_value JAEGER_UI_PORT)}"
 : "${GRAFANA_ADMIN_PASSWORD:=$(env_value GRAFANA_ADMIN_PASSWORD)}"
 prometheus="http://127.0.0.1:${PROMETHEUS_PORT:-9090}"
+alertmanager="http://127.0.0.1:${ALERTMANAGER_PORT:-9093}"
+mailpit="http://127.0.0.1:${MAILPIT_UI_PORT:-8025}"
 grafana="http://127.0.0.1:${GRAFANA_PORT:-3000}"
 jaeger="http://127.0.0.1:${JAEGER_UI_PORT:-16686}"
 grafana_auth="admin:${GRAFANA_ADMIN_PASSWORD:-local-grafana-admin}"
@@ -57,7 +67,7 @@ eventually() {
   log "$what"
 }
 
-expected_jobs='["otel-collector","prometheus","rabbitmq","rabbitmq-queues","recorvia-api","recorvia-worker"]'
+expected_jobs='["alertmanager","otel-collector","prometheus","rabbitmq","rabbitmq-queues","recorvia-api","recorvia-worker"]'
 targets_up() {
   get "$prometheus/api/v1/targets?state=active" | jq -e --argjson want "$expected_jobs" '
     ($want - [.data.activeTargets[] | select(.health == "up") | .labels.job]) | length == 0' >/dev/null
@@ -67,6 +77,44 @@ expected_rules=$(grep -c '^ *- alert: ' "$obs/prometheus/rules/recorvia.yml")
 rules_ok() {
   get "$prometheus/api/v1/rules?type=alert" | jq -e --argjson n "$expected_rules" '
     [.data.groups[].rules[]] | length == $n and all(.[]; .health == "ok")' >/dev/null
+}
+
+# Toda regra carregada traz o link completo do runbook, derivado da anotação
+# runbook na construção da imagem do Prometheus.
+rules_have_runbook_url() {
+  get "$prometheus/api/v1/rules?type=alert" | jq -e '
+    [.data.groups[].rules[]] | length > 0 and all(.[];
+      (.annotations.runbook // "") as $path
+      | ($path | startswith("docs/operacao/runbooks/"))
+        and ((.annotations.runbook_url // "") | test("^https?://") and endswith($path)))' >/dev/null
+}
+
+# Caminho dos alertas, do Prometheus ao e-mail.
+watchdog=RecorviaWatchdog
+alertmanager_ready() { get "$alertmanager/-/ready" >/dev/null; }
+alertmanager_discovered() {
+  get "$prometheus/api/v1/alertmanagers" | jq -e '.data.activeAlertmanagers | length == 1' >/dev/null
+}
+watchdog_firing() {
+  get "$prometheus/api/v1/alerts" | jq -e --arg name "$watchdog" '
+    .data.alerts | any(.[]; .labels.alertname == $name and .state == "firing")' >/dev/null
+}
+watchdog_routed() {
+  get --get "$alertmanager/api/v2/alerts" --data-urlencode "filter=alertname=\"$watchdog\"" | jq -e '
+    any(.[]; .status.state == "active" and (.receivers | any(.name == "recorvia-watchdog")))' >/dev/null
+}
+watchdog_runbook_url() {
+  get "$prometheus/api/v1/rules?type=alert" | jq -er --arg name "$watchdog" '
+    [.data.groups[].rules[] | select(.name == $name)][0].annotations.runbook_url'
+}
+# O e-mail mais recente do alerta no Mailpit traz, no texto e no HTML, o link
+# do runbook da regra.
+watchdog_email() {
+  local link id
+  link=$(watchdog_runbook_url) || return 1
+  id=$(get --get "$mailpit/api/v1/search" --data-urlencode "query=subject:\"$watchdog\"" | jq -er '.messages[0].ID') || return 1
+  get "$mailpit/api/v1/message/$id" | jq -e --arg name "$watchdog" --arg link "$link" '
+    (.Subject | contains($name)) and (.To | length > 0) and (.Text | contains($link)) and (.HTML | contains($link))' >/dev/null
 }
 
 has_series() {
@@ -87,9 +135,15 @@ jaeger_services() {
   get "$jaeger/api/v3/services" | jq -e '(["recorvia-api", "recorvia-worker"] - .services) | length == 0' >/dev/null
 }
 
-log "Prometheus em $prometheus, Grafana em $grafana, Jaeger em $jaeger (prazo de $timeout s por verificação)"
+log "Prometheus em $prometheus, Alertmanager em $alertmanager, Mailpit em $mailpit, Grafana em $grafana, Jaeger em $jaeger (prazo de $timeout s por verificação)"
 eventually "Prometheus: alvos $expected_jobs com health=up" targets_up
 eventually "Prometheus: $expected_rules regras de alerta carregadas e avaliadas sem erro" rules_ok
+eventually "Prometheus: todas as regras com o link do runbook (runbook_url)" rules_have_runbook_url
+eventually "Alertmanager: pronto" alertmanager_ready
+eventually "Prometheus: Alertmanager descoberto para o envio dos alertas" alertmanager_discovered
+eventually "Prometheus: alerta de teste $watchdog disparando" watchdog_firing
+eventually "Alertmanager: $watchdog recebido e roteado para recorvia-watchdog" watchdog_routed
+eventually "Mailpit: e-mail de $watchdog com o link do runbook" watchdog_email
 for q in \
   'recorvia_db_pool_max_connections{service="api"}' \
   'recorvia_db_pool_max_connections{service="worker"}' \
@@ -112,6 +166,16 @@ for q in \
   'recorvia_collection_actions_total{action="reminder_scheduled"}' \
   'recorvia_retention_purged_total{kind="inbox_messages"}' \
   'recorvia_job_interval_seconds{task="retention.purge"}' \
+  'recorvia_dead_letters_open{consumer="payments.invoice_issued"}' \
+  'recorvia_dead_letters_oldest_open_seconds{consumer="other"}' \
+  'recorvia_notifications_backlog{state="due"}' \
+  'recorvia_notifications_backlog_oldest_seconds{state="sending"}' \
+  'recorvia_webhook_deliveries_backlog{state="pending"}' \
+  'recorvia_webhook_deliveries_backlog_oldest_due_seconds{state="retrying"}' \
+  'prometheus_notifications_errors_total' \
+  'prometheus_notifications_dropped_total' \
+  'alertmanager_notifications_total{integration="email"} > 0' \
+  'alertmanager_notifications_failed_total{integration="email"}' \
   'rabbitmq_detailed_queue_consumers{queue="recorvia.payments.invoice_issued"} > 0' \
   'rabbitmq_detailed_queue_messages{queue=~"recorvia\\..+\\.dlq"}'; do
   eventually "Prometheus: série $q" has_series "$q"
@@ -123,4 +187,8 @@ eventually "Jaeger: rastros de recorvia-api e recorvia-worker" jaeger_services
 
 log "alertas em andamento (informativo):"
 get "$prometheus/api/v1/alerts" | jq -r '.data.alerts[] | "    \(.labels.alertname) \(.state) \(.labels.severity)"'
+log "alertas no Alertmanager (informativo):"
+get "$alertmanager/api/v2/alerts" | jq -r '.[] | "    \(.labels.alertname) \(.status.state) \([.receivers[].name] | join(","))"' || true
+log "e-mails de alerta no Mailpit (informativo):"
+get --get "$mailpit/api/v1/search" --data-urlencode 'query=subject:"[Recorvia]"' | jq -r '.messages[] | "    \(.Created) \(.Subject)"' || true
 log "stack de observabilidade conferida"

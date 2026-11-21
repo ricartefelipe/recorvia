@@ -393,30 +393,8 @@ reconhecido quando aparece. Webhooks de reembolso repetidos ou fora de ordem nã
 cumulativos e confirmação idempotente).
 
 ## ADR-036 Disputas e chargebacks
-**Status:** aceita.
-**Decisão:** a situação de chargeback informada pelo provedor (webhook ou consulta) abre a disputa
-(`disputes`, situação `opened`) pelo saldo ainda não reembolsado nem estornado e lança `dispute.opened`
-(débito em `chargebacks`, crédito nos valores em liquidação): o valor fica retido. A análise passa a
-`under_review`; a disputa ganha (`won`) estorna o lançamento de abertura e devolve a cobrança à situação dos
-reembolsos confirmados (`paid`, `partially_refunded` ou, com reembolso confirmado durante a disputa que
-completa o pago, `refunded`); a perdida (`lost`) registra `amount_charged_back` e a cobrança passa a `charged_back`, sem
-reabrir a fatura (histórico com `reason = 'chargeback'`). O estorno da disputa perdida é limitado ao saldo
-elegível: não inclui o reembolsado durante a disputa nem o reservado por reembolso em andamento (que,
-confirmado depois, cabe no saldo), e o lançamento `dispute.hold_released` (débito nos valores em
-liquidação, crédito em `chargebacks`) libera essa parte da retenção. Se o reembolso reservado for recusado
-depois da perda, o valor passa ao chargeback (`amount_charged_back` e `dispute.hold_restored`, um por
-reembolso), porque o valor contestado foi debitado pelo provedor. Assim, `chargebacks` registra o valor
-estornado e, com `refunds`, nunca soma mais que o pago. O painel financeiro mostra o movimento líquido das
-duas contas no mês (débitos menos créditos): a retenção liberada e a disputa ganha reduzem o chargeback do
-mês em que ocorrem, que fica negativo quando a disputa aberta em mês anterior é ganha. Há no máximo uma
-disputa aberta por cobrança (`disputes_open_key`), e cada transição fica em `dispute_events` (imutável).
-Retratos do provedor anteriores ao último registrado ou ao encerramento da disputa não alteram nem reabrem
-disputas.
-**Consequências:** a decisão por situação explícita vale para o simulador (`chargeback_requested`, `won`,
-`lost`). A documentação do Asaas não descreve situação de chargeback perdido; a decisão ganha corresponde a
-`AWAITING_CHARGEBACK_REVERSAL`, e, num retrato obtido por consulta ao provedor (por exemplo, na resolução da
-conciliação), a cobrança novamente recebida sem chargeback encerra a disputa aberta como ganha; eventos sem
-chargeback não decidem disputas. O chargeback não consome crédito do cliente.
+**Status:** aceita; a limitação "o chargeback não consome crédito do cliente" foi resolvida pela
+ADR-070: a disputa perdida passa a consumir o crédito gerado pelo excedente do pagamento.
 
 ## ADR-037 Cancelamento da cobrança no provedor
 **Status:** aceita (resolve a limitação registrada nas ADR-029 e ADR-030).
@@ -432,59 +410,8 @@ em andamento é cancelada no provedor quando a criação termina.
 pagamento antes do cancelamento (ou o cancelamento falha); a confirmação continua prevalecendo.
 
 ## ADR-038 Conciliação com o provedor
-**Status:** aceita.
-**Decisão:** cada execução (`reconciliation_runs`) cobre uma janela `[início, fim)` da conta padrão do
-provedor: lista as cobranças do provedor (`ListCharges`, paginada), carrega as cobranças locais criadas ou
-atualizadas na janela ou presentes na listagem, consulta individualmente (`GetCharge`) as locais ausentes da
-listagem e compara. As chamadas ao provedor ocorrem sem transação aberta; há no máximo uma execução em
-andamento por conta (índice único parcial), com lease que permite encerrar execuções interrompidas. Tipos de
-divergência: cobrança do provedor sem correspondência local, cobrança local inexistente no provedor, valor
-divergente (cobrado ou pago), taxa divergente, pagamento não refletido (pago em um lado e não no outro),
-reembolso pendente (sem confirmação há mais de uma hora ou totais divergentes), chargeback pendente e operação
-com resultado desconhecido.
-**Deduplicação:** a chave da divergência combina tipo, objeto e valores. Divergência repetida atualiza o
-registro (ocorrências, última execução); divergência aberta não constatada numa execução que verificou o mesmo
-objeto é resolvida automaticamente (`auto_resolved`) e é reaberta se voltar com os mesmos valores; divergência
-resolvida manualmente não é reaberta pelos mesmos valores (valores novos geram nova divergência).
-**Resolução:** exige permissão `reconciliation.resolve`, justificativa de 10 a 2000 caracteres e registra
-responsável, data, histórico (auditoria) e, quando houver, o lançamento `reconciliation.adjustment`. O
-responsável fica sempre na auditoria (usuário da sessão ou credencial de API); `resolved_by` guarda somente
-o usuário e fica nulo com credencial de API e na resolução automática.
-`dismiss` registra como explicada; `keep_local` mantém o registro local; `adjust_ledger` lança o ajuste pela
-diferença de taxa (taxa do provedor menos a local) ou de valor pago (local menos o do provedor);
-`accept_provider` adota o provedor: aceita a taxa (cobrança e ledger), ajusta o valor pago, aplica o
-pagamento não refletido, sincroniza reembolso ou chargeback pela consulta atual (reembolso sem registro no
-provedor é encerrado e a reserva liberada), reconsulta a operação desconhecida ou cancela localmente a cobrança
-em aberto inexistente no provedor. Cobrança do provedor sem correspondência local não é importada.
-**Agendamento:** o job `payments.reconcile` (horário, com lease do agendador) executa a conciliação dos
-tenants cujo plano da plataforma tem `reconciliation_automation`, com provedor padrão ativo e sem execução
-agendada nas últimas 24 horas (janela de 7 dias). A execução manual é sempre permitida (janela padrão de 30
-dias, até 93 dias).
-**Rodízio:** a listagem do Asaas filtra pela data de criação (`dateCreated`), e a leitura local cobre o
-criado ou atualizado na janela; uma cobrança antiga com chargeback, reembolso ou pagamento tardio e webhook
-perdido ficaria fora dos dois lados. Por isso cada execução consulta individualmente até 100 cobranças fora
-da janela, vinculadas ao provedor, criadas nos últimos 180 dias e ainda sujeitas a mudança (aguardando
-pagamento, pagas, parcialmente reembolsadas ou em disputa), a começar pelas nunca verificadas e pelas
-verificadas há mais tempo (`reconciliation_charge_checks`, gravada ao concluir a execução). O rodízio é de
-melhor esforço: não torna a execução parcial nem a faz falhar. A consulta que falha é pulada (a cobrança não
-é comparada nem registrada como verificada e volta primeiro na próxima execução); o prazo da coleta
-esgotado, o cancelamento da execução e três falhas seguidas que indicam provedor indisponível (sem
-resposta, limite de taxa ou erro 5xx; a recusa definitiva, própria da cobrança consultada, não conta)
-interrompem o rodízio. O que não couber ou não for consultado fica para as próximas execuções; as falhas
-ficam no log e na auditoria da execução (`rotation_failures`).
-**Limites e prazo:** a leitura local traz primeiro as cobranças presentes na listagem do provedor e depois
-as da janela, até 5000; as listadas sempre cabem (a listagem tem no máximo 2000 cobranças, e cada uma
-corresponde a no máximo duas locais, pelo ID do provedor e pela referência), de modo que o corte nunca gera
-divergência `missing_local` falsa. A coleta tem prazo próprio: 40 segundos na execução manual, que
-responde na requisição sem depender do prazo nem do cancelamento dela (abaixo do limite de escrita da
-resposta da API, de 60 segundos), e o lease menos 2 minutos na agendada. Esgotado o prazo, a coleta para e a
-comparação usa o que foi obtido.
-**Consequências:** a ordem de bloqueio na resolução é divergência e depois cobrança; a execução bloqueia as
-divergências antes de gravar referências às cobranças. Execuções com limite de páginas, de consultas
-individuais, de cobranças locais ou de operações com resultado desconhecido (500) atingido, ou com o prazo
-da coleta esgotado, terminam concluídas com aviso de execução parcial, que cita os motivos. O que não foi
-comparado não gera divergência nem tem divergência resolvida automaticamente; a divergência de operação que
-ficou fora da leitura limitada só é resolvida quando a operação deixa de ter resultado desconhecido.
+**Status:** aceita; a execução manual deixou de rodar dentro da requisição (prazo de 40 segundos) e
+passou a ser registrada e executada pelo worker, conforme as ADR-071 e ADR-072.
 
 ## ADR-039 Métricas de recebíveis a partir de totais do banco
 **Status:** aceita.
@@ -728,7 +655,8 @@ Respostas 401 incluem `WWW-Authenticate: Bearer`.
 tenant precisa saber o tipo do principal além da autoria.
 
 ## ADR-050 Portal do cliente: link de uso único e sessão restrita
-**Status:** aceita.
+**Status:** aceita; a revogação explícita e a listagem dos links vieram com a ADR-068, e a paginação
+das faturas do portal, com a ADR-069.
 **Decisão:** o link (`customer_portal_links`) guarda apenas o SHA-256 de um token de 256 bits e vale
 por 72 horas por padrão (`RECORVIA_PORTAL_LINK_TTL`, de 15 minutos a 30 dias). Cada cliente tem no
 máximo um link não revogado (índice único parcial): gerar um novo link revoga o anterior, pendente ou
@@ -1244,3 +1172,365 @@ uma métrica por tenant violaria a regra de cardinalidade (ADR-053).
 **Consequências:** não há métrica do volume vencido restante nem da idade do registro mais antigo;
 o acúmulo é inferido pelas execuções incompletas. Os limites (3 horas, 20 execuções em 24 horas) são
 pontos de partida, a calibrar com o volume real.
+
+## ADR-065 Alertmanager no perfil de observabilidade, com receptores resolvidos na partida
+**Status:** aceita.
+**Contexto:** os alertas do Prometheus (ADR-053) só apareciam na interface dele e no Grafana: sem
+encaminhamento, um alerta crítico dependia de alguém estar olhando. O encaminhamento precisa de
+endereços e credenciais (SMTP, webhook), que não podem ficar na imagem nem em arquivos do
+repositório, e o compose não usa bind mounts (ADR-020). O Alertmanager não expande variáveis de
+ambiente no arquivo de configuração.
+**Decisão:**
+1. Alertmanager `prom/alertmanager:v0.35.0` no perfil `observability`, em imagem própria
+   (`deploy/observability/alertmanager`), com o roteamento, os modelos das notificações e o script
+   de partida copiados por `COPY`. O Prometheus envia os alertas a `alertmanager:9093` e coleta as
+   métricas dele.
+2. O roteamento é fixo na imagem (`alertmanager.yml`): por severidade (`critical` para
+   `recorvia-critical`, com espera de 10 s e repetição a cada hora; `warning` e alertas sem
+   severidade conhecida para `recorvia-warning`, com 30 s e 12 horas), agrupamento por nome do
+   alerta, área e severidade, e uma regra de inibição em que o crítico inibe o aviso de mesmo nome e
+   mesmos rótulos de agregação. A lista `equal` reúne os rótulos usados nas agregações das regras
+   (rótulos ausentes nos dois alertas contam como iguais), e um teste falha se uma regra agregar
+   por um rótulo fora dela: comparar só o nome faria o crítico de um consumidor silenciar o aviso
+   de outro.
+3. Os receptores (e-mail e webhook genérico) e as definições de SMTP são gerados na partida do
+   container pelo `entrypoint.sh`, a partir das variáveis `ALERTMANAGER_*`, e acrescentados ao
+   roteamento. Senha do SMTP, URL e token do webhook são gravados em arquivos de acesso restrito e
+   referenciados pela configuração (`smtp_auth_password_file`, `url_file`, `credentials_file`): não
+   aparecem na configuração exposta pela API nem nos logs. O script valida os valores (sem quebras
+   de linha, que alterariam o YAML; sem ações de modelo nos destinatários), recusa combinações
+   incoerentes e executa `amtool check-config` antes de iniciar; sem receptores, o Alertmanager
+   inicia e registra o aviso. No compose local, os e-mails vão para o Mailpit. Entre as
+   combinações recusadas estão usuário do SMTP sem senha (a configuração seria válida e todo
+   envio falharia) e senha com `ALERTMANAGER_SMTP_REQUIRE_TLS=false`: sem TLS exigido, o
+   Alertmanager não negocia STARTTLS e a senha trafegaria em claro. Sem TLS, só é aceito o envio
+   sem autenticação, que é o caso do Mailpit.
+4. Link do runbook em cada notificação: as regras mantêm a anotação `runbook` (caminho no
+   repositório, conferido contra as seções existentes) e a imagem do Prometheus acrescenta, na
+   construção, a anotação `runbook_url` com o endereço completo (`RUNBOOK_BASE_URL`). O e-mail usa
+   modelos próprios em português com o link, e o webhook, que mantém o formato padrão do
+   Alertmanager (versão 4) esperado pelas integrações existentes, recebe a anotação na carga.
+5. `RecorviaWatchdog`, um alerta sempre ativo com rota própria (e-mail, repetição diária), prova o
+   caminho inteiro. O `stack-check` da CI confere a regra disparando, o alerta no Alertmanager e o
+   e-mail no Mailpit com o link do runbook; os mesmos passos são exercitados com Testcontainers
+   (`TestAlertPipelineFromPrometheusRuleToEmail`), assim como o roteamento, a inibição e o webhook
+   (`TestAlertmanagerRoutesBySeverityInhibitsAndNotifiesWebhook`).
+6. No compose local, o estado do Alertmanager (registro de notificações e silêncios, no diretório
+   de `--storage.path`) fica em `tmpfs` e dura o mesmo que a caixa do Mailpit, que não tem volume.
+   Num volume mantido pelo `make down`, o registro indicaria o grupo do `RecorviaWatchdog` como já
+   notificado e, na subida seguinte, o e-mail só sairia depois do intervalo de repetição (24
+   horas), com o Mailpit vazio e o `make obs-stack-check` reprovado. O `tmpfs` é explícito porque
+   a imagem declara `VOLUME` para o diretório e o compose reaproveita volumes anônimos ao recriar
+   o container.
+**Alternativas descartadas:** receptores no arquivo da imagem (segredo na imagem e um build por
+ambiente); bind mount de um arquivo de configuração (ADR-020); endereço completo do runbook
+escrito em cada regra (prende as regras a um endereço e quebraria a conferência das seções pelo
+caminho); carga personalizada do webhook para incluir o link (o próprio Alertmanager a trata como
+opção avançada sem suporte, e a carga deixaria de ser a que as integrações esperam); alerta de
+teste injetado pela API do Alertmanager no `stack-check` (não provaria a avaliação da regra nem o
+envio pelo Prometheus); volume também para o Mailpit, para igualar as durações pelo lado
+persistente (o `stack-check` aceitaria um e-mail de uma execução anterior e a contagem de
+notificações do Alertmanager continuaria zerada depois da partida); variável de exceção para
+autenticar no SMTP sem TLS (nenhum ambiente previsto precisa dela, e a senha ficaria exposta na
+rede).
+**Consequências:** no compose local, recriar o container do Alertmanager repete as notificações
+dos alertas ativos e descarta os silêncios; quem implanta a imagem com `/alertmanager` persistente
+mantém os silêncios e só recebe de novo um alerta já notificado depois do intervalo de repetição.
+Autenticação no SMTP exige TLS. Alterar um receptor exige recriar o container do Alertmanager;
+alterar o roteamento ou o endereço dos runbooks exige reconstruir a imagem. O Alertmanager roda em
+instância única. A notificação diária do `RecorviaWatchdog` não substitui um serviço externo que
+alerte pela ausência do sinal. O `make up-obs` passa a publicar a porta `ALERTMANAGER_PORT` (9093)
+em `127.0.0.1`.
+
+## ADR-066 Métricas globais de fila por funções agregadas com o relógio da aplicação
+**Status:** aceita. Substitui a consequência da ADR-053 que deixava as dead letters abertas sem
+métrica global.
+**Contexto:** as dead letters abertas, as notificações e as entregas de webhooks ficam em tabelas
+com RLS por tenant: o worker não consegue contá-las sem percorrer os tenants, e os contadores
+existentes só mostram o que aconteceu desde a partida de cada processo. Uma dead letter aberta há
+dias, uma fila de e-mails parada sem nenhuma falha de envio ou entregas de webhooks devidas e não
+tentadas não tinham série que as mostrasse.
+**Decisão:**
+1. Migration 00015 com três funções `SECURITY DEFINER` no padrão das `app_*_stats` existentes
+   (`search_path` fixo, `EXECUTE` revogado de `PUBLIC` e concedido ao papel da aplicação), que
+   devolvem apenas agregados, sem identificar tenants: `app_dead_letter_stats` (por consumidor,
+   inclusive os registros sem tenant), `app_notification_backlog_stats` (por situação) e
+   `app_webhook_delivery_backlog_stats` (por situação). Todas recebem o instante de referência, que
+   o worker lê do relógio injetado: a idade não depende do relógio do banco e os testes usam um
+   relógio controlado.
+2. Séries, coletadas pela tarefa `metrics.collect` e com rótulos de conjunto fechado:
+   `recorvia_dead_letters_open` e `recorvia_dead_letters_oldest_open_seconds` por `consumer` (os
+   consumidores do worker, com zero quando não há, e `other` para nomes que só existem no banco);
+   `recorvia_notifications_backlog` e `recorvia_notifications_backlog_oldest_seconds` por `state`
+   (`due`, `sending`, `failed`); `recorvia_webhook_deliveries_backlog` e
+   `recorvia_webhook_deliveries_backlog_oldest_due_seconds` por `state` (`pending`, `retrying`).
+3. A idade mede o que indica falha da plataforma, e não a espera prevista. Nas notificações, `due`
+   conta somente as agendadas com o horário de envio vencido, e a idade é o atraso em relação a
+   esse horário (lembretes futuros e novas tentativas em espera ficam de fora); `sending` mede o
+   tempo desde a reivindicação. Nas entregas de webhooks, o total inclui as que esperam o backoff,
+   mas o atraso considera apenas as com o horário da tentativa vencido, a partir desse horário: a
+   idade desde a criação cresceria por horas com o destino de um único tenant fora do ar, e um
+   reenvio manual de uma entrega antiga pareceria atraso.
+4. `failed` é uma situação final das notificações; o medidor conta as falhas definitivas das
+   últimas 24 horas, janela que mantém a consulta proporcional ao trabalho recente e dá um valor
+   que volta a zero.
+5. Índices parciais (`dead_letters_open_idx`, `notifications_failed_idx`) mantêm as consultas,
+   executadas a cada 15 s, proporcionais ao que está em aberto; as demais usam os índices parciais
+   de trabalho devido já existentes.
+**Alternativas descartadas:** contar pelos tenants com o contexto de cada um, como em
+`recorvia_payment_operations_exhausted` (uma consulta por tenant a cada 15 s, e os registros sem
+tenant ficariam invisíveis); usar o relógio do banco, como `app_outbox_stats` (testes dependentes
+do relógio real); manter totais em tabela própria atualizada por gatilhos (escrita extra em toda
+transição e mais um ponto de divergência).
+**Consequências:** como as demais contagens globais, os medidores são gravados pela instância do
+worker que executou a tarefa e os alertas usam `max`. A função das dead letters conta registros de
+todos os tenants e os sem tenant, mas não permite ao papel da aplicação lê-los: o detalhe continua
+restrito à API de cada tenant e à operação. A migration cria dois índices sem `CONCURRENTLY` (as
+migrations rodam em transação): em bases grandes, a criação bloqueia escritas nas duas tabelas
+durante a aplicação.
+
+## ADR-067 Alertas de fila com duas severidades e alertas do próprio caminho de alertas
+**Status:** aceita.
+**Contexto:** com as métricas da ADR-066 e o encaminhamento da ADR-065, faltava decidir o que
+alerta e com que urgência, sem notificar duas vezes o mesmo problema.
+**Decisão:**
+1. `RecorviaDeadLettersOpen`, `RecorviaNotificationsBacklog` e `RecorviaWebhookDeliveriesBacklog`
+   têm, cada um, duas regras com o mesmo nome e os mesmos rótulos, uma de aviso e uma crítica
+   (dead letters: abertas por 30 minutos e mais antiga aberta há mais de 24 horas; filas: atraso
+   acima de 15 minutos e acima de uma hora). A condição crítica implica a de aviso, e a inibição da
+   ADR-065 faz com que só a crítica seja notificada enquanto durar.
+2. Os alertas de fila usam a idade, não o total: envios e entregas rodam a cada 15 s e 10 s, e
+   minutos de atraso indicam tarefa parada ou volume acima da vazão em qualquer escala; um total
+   depende da carteira de cada instalação. `failed` (notificações) e o total em `retrying`
+   (webhooks) têm só painel: a falha definitiva já alerta por `RecorviaNotificationsFailed` e a
+   espera do backoff é o comportamento previsto.
+3. `RecorviaDeadLettersOpen` complementa `RecorviaMessagesDeadLettered` (contador por processo, que
+   avisa a entrada na DLQ): o medidor vem do banco, cobre todos os tenants, permanece até a triagem
+   e não zera quando o worker reinicia.
+4. O caminho de alertas tem alertas próprios: `RecorviaAlertDeliveryFailing` (Prometheus sem
+   conseguir enviar ao Alertmanager), `RecorviaAlertNotificationsFailing` (falha de uma integração
+   do Alertmanager) e a coleta do Alertmanager em `RecorviaTargetDown`, todos críticos, além de
+   `RecorviaWatchdog` com a severidade `info`, reservada a ele.
+**Consequências:** os limites são pontos de partida a calibrar com volume real. Com o caminho de
+alertas interrompido, os alertas dele só aparecem no Prometheus e no Grafana (ou pela integração
+que continuar funcionando); a ausência da notificação do `RecorviaWatchdog` é o sinal para quem
+recebe. Runbooks: `docs/operacao/runbooks/alertas.md`, `filas-e-dlq.md` (dead letters abertas) e
+`notificacoes-e-webhooks.md` (filas acumuladas).
+
+## ADR-068 Revogação explícita e listagem dos links do portal
+**Status:** aceita. Complementa a ADR-050, em que gerar um novo link era a única forma de revogar o
+anterior.
+**Decisão:** o contrato ganha `GET /api/v1/customers/{id}/portal-links` e
+`DELETE /api/v1/customers/{id}/portal-links/{link_id}`, e a resposta da geração passa a trazer o
+`id` do link. As três rotas exigem a mesma permissão, `customers.portal_links`: quem pode dar acesso
+ao portal é quem vê e retira esse acesso (o auditor acompanha gerações e revogações pela trilha de
+auditoria). A listagem é paginada por cursor (`limit`, `cursor`, `next_cursor`) em
+`(created_at, id)` decrescentes, sobre o índice `customer_portal_links_customer_idx`, e traz
+situação (`pending`, `used`, `expired` ou `revoked`, calculada no instante da consulta), criação,
+expiração, uso, revogação com o motivo (`superseded` ou `revoked`) e quem gerou (membro ou
+credencial, com o nome). A consulta da listagem não lê `token_hash`: token e hash nunca saem da
+API depois da geração. A revogação bloqueia o cliente (`FOR NO KEY UPDATE`, serializando com a
+geração) e o link (`FOR UPDATE`, serializando com a troca por sessão), grava `revoked_at` com o
+motivo `revoked` e audita `customer.portal_link_revoked` no cliente, com `link_id` e a situação
+anterior, na mesma transação. Depois do commit, as sessões do portal abertas com o link são removidas
+do Redis: cada sessão é indexada pelo link de origem
+(`recorvia:portal:link_sessions:<link>`, um conjunto com os hashes dos identificadores de sessão,
+com a expiração da sessão de maior validade, mantida com `EXPIRE NX` e `EXPIRE GT`, do Redis 7 em
+diante). A geração de um novo link faz a mesma remoção para os links que substitui.
+**Idempotência:** a revogação responde 204 também para um link já revogado, sem alterar a linha
+(o motivo `superseded` de um link substituído é preservado) e sem nova auditoria; a repetição apenas
+refaz a remoção das sessões. Por não criar recurso nem efeito financeiro, a rota não usa
+`Idempotency-Key`. Link inexistente, de outro cliente (ainda que da mesma organização) ou de outra
+organização responde 404 `portal_link_not_found`, e cliente de outra organização, 404
+`customer_not_found`; nada é revogado, auditado ou removido do Redis nesses casos.
+**Credenciais de API (ADR-059):** a revogação não tem coluna de autoria (não há migration nova); a
+autoria fica na auditoria, pelo ator, e as rotas de listagem e revogação aceitam credenciais com o
+escopo `customers.portal_links`, como a de geração. A permissão é delegável, portanto não há recusa
+`user_session_required`.
+**Justificativa:** a revogação precisa valer mesmo com o Redis indisponível, e por isso a fonte da
+verdade continua sendo o banco: `Authenticate` confere o link a cada requisição e recusa a sessão de
+link revogado (ADR-050). Remover as sessões depois do commit é o que as encerra de imediato no
+armazenamento; se essa remoção falhar, a rota ainda responde 204 (o acesso já está cortado), registra
+um aviso no log e a repetição da chamada conclui a limpeza. Fazer a remoção antes do commit
+condicionaria um ato de segurança à disponibilidade do Redis e poderia encerrar a sessão sem revogar
+o link. Uma requisição do portal que já tinha passado pela conferência do link pode regravar a sessão
+logo depois da remoção; ela é recusada e removida na requisição seguinte. Sessões criadas antes desta
+versão não têm índice e seguem apenas a recusa por `Authenticate`, até expirarem (a duração máxima
+da sessão, duas horas por padrão).
+**Consequências:** na interface, a ficha do cliente ganha a aba Portal (visível com
+`customers.portal_links`), com a lista dos links e o botão de revogar, com confirmação, para os links
+pendentes ou em uso. O serviço deixa de ter a revogação em massa por cliente, que não era exposta: o
+índice único parcial garante no máximo um link não revogado por cliente, e a revogação por
+identificador cobre o caso. Testes unitários, de integração (PostgreSQL e Redis reais) e pela API
+cobrem a idempotência, a concorrência entre revogações e com a troca do link, a falha do Redis e o
+isolamento entre clientes e organizações.
+
+## ADR-069 Paginação por cursor das faturas do portal
+**Status:** aceita. Substitui, na ADR-050, a listagem das 100 faturas mais recentes sem paginação.
+**Decisão:** `GET /api/portal/v1/invoices` aceita `limit` (1 a 100, padrão 25) e `cursor` e devolve
+`next_cursor`, como as demais listagens do contrato. A ordem é `(issued_at, id)` decrescentes e a
+paginação é por keyset: o cursor é a posição da última fatura da página (emissão e identificador),
+em base64url. Toda fatura emitida tem `issued_at` (`invoices_issued_fields`) e ele não muda depois
+da emissão (`app_invoice_guard`); uma fatura emitida durante a navegação entra antes da primeira
+página e não desloca as seguintes, sem repetir nem pular faturas já percorridas. A organização e o
+cliente consultados vêm sempre da sessão do portal: o cursor não carrega tenant nem cliente, e a
+consulta filtra `tenant_id` e `customer_id` da sessão sob RLS. Um cursor obtido em outra sessão, de
+outro cliente ou de outra organização, é só uma posição no tempo e percorre apenas as faturas da
+sessão que o apresenta. Os cursores têm tipo (faturas do portal e links do portal não se misturam),
+só são aceitos na forma canônica gerada pelo servidor e, fora dela, respondem 422 `invalid_cursor`
+sem consultar as faturas.
+**Justificativa:** o keyset mantém a listagem estável sob inserções, o que o deslocamento (`OFFSET`)
+não garante, e apoia-se no índice `invoices_customer_idx`. Vincular o cursor ao cliente (com assinatura ou
+identificador embutido) não acrescentaria proteção: o escopo já é imposto pela sessão em toda
+consulta, e a verificação no caso de uso (`visible`) continua como segunda barreira. A ordem anterior
+desempatava por `created_at`; o desempate passa a ser só pelo identificador (UUIDv7), que também é
+cronológico.
+**Consequências:** clientes da API que liam `data` sem paginar passam a receber 25 faturas por
+página, em vez de até 100, e devem seguir `next_cursor`. A interface do portal acumula as páginas
+com o botão "Carregar mais faturas". O analisador do cursor tem teste de fuzz, e o roteiro E2E
+`05-portal` percorre duas páginas e a revogação de links.
+
+## ADR-070 Chargeback consome o crédito do pagamento excedente
+**Status:** aceita (resolve a limitação registrada na ADR-036: "o chargeback não consome crédito do cliente").
+**Contexto:** o pagamento acima do saldo da fatura (ou de fatura já quitada ou cancelada) vira crédito do
+cliente (`payment.overpayment`, ADR-030). O reembolso já devolve esse crédito antes de reduzir a receita
+(ADR-034), mas a disputa perdida estornava o valor pago inteiro e deixava o crédito com o cliente: ele
+recebia o dinheiro de volta pelo chargeback e ainda podia abater faturas futuras com o crédito, e o ledger
+registrava como chargeback (redução de receita) um valor que nunca foi receita.
+**Decisão:** o valor estornado por chargeback consome o crédito do excedente com a mesma base do reembolso.
+A base é única para os dois (`overpaymentPortion`): o excedente do pagamento da cobrança menos o que já foi
+devolvido ao pagador, por reembolsos (`refunds.credit_amount`) e por chargebacks
+(`disputes.credit_amount + disputes.recovery_amount` das disputas perdidas). O valor devolvido sai primeiro
+dessa base, em qualquer ordem dos eventos, de modo que cada centavo do excedente é devolvido uma única vez.
+Na disputa perdida (e no aumento do chargeback pelo reembolso reservado recusado depois dela, ADR-036), a
+parte do valor estornado dentro da base é dividida em duas, sob o bloqueio do crédito do cliente:
+- **crédito consumido** (`disputes.credit_amount`): o que ainda está no saldo é consumido
+  (`customer_credit_entries`, tipo `consumption`);
+- **valor a recuperar do cliente** (`disputes.recovery_amount`): o que o cliente já usou em outras faturas
+  não deixa o saldo negativo; fica registrado como valor a recuperar.
+
+O lançamento `dispute.credit_reversed` (um por disputa e um por reembolso recusado depois da perda) tira as
+duas partes de `chargebacks`: débito em `customer_credits` pelo crédito consumido e em
+`customer_recoverables` (conta nova de ativo, "Valores a recuperar de clientes") pelo valor a recuperar,
+crédito em `chargebacks`. Com `dispute.opened` e `dispute.hold_released`, `chargebacks` fica com o valor
+estornado menos o excedente, isto é, a receita efetivamente perdida. As duas partes aparecem na disputa
+(`GET /api/v1/disputes`), no histórico da disputa e da fatura, na auditoria (`dispute.lost`,
+`dispute.chargeback_increased`) e no evento `dispute.closed`.
+
+| Momento | Efeito no crédito |
+|---|---|
+| Reembolso antes da disputa | consome o crédito primeiro (ADR-034); a disputa perdida usa só o excedente restante |
+| Reembolso confirmado durante a disputa | idem; o valor reembolsado não é estornado de novo (ADR-036) |
+| Reembolso reservado, confirmado depois da perda | o chargeback já levou o excedente; o reembolso reduz só a receita |
+| Reembolso reservado, recusado depois da perda | o valor passa ao chargeback e leva o excedente restante (lançamento por reembolso) |
+| Disputa ganha | nenhum efeito no crédito; uma nova disputa perdida da mesma cobrança consome o crédito uma vez |
+| Webhook repetido ou fora de ordem | nenhum efeito: a decisão é registrada uma vez (ADR-036) e os lançamentos têm chave de idempotência |
+
+**Justificativa:** no reembolso, a parte do crédito que o cliente já usou reduz a receita (ADR-034): a
+devolução é decisão do tenant, que conhece o saldo. No chargeback a devolução é imposta pelo pagador: o
+crédito que ele já abateu de outra fatura deixou de ter lastro, e essa fatura foi quitada com um valor que
+voltou a ele. Registrar a diferença como receita perdida esconderia que o cliente deve o valor; deixar o
+saldo negativo quebraria a regra de que crédito só é consumido do que existe (o banco recusa o consumo acima
+do saldo) e contaminaria a emissão das próximas faturas. A conta `customer_recoverables` separa esse valor de
+`accounts_receivable`, que continua igual ao saldo devedor das faturas.
+**Consequências:** migration `00017` (colunas `credit_amount` e `recovery_amount` em `disputes`, limitadas ao
+valor contestado e permitidas só em disputa perdida); a conta nova é criada sob demanda, como as demais do
+plano. O indicador de chargebacks do painel (movimento líquido da conta) passa a excluir o excedente. A ordem
+de bloqueio é a do reembolso: cobrança, fatura e cliente (crédito). A cobrança do valor a recuperar é
+decisão do tenant (por exemplo, fatura avulsa); **não há operação de baixa da conta
+`customer_recoverables`** (recebimento ou perda), que fica como pendência. Disputas perdidas antes desta
+versão não são reprocessadas: o crédito daqueles pagamentos permanece com o cliente.
+
+## ADR-071 Conciliação manual executada pelo worker como tarefa com lease
+**Status:** aceita (resolve a limitação "a conciliação manual executa dentro da requisição"; complementa a
+ADR-038).
+**Contexto:** a execução manual coletava no provedor dentro da requisição HTTP, com prazo de 40 segundos
+para caber no limite de escrita da resposta; em contas grandes terminava como parcial pelo prazo, e a
+requisição ficava presa por dezenas de segundos.
+**Decisão:** o pedido só registra a execução; quem executa é o worker.
+- **Registro.** `StartReconciliation` grava `reconciliation_runs` em `running`, sem lease e com
+  `attempts = 0`, na mesma transação da auditoria. A execução registrada é o próprio registro da tarefa: não
+  há mensagem que possa se perder nem segunda fonte de verdade. O índice único das execuções em andamento
+  continua garantindo uma por conta, agora também enquanto ela aguarda o worker ou a retomada.
+- **Executor.** Cada worker roda duas instâncias de um laço próprio, fora do agendador (que executa uma
+  tarefa por vez e seria bloqueado por uma conciliação longa). A cada 2 segundos o laço descobre, entre
+  todos os tenants, as execuções `running` sem lease ou com lease expirado
+  (`app_claimable_reconciliation_runs`, `SECURITY DEFINER`, só identificadores) e assume uma por vez na
+  transação do tenant: `FOR UPDATE`, nova verificação, lease de 15 minutos e `attempts + 1`. Instâncias
+  concorrentes se serializam na linha; a segunda encontra o lease vigente e desiste.
+- **Execução.** A coleta tem prazo de 13 minutos por tentativa (o lease menos a folga da comparação e do
+  registro), sem relação com prazo HTTP; os limites de páginas, consultas e cobranças da ADR-038 continuam
+  valendo e, com o prazo esgotado, a execução é concluída como parcial com o motivo. Falha do provedor ou da
+  leitura encerra como `failed`, com a causa.
+- **Retomada.** O worker interrompido deixa a execução com o lease; quando ele expira, qualquer instância a
+  assume de novo e a executa do início (`reconciliation.run_resumed`). O worker que encerra normalmente (ou a
+  tarefa agendada cancelada) devolve a execução, removendo o lease (`reconciliation.run_released`), e ela é
+  retomada de imediato. As divergências só são gravadas na transação que encerra a execução, pela chave de
+  deduplicação, e essa transação exige que a tentativa ainda detenha a execução (mesma contagem de
+  `attempts`): a instância cujo lease expirou e foi substituída não conclui nem encerra como falha a
+  execução retomada. Por isso a retomada não duplica divergências nem ocorrências.
+- **Limite.** Depois de três tentativas interrompidas, a execução é encerrada como `failed` ao ser assumida,
+  com a causa ("interrompida 3 vezes"), e a conta volta a aceitar pedidos.
+- **Agendada.** O job `payments.reconcile` continua executando na própria tarefa (o resultado alimenta as
+  métricas da tarefa), mas registra a execução já assumida (`attempts = 1`, com lease): se for
+  interrompida, segue o mesmo caminho de retomada. Execuções com lease expirado deixam de ser encerradas
+  como falha no início da execução seguinte.
+
+**Alternativas:** evento na outbox com consumidor e inbox foi descartado porque o consumidor tem prazo de
+processamento de 2 minutos e redelivery por tentativa: uma conciliação de vários minutos manteria a
+mensagem sem confirmação, e a execução interrompida dependeria de reentrega com esperas fixas e de DLQ, sem
+dispensar o lease para impedir duas execuções simultâneas. Uma tarefa do agendador com intervalo curto foi
+descartada porque o agendador executa uma tarefa por vez. A tarefa com lease é o mecanismo que o projeto já
+usa para operações externas (`payment_operations`), notificações e entregas de webhooks.
+**Consequências:** migration `00017` (`reconciliation_runs.attempts` e as funções de descoberta e de
+contagem); `Config.ManualReconciliationBudget` deu lugar a `Config.ReconciliationBudget` (padrão e máximo de
+13 minutos). Sem worker em execução, o pedido fica registrado e a conta fica ocupada até um worker partir: as
+métricas `recorvia_reconciliation_runs_in_progress{state}` (`queued`, `executing`, `stalled`) e
+`recorvia_reconciliation_oldest_waiting_seconds` e o alerta `RecorviaReconciliationRunsWaiting` (mais de 5
+minutos sem worker) cobrem esse caso, descrito no runbook de conciliação. Para que o alerta não dependa do
+processo que parou, as duas métricas são exportadas também pela API, que registra os pedidos e continua em
+execução sem o worker: ela lê as contagens agregadas do banco a cada coleta (prazo de 2 segundos; se a
+leitura falhar, as séries mantêm o último valor e a falha vai para o log), enquanto o worker as publica pela
+tarefa `metrics.collect`. A regra usa `max()` sobre todas as instâncias: com as séries do worker obsoletas, a
+da API sustenta o alerta, que dispara junto com `RecorviaTargetDown`. Com a API e o worker sem acesso ao
+banco, as séries ficam congeladas e o sinal é `RecorviaDependencyUnavailable`. Um worker executa no máximo duas
+conciliações ao mesmo tempo; mais instâncias do worker aumentam a vazão. A retomada refaz a coleta do início:
+o progresso parcial não é persistido.
+
+## ADR-072 Contrato do pedido assíncrono de conciliação e a Idempotency-Key
+**Status:** aceita.
+**Contexto:** com a ADR-071, `POST /api/v1/reconciliation/runs` deixa de devolver a execução encerrada. O
+contrato precisa dizer como acompanhar a execução e o que a `Idempotency-Key` devolve enquanto ela não
+termina, sem que a chave fique presa a um retrato "em andamento".
+**Decisão:**
+- `POST /api/v1/reconciliation/runs` responde `202 Accepted` com a execução em `running` e o header
+  `Location: /api/v1/reconciliation/runs/{id}`. A operação nova `GET /api/v1/reconciliation/runs/{id}`
+  (`reconciliation.read`) devolve a execução na situação atual; a execução ganhou `trigger` e `attempts`
+  (0 enquanto aguarda o worker, mais que 1 quando foi retomada).
+- A `Idempotency-Key` continua obrigatória e identifica o pedido pela chave de negócio (`request_key`,
+  ADR-022): a repetição devolve sempre a mesma execução, **na situação atual**. Para isso, a resposta `202`
+  não fica registrada na chave (como já ocorre com 5xx, 429 e conflitos com `Retry-After`): a repetição volta
+  ao caso de uso, que encontra a execução pela chave de negócio e responde `202` enquanto ela está em
+  andamento e `200` depois de encerrada; o `200` é resultado definitivo e fica registrado. Mesma chave com a
+  execução interrompida e retomada continua apontando para a mesma execução.
+- O `200` também traz o `Location`, e ele faz parte do resultado registrado: a chave guarda o header junto
+  de status, corpo e `Content-Type` (`idempotency_keys.response_location`), e toda repetição do resultado
+  (`Idempotent-Replayed: true`) o reproduz. O cliente que segue o `Location` recebe a mesma resposta em
+  qualquer repetição do pedido.
+- `409 reconciliation_running` (outra execução da conta em andamento) mantém o `Retry-After` e não prende a
+  chave.
+- **Interface.** A tela envia o pedido uma vez, descarta a chave assim que a API o aceita (a intenção
+  terminou) e acompanha a execução por consulta, a cada 2 segundos, até `completed` ou `failed`, quando
+  informa o resultado; não repete o `POST` para acompanhar. A lista de execuções é atualizada enquanto houver
+  execução em andamento, inclusive agendada ou pedida por outra pessoa.
+
+**Justificativa:** registrar o `202` na chave faria a repetição devolver para sempre "em andamento", mesmo
+depois de a execução terminar ou falhar; liberar a chave só é seguro porque o caso de uso é idempotente pela
+chave de negócio, na mesma transação que registra a execução.
+**Consequências:** clientes da API que esperavam a execução encerrada na resposta do `POST` precisam
+acompanhar pelo `Location`; o roteiro `web/e2e/04-conciliacao.spec.ts` verifica o `202` e o acompanhamento
+pela interface. A regra do `202` vale para qualquer rota idempotente que venha a aceitar pedidos
+assíncronos, desde que o caso de uso reconheça o pedido pela chave de negócio. A migration `00017` acrescenta
+`idempotency_keys.response_location` (nulo nas respostas sem o header e nos resultados registrados antes
+dela, cuja repetição continua saindo sem `Location` até a chave expirar, em 24 horas); o registro vale para
+qualquer rota idempotente que responda com `Location`.

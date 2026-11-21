@@ -8,10 +8,11 @@ verificação.
 | Runbook | Alertas |
 |---|---|
 | [Faturamento e cobrança](faturamento.md) | `RecorviaBillingCycleStale`, `RecorviaScheduledTaskFailing`, `RecorviaScheduledTaskStale`, `RecorviaMetricsCollectionStale`, `RecorviaChargesDeclined`, `RecorviaPaymentProviderUnavailable`, `RecorviaPaymentOperationsPending`, `RecorviaWebhooksRejected`, `RecorviaDBPoolSaturated`, `RecorviaDBPoolWaiting`, `RecorviaDBServerConnectionsHigh`, `RecorviaHTTPErrorRate` |
-| [Filas e DLQ](filas-e-dlq.md) | `RecorviaTargetDown`, `RecorviaOutboxBacklog`, `RecorviaOutboxStalled`, `RecorviaOutboxPublishFailures`, `RecorviaQueueBacklog`, `RecorviaQueueLag`, `RecorviaQueueWithoutConsumer`, `RecorviaDeadLetterQueueNotDrained`, `RecorviaMessagesDeadLettered`, `RecorviaConsumerRetryRate`, `RecorviaMessagesRequeued`, `RecorviaWorkerSaturated`, `RecorviaDependencyUnavailable` |
-| [Conciliação](conciliacao.md) | `RecorviaPaymentOperationsUnknown`, `RecorviaPaymentOperationsExhausted`, `RecorviaRefundsUnknown`, `RecorviaRefundsFailed`, `RecorviaReconciliationDiscrepanciesOpen`, `RecorviaReconciliationDiscrepanciesHigh` |
-| [Notificações e webhooks enviados](notificacoes-e-webhooks.md) | `RecorviaEmailDeliveryStalled`, `RecorviaNotificationsFailed`, `RecorviaWebhookDeliveriesFailing` |
+| [Filas e DLQ](filas-e-dlq.md) | `RecorviaTargetDown`, `RecorviaOutboxBacklog`, `RecorviaOutboxStalled`, `RecorviaOutboxPublishFailures`, `RecorviaQueueBacklog`, `RecorviaQueueLag`, `RecorviaQueueWithoutConsumer`, `RecorviaDeadLetterQueueNotDrained`, `RecorviaMessagesDeadLettered`, `RecorviaDeadLettersOpen`, `RecorviaConsumerRetryRate`, `RecorviaMessagesRequeued`, `RecorviaWorkerSaturated`, `RecorviaDependencyUnavailable` |
+| [Conciliação](conciliacao.md) | `RecorviaPaymentOperationsUnknown`, `RecorviaPaymentOperationsExhausted`, `RecorviaRefundsUnknown`, `RecorviaRefundsFailed`, `RecorviaReconciliationDiscrepanciesOpen`, `RecorviaReconciliationDiscrepanciesHigh`, `RecorviaReconciliationRunsWaiting` |
+| [Notificações e webhooks enviados](notificacoes-e-webhooks.md) | `RecorviaEmailDeliveryStalled`, `RecorviaNotificationsFailed`, `RecorviaNotificationsBacklog`, `RecorviaWebhookDeliveriesFailing`, `RecorviaWebhookDeliveriesBacklog` |
 | [Expurgo por retenção](retencao.md) | `RecorviaRetentionPurgeStale`, `RecorviaRetentionPurgeBacklog` |
+| [Encaminhamento de alertas](alertas.md) | `RecorviaWatchdog`, `RecorviaAlertDeliveryFailing`, `RecorviaAlertNotificationsFailing` |
 | [Isolamento de dados](isolamento-de-dados.md) | sem alerta automático (incidente aberto por suspeita ou relato) |
 
 ## Convenções dos comandos
@@ -31,5 +32,8 @@ substitua pelo acesso equivalente ao banco e ao broker.
   `docs/roteiro-demo.md`). Os endpoints citados estão em `api/openapi.yaml`.
 - **Métricas**: Prometheus em http://localhost:9090 (consultas PromQL citadas) e dashboards do
   Grafana em http://localhost:3000 (pasta *Recorvia*).
+- **Alertas**: as notificações (e-mail e webhook) trazem o link da seção do runbook. No ambiente
+  local, os e-mails ficam no Mailpit (http://localhost:8025) e os alertas ativos, silêncios e
+  inibições, no Alertmanager (http://localhost:9093).
 - Ao abrir um incidente, registre horário, alerta, consultas executadas e ações tomadas. Não copie
   dados pessoais de clientes para o registro; use identificadores.

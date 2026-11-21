@@ -4,7 +4,9 @@ import { chooseOption, login, searchAndChoose, selectTenant, TENANTS, uniqueSuff
 /**
  * Roteiro de recebíveis: reembolso parcial de uma cobrança paga pela
  * interface e divergência de taxa criada no simulador (ação diverge),
- * detectada pela conciliação e resolvida com justificativa.
+ * detectada pela conciliação e resolvida com justificativa. A conciliação
+ * manual é assíncrona: a API aceita o pedido (202, execução em andamento), o
+ * worker executa e a interface acompanha até o término.
  */
 test.describe.serial('reembolso e conciliação da Acme', () => {
   const suffix = uniqueSuffix();
@@ -16,6 +18,35 @@ test.describe.serial('reembolso e conciliação da Acme', () => {
   let invoicePath = '';
   let chargePath = '';
   let checkoutUrl = '';
+
+  /**
+   * Pede a conciliação manual pela interface e a acompanha até terminar: o
+   * pedido responde de imediato com a execução em andamento, e o resultado
+   * chega quando o worker a conclui, sem novo pedido.
+   */
+  async function runReconciliation(page: Page): Promise<void> {
+    await page.goto('/conciliacao');
+    await page.getByRole('button', { name: 'Executar conciliação agora' }).click();
+    const accepted = page.waitForResponse(
+      (response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/v1/reconciliation/runs',
+    );
+    await page.getByRole('dialog', { name: 'Executar conciliação agora' }).getByRole('button', { name: 'Executar conciliação' }).click();
+    const response = await accepted;
+    expect(response.status()).toBe(202);
+    const run = (await response.json()) as { id: string; status: string; finished_at: string | null };
+    expect(run.status).toBe('running');
+    expect(run.finished_at).toBeNull();
+    expect(response.headers()['location']).toBe(`/api/v1/reconciliation/runs/${run.id}`);
+
+    await expect(page.getByText(/^Conciliação concluída: /).first()).toBeVisible({ timeout: 120_000 });
+    const latest = page.getByRole('table', { name: 'Execuções de conciliação' }).getByRole('row').nth(1);
+    await expect(latest).toContainText('Concluída');
+    await expect(latest).toContainText('Manual');
+    // Encerrada a execução, a tela deixa de indicar conciliação em andamento
+    // e aceita novo pedido.
+    await expect(page.getByRole('status').filter({ hasText: 'Conciliação em andamento' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Executar conciliação agora' })).toBeEnabled();
+  }
 
   /** Cria cliente, plano e assinatura, emite a fatura e aguarda o checkout da cobrança. */
   async function issueInvoiceWithCheckout(page: Page): Promise<void> {
@@ -137,12 +168,8 @@ test.describe.serial('reembolso e conciliação da Acme', () => {
       expect(response.ok()).toBeTruthy();
     });
 
-    await test.step('executa a conciliação manual', async () => {
-      await page.goto('/conciliacao');
-      await page.getByRole('button', { name: 'Executar conciliação agora' }).click();
-      await page.getByRole('dialog', { name: 'Executar conciliação agora' }).getByRole('button', { name: 'Executar conciliação' }).click();
-      await expect(page.getByText(/^Conciliação concluída: /).first()).toBeVisible({ timeout: 60_000 });
-      await expect(page.getByRole('table', { name: 'Execuções de conciliação' }).getByRole('row').nth(1)).toContainText('Concluída');
+    await test.step('pede a conciliação manual e acompanha a execução assíncrona até terminar', async () => {
+      await runReconciliation(page);
     });
 
     await test.step('a divergência de taxa aparece aberta e mostra local × provedor', async () => {
@@ -180,10 +207,7 @@ test.describe.serial('reembolso e conciliação da Acme', () => {
     });
 
     await test.step('nova execução não reabre a divergência resolvida', async () => {
-      await page.goto('/conciliacao');
-      await page.getByRole('button', { name: 'Executar conciliação agora' }).click();
-      await page.getByRole('dialog', { name: 'Executar conciliação agora' }).getByRole('button', { name: 'Executar conciliação' }).click();
-      await expect(page.getByText(/^Conciliação concluída: /).first()).toBeVisible({ timeout: 60_000 });
+      await runReconciliation(page);
       await page.getByRole('tab', { name: 'Divergências' }).click();
       await expect(
         page.getByRole('table', { name: 'Divergências' }).getByRole('row').filter({ hasText: providerChargeId }).filter({ hasText: 'Taxa divergente' }),

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -562,6 +563,34 @@ func TestReceivablesAPIDisputes(t *testing.T) {
 	}
 }
 
+// work faz o papel do worker: assume e executa a conciliação registrada.
+func (r *recvAPI) work(t *testing.T, tenantID uuid.UUID, run map[string]any) {
+	t.Helper()
+	id, err := uuid.Parse(run["id"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.pay.ExecuteReconciliationRun(context.Background(), tenantID, id); err != nil {
+		t.Fatalf("execução da conciliação registrada: %v", err)
+	}
+}
+
+// reconcile pede a conciliação pela API (202, execução em andamento), executa
+// como o worker e devolve a execução encerrada consultada pela API.
+func (r *recvAPI) reconcile(t *testing.T, c *client, tenantID uuid.UUID, key string) map[string]any {
+	t.Helper()
+	run, h := c.expect(http.StatusAccepted, http.MethodPost, "/api/v1/reconciliation/runs", nil, "Idempotency-Key", key)
+	r.conforms(t, "ReconciliationRun", run)
+	path := "/api/v1/reconciliation/runs/" + run["id"].(string)
+	if run["status"] != "running" || run["finished_at"] != nil || run["attempts"] != float64(0) || h.Get("Location") != path {
+		t.Fatalf("execução registrada: %v (Location %q)", run, h.Get("Location"))
+	}
+	r.work(t, tenantID, run)
+	done, _ := c.expect(http.StatusOK, http.MethodGet, path, nil)
+	r.conforms(t, "ReconciliationRun", done)
+	return done
+}
+
 func TestReceivablesAPIReconciliation(t *testing.T) {
 	ctx := context.Background()
 	r := newReceivablesAPI(t)
@@ -589,16 +618,55 @@ func TestReceivablesAPIReconciliation(t *testing.T) {
 	auditor.expectProblem(http.StatusForbidden, "forbidden", http.MethodPost, "/api/v1/reconciliation/runs", nil, "Idempotency-Key", "auditor-"+uuid.NewString())
 	owner.expectProblem(http.StatusUnprocessableEntity, "idempotency_key_required", http.MethodPost, "/api/v1/reconciliation/runs", nil)
 
+	// O pedido registra a execução e responde de imediato, sem consultar o
+	// provedor; a repetição com a mesma chave devolve a mesma execução em
+	// andamento, e outro pedido da conta é recusado até ela terminar.
 	key := "conciliacao-" + uuid.NewString()
-	run, h := finance.expect(http.StatusOK, http.MethodPost, "/api/v1/reconciliation/runs", nil, "Idempotency-Key", key)
+	path := "/api/v1/reconciliation/runs"
+	queued, h := finance.expect(http.StatusAccepted, http.MethodPost, path, nil, "Idempotency-Key", key)
+	r.conforms(t, "ReconciliationRun", queued)
+	runPath := path + "/" + queued["id"].(string)
+	if queued["status"] != "running" || queued["trigger"] != "manual" || queued["attempts"] != float64(0) || queued["finished_at"] != nil ||
+		queued["discrepancy_count"] != float64(0) || h.Get("Location") != runPath || h.Get("Idempotent-Replayed") != "" {
+		t.Fatalf("execução registrada: %v %v", queued, h)
+	}
+	if again, h := finance.expect(http.StatusAccepted, http.MethodPost, path, nil, "Idempotency-Key", key); again["id"] != queued["id"] ||
+		again["status"] != "running" || h.Get("Idempotent-Replayed") != "" {
+		t.Fatalf("repetição com a execução em andamento: %v %v", again, h)
+	}
+	st, busy, h := owner.do(http.MethodPost, path, nil, "Idempotency-Key", "outra-"+uuid.NewString())
+	if st != http.StatusConflict || busy["code"] != "reconciliation_running" || h.Get("Retry-After") == "" {
+		t.Fatalf("segunda execução da conta: %d %v", st, busy)
+	}
+	pending, _ := auditor.expect(http.StatusOK, http.MethodGet, runPath, nil)
+	if pending["status"] != "running" || len(objects(t, mustList(t, auditor, "/api/v1/reconciliation/discrepancies"))) != 0 {
+		t.Fatalf("antes do worker: %v", pending)
+	}
+	operator.expectProblem(http.StatusForbidden, "forbidden", http.MethodGet, runPath, nil)
+	auditor.expectProblem(http.StatusNotFound, "reconciliation_run_not_found", http.MethodGet, path+"/"+uuid.NewString(), nil)
+	auditor.expectProblem(http.StatusNotFound, "not_found", http.MethodGet, path+"/abc", nil)
+
+	// O worker assume e conclui a execução; quem pediu acompanha pela consulta.
+	r.work(t, tn.ID, queued)
+	run, _ := auditor.expect(http.StatusOK, http.MethodGet, runPath, nil)
 	r.conforms(t, "ReconciliationRun", run)
 	if run["status"] != "completed" || run["discrepancy_count"] != float64(2) || run["provider"] != "simulator" || run["finished_at"] == nil ||
-		h.Get("Idempotent-Replayed") != "" {
+		run["attempts"] != float64(1) || run["error"] != "" {
 		t.Fatalf("execução: %v", run)
 	}
-	replay, h := finance.expect(http.StatusOK, http.MethodPost, "/api/v1/reconciliation/runs", nil, "Idempotency-Key", key)
-	if replay["id"] != run["id"] || h.Get("Idempotent-Replayed") != "true" {
-		t.Fatalf("repetição da execução: %v", replay)
+	// Depois de encerrada, a mesma chave devolve o resultado (200), que
+	// passa a ficar registrado na chave.
+	replay, h := finance.expect(http.StatusOK, http.MethodPost, path, nil, "Idempotency-Key", key)
+	if replay["id"] != run["id"] || replay["status"] != "completed" || h.Get("Idempotent-Replayed") != "" || h.Get("Location") != runPath {
+		t.Fatalf("resultado pela chave: %v %v", replay, h)
+	}
+	// A repetição do resultado registrado reproduz também o header Location
+	// do contrato, além de status e corpo.
+	for range 2 {
+		again, h := finance.expect(http.StatusOK, http.MethodPost, path, nil, "Idempotency-Key", key)
+		if !reflect.DeepEqual(again, replay) || h.Get("Idempotent-Replayed") != "true" || h.Get("Location") != runPath {
+			t.Fatalf("repetição do resultado: %v %v", again, h)
+		}
 	}
 	runs, _ := auditor.expect(http.StatusOK, http.MethodGet, "/api/v1/reconciliation/runs", nil)
 	if list := objects(t, runs["data"]); len(list) != 1 || list[0]["id"] != run["id"] {
@@ -675,7 +743,7 @@ func TestReceivablesAPIReconciliation(t *testing.T) {
 
 	// Nova execução: nenhuma divergência aberta; a resolvida não é reaberta.
 	r.env.Clock.Advance(time.Minute)
-	again, _ := owner.expect(http.StatusOK, http.MethodPost, "/api/v1/reconciliation/runs", nil, "Idempotency-Key", "conciliacao-"+uuid.NewString())
+	again := r.reconcile(t, owner, tn.ID, "conciliacao-"+uuid.NewString())
 	if again["status"] != "completed" || again["discrepancy_count"] != float64(0) {
 		t.Fatalf("execução após as resoluções: %v", again)
 	}
@@ -694,18 +762,26 @@ func TestReceivablesAPIReconciliation(t *testing.T) {
 	if len(jsonArray(t, list["data"])) != 0 {
 		t.Fatalf("divergências de outra organização: %v", list)
 	}
-	otherRun, _ := outsider.expect(http.StatusOK, http.MethodPost, "/api/v1/reconciliation/runs", nil, "Idempotency-Key", "outra-"+uuid.NewString())
+	outsider.expectProblem(http.StatusNotFound, "reconciliation_run_not_found", http.MethodGet, runPath, nil)
+	otherRun := r.reconcile(t, outsider, other.ID, "outra-"+uuid.NewString())
 	if otherRun["status"] != "completed" || otherRun["checked_count"] != float64(0) || otherRun["discrepancy_count"] != float64(0) {
 		t.Fatalf("execução de outra organização: %v", otherRun)
 	}
 
-	// Provedor indisponível: a execução termina como falha, com a causa.
+	// Provedor indisponível: o pedido é aceito e a execução termina como
+	// falha, com a causa.
 	r.simSrv.Close()
-	failed, _ := owner.expect(http.StatusOK, http.MethodPost, "/api/v1/reconciliation/runs", nil, "Idempotency-Key", "conciliacao-"+uuid.NewString())
-	r.conforms(t, "ReconciliationRun", failed)
+	failed := r.reconcile(t, owner, tn.ID, "conciliacao-"+uuid.NewString())
 	if failed["status"] != "failed" || failed["error"] == "" || failed["finished_at"] == nil {
 		t.Fatalf("execução com o provedor indisponível: %v", failed)
 	}
+}
+
+// mustList devolve o campo data de uma listagem.
+func mustList(t *testing.T, c *client, path string) any {
+	t.Helper()
+	body, _ := c.expect(http.StatusOK, http.MethodGet, path, nil)
+	return body["data"]
 }
 
 func hasAction(t *testing.T, discrepancy map[string]any, action string) bool {
@@ -757,9 +833,14 @@ func TestReceivablesAPIWithAPICredential(t *testing.T) {
 		t.Fatalf("repetição por credencial: %d %v", again.status, again.body)
 	}
 
-	run := r.raw(http.MethodPost, "/api/v1/reconciliation/runs", nil, bearer(secret, "Idempotency-Key", "erp-conciliacao-"+uuid.NewString()))
+	queued := r.raw(http.MethodPost, "/api/v1/reconciliation/runs", nil, bearer(secret, "Idempotency-Key", "erp-conciliacao-"+uuid.NewString()))
+	if queued.status != http.StatusAccepted || queued.body["status"] != "running" {
+		t.Fatalf("conciliação por credencial: %d %v", queued.status, queued.body)
+	}
+	r.work(t, tn.ID, queued.body)
+	run := r.raw(http.MethodGet, queued.header.Get("Location"), nil, bearer(secret))
 	if run.status != http.StatusOK || run.body["status"] != "completed" || run.body["discrepancy_count"] != float64(1) {
-		t.Fatalf("conciliação por credencial: %d %v", run.status, run.body)
+		t.Fatalf("execução acompanhada pela credencial: %d %v", run.status, run.body)
 	}
 	open := r.raw(http.MethodGet, "/api/v1/reconciliation/discrepancies?status=open&kind=fee_mismatch", nil, bearer(secret))
 	items := objects(t, open.body["data"])
@@ -836,16 +917,31 @@ func TestReceivablesAPIReconciliationRunningIsNotStoredInIdempotencyKey(t *testi
 	if st != http.StatusConflict || body["code"] != "reconciliation_running" || h.Get("Retry-After") == "" {
 		t.Fatalf("execução em andamento: %d %v %v", st, body, h)
 	}
-	if _, err := r.pay.FinishReconciliation(ctx, tn.ID, other); err != nil {
-		t.Fatal(err)
+	if _, outcome, err := r.pay.ExecuteReconciliationRun(ctx, tn.ID, other.ID); err != nil || outcome != payments.RunOutcomeCompleted {
+		t.Fatalf("outra execução: %s %v", outcome, err)
 	}
-	run, h := owner.expect(http.StatusOK, http.MethodPost, "/api/v1/reconciliation/runs", nil, "Idempotency-Key", key)
-	if run["status"] != "completed" || run["id"] == other.Run.ID.String() || h.Get("Idempotent-Replayed") != "" {
+	// A mesma chave registra a execução depois que a outra termina; enquanto
+	// ela está em andamento, a resposta 202 também não prende a chave.
+	run, h := owner.expect(http.StatusAccepted, http.MethodPost, "/api/v1/reconciliation/runs", nil, "Idempotency-Key", key)
+	if run["status"] != "running" || run["id"] == other.ID.String() || h.Get("Idempotent-Replayed") != "" {
 		t.Fatalf("repetição depois da outra execução: %v %v", run, h)
 	}
-	// O resultado da execução fica registrado na chave.
+	if n := r.count(t, tn, `SELECT count(*) FROM idempotency_keys WHERE tenant_id = $1 AND idempotency_key = $2`, key); n != 0 {
+		t.Fatalf("chave presa pela execução em andamento: %d registro(s)", n)
+	}
+	r.work(t, tn.ID, run)
+	// O resultado da execução encerrada fica registrado na chave.
+	done, h := owner.expect(http.StatusOK, http.MethodPost, "/api/v1/reconciliation/runs", nil, "Idempotency-Key", key)
+	location := h.Get("Location")
+	if done["id"] != run["id"] || done["status"] != "completed" || h.Get("Idempotent-Replayed") != "" ||
+		location != "/api/v1/reconciliation/runs/"+run["id"].(string) {
+		t.Fatalf("resultado da execução: %v %v", done, h)
+	}
 	again, h := owner.expect(http.StatusOK, http.MethodPost, "/api/v1/reconciliation/runs", nil, "Idempotency-Key", key)
-	if again["id"] != run["id"] || h.Get("Idempotent-Replayed") != "true" {
+	if again["id"] != run["id"] || h.Get("Idempotent-Replayed") != "true" || h.Get("Location") != location {
 		t.Fatalf("resultado registrado: %v %v", again, h)
+	}
+	if n := r.count(t, tn, `SELECT count(*) FROM reconciliation_runs WHERE tenant_id = $1`); n != 2 {
+		t.Fatalf("execuções registradas = %d", n)
 	}
 }

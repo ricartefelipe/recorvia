@@ -1,0 +1,54 @@
+{{/*
+  Modelos das notificações de alerta do Recorvia (ADR-065). Cada alerta traz
+  o link do runbook: a anotação runbook_url (endereço completo, acrescentada
+  às regras na imagem do Prometheus) ou, na falta dela, a anotação runbook
+  (caminho no repositório).
+*/}}
+
+{{ define "recorvia.runbook" }}{{ if .Annotations.runbook_url }}{{ .Annotations.runbook_url }}{{ else }}{{ .Annotations.runbook }}{{ end }}{{ end }}
+
+{{ define "recorvia.severity" }}{{ if eq . "critical" }}CRÍTICO{{ else if eq . "warning" }}AVISO{{ else if eq . "info" }}INFORMATIVO{{ else if . }}{{ . | toUpper }}{{ else }}ALERTA{{ end }}{{ end }}
+
+{{ define "recorvia.email.subject" }}[Recorvia][{{ if eq .Status "resolved" }}RESOLVIDO{{ else }}{{ template "recorvia.severity" .CommonLabels.severity }}{{ end }}] {{ .GroupLabels.alertname }}{{ if eq .Status "firing" }} ({{ len .Alerts.Firing }} {{ if eq (len .Alerts.Firing) 1 }}ativo{{ else }}ativos{{ end }}){{ end }}{{ end }}
+
+{{ define "recorvia.alert.text" }}- {{ .Labels.alertname }} [{{ template "recorvia.severity" .Labels.severity }}]: {{ .Annotations.summary }}
+  {{ .Annotations.description }}
+  Rótulos: {{ range .Labels.SortedPairs }}{{ .Name }}={{ .Value }} {{ end }}
+  Início: {{ .StartsAt.UTC.Format "2006-01-02 15:04:05" }} UTC{{ if eq .Status "resolved" }}
+  Fim: {{ .EndsAt.UTC.Format "2006-01-02 15:04:05" }} UTC{{ end }}
+  Runbook: {{ template "recorvia.runbook" . }}
+  Consulta: {{ .GeneratorURL }}
+{{ end }}
+
+{{ define "recorvia.email.text" }}{{ if .Alerts.Firing }}Alertas ativos ({{ len .Alerts.Firing }}):
+
+{{ range .Alerts.Firing }}{{ template "recorvia.alert.text" . }}
+{{ end }}{{ end }}{{ if .Alerts.Resolved }}Alertas resolvidos ({{ len .Alerts.Resolved }}):
+
+{{ range .Alerts.Resolved }}{{ template "recorvia.alert.text" . }}
+{{ end }}{{ end }}Alertmanager: {{ .ExternalURL }}
+{{ end }}
+
+{{ define "recorvia.alert.html" }}
+<div style="margin:0 0 16px 0;padding:12px 16px;border-left:4px solid {{ if eq .Status "resolved" }}#2e7d32{{ else if eq .Labels.severity "critical" }}#c62828{{ else if eq .Labels.severity "warning" }}#ef6c00{{ else }}#546e7a{{ end }};background:#f7f7f7;">
+  <p style="margin:0 0 6px 0;font-size:15px;"><strong>{{ .Labels.alertname }}</strong> [{{ template "recorvia.severity" .Labels.severity }}]</p>
+  <p style="margin:0 0 6px 0;">{{ .Annotations.summary }}</p>
+  <p style="margin:0 0 6px 0;color:#444;">{{ .Annotations.description }}</p>
+  <p style="margin:0 0 6px 0;font-size:12px;color:#555;">{{ range .Labels.SortedPairs }}{{ .Name }}={{ .Value }} {{ end }}</p>
+  <p style="margin:0 0 6px 0;font-size:12px;color:#555;">Início: {{ .StartsAt.UTC.Format "2006-01-02 15:04:05" }} UTC{{ if eq .Status "resolved" }}; fim: {{ .EndsAt.UTC.Format "2006-01-02 15:04:05" }} UTC{{ end }}</p>
+  <p style="margin:0;"><a href="{{ template "recorvia.runbook" . }}">Runbook</a>: {{ template "recorvia.runbook" . }}{{ if .GeneratorURL }} | <a href="{{ .GeneratorURL }}">Consulta no Prometheus</a>{{ end }}</p>
+</div>
+{{ end }}
+
+{{ define "recorvia.email.html" }}<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="utf-8"><title>{{ template "recorvia.email.subject" . }}</title></head>
+<body style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222;">
+{{ if .Alerts.Firing }}<h2 style="font-size:16px;">Alertas ativos ({{ len .Alerts.Firing }})</h2>
+{{ range .Alerts.Firing }}{{ template "recorvia.alert.html" . }}{{ end }}{{ end }}
+{{ if .Alerts.Resolved }}<h2 style="font-size:16px;">Alertas resolvidos ({{ len .Alerts.Resolved }})</h2>
+{{ range .Alerts.Resolved }}{{ template "recorvia.alert.html" . }}{{ end }}{{ end }}
+<p style="font-size:12px;color:#555;"><a href="{{ .ExternalURL }}">Abrir o Alertmanager</a></p>
+</body>
+</html>
+{{ end }}

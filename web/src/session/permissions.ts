@@ -59,7 +59,7 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   'platform_billing.manage': 'Alterar plano da plataforma',
   'customers.read': 'Ver clientes',
   'customers.write': 'Cadastrar e alterar clientes',
-  'customers.portal_links': 'Gerar links do portal do cliente',
+  'customers.portal_links': 'Gerar, listar e revogar links do portal do cliente',
   'customers.anonymize': 'Anonimizar clientes',
   'catalog.read': 'Ver catálogo',
   'catalog.write': 'Alterar catálogo e preços',
