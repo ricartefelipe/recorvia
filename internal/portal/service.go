@@ -28,11 +28,18 @@ type Tx interface {
 	// RevokeActiveLinks revoga os links não revogados do cliente e devolve
 	// os identificadores afetados.
 	RevokeActiveLinks(ctx context.Context, customerID uuid.UUID, at time.Time, reason string) ([]uuid.UUID, error)
+	// RevokeLink revoga um link ainda não revogado do cliente.
+	RevokeLink(ctx context.Context, customerID, id uuid.UUID, at time.Time, reason string) error
 	Link(ctx context.Context, id uuid.UUID, forUpdate bool) (Link, error)
+	// Links lista os links do cliente, dos mais novos para os mais antigos
+	// (criação e identificador decrescentes), depois da posição after e no
+	// máximo limit. O hash do token não é devolvido.
+	Links(ctx context.Context, customerID uuid.UUID, after *Position, limit int) ([]LinkSummary, error)
 	MarkLinkUsed(ctx context.Context, id uuid.UUID, at time.Time) error
 	// Invoices lista as faturas emitidas do cliente, com itens, das mais
-	// recentes para as mais antigas (no máximo limit).
-	Invoices(ctx context.Context, customerID uuid.UUID, limit int) ([]billing.Invoice, error)
+	// recentes para as mais antigas (emissão e identificador decrescentes),
+	// depois da posição after e no máximo limit.
+	Invoices(ctx context.Context, customerID uuid.UUID, after *Position, limit int) ([]billing.Invoice, error)
 	// Invoice lê uma fatura emitida do cliente, com itens; fatura de outro
 	// cliente ou em rascunho resulta em NotFound.
 	Invoice(ctx context.Context, customerID, id uuid.UUID) (billing.Invoice, error)
@@ -58,6 +65,9 @@ type SessionStore interface {
 	// Get retorna ErrSessionNotFound para sessão inexistente ou expirada.
 	Get(ctx context.Context, id string) (Session, error)
 	Delete(ctx context.Context, id string) error
+	// DeleteByLink remove as sessões abertas a partir do link. Não havendo
+	// sessão, nada acontece.
+	DeleteByLink(ctx context.Context, linkID uuid.UUID) error
 }
 
 // FailureCounter conta tentativas de acesso inválidas por origem em janela
@@ -135,6 +145,7 @@ var (
 	errSessionInvalid = apperr.Unauthenticated("portal_session_invalid",
 		"Sua sessão do portal expirou ou foi encerrada. Solicite um novo link de acesso à empresa.")
 	errSessionStore = apperr.Unavailable("session_store_unavailable", "Serviço de sessão indisponível. Tente novamente em instantes.")
+	errLinkNotFound = apperr.NotFound("portal_link_not_found", "Link do portal não encontrado.")
 )
 
 // CreateLink gera um link de uso único para o cliente. Links anteriores do
@@ -149,7 +160,9 @@ func (s *Service) CreateLink(ctx context.Context, tenantID uuid.UUID, creator Cr
 	now := s.clock.Now()
 	l := Link{ID: ids.New(), TenantID: tenantID, CustomerID: customerID, TokenHash: hash, CreatedByUser: creator.UserID,
 		CreatedByCredential: creator.CredentialID, CreatedAt: now, ExpiresAt: now.Add(s.policy.LinkTTL)}
+	var superseded []uuid.UUID
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		superseded = nil
 		c, err := tx.Customer(ctx, customerID, true)
 		if err != nil {
 			return err
@@ -157,7 +170,7 @@ func (s *Service) CreateLink(ctx context.Context, tenantID uuid.UUID, creator Cr
 		if c.Status != customers.Active {
 			return apperr.Conflict("customer_archived", "Cliente arquivado não tem acesso ao portal.")
 		}
-		superseded, err := tx.RevokeActiveLinks(ctx, customerID, now, RevokeSuperseded)
+		superseded, err = tx.RevokeActiveLinks(ctx, customerID, now, RevokeSuperseded)
 		if err != nil {
 			return err
 		}
@@ -170,30 +183,119 @@ func (s *Service) CreateLink(ctx context.Context, tenantID uuid.UUID, creator Cr
 	if err != nil {
 		return Link{}, "", err
 	}
+	for _, id := range superseded {
+		_ = s.endLinkSessions(ctx, id) // melhor esforço: a sessão de link revogado já é recusada por Authenticate
+	}
 	return l, token, nil
 }
 
-// RevokeLinks revoga todos os links não revogados do cliente, encerrando
-// também as sessões abertas com eles.
-func (s *Service) RevokeLinks(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, customerID uuid.UUID) (int, error) {
+// endLinkSessions remove do armazenamento as sessões abertas com o link,
+// depois de confirmada a revogação. O cancelamento da requisição não
+// interrompe a limpeza.
+func (s *Service) endLinkSessions(ctx context.Context, linkID uuid.UUID) error {
+	return s.sessions.DeleteByLink(context.WithoutCancel(ctx), linkID)
+}
+
+// RevokeResult é o efeito de uma revogação explícita.
+type RevokeResult struct {
+	// Link é o link depois da operação.
+	Link Link
+	// Revoked indica que esta chamada revogou o link; false quando ele já
+	// estava revogado (repetição, sem nova auditoria).
+	Revoked bool
+	// SessionCleanupErr é a falha ao remover do armazenamento as sessões
+	// abertas com o link. A revogação já está confirmada e a sessão não é
+	// mais aceita (Authenticate confere o link a cada requisição); repetir
+	// a chamada refaz a limpeza.
+	SessionCleanupErr error
+}
+
+// RevokeLink revoga um link do cliente de forma explícita: o link pendente
+// deixa de poder ser trocado e as sessões abertas com um link já usado são
+// encerradas. A operação é idempotente: revogar de novo não altera o link
+// nem gera auditoria, apenas refaz a remoção das sessões. Link inexistente,
+// de outro cliente ou de outra organização responde como não encontrado.
+// O bloqueio do cliente serializa a revogação com a geração de links, e o
+// do link, com a troca por sessão.
+func (s *Service) RevokeLink(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, customerID, linkID uuid.UUID) (RevokeResult, error) {
 	now := s.clock.Now()
-	var n int
+	var res RevokeResult
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		res = RevokeResult{}
 		if _, err := tx.Customer(ctx, customerID, true); err != nil {
 			return err
 		}
-		revoked, err := tx.RevokeActiveLinks(ctx, customerID, now, RevokeRequested)
+		l, err := tx.Link(ctx, linkID, true)
+		if err != nil {
+			if apperr.IsKind(err, apperr.KindNotFound) {
+				return errLinkNotFound
+			}
+			return err
+		}
+		if l.TenantID != tenantID || l.CustomerID != customerID {
+			return errLinkNotFound
+		}
+		res.Link = l
+		if l.RevokedAt != nil {
+			return nil
+		}
+		previous := l.State(now)
+		if err := tx.RevokeLink(ctx, customerID, linkID, now, RevokeRequested); err != nil {
+			return err
+		}
+		res.Link.RevokedAt, res.Link.RevokeReason, res.Revoked = &now, RevokeRequested, true
+		return tx.Audit(ctx, audit.New(tenantID, now, actor, "customer.portal_link_revoked", "customer", customerID.String(),
+			map[string]any{"link_id": linkID, "previous_state": string(previous)}))
+	})
+	if err != nil {
+		return RevokeResult{}, err
+	}
+	res.SessionCleanupErr = s.endLinkSessions(ctx, linkID)
+	return res, nil
+}
+
+// LinkPage é uma página dos links de um cliente.
+type LinkPage struct {
+	Items      []LinkSummary
+	NextCursor string
+}
+
+// Links lista os links do portal de um cliente da organização, dos mais
+// novos para os mais antigos, com a situação no instante da consulta.
+func (s *Service) Links(ctx context.Context, tenantID, customerID uuid.UUID, q PageQuery) (LinkPage, error) {
+	after, err := parseCursor(cursorLinks, q.Cursor)
+	if err != nil {
+		return LinkPage{}, err
+	}
+	limit := pageLimit(q.Limit)
+	now := s.clock.Now()
+	var page LinkPage
+	err = s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		page = LinkPage{Items: []LinkSummary{}}
+		if _, err := tx.Customer(ctx, customerID, false); err != nil {
+			return err
+		}
+		links, err := tx.Links(ctx, customerID, after, limit+1)
 		if err != nil {
 			return err
 		}
-		n = len(revoked)
-		if n == 0 {
-			return nil
+		if len(links) > limit {
+			links = links[:limit]
+			page.NextCursor = encodeCursor(cursorLinks, Position{At: links[limit-1].CreatedAt, ID: links[limit-1].ID})
 		}
-		return tx.Audit(ctx, audit.New(tenantID, now, actor, "customer.portal_links_revoked", "customer", customerID.String(),
-			map[string]any{"links": n}))
+		for _, l := range links {
+			if l.TenantID != tenantID || l.CustomerID != customerID {
+				continue // segunda barreira: o armazenamento já filtra por organização e cliente
+			}
+			l.TokenHash, l.Current = nil, l.State(now)
+			page.Items = append(page.Items, l)
+		}
+		return nil
 	})
-	return n, err
+	if err != nil {
+		return LinkPage{}, err
+	}
+	return page, nil
 }
 
 func (s *Service) failureKey(clientKey string) string { return "portal_access:" + clientKey }

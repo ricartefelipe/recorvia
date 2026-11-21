@@ -3,6 +3,7 @@ package portal
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,14 +17,55 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/kernel/money"
 )
 
-// addInvoice inclui uma fatura no fim da ordem de listagem do tenant.
+// addInvoice inclui uma fatura no fim da ordem de listagem do tenant: cada
+// fatura emitida recebe uma emissão um minuto anterior à da última incluída
+// (rascunhos não têm emissão).
 func (e *env) addInvoice(tenantID, customerID uuid.UUID, status billing.Status, total, due int64, dueAt *time.Time) billing.Invoice {
+	d := e.store.tenants[tenantID]
 	inv := billing.Invoice{ID: uuid.New(), TenantID: tenantID, CustomerID: customerID, Number: "ACME-" + uuid.NewString()[:6], Status: status,
 		Currency: money.BRL, Total: money.New(total, money.BRL), AmountDue: money.New(due, money.BRL), DueAt: dueAt,
 		Items: []billing.Item{{Description: "Plano Profissional", Amount: money.New(total+500, money.BRL), DiscountAmount: money.New(500, money.BRL)}}}
-	d := e.store.tenants[tenantID]
+	if status != billing.Draft {
+		at := testNow.Add(-time.Duration(len(d.invoices)+1) * time.Minute)
+		inv.IssuedAt = &at
+	}
 	d.invoices = append(d.invoices, inv)
 	return inv
+}
+
+// issueAt inclui uma fatura emitida do cliente padrão no instante indicado.
+func (e *env) issueAt(at time.Time) billing.Invoice {
+	inv := e.addInvoice(e.tenantID, e.customer.ID, billing.Open, 1000, 1000, nil)
+	d := e.d()
+	d.invoices[len(d.invoices)-1].IssuedAt = &at
+	inv.IssuedAt = &at
+	return inv
+}
+
+// invoicePages percorre a listagem até o fim e devolve os identificadores
+// na ordem recebida.
+func (e *env) invoicePages(t *testing.T, s Session, limit int) []uuid.UUID {
+	t.Helper()
+	var ids []uuid.UUID
+	q := PageQuery{Limit: limit}
+	for range 1000 {
+		page, err := e.svc.Invoices(context.Background(), s, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Items) > limit {
+			t.Fatalf("página com %d itens excede o limite %d", len(page.Items), limit)
+		}
+		for _, inv := range page.Items {
+			ids = append(ids, inv.ID)
+		}
+		if page.NextCursor == "" {
+			return ids
+		}
+		q.Cursor = page.NextCursor
+	}
+	t.Fatal("a paginação não termina")
+	return nil
 }
 
 // portalSession abre uma sessão do portal para o cliente padrão.
@@ -76,9 +118,13 @@ func TestInvoicesListOnlyIssuedInvoicesOfSessionCustomer(t *testing.T) {
 
 	for _, leaky := range []bool{false, true} {
 		e.store.leaky = leaky
-		got, err := e.svc.Invoices(context.Background(), s)
+		page, err := e.svc.Invoices(context.Background(), s, PageQuery{})
 		if err != nil {
 			t.Fatal(err)
+		}
+		got := page.Items
+		if page.NextCursor != "" {
+			t.Fatalf("leaky=%v: página única não tem cursor seguinte: %q", leaky, page.NextCursor)
 		}
 		if len(got) != 3 || got[0].ID != overdue.ID || got[1].ID != paid.ID || got[2].ID != unsafe.ID {
 			t.Fatalf("leaky=%v: faturas fora do escopo da sessão: %+v", leaky, got)
@@ -96,20 +142,200 @@ func TestInvoicesListOnlyIssuedInvoicesOfSessionCustomer(t *testing.T) {
 	e.store.leaky = false
 
 	// Cliente sem faturas recebe lista vazia (não nula).
-	empty, err := e.svc.Invoices(context.Background(), Session{TenantID: e.tenantID, CustomerID: uuid.New()})
-	if err != nil || empty == nil || len(empty) != 0 {
-		t.Fatalf("lista vazia: %v %v", empty, err)
+	empty, err := e.svc.Invoices(context.Background(), Session{TenantID: e.tenantID, CustomerID: uuid.New()}, PageQuery{})
+	if err != nil || empty.Items == nil || len(empty.Items) != 0 || empty.NextCursor != "" {
+		t.Fatalf("lista vazia: %+v %v", empty, err)
 	}
 }
 
-func TestInvoicesListLimit(t *testing.T) {
+func TestInvoicesPageSizeLimits(t *testing.T) {
 	e := newEnv(t)
-	for range MaxInvoices + 5 {
+	for range MaxPageSize + 5 {
 		e.addInvoice(e.tenantID, e.customer.ID, billing.Paid, 100, 0, nil)
 	}
-	got, err := e.svc.Invoices(context.Background(), e.portalSession(t))
-	if err != nil || len(got) != MaxInvoices {
-		t.Fatalf("limite da listagem: %d %v", len(got), err)
+	s := e.portalSession(t)
+	cases := []struct {
+		name  string
+		limit int
+		want  int
+	}{
+		{"padrão", 0, DefaultPageSize},
+		{"negativo usa o padrão", -3, DefaultPageSize},
+		{"informado", 7, 7},
+		{"máximo", MaxPageSize, MaxPageSize},
+		{"acima do máximo", MaxPageSize + 50, MaxPageSize},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			page, err := e.svc.Invoices(context.Background(), s, PageQuery{Limit: tc.limit})
+			if err != nil || len(page.Items) != tc.want || page.NextCursor == "" {
+				t.Fatalf("página: %d itens, cursor %q, erro %v", len(page.Items), page.NextCursor, err)
+			}
+		})
+	}
+}
+
+// A paginação percorre todas as faturas uma única vez, na ordem da emissão
+// (e do identificador, no empate), com qualquer tamanho de página.
+func TestInvoicesPaginationCoversEachInvoiceOnce(t *testing.T) {
+	e := newEnv(t)
+	other := e.addCustomer(e.tenantID, "Outro Cliente")
+	var want []uuid.UUID
+	for i := range 11 {
+		// Emissões repetidas de duas em duas exercitam o desempate pelo identificador.
+		inv := e.issueAt(testNow.Add(-time.Duration(i/2) * time.Hour))
+		want = append(want, inv.ID)
+		e.addInvoice(e.tenantID, other.ID, billing.Open, 777, 777, nil)
+		e.addInvoice(e.tenantID, e.customer.ID, billing.Draft, 100, 100, nil)
+	}
+	sortByPosition(e.d().invoices, want)
+	s := e.portalSession(t)
+	for _, limit := range []int{1, 2, 3, 5, 11, 12, 100} {
+		got := e.invoicePages(t, s, limit)
+		if !slices.Equal(got, want) {
+			t.Fatalf("limite %d: páginas %v, esperado %v", limit, got, want)
+		}
+	}
+	// Página exata: sem item além do limite, não há cursor seguinte.
+	page, err := e.svc.Invoices(context.Background(), s, PageQuery{Limit: len(want)})
+	if err != nil || len(page.Items) != len(want) || page.NextCursor != "" {
+		t.Fatalf("página exata: %d itens, cursor %q, erro %v", len(page.Items), page.NextCursor, err)
+	}
+}
+
+// sortByPosition ordena ids pela ordem da listagem (emissão e identificador
+// decrescentes) das faturas correspondentes.
+func sortByPosition(invoices []billing.Invoice, ids []uuid.UUID) {
+	byID := make(map[uuid.UUID]billing.Invoice, len(invoices))
+	for _, inv := range invoices {
+		byID[inv.ID] = inv
+	}
+	slices.SortFunc(ids, func(a, b uuid.UUID) int {
+		if before(issuedAt(byID[b]), b, issuedAt(byID[a]), a) {
+			return -1
+		}
+		return 1
+	})
+}
+
+// Faturas emitidas durante a navegação não deslocam as páginas seguintes:
+// nada é repetido nem pulado, e a fatura nova aparece ao recomeçar.
+func TestInvoicesPaginationIsStableUnderInserts(t *testing.T) {
+	e := newEnv(t)
+	var want []uuid.UUID
+	for i := range 6 {
+		want = append(want, e.issueAt(testNow.Add(-time.Duration(i+1)*time.Hour)).ID)
+	}
+	s := e.portalSession(t)
+	first, err := e.svc.Invoices(context.Background(), s, PageQuery{Limit: 2})
+	if err != nil || len(first.Items) != 2 || first.NextCursor == "" {
+		t.Fatalf("primeira página: %+v %v", first, err)
+	}
+	// Entre as páginas: uma fatura mais nova que todas e outra emitida no
+	// mesmo instante da última já entregue, com identificador maior (viria
+	// antes dela na ordem).
+	newest := e.issueAt(testNow)
+	tie := e.issueAt(*first.Items[1].IssuedAt)
+	d := e.d()
+	maxID := uuid.Max
+	d.invoices[len(d.invoices)-1].ID = maxID
+	tie.ID = maxID
+	got := []uuid.UUID{first.Items[0].ID, first.Items[1].ID}
+	q := PageQuery{Limit: 2, Cursor: first.NextCursor}
+	for q.Cursor != "" {
+		page, err := e.svc.Invoices(context.Background(), s, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, inv := range page.Items {
+			got = append(got, inv.ID)
+		}
+		q.Cursor = page.NextCursor
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("páginas depois das inserções: %v, esperado %v", got, want)
+	}
+	all := e.invoicePages(t, s, 3)
+	if len(all) != len(want)+2 || all[0] != newest.ID || !slices.Contains(all, tie.ID) {
+		t.Fatalf("ao recomeçar, as faturas novas aparecem: %v", all)
+	}
+}
+
+// O cursor é só uma posição: usado na sessão de outro cliente ou de outra
+// organização, continua restrito às faturas daquela sessão.
+func TestInvoiceCursorNeverReachesAnotherCustomerOrTenant(t *testing.T) {
+	e := newEnv(t)
+	other := e.addCustomer(e.tenantID, "Outro Cliente")
+	otherTenant := e.addTenant("Beta Consultoria")
+	foreign := e.addCustomer(otherTenant, "Cliente Beta")
+	own := map[uuid.UUID]bool{}
+	for i := range 5 {
+		own[e.issueAt(testNow.Add(-time.Duration(i+1)*time.Hour)).ID] = true
+		e.addInvoice(e.tenantID, other.ID, billing.Open, 777, 777, nil)
+		e.addInvoice(otherTenant, foreign.ID, billing.Open, 888, 888, nil)
+	}
+	s := e.portalSession(t)
+	otherSession := Session{TenantID: e.tenantID, CustomerID: other.ID}
+	foreignSession := Session{TenantID: otherTenant, CustomerID: foreign.ID}
+	cursors := map[string]string{}
+	for name, sess := range map[string]Session{"outro cliente": otherSession, "outro tenant": foreignSession} {
+		page, err := e.svc.Invoices(context.Background(), sess, PageQuery{Limit: 1})
+		if err != nil || len(page.Items) != 1 || page.NextCursor == "" || own[page.Items[0].ID] {
+			t.Fatalf("%s: %+v %v", name, page, err)
+		}
+		cursors[name] = page.NextCursor
+	}
+	for name, cursor := range cursors {
+		for _, leaky := range []bool{false, true} {
+			e.store.leaky = leaky
+			q := PageQuery{Limit: 2, Cursor: cursor}
+			for range 10 {
+				page, err := e.svc.Invoices(context.Background(), s, q)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, inv := range page.Items {
+					if !own[inv.ID] || inv.CustomerID != e.customer.ID || inv.TenantID != e.tenantID {
+						t.Fatalf("cursor de %s (leaky=%v) alcançou fatura alheia: %+v", name, leaky, inv.Invoice)
+					}
+				}
+				if q.Cursor = page.NextCursor; q.Cursor == "" {
+					break
+				}
+			}
+		}
+	}
+	e.store.leaky = false
+}
+
+func TestInvoicesRejectInvalidCursor(t *testing.T) {
+	e := newEnv(t)
+	e.issueAt(testNow.Add(-time.Hour))
+	s := e.portalSession(t)
+	linkCursor := encodeCursor(cursorLinks, Position{At: testNow, ID: uuid.New()})
+	for name, cursor := range map[string]string{"malformado": "não-é-cursor", "de outra listagem": linkCursor, "longo": strings.Repeat("A", 400)} {
+		t.Run(name, func(t *testing.T) {
+			calls := e.store.calls["InTenant"]
+			_, err := e.svc.Invoices(context.Background(), s, PageQuery{Cursor: cursor})
+			assertErr(t, err, apperr.KindInvalid, "invalid_cursor")
+			if e.store.calls["InTenant"] != calls {
+				t.Fatal("cursor inválido não deve consultar o armazenamento")
+			}
+		})
+	}
+}
+
+// Fatura listada sem emissão (o armazenamento real não a devolve) não gera
+// cursor: a listagem falha em vez de produzir uma posição arbitrária.
+func TestInvoicesWithoutIssueDateCannotAnchorCursor(t *testing.T) {
+	e := newEnv(t)
+	e.issueAt(testNow.Add(-time.Hour))
+	e.addInvoice(e.tenantID, e.customer.ID, billing.Draft, 100, 100, nil)
+	e.addInvoice(e.tenantID, e.customer.ID, billing.Draft, 100, 100, nil)
+	s := e.portalSession(t)
+	e.store.leaky = true
+	if _, err := e.svc.Invoices(context.Background(), s, PageQuery{Limit: 2}); err == nil || apperr.IsKind(err, apperr.KindInvalid) {
+		t.Fatalf("fatura sem emissão como âncora: %v", err)
 	}
 }
 
@@ -166,7 +392,7 @@ func TestInvoiceQueriesPropagateFailures(t *testing.T) {
 	s := e.portalSession(t)
 	for _, op := range []string{"Tenant", "Invoices", "CheckoutURLs"} {
 		e.store.fail[op] = errBoom
-		if _, err := e.svc.Invoices(context.Background(), s); !errors.Is(err, errBoom) {
+		if _, err := e.svc.Invoices(context.Background(), s, PageQuery{}); !errors.Is(err, errBoom) {
 			t.Fatalf("listagem com falha em %s: %v", op, err)
 		}
 		e.store.fail[op] = nil
@@ -179,7 +405,7 @@ func TestInvoiceQueriesPropagateFailures(t *testing.T) {
 		e.store.fail[op] = nil
 	}
 	e.d().tenant.Timezone = "Fuso/Inexistente"
-	if _, err := e.svc.Invoices(context.Background(), s); err == nil {
+	if _, err := e.svc.Invoices(context.Background(), s, PageQuery{}); err == nil {
 		t.Fatal("fuso inválido deveria falhar")
 	}
 	if _, err := e.svc.Invoice(context.Background(), s, inv.ID); err == nil {

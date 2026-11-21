@@ -181,3 +181,98 @@ func TestPortalSessionsAndFailureCounter(t *testing.T) {
 		t.Fatalf("contadores de chaves diferentes são independentes: %d", n)
 	}
 }
+
+// As sessões do portal são indexadas pelo link de origem: revogar o link
+// remove todas as sessões abertas com ele, e somente elas. O índice guarda
+// hashes (nunca identificadores de sessão), expira junto com a sessão de
+// maior validade e a remoção é idempotente.
+func TestPortalSessionsAreRemovedByLink(t *testing.T) {
+	ctx := context.Background()
+	rdb := startRedis(t)
+	st := redisstore.NewPortalSessions(redisstore.New(rdb, keyring(t), "portal"))
+	link, otherLink := uuid.New(), uuid.New()
+	session := func(id string, linkID uuid.UUID) portal.Session {
+		return portal.Session{ID: id, TenantID: uuid.New(), CustomerID: uuid.New(), LinkID: linkID, CSRFToken: "csrf"}
+	}
+	for id, s := range map[string]struct {
+		link uuid.UUID
+		ttl  time.Duration
+	}{"sessao-um": {link, 10 * time.Minute}, "sessao-dois": {link, 30 * time.Minute}, "sessao-alheia": {otherLink, 30 * time.Minute}} {
+		if err := st.Save(ctx, session(id, s.link), s.ttl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	index := "recorvia:portal:link_sessions:" + link.String()
+	members, err := rdb.SMembers(ctx, index).Result()
+	if err != nil || len(members) != 2 {
+		t.Fatalf("índice do link: %v %v", members, err)
+	}
+	for _, m := range members {
+		if strings.Contains(m, "sessao-") || len(m) != 64 {
+			t.Fatalf("o índice guarda apenas o hash do identificador da sessão: %q", m)
+		}
+	}
+	// A expiração do índice acompanha a sessão de maior validade e não é
+	// encurtada por uma regravação com validade menor (sessão perto do fim).
+	if ttl := rdb.TTL(ctx, index).Val(); ttl <= 10*time.Minute || ttl > 30*time.Minute {
+		t.Fatalf("expiração do índice: %v", ttl)
+	}
+	if err := st.Save(ctx, session("sessao-um", link), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if ttl := rdb.TTL(ctx, index).Val(); ttl <= 10*time.Minute {
+		t.Fatalf("a expiração do índice não pode ser encurtada: %v", ttl)
+	}
+	if n := rdb.SCard(ctx, index).Val(); n != 2 {
+		t.Fatalf("regravar a sessão não duplica a entrada do índice: %d", n)
+	}
+
+	if err := st.DeleteByLink(ctx, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"sessao-um", "sessao-dois"} {
+		if _, err := st.Get(ctx, id); !errors.Is(err, portal.ErrSessionNotFound) {
+			t.Fatalf("sessão %s do link revogado não removida: %v", id, err)
+		}
+	}
+	if n := rdb.Exists(ctx, index).Val(); n != 0 {
+		t.Fatal("o índice do link revogado deveria ter sido removido")
+	}
+	if got, err := st.Get(ctx, "sessao-alheia"); err != nil || got.LinkID != otherLink {
+		t.Fatalf("a sessão de outro link não pode ser afetada: %+v %v", got, err)
+	}
+	// Idempotente: repetir, ou revogar link sem sessões, não falha nem remove nada.
+	for _, id := range []uuid.UUID{link, uuid.New()} {
+		if err := st.DeleteByLink(ctx, id); err != nil {
+			t.Fatalf("remoção repetida: %v", err)
+		}
+	}
+	if keys, err := rdb.Keys(ctx, "recorvia:portal:portal_session:*").Result(); err != nil || len(keys) != 1 {
+		t.Fatalf("sessões restantes: %v %v", keys, err)
+	}
+	// Sessão encerrada pelo próprio cliente (Delete): a entrada residual do
+	// índice aponta para uma chave inexistente e a remoção pelo link a limpa.
+	if err := st.Delete(ctx, "sessao-alheia"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteByLink(ctx, otherLink); err != nil {
+		t.Fatal(err)
+	}
+	if keys, err := rdb.Keys(ctx, "recorvia:portal:*").Result(); err != nil || len(keys) != 0 {
+		t.Fatalf("nada do portal deveria restar: %v %v", keys, err)
+	}
+}
+
+// Com o Redis indisponível, a remoção pelo link devolve o erro (quem revoga
+// decide o que fazer; o link já está revogado no banco).
+func TestPortalSessionsDeleteByLinkReportsRedisFailure(t *testing.T) {
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: 200 * time.Millisecond})
+	t.Cleanup(func() { _ = rdb.Close() })
+	st := redisstore.NewPortalSessions(redisstore.New(rdb, keyring(t), "portal"))
+	if err := st.DeleteByLink(context.Background(), uuid.New()); err == nil {
+		t.Fatal("esperava erro com o Redis indisponível")
+	}
+	if err := st.Save(context.Background(), portal.Session{ID: "s", LinkID: uuid.New()}, time.Minute); err == nil {
+		t.Fatal("esperava erro ao gravar com o Redis indisponível")
+	}
+}

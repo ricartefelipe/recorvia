@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 
 	"github.com/ricartefelipe/recorvia/internal/apicredentials"
@@ -42,6 +43,7 @@ type apiEnv struct {
 	t        *testing.T
 	env      *fixture.Env
 	sessions *redisstore.Store
+	rdb      *redis.Client
 	srv      *httptest.Server
 }
 
@@ -50,6 +52,9 @@ type apiSetup struct {
 	cfg              *config.Config
 	portalPolicy     portal.Policy
 	credentialPolicy apicredentials.Policy
+	// portalSessions, quando informado, envolve o armazenamento de sessões do
+	// portal (por exemplo, para simular falha do Redis em uma operação).
+	portalSessions func(portal.SessionStore) portal.SessionStore
 }
 
 func newAPI(t *testing.T, opts ...func(*apiSetup)) *apiEnv {
@@ -82,8 +87,11 @@ func newAPI(t *testing.T, opts ...func(*apiSetup)) *apiEnv {
 		o(setup)
 	}
 	pay := env.Payments(gateways.NewResolver(time.Second), payments.Config{WebhookBaseURL: "http://api.test/webhooks/providers"})
-	portalSvc := portal.NewService(env.Store.Portal(), redisstore.NewPortalSessions(redisstore.New(rdb, kr, "portal")), sessions, env.Clock,
-		setup.portalPolicy)
+	var portalSessions portal.SessionStore = redisstore.NewPortalSessions(redisstore.New(rdb, kr, "portal"))
+	if setup.portalSessions != nil {
+		portalSessions = setup.portalSessions(portalSessions)
+	}
+	portalSvc := portal.NewService(env.Store.Portal(), portalSessions, sessions, env.Clock, setup.portalPolicy)
 	credentials := apicredentials.NewService(env.Store.APICredentials(), sessions, env.Clock, setup.credentialPolicy)
 	_, router := httpapi.NewRouter(httpapi.Deps{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: setup.cfg, Clock: env.Clock,
 		Store: env.Store, Sessions: sessions, Identity: idsvc, Tenancy: env.Tenancy, Platform: env.Platform, Customers: env.Customers,
@@ -92,7 +100,7 @@ func newAPI(t *testing.T, opts ...func(*apiSetup)) *apiEnv {
 		Portal: portalSvc, Credentials: credentials})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
-	return &apiEnv{t: t, env: env, sessions: sessions, srv: srv}
+	return &apiEnv{t: t, env: env, sessions: sessions, rdb: rdb, srv: srv}
 }
 
 type client struct {

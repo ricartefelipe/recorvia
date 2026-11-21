@@ -655,7 +655,8 @@ Respostas 401 incluem `WWW-Authenticate: Bearer`.
 tenant precisa saber o tipo do principal além da autoria.
 
 ## ADR-050 Portal do cliente: link de uso único e sessão restrita
-**Status:** aceita.
+**Status:** aceita; a revogação explícita e a listagem dos links vieram com a ADR-068, e a paginação
+das faturas do portal, com a ADR-069.
 **Decisão:** o link (`customer_portal_links`) guarda apenas o SHA-256 de um token de 256 bits e vale
 por 72 horas por padrão (`RECORVIA_PORTAL_LINK_TTL`, de 15 minutos a 30 dias). Cada cliente tem no
 máximo um link não revogado (índice único parcial): gerar um novo link revoga o anterior, pendente ou
@@ -995,6 +996,79 @@ toda rota com permissão não delegável; o teste de contrato confere o esquema 
 integração exercitam cada rota afetada com uma credencial real pela pilha Bearer (autoria nula e
 auditoria com ator `api_credential` e, nas dead letters, com a justificativa; ou 403 sem efeito) e
 as leituras que continuam disponíveis à credencial.
+
+## ADR-068 Revogação explícita e listagem dos links do portal
+**Status:** aceita. Complementa a ADR-050, em que gerar um novo link era a única forma de revogar o
+anterior.
+**Decisão:** o contrato ganha `GET /api/v1/customers/{id}/portal-links` e
+`DELETE /api/v1/customers/{id}/portal-links/{link_id}`, e a resposta da geração passa a trazer o
+`id` do link. As três rotas exigem a mesma permissão, `customers.portal_links`: quem pode dar acesso
+ao portal é quem vê e retira esse acesso (o auditor acompanha gerações e revogações pela trilha de
+auditoria). A listagem é paginada por cursor (`limit`, `cursor`, `next_cursor`) em
+`(created_at, id)` decrescentes, sobre o índice `customer_portal_links_customer_idx`, e traz
+situação (`pending`, `used`, `expired` ou `revoked`, calculada no instante da consulta), criação,
+expiração, uso, revogação com o motivo (`superseded` ou `revoked`) e quem gerou (membro ou
+credencial, com o nome). A consulta da listagem não lê `token_hash`: token e hash nunca saem da
+API depois da geração. A revogação bloqueia o cliente (`FOR NO KEY UPDATE`, serializando com a
+geração) e o link (`FOR UPDATE`, serializando com a troca por sessão), grava `revoked_at` com o
+motivo `revoked` e audita `customer.portal_link_revoked` no cliente, com `link_id` e a situação
+anterior, na mesma transação. Depois do commit, as sessões do portal abertas com o link são removidas
+do Redis: cada sessão é indexada pelo link de origem
+(`recorvia:portal:link_sessions:<link>`, um conjunto com os hashes dos identificadores de sessão,
+com a expiração da sessão de maior validade, mantida com `EXPIRE NX` e `EXPIRE GT`, do Redis 7 em
+diante). A geração de um novo link faz a mesma remoção para os links que substitui.
+**Idempotência:** a revogação responde 204 também para um link já revogado, sem alterar a linha
+(o motivo `superseded` de um link substituído é preservado) e sem nova auditoria; a repetição apenas
+refaz a remoção das sessões. Por não criar recurso nem efeito financeiro, a rota não usa
+`Idempotency-Key`. Link inexistente, de outro cliente (ainda que da mesma organização) ou de outra
+organização responde 404 `portal_link_not_found`, e cliente de outra organização, 404
+`customer_not_found`; nada é revogado, auditado ou removido do Redis nesses casos.
+**Credenciais de API (ADR-059):** a revogação não tem coluna de autoria (não há migration nova); a
+autoria fica na auditoria, pelo ator, e as rotas de listagem e revogação aceitam credenciais com o
+escopo `customers.portal_links`, como a de geração. A permissão é delegável, portanto não há recusa
+`user_session_required`.
+**Justificativa:** a revogação precisa valer mesmo com o Redis indisponível, e por isso a fonte da
+verdade continua sendo o banco: `Authenticate` confere o link a cada requisição e recusa a sessão de
+link revogado (ADR-050). Remover as sessões depois do commit é o que as encerra de imediato no
+armazenamento; se essa remoção falhar, a rota ainda responde 204 (o acesso já está cortado), registra
+um aviso no log e a repetição da chamada conclui a limpeza. Fazer a remoção antes do commit
+condicionaria um ato de segurança à disponibilidade do Redis e poderia encerrar a sessão sem revogar
+o link. Uma requisição do portal que já tinha passado pela conferência do link pode regravar a sessão
+logo depois da remoção; ela é recusada e removida na requisição seguinte. Sessões criadas antes desta
+versão não têm índice e seguem apenas a recusa por `Authenticate`, até expirarem (a duração máxima
+da sessão, duas horas por padrão).
+**Consequências:** na interface, a ficha do cliente ganha a aba Portal (visível com
+`customers.portal_links`), com a lista dos links e o botão de revogar, com confirmação, para os links
+pendentes ou em uso. O serviço deixa de ter a revogação em massa por cliente, que não era exposta: o
+índice único parcial garante no máximo um link não revogado por cliente, e a revogação por
+identificador cobre o caso. Testes unitários, de integração (PostgreSQL e Redis reais) e pela API
+cobrem a idempotência, a concorrência entre revogações e com a troca do link, a falha do Redis e o
+isolamento entre clientes e organizações.
+
+## ADR-069 Paginação por cursor das faturas do portal
+**Status:** aceita. Substitui, na ADR-050, a listagem das 100 faturas mais recentes sem paginação.
+**Decisão:** `GET /api/portal/v1/invoices` aceita `limit` (1 a 100, padrão 25) e `cursor` e devolve
+`next_cursor`, como as demais listagens do contrato. A ordem é `(issued_at, id)` decrescentes e a
+paginação é por keyset: o cursor é a posição da última fatura da página (emissão e identificador),
+em base64url. Toda fatura emitida tem `issued_at` (`invoices_issued_fields`) e ele não muda depois
+da emissão (`app_invoice_guard`); uma fatura emitida durante a navegação entra antes da primeira
+página e não desloca as seguintes, sem repetir nem pular faturas já percorridas. A organização e o
+cliente consultados vêm sempre da sessão do portal: o cursor não carrega tenant nem cliente, e a
+consulta filtra `tenant_id` e `customer_id` da sessão sob RLS. Um cursor obtido em outra sessão, de
+outro cliente ou de outra organização, é só uma posição no tempo e percorre apenas as faturas da
+sessão que o apresenta. Os cursores têm tipo (faturas do portal e links do portal não se misturam),
+só são aceitos na forma canônica gerada pelo servidor e, fora dela, respondem 422 `invalid_cursor`
+sem consultar as faturas.
+**Justificativa:** o keyset mantém a listagem estável sob inserções, o que o deslocamento (`OFFSET`)
+não garante, e apoia-se no índice `invoices_customer_idx`. Vincular o cursor ao cliente (com assinatura ou
+identificador embutido) não acrescentaria proteção: o escopo já é imposto pela sessão em toda
+consulta, e a verificação no caso de uso (`visible`) continua como segunda barreira. A ordem anterior
+desempatava por `created_at`; o desempate passa a ser só pelo identificador (UUIDv7), que também é
+cronológico.
+**Consequências:** clientes da API que liam `data` sem paginar passam a receber 25 faturas por
+página, em vez de até 100, e devem seguir `next_cursor`. A interface do portal acumula as páginas
+com o botão "Carregar mais faturas". O analisador do cursor tem teste de fuzz, e o roteiro E2E
+`05-portal` percorre duas páginas e a revogação de links.
 
 ## ADR-070 Chargeback consome o crédito do pagamento excedente
 **Status:** aceita (resolve a limitação registrada na ADR-036: "o chargeback não consome crédito do cliente").

@@ -66,6 +66,24 @@ func (m *memSessions) Delete(_ context.Context, id string) error {
 	return nil
 }
 
+func (m *memSessions) DeleteByLink(_ context.Context, linkID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, s := range m.items {
+		if s.LinkID == linkID {
+			delete(m.items, id)
+		}
+	}
+	return nil
+}
+
+func (m *memSessions) has(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.items[id]
+	return ok
+}
+
 func portalEnv(t *testing.T, maxConns int32) (*fixture.Env, *portal.Service, *memSessions) {
 	t.Helper()
 	env := fixture.New(t, maxConns, now)

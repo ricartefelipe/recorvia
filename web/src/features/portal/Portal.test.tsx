@@ -117,6 +117,57 @@ describe('portal do cliente', () => {
     expect(requests[0].headers.get('X-Recorvia-Tenant')).toBeNull();
   });
 
+  it('carrega mais faturas pelo cursor, mantendo as já exibidas', async () => {
+    const cursors: (string | null)[] = [];
+    const pages: Record<string, { data: (typeof invoice)[]; next_cursor: string | null }> = {
+      '': {
+        data: [invoice, { ...invoice, id: 'f2', number: 'ACME-000122' }],
+        next_cursor: 'cursor-2',
+      },
+      'cursor-2': { data: [{ ...invoice, id: 'f3', number: 'ACME-000121' }], next_cursor: null },
+    };
+    server.use(
+      http.get('/api/portal/v1/session', () => HttpResponse.json(session)),
+      http.get('/api/portal/v1/invoices', ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('cursor');
+        cursors.push(cursor);
+        return HttpResponse.json(pages[cursor ?? '']);
+      }),
+    );
+    const { user } = renderPortal('/portal');
+    const table = await screen.findByRole('table', { name: 'Faturas' });
+    expect(within(table).getAllByRole('row')).toHaveLength(3);
+    expect(screen.getByText('2 faturas exibidas; há faturas mais antigas.')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Carregar mais faturas' }));
+    expect(await within(table).findByText('ACME-000121')).toBeInTheDocument();
+    // As páginas se acumulam, na ordem recebida, sem repetir faturas.
+    expect(within(table).getAllByRole('link', { name: /^ACME-/ }).map((a) => a.textContent)).toEqual(['ACME-000123', 'ACME-000122', 'ACME-000121']);
+    expect(cursors).toEqual([null, 'cursor-2']);
+    expect(screen.queryByRole('button', { name: 'Carregar mais faturas' })).not.toBeInTheDocument();
+    expect(screen.getByText('3 faturas exibidas; não há mais faturas.')).toBeInTheDocument();
+  });
+
+  it('falha ao carregar mais mantém as faturas exibidas e permite tentar de novo', async () => {
+    let failures = 1;
+    server.use(
+      http.get('/api/portal/v1/session', () => HttpResponse.json(session)),
+      http.get('/api/portal/v1/invoices', ({ request }) => {
+        if (!new URL(request.url).searchParams.get('cursor')) return HttpResponse.json({ data: [invoice], next_cursor: 'cursor-2' });
+        if (failures-- > 0) {
+          return HttpResponse.json({ type: 'about:blank', title: 'Indisponível', status: 503, code: 'unavailable' }, { status: 503 });
+        }
+        return HttpResponse.json({ data: [{ ...invoice, id: 'f2', number: 'ACME-000122' }], next_cursor: null });
+      }),
+    );
+    const { user } = renderPortal('/portal');
+    const table = await screen.findByRole('table', { name: 'Faturas' });
+    await user.click(screen.getByRole('button', { name: 'Carregar mais faturas' }));
+    await user.click(await screen.findByRole('button', { name: 'Tentar novamente' }));
+    expect(await within(table).findByText('ACME-000122')).toBeInTheDocument();
+    expect(within(table).getByText('ACME-000123')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Tentar novamente' })).not.toBeInTheDocument();
+  });
+
   it('mostra ao cliente a baixa interna como fatura encerrada, sem botão de pagamento', async () => {
     server.use(
       http.get('/api/portal/v1/session', () => HttpResponse.json(session)),

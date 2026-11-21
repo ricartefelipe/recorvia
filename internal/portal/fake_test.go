@@ -25,15 +25,19 @@ type tenantData struct {
 	customers map[uuid.UUID]customers.Customer
 	contacts  map[uuid.UUID][]customers.Contact
 	links     map[uuid.UUID]Link
-	// invoices guarda as faturas na ordem de listagem (mais recentes primeiro).
-	invoices  []billing.Invoice
+	// invoices guarda as faturas; a listagem as ordena pela emissão e pelo
+	// identificador, decrescentes, como o armazenamento real.
+	invoices []billing.Invoice
+	// creators guarda o nome de quem gerou cada link (resolvido por junção
+	// no armazenamento real).
+	creators  map[uuid.UUID]string
 	checkouts map[uuid.UUID]string
 	audits    []audit.Entry
 }
 
 func newTenantData() *tenantData {
 	return &tenantData{customers: map[uuid.UUID]customers.Customer{}, contacts: map[uuid.UUID][]customers.Contact{}, links: map[uuid.UUID]Link{},
-		checkouts: map[uuid.UUID]string{}}
+		checkouts: map[uuid.UUID]string{}, creators: map[uuid.UUID]string{}}
 }
 
 func (d *tenantData) clone() *tenantData {
@@ -47,6 +51,7 @@ func (d *tenantData) clone() *tenantData {
 	c.links = maps.Clone(d.links)
 	c.invoices = slices.Clone(d.invoices)
 	c.checkouts = maps.Clone(d.checkouts)
+	c.creators = maps.Clone(d.creators)
 	c.contacts = make(map[uuid.UUID][]customers.Contact, len(d.contacts))
 	for k, v := range d.contacts {
 		c.contacts[k] = slices.Clone(v)
@@ -63,7 +68,8 @@ type fakeStore struct {
 	fail      map[string]error
 	calls     map[string]int
 	commitErr error
-	// leaky desliga o filtro de cliente e situação das faturas, simulando um
+	// leaky desliga o filtro de cliente e situação das faturas e o filtro de
+	// cliente dos links (que passam a trazer o hash do token), simulando um
 	// armazenamento que devolve dados além do permitido.
 	leaky bool
 }
@@ -176,6 +182,57 @@ func (tx *fakeTx) RevokeActiveLinks(_ context.Context, customerID uuid.UUID, at 
 	return out, nil
 }
 
+func (tx *fakeTx) RevokeLink(_ context.Context, customerID, id uuid.UUID, at time.Time, reason string) error {
+	if err := tx.store.hit("RevokeLink"); err != nil {
+		return err
+	}
+	l, ok := tx.d.links[id]
+	if !ok || l.CustomerID != customerID || l.RevokedAt != nil {
+		return apperr.Conflict("portal_link_unavailable", "O link já foi revogado ou não pertence a este cliente.")
+	}
+	l.RevokedAt, l.RevokeReason = &at, reason
+	tx.d.links[id] = l
+	return nil
+}
+
+// before informa se (at, id) vem depois de (otherAt, otherID) na ordem
+// decrescente das listagens.
+func before(at time.Time, id uuid.UUID, otherAt time.Time, otherID uuid.UUID) bool {
+	if !at.Equal(otherAt) {
+		return at.Before(otherAt)
+	}
+	return bytes.Compare(id[:], otherID[:]) < 0
+}
+
+// Links reproduz a listagem do armazenamento (cliente, ordem e posição),
+// sem o hash do token; com leaky, devolve os links de todos os clientes com
+// o hash.
+func (tx *fakeTx) Links(_ context.Context, customerID uuid.UUID, after *Position, limit int) ([]LinkSummary, error) {
+	if err := tx.store.hit("Links"); err != nil {
+		return nil, err
+	}
+	var out []LinkSummary
+	for _, l := range tx.d.links {
+		if !tx.store.leaky && l.CustomerID != customerID {
+			continue
+		}
+		if after != nil && !before(l.CreatedAt, l.ID, after.At, after.ID) {
+			continue
+		}
+		if !tx.store.leaky {
+			l.TokenHash = nil
+		}
+		out = append(out, LinkSummary{Link: l, CreatorName: tx.d.creators[l.ID]})
+	}
+	slices.SortFunc(out, func(a, b LinkSummary) int {
+		if before(b.CreatedAt, b.ID, a.CreatedAt, a.ID) {
+			return -1
+		}
+		return 1
+	})
+	return out[:min(len(out), limit)], nil
+}
+
 func (tx *fakeTx) Link(_ context.Context, id uuid.UUID, _ bool) (Link, error) {
 	if err := tx.store.hit("Link"); err != nil {
 		return Link{}, err
@@ -200,22 +257,38 @@ func (tx *fakeTx) MarkLinkUsed(_ context.Context, id uuid.UUID, at time.Time) er
 	return nil
 }
 
-// Invoices reproduz o filtro do armazenamento (cliente e situação), exceto
-// com leaky, que devolve tudo para exercitar a segunda barreira do serviço.
-func (tx *fakeTx) Invoices(_ context.Context, customerID uuid.UUID, limit int) ([]billing.Invoice, error) {
+// issuedAt devolve a emissão da fatura; rascunhos (sem emissão) ficam no fim.
+func issuedAt(inv billing.Invoice) time.Time {
+	if inv.IssuedAt == nil {
+		return time.Time{}
+	}
+	return *inv.IssuedAt
+}
+
+// Invoices reproduz a listagem do armazenamento (cliente, situação, ordem e
+// posição), exceto com leaky, que ignora cliente e situação para exercitar a
+// segunda barreira do serviço.
+func (tx *fakeTx) Invoices(_ context.Context, customerID uuid.UUID, after *Position, limit int) ([]billing.Invoice, error) {
 	if err := tx.store.hit("Invoices"); err != nil {
 		return nil, err
 	}
 	var out []billing.Invoice
 	for _, inv := range tx.d.invoices {
-		if tx.store.leaky || (inv.CustomerID == customerID && inv.Status != billing.Draft) {
-			out = append(out, inv)
+		if !tx.store.leaky && (inv.CustomerID != customerID || inv.Status == billing.Draft) {
+			continue
 		}
-		if len(out) == limit {
-			break
+		if after != nil && !before(issuedAt(inv), inv.ID, after.At, after.ID) {
+			continue
 		}
+		out = append(out, inv)
 	}
-	return out, nil
+	slices.SortStableFunc(out, func(a, b billing.Invoice) int {
+		if before(issuedAt(b), b.ID, issuedAt(a), a.ID) {
+			return -1
+		}
+		return 1
+	})
+	return out[:min(len(out), limit)], nil
 }
 
 func (tx *fakeTx) Invoice(_ context.Context, customerID, id uuid.UUID) (billing.Invoice, error) {
@@ -278,6 +351,9 @@ type fakeSessions struct {
 	deleteErr error
 	saves     int
 	deletes   int
+	// byLink registra os links cujas sessões foram removidas.
+	byLink    []uuid.UUID
+	byLinkErr error
 }
 
 func newFakeSessions() *fakeSessions { return &fakeSessions{items: map[string]savedSession{}} }
@@ -308,6 +384,19 @@ func (f *fakeSessions) Delete(_ context.Context, id string) error {
 		return f.deleteErr
 	}
 	delete(f.items, id)
+	return nil
+}
+
+func (f *fakeSessions) DeleteByLink(_ context.Context, linkID uuid.UUID) error {
+	f.byLink = append(f.byLink, linkID)
+	if f.byLinkErr != nil {
+		return f.byLinkErr
+	}
+	for id, v := range f.items {
+		if v.s.LinkID == linkID {
+			delete(f.items, id)
+		}
+	}
 	return nil
 }
 

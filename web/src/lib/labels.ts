@@ -26,6 +26,14 @@ export const invitationStateLabels: Labels = {
   expired: 'Expirado',
 };
 
+/** Situação dos links do portal do cliente. */
+export const portalLinkStatusLabels: Labels = {
+  pending: 'Pendente',
+  used: 'Utilizado',
+  expired: 'Expirado',
+  revoked: 'Revogado',
+};
+
 export const memberStatusLabels: Labels = { active: 'Ativo', removed: 'Removido' };
 
 export const customerKindLabels: Labels = { individual: 'Pessoa física', company: 'Pessoa jurídica' };
@@ -335,6 +343,7 @@ const statusColors: Record<string, string> = {
   accepted: 'green',
   revoked: 'gray',
   expired: 'gray',
+  used: 'green',
   removed: 'gray',
   applied: 'green',
   ended: 'gray',
