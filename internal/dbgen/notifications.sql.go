@@ -119,7 +119,7 @@ func (q *Queries) CustomerRecipientData(ctx context.Context, arg CustomerRecipie
 }
 
 const dueNotifications = `-- name: DueNotifications :many
-SELECT id, tenant_id, business_key, template_key, channel, recipients, subject, content_ciphertext, content_key_id, customer_id, invoice_id, subscription_id, invitation_id, policy_id, step_offset_days, status, status_reason, send_after, attempts, max_attempts, lease_until, last_error, message_id, sent_at, created_at, updated_at FROM notifications
+SELECT id, tenant_id, business_key, template_key, channel, recipients, subject, content_ciphertext, content_key_id, customer_id, invoice_id, subscription_id, invitation_id, policy_id, step_offset_days, status, status_reason, send_after, attempts, max_attempts, lease_until, last_error, message_id, sent_at, created_at, updated_at, content_purged_at FROM notifications
  WHERE tenant_id = $1
    AND ((status = 'scheduled' AND send_after <= $2) OR (status = 'sending' AND lease_until < $2))
  ORDER BY send_after, id
@@ -169,6 +169,7 @@ func (q *Queries) DueNotifications(ctx context.Context, arg DueNotificationsPara
 			&i.SentAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ContentPurgedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -228,7 +229,7 @@ func (q *Queries) GetInvoiceNotificationInfo(ctx context.Context, arg GetInvoice
 }
 
 const getNotification = `-- name: GetNotification :one
-SELECT id, tenant_id, business_key, template_key, channel, recipients, subject, content_ciphertext, content_key_id, customer_id, invoice_id, subscription_id, invitation_id, policy_id, step_offset_days, status, status_reason, send_after, attempts, max_attempts, lease_until, last_error, message_id, sent_at, created_at, updated_at FROM notifications WHERE tenant_id = $1 AND id = $2
+SELECT id, tenant_id, business_key, template_key, channel, recipients, subject, content_ciphertext, content_key_id, customer_id, invoice_id, subscription_id, invitation_id, policy_id, step_offset_days, status, status_reason, send_after, attempts, max_attempts, lease_until, last_error, message_id, sent_at, created_at, updated_at, content_purged_at FROM notifications WHERE tenant_id = $1 AND id = $2
 `
 
 type GetNotificationParams struct {
@@ -266,12 +267,13 @@ func (q *Queries) GetNotification(ctx context.Context, arg GetNotificationParams
 		&i.SentAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ContentPurgedAt,
 	)
 	return i, err
 }
 
 const getNotificationForUpdate = `-- name: GetNotificationForUpdate :one
-SELECT id, tenant_id, business_key, template_key, channel, recipients, subject, content_ciphertext, content_key_id, customer_id, invoice_id, subscription_id, invitation_id, policy_id, step_offset_days, status, status_reason, send_after, attempts, max_attempts, lease_until, last_error, message_id, sent_at, created_at, updated_at FROM notifications WHERE tenant_id = $1 AND id = $2 FOR UPDATE
+SELECT id, tenant_id, business_key, template_key, channel, recipients, subject, content_ciphertext, content_key_id, customer_id, invoice_id, subscription_id, invitation_id, policy_id, step_offset_days, status, status_reason, send_after, attempts, max_attempts, lease_until, last_error, message_id, sent_at, created_at, updated_at, content_purged_at FROM notifications WHERE tenant_id = $1 AND id = $2 FOR UPDATE
 `
 
 type GetNotificationForUpdateParams struct {
@@ -309,6 +311,7 @@ func (q *Queries) GetNotificationForUpdate(ctx context.Context, arg GetNotificat
 		&i.SentAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ContentPurgedAt,
 	)
 	return i, err
 }
@@ -660,8 +663,8 @@ func (q *Queries) ListNotifications(ctx context.Context, arg ListNotificationsPa
 	return items, nil
 }
 
-const lockCustomerKeyShare = `-- name: LockCustomerKeyShare :exec
-SELECT id FROM customers WHERE tenant_id = $1 AND id = $2 FOR KEY SHARE
+const lockCustomerKeyShare = `-- name: LockCustomerKeyShare :one
+SELECT anonymized_at FROM customers WHERE tenant_id = $1 AND id = $2 FOR KEY SHARE
 `
 
 type LockCustomerKeyShareParams struct {
@@ -669,9 +672,14 @@ type LockCustomerKeyShareParams struct {
 	ID       uuid.UUID
 }
 
-func (q *Queries) LockCustomerKeyShare(ctx context.Context, arg LockCustomerKeyShareParams) error {
-	_, err := q.db.Exec(ctx, lockCustomerKeyShare, arg.TenantID, arg.ID)
-	return err
+// Bloqueia o cliente em modo compartilhado e devolve a anonimização: a
+// anonimização mantém o cliente com bloqueio exclusivo, de modo que a
+// gravação de uma notificação composta antes dela espera e é descartada.
+func (q *Queries) LockCustomerKeyShare(ctx context.Context, arg LockCustomerKeyShareParams) (*time.Time, error) {
+	row := q.db.QueryRow(ctx, lockCustomerKeyShare, arg.TenantID, arg.ID)
+	var anonymized_at *time.Time
+	err := row.Scan(&anonymized_at)
+	return anonymized_at, err
 }
 
 const lockInvoiceKeyShare = `-- name: LockInvoiceKeyShare :exec

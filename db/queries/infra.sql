@@ -128,3 +128,12 @@ SELECT * FROM dead_letters WHERE tenant_id = @tenant_id AND id = @id FOR UPDATE;
 -- name: ResolveDeadLetter :exec
 UPDATE dead_letters SET status = @status, resolved_at = @resolved_at, resolved_by = @resolved_by, resolution_note = @resolution_note
  WHERE tenant_id = @tenant_id AND id = @id;
+
+-- name: RetentionTenants :many
+-- Tenants com dados do tipo informado vencidos no corte (somente IDs).
+SELECT t::uuid AS tenant_id FROM app_retention_tenants(@kind, @cutoff, sqlc.narg(after_tenant)::uuid, @max_tenants) AS t;
+
+-- name: RetentionPurge :one
+-- Remove um lote vencido do tipo informado, na transação do tenant.
+SELECT purged::int AS purged, more::boolean AS more
+  FROM app_retention_purge(@kind, @tenant_id, @cutoff, @now, @batch_size);

@@ -417,6 +417,7 @@ type Notification struct {
 	SentAt            *time.Time
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+	ContentPurgedAt   *time.Time
 }
 
 type NotificationEvent struct {
@@ -641,6 +642,7 @@ type ProviderWebhookEvent struct {
 	Status            string
 	ProcessedAt       *time.Time
 	Error             *string
+	PayloadPurgedAt   *time.Time
 }
 
 type ReconciliationDiscrepancy struct {
@@ -852,6 +854,7 @@ type UsageAggregate struct {
 	PriceVersionID    *uuid.UUID
 	CorrectedQuantity pgtype.Numeric
 	CorrectedAmount   *int64
+	EventsPurgedAt    *time.Time
 }
 
 type UsageEvent struct {
