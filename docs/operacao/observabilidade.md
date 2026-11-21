@@ -1,15 +1,17 @@
 # Observabilidade
 
 Como o Recorvia expõe métricas, rastros e sondas de saúde, como subir a stack local de
-observabilidade e o que cada alerta significa. Decisões: ADR-052 (stack e configurações nas
-imagens), ADR-053 (métricas e alertas de baixa cardinalidade) e ADR-054 (liveness e readiness).
+observabilidade, como os alertas são encaminhados e o que cada um significa. Decisões: ADR-052
+(stack e configurações nas imagens), ADR-053 (métricas e alertas de baixa cardinalidade), ADR-054
+(liveness e readiness), ADR-065 (Alertmanager), ADR-066 (métricas globais de fila) e ADR-067
+(alertas das filas e do caminho de alertas).
 Procedimentos de resposta aos alertas: [runbooks](runbooks/README.md).
 
 ## Subir a stack local
 
 ```bash
-make up-obs          # ambiente completo + OpenTelemetry Collector, Jaeger, Prometheus e Grafana
-make obs-stack-check # confere alvos, regras, séries, dashboards e rastros da stack em execução
+make up-obs          # ambiente completo + OpenTelemetry Collector, Jaeger, Prometheus, Alertmanager e Grafana
+make obs-stack-check # confere alvos, regras, séries, um alerta até o e-mail, dashboards e rastros da stack em execução
 make obs-check       # valida as configurações com as ferramentas oficiais (sem subir o ambiente)
 ```
 
@@ -23,16 +25,19 @@ mounts); alterar uma configuração exige reconstruir a imagem, o que `make up-o
 |---|---|---|---|
 | Grafana | http://localhost:3000 | `GRAFANA_PORT` | leitura anônima; administrador `admin` com `GRAFANA_ADMIN_PASSWORD` do `.env` |
 | Prometheus | http://localhost:9090 | `PROMETHEUS_PORT` | consultas, alvos (`/targets`) e alertas (`/alerts`) |
+| Alertmanager | http://localhost:9093 | `ALERTMANAGER_PORT` | alertas recebidos, silêncios e inibições; as notificações por e-mail ficam no Mailpit (http://localhost:8025) |
 | Jaeger | http://localhost:16686 | `JAEGER_UI_PORT` | rastros da API e do worker |
 
 As portas de métricas (`api:9091`, `worker:9091`, `rabbitmq:15692`, `otel-collector:8888`) não
-são publicadas no host: só o Prometheus, na rede do compose, as acessa.
+são publicadas no host: só o Prometheus, na rede do compose, as acessa. O Alertmanager é coletado
+em `alertmanager:9093`.
 
 | Componente | Imagem (versão fixa) | Configuração |
 |---|---|---|
 | OpenTelemetry Collector | `otel/opentelemetry-collector-contrib:0.165.0` | `deploy/observability/otel-collector/config.yaml` |
 | Jaeger v2 | `jaegertracing/jaeger:2.23.0` | `deploy/observability/jaeger/config.yaml` (armazenamento em memória) |
 | Prometheus | `prom/prometheus:v3.16.0` | `deploy/observability/prometheus/prometheus.yml` e `rules/recorvia.yml` |
+| Alertmanager | `prom/alertmanager:v0.35.0` | `deploy/observability/alertmanager/alertmanager.yml` (roteamento), `templates/recorvia.tmpl` (notificações) e `entrypoint.sh` (receptores gerados na partida) |
 | Grafana | `grafana/grafana:13.3.1` | `deploy/observability/grafana/provisioning` e `dashboards/*.json` |
 
 ## Liveness e readiness
@@ -99,7 +104,12 @@ tabela abaixo, com os valores dos rótulos de conjunto fechado.
 | `recorvia_notifications_dispatched_total` | contador | `outcome` | worker, tarefa `notifications.dispatch`: `sent` (aceita pelo SMTP), `retried` (falha transitória, nova tentativa agendada), `failed` (encerrada sem envio: recusa permanente, fim das tentativas ou conteúdo indisponível), `deferred` (fora da janela de envio ou do limite de frequência), `skipped` (cancelada ou suprimida antes do envio) e `lost_lease` (outra execução assumiu a tentativa) |
 | `recorvia_webhook_deliveries_total` | contador | `outcome` | worker, tarefa `webhooks.deliver`: `succeeded` (resposta 2xx), `retrying` (falha, nova tentativa agendada), `exhausted` (tentativas esgotadas ou destino bloqueado pela proteção SSRF), `lost_lease` e `deferred` (devolvida à fila sem consumir tentativa: orçamento da execução ou endpoint sem resposta) |
 | `recorvia_collection_actions_total` | contador | `action` | worker, tarefa `collections.run`: `reminder_scheduled`, `invoice_overdue`, `subscription_suspended` e `subscription_reactivated` |
+| `recorvia_dead_letters_open` / `recorvia_dead_letters_oldest_open_seconds` | gauge | `consumer` | worker, `metrics.collect`: dead letters registradas em `dead_letters` e ainda não resolvidas, em todos os tenants e as sem tenant, e a idade da mais antiga (tempo desde a falha; zero sem dead letters abertas); `consumer` é um consumidor do worker ou `other` (registros de consumidores removidos ou renomeados) |
+| `recorvia_notifications_backlog` / `recorvia_notifications_backlog_oldest_seconds` | gauge | `state` | worker, `metrics.collect`: fila de notificações de todos os tenants. `due`: agendadas com o horário de envio vencido (idade: atraso em relação a esse horário); `sending`: reivindicadas para envio (idade: tempo desde a reivindicação); `failed`: falha definitiva nas últimas 24 horas (idade: tempo desde a mais antiga da janela). Agendamentos futuros não contam |
+| `recorvia_webhook_deliveries_backlog` / `recorvia_webhook_deliveries_backlog_oldest_due_seconds` | gauge | `state` | worker, `metrics.collect`: fila de entregas de webhooks enviados de todos os tenants, em `pending` (aguardando a primeira tentativa ou um reenvio) e `retrying` (aguardando nova tentativa, inclusive em backoff); o atraso considera somente as entregas com o horário da tentativa vencido, a partir desse horário |
 | `recorvia_reconciliation_open_discrepancies` | gauge | `kind` | declarada nesta etapa; alimentada pela tarefa `metrics.collect` da etapa 5 (recebíveis e conciliação) |
+| `recorvia_reconciliation_runs_in_progress` | gauge | `state` | worker (`metrics.collect`) e API (lida do banco a cada coleta do Prometheus, com prazo de 2 s; se a leitura falhar, mantém o último valor): execuções de conciliação em andamento, de todos os tenants: `queued` (registrada, aguardando um worker), `executing` (lease vigente) e `stalled` (lease expirado, aguardando a retomada) |
+| `recorvia_reconciliation_oldest_waiting_seconds` | gauge | — | worker (`metrics.collect`) e API (a cada coleta, como a métrica anterior): espera mais longa entre as execuções sem worker, desde o registro (`queued`) ou desde o fim do lease (`stalled`); zero quando não há nenhuma. A API a exporta porque registra os pedidos e continua em execução quando o worker para |
 | `recorvia_db_pool_connections` | gauge | `state` | API e worker, pool pgx lido a cada coleta (`acquired`, `idle`, `constructing`) |
 | `recorvia_db_pool_max_connections` | gauge | — | API e worker |
 | `recorvia_db_pool_acquires_total`, `recorvia_db_pool_empty_acquires_total`, `recorvia_db_pool_canceled_acquires_total`, `recorvia_db_pool_empty_acquire_wait_seconds_total` | contador | — | API e worker |
@@ -128,6 +138,28 @@ Avaliação das métricas da régua de cobrança, das notificações e dos webho
   reativações dependem da carteira de cada tenant e não têm limite que indique falha; a falha da
   tarefa `collections.run` é coberta por `RecorviaScheduledTaskFailing`. Painel "Ações da régua de
   cobrança".
+
+Métricas globais de fila (ADR-066). As três famílias acima são lidas do banco por funções
+agregadas `SECURITY DEFINER` (`app_dead_letter_stats`, `app_notification_backlog_stats` e
+`app_webhook_delivery_backlog_stats`, migration 00015), que somam todos os tenants sem
+identificá-los e recebem o instante de referência do relógio da aplicação. Os rótulos têm conjunto
+fechado (`TestDeadLetterStatsFeedGaugesWithClosedConsumerSet`,
+`TestQueueStatsFeedGaugesWithDeclaredStates`), e os medidores só existem depois da primeira
+coleta. Ao contrário dos contadores (`recorvia_consumer_messages_total{outcome="dead_letter"}`,
+`recorvia_notifications_dispatched_total`, `recorvia_webhook_deliveries_total`), que contam o que
+aconteceu desde a partida de cada worker, os medidores mostram o que está parado agora e não
+zeram num reinício:
+
+- dead letters abertas: alerta `RecorviaDeadLettersOpen` (aviso com 30 minutos sem triagem;
+  crítico com a mais antiga aberta há mais de 24 horas); painéis "Dead letters abertas por
+  consumidor" e "Idade da dead letter aberta mais antiga" (*mensageria*) e indicador na *visão
+  geral*;
+- fila de notificações: alerta `RecorviaNotificationsBacklog` (atraso de `due` ou `sending` acima
+  de 15 minutos; crítico acima de uma hora); `failed` tem só painel, porque a falha definitiva já
+  alerta por `RecorviaNotificationsFailed`;
+- fila de entregas de webhooks: alerta `RecorviaWebhookDeliveriesBacklog` (entrega devida há mais
+  de 15 minutos; crítico acima de uma hora). O total em `retrying` não alerta: a espera do backoff
+  é o comportamento previsto para o destino de um tenant fora do ar.
 
 O tipo de falha de cobrança vem da classificação do adaptador (`payments.GatewayErrorKind`): erro
 não classificado conta como `ambiguous`. A contagem é feita por um decorador do adaptador na
@@ -159,14 +191,20 @@ RabbitMQ 4.2.9.
 
 Regras em `deploy/observability/prometheus/rules/recorvia.yml`, com testes em
 `deploy/observability/prometheus/tests/recorvia_test.yml` (`promtool test rules`). Os limites são
-pontos de partida para o ambiente local e devem ser calibrados com volume real. Não há
-Alertmanager no perfil local: os alertas aparecem em http://localhost:9090/alerts e no Grafana. A
-anotação `runbook` de cada regra aponta para uma seção existente (conferido por
-`TestAlertRulesLinkToExistingRunbookSections`).
+pontos de partida para o ambiente local e devem ser calibrados com volume real. Os alertas
+aparecem em http://localhost:9090/alerts e no Grafana e são enviados ao Alertmanager, que os
+notifica ([Encaminhamento de alertas](#encaminhamento-de-alertas)). A anotação `runbook` de cada
+regra aponta para uma seção existente (conferido por `TestAlertRulesLinkToExistingRunbookSections`);
+a imagem do Prometheus acrescenta a cada regra a anotação `runbook_url`, com o endereço completo.
+
+Severidades: `critical` exige ação imediata, `warning` exige análise no mesmo dia e `info` não
+pede ação (somente `RecorviaWatchdog`). Um alerta com duas severidades (`RecorviaDeadLettersOpen`,
+`RecorviaNotificationsBacklog`, `RecorviaWebhookDeliveriesBacklog`) tem duas regras com o mesmo
+nome e os mesmos rótulos; enquanto a crítica dispara, o Alertmanager inibe a de aviso.
 
 | Alerta | Condição | Severidade |
 |---|---|---|
-| `RecorviaTargetDown` | coleta da API, do worker ou do RabbitMQ falhando por 2 min | critical |
+| `RecorviaTargetDown` | coleta da API, do worker, do RabbitMQ ou do Alertmanager falhando por 2 min | critical |
 | `RecorviaOutboxBacklog` | mais de 1000 eventos pendentes por 10 min | warning |
 | `RecorviaOutboxStalled` | evento pendente mais antigo com mais de 5 min, por 5 min | critical |
 | `RecorviaOutboxPublishFailures` | falhas de publicação contínuas por 10 min | warning |
@@ -175,6 +213,8 @@ anotação `runbook` de cada regra aponta para uma seção existente (conferido 
 | `RecorviaQueueWithoutConsumer` | fila principal sem consumidor por 5 min | critical |
 | `RecorviaDeadLetterQueueNotDrained` | DLQ com mensagens não registradas em `dead_letters` por 10 min | warning |
 | `RecorviaMessagesDeadLettered` | mensagens enviadas à DLQ nos últimos 15 min | warning |
+| `RecorviaDeadLettersOpen` | dead letters abertas de um consumidor (todos os tenants) por 30 min | warning |
+| `RecorviaDeadLettersOpen` | dead letter mais antiga de um consumidor aberta há mais de 24 h, por 15 min | critical |
 | `RecorviaConsumerRetryRate` | mais de 10% de retentativas por 15 min | warning |
 | `RecorviaMessagesRequeued` | mensagens devolvidas à fila principal nos últimos 10 min | warning |
 | `RecorviaWorkerSaturated` | consumidor com 90% ou mais das vagas ocupadas por 15 min | warning |
@@ -186,6 +226,7 @@ anotação `runbook` de cada regra aponta para uma seção existente (conferido 
 | `RecorviaWebhooksRejected` | mais de 5 webhooks recusados (`unauthenticated`, `unknown_endpoint`, `too_large` ou `error`) em 15 min | warning |
 | `RecorviaReconciliationDiscrepanciesOpen` | divergência aberta por 4 h | warning |
 | `RecorviaReconciliationDiscrepanciesHigh` | mais de 25 divergências abertas por 30 min | critical |
+| `RecorviaReconciliationRunsWaiting` | execução de conciliação sem worker (aguardando ou interrompida) há mais de 5 min, por 5 min; a métrica sai do worker e da API, e o alerta dispara mesmo sem nenhum worker em execução | warning |
 | `RecorviaRefundsUnknown` | reembolso com resultado desconhecido por 30 min (métrica da etapa 5) | warning |
 | `RecorviaRefundsFailed` | reembolso recusado pelo provedor na última hora (métrica da etapa 5) | warning |
 | `RecorviaBillingCycleStale` | `billing.run_cycle` sem sucesso há mais de 15 min, ou sem nenhum sucesso desde a partida do worker (há mais de 15 min) | critical |
@@ -195,11 +236,18 @@ anotação `runbook` de cada regra aponta para uma seção existente (conferido 
 | `RecorviaEmailDeliveryStalled` | tentativas de envio falhando e nenhum e-mail aceito em 15 min, por 15 min | warning |
 | `RecorviaNotificationsFailed` | mais de 5 notificações com falha definitiva em 30 min | warning |
 | `RecorviaWebhookDeliveriesFailing` | 10 ou mais tentativas de entrega falhando e nenhuma bem-sucedida em 30 min, por 15 min | warning |
+| `RecorviaNotificationsBacklog` | notificação vencida (`due`) ou em envio (`sending`) há mais de 15 min, por 10 min | warning |
+| `RecorviaNotificationsBacklog` | o mesmo, há mais de 1 h, por 10 min | critical |
+| `RecorviaWebhookDeliveriesBacklog` | entrega de webhook devida (`pending` ou `retrying`) há mais de 15 min, por 10 min | warning |
+| `RecorviaWebhookDeliveriesBacklog` | o mesmo, há mais de 1 h, por 10 min | critical |
 | `RecorviaDBPoolSaturated` | pool de um processo com 90% ou mais em uso por 5 min | warning |
 | `RecorviaDBPoolWaiting` | espera por conexão acima de 0,2 s por segundo, por 10 min | warning |
 | `RecorviaDBServerConnectionsHigh` | servidor com mais de 80% das conexões para papéis comuns, por 10 min | critical |
 | `RecorviaDependencyUnavailable` | dependência indisponível por 2 min (estado verificado a cada coleta) | critical |
 | `RecorviaHTTPErrorRate` | mais de 5% de respostas 5xx por 10 min | warning |
+| `RecorviaWatchdog` | sempre ativo: verificação do caminho de alertas | info |
+| `RecorviaAlertDeliveryFailing` | envios do Prometheus ao Alertmanager falhando ou descartados em 10 min, por 5 min | critical |
+| `RecorviaAlertNotificationsFailing` | notificações do Alertmanager falhando numa integração (`email`, `webhook`) em 15 min, por 5 min | critical |
 
 O último sucesso de uma tarefa só existe depois de um sucesso real; num reinício do worker com a
 tarefa falhando, ou com a reivindicação falhando a cada ciclo (sem execução registrada), a série
@@ -210,8 +258,86 @@ tarefa é agendada um intervalo depois, mesmo após falha: `RecorviaScheduledTas
 tarefas de até 10 minutos de intervalo, e as horárias (`platform.close_statements`,
 `idempotency.purge`) e a diária (`outbox.purge`) ficam com o alerta proporcional ao intervalo.
 
-A quantidade de dead letters registradas e ainda não resolvidas por tenant é consultada pela API
-(`GET /api/v1/dead-letters`); não há métrica global para ela (ADR-053).
+A quantidade de dead letters registradas e ainda não resolvidas de todos os tenants é exportada
+por consumidor (`recorvia_dead_letters_open`, ADR-066); o detalhe por tenant continua na API
+(`GET /api/v1/dead-letters`), porque as métricas não identificam tenants.
+
+<a id="encaminhamento-de-alertas"></a>
+
+## Encaminhamento de alertas
+
+O Prometheus envia os alertas ao Alertmanager (`alerting` em `prometheus.yml`), que agrupa,
+inibe, roteia por severidade e notifica (ADR-065). O roteamento fica na imagem
+(`deploy/observability/alertmanager/alertmanager.yml`); os receptores são gerados na partida do
+container pelo `entrypoint.sh`, a partir de variáveis de ambiente, e a configuração resultante é
+validada com `amtool check-config` antes de o Alertmanager iniciar. Procedimentos:
+[runbook de encaminhamento de alertas](runbooks/alertas.md).
+
+| Rota | Receptor | Agrupamento | Espera inicial | Intervalo do grupo | Repetição |
+|---|---|---|---|---|---|
+| `alertname="RecorviaWatchdog"` | `recorvia-watchdog` (somente e-mail) | `alertname` | 10 s | 5 min | 24 h |
+| `severity="critical"` | `recorvia-critical` (e-mail dos críticos e webhook) | `alertname`, `area`, `severity` | 10 s | 2 min | 1 h |
+| `severity="warning"` e demais | `recorvia-warning` (e-mail e webhook) | `alertname`, `area`, `severity` | 30 s | 5 min | 12 h |
+
+- **Agrupamento**: uma notificação por alerta e severidade reúne os consumidores, filas ou
+  instâncias afetados; alertas novos do mesmo grupo entram na notificação seguinte, depois do
+  intervalo do grupo.
+- **Inibição**: enquanto um alerta crítico está ativo, o aviso de mesmo nome e mesmos rótulos de
+  agregação (`consumer`, `state`, `queue`, `provider`, `service`, `instance`, `task`, `kind`,
+  `status`, `dependency`, `outcome`, `integration`) não é notificado; o aviso de outro consumidor
+  ou de outra situação continua. `TestAlertRoutingCoversRuleSeveritiesAndInhibitionLabels` falha
+  se uma regra agregar por um rótulo fora dessa lista.
+- **Repetição**: um alerta que continua ativo é notificado de novo a cada intervalo de repetição;
+  a resolução é notificada por e-mail e pelo webhook (exceto a do `RecorviaWatchdog`).
+- **Link do runbook**: cada alerta da notificação traz o endereço completo da seção do runbook.
+  A imagem do Prometheus deriva a anotação `runbook_url` de `runbook` com o argumento de
+  construção `RUNBOOK_BASE_URL` (padrão `https://github.com/ricartefelipe/recorvia/blob/main/`;
+  no compose, a variável de mesmo nome). O e-mail (texto e HTML) mostra o link, e o webhook
+  recebe as duas anotações em `alerts[].annotations`.
+
+Receptores, resolvidos na partida do container (alterar uma variável exige recriá-lo):
+
+| Variável | Padrão no compose local | Uso |
+|---|---|---|
+| `ALERTMANAGER_SMTP_SMARTHOST` | `mailpit:1025` | servidor SMTP (`host:porta`) |
+| `ALERTMANAGER_SMTP_FROM` | `alertas@recorvia.local` | remetente |
+| `ALERTMANAGER_SMTP_REQUIRE_TLS` | `false` (Mailpit sem TLS) | `true` (padrão da imagem) exige STARTTLS; `false` só é aceito sem autenticação |
+| `ALERTMANAGER_SMTP_USERNAME` / `ALERTMANAGER_SMTP_PASSWORD` | vazios | autenticação SMTP: as duas juntas e somente com `ALERTMANAGER_SMTP_REQUIRE_TLS=true` (no compose, é preciso defini-la); a senha é gravada num arquivo de acesso restrito e referenciada por `smtp_auth_password_file` |
+| `ALERTMANAGER_EMAIL_TO` | `plantao@recorvia.local` | destinatários dos avisos e do `RecorviaWatchdog` (separados por vírgula) |
+| `ALERTMANAGER_EMAIL_TO_CRITICAL` | vazio (usa `ALERTMANAGER_EMAIL_TO`) | destinatários dos críticos |
+| `ALERTMANAGER_WEBHOOK_URL` | vazio (webhook desligado) | endpoint HTTP(S) que recebe o `POST` no formato padrão do Alertmanager (versão 4), para críticos e avisos; gravada em arquivo (`url_file`), porque pode conter token |
+| `ALERTMANAGER_WEBHOOK_BEARER_TOKEN` | vazio | enviado em `Authorization: Bearer`; gravado em arquivo (`credentials_file`) |
+| `ALERTMANAGER_EXTERNAL_URL` | `http://localhost:${ALERTMANAGER_PORT}` | endereço da interface nos links das notificações |
+| `ALERTMANAGER_CLUSTER_LISTEN_ADDRESS` | vazio (instância única) | endereço do cluster de alta disponibilidade |
+
+Sem `ALERTMANAGER_EMAIL_TO` e sem `ALERTMANAGER_WEBHOOK_URL`, o Alertmanager inicia com os
+receptores vazios e os alertas ficam visíveis apenas na interface (a partida registra o aviso).
+Combinações incoerentes impedem a partida, com a variável indicada na mensagem: destinatário sem
+servidor SMTP, senha sem usuário, usuário sem senha (todo envio falharia num servidor que anuncia
+autenticação), senha com `ALERTMANAGER_SMTP_REQUIRE_TLS=false` (sem TLS exigido, o Alertmanager
+não negocia STARTTLS e a senha trafegaria em claro), token sem URL, URL sem `http://` ou
+`https://`, valor com quebra de linha ou destinatário com `{{`. A imagem não contém endereços nem
+segredos; os arquivos de segredo ficam em `/etc/alertmanager/runtime` (modo 600, diretório 700),
+a API do Alertmanager expõe somente os caminhos deles, e nada disso é escrito nos logs
+(`TestAlertmanagerEntrypointValidatesEnvironment`,
+`TestAlertmanagerKeepsSMTPPasswordInRestrictedFileAndRequiresTLS`,
+`TestAlertmanagerRoutesBySeverityInhibitsAndNotifiesWebhook`).
+
+No ambiente local, `make up-obs` já entrega os e-mails no Mailpit: a notificação
+"[Recorvia][INFORMATIVO] RecorviaWatchdog" chega cerca de meio minuto depois da partida. Para
+receber o webhook num serviço local, defina `ALERTMANAGER_WEBHOOK_URL` no `.env` e recrie o
+container (`docker compose --profile observability up -d alertmanager`).
+
+O estado do Alertmanager (silêncios e registro de notificações, em `/alertmanager`) fica em
+`tmpfs` no compose local e dura o mesmo que a caixa do Mailpit, que também não tem volume: num
+container novo (`make down` seguido de `make up-obs`, ou a recriação do container para trocar um
+receptor), os alertas ativos são notificados de novo e os silêncios criados na interface deixam
+de existir. Com o registro num volume, o Alertmanager consideraria o grupo já notificado e o
+`RecorviaWatchdog` só voltaria a ser enviado depois do intervalo de repetição (24 horas), com o
+Mailpit vazio (`TestComposeAlertmanagerStateDoesNotOutliveContainer`,
+`TestAlertmanagerNotifiesWatchdogAgainAfterEnvironmentRestart`). Fora do compose local, com
+`/alertmanager` num volume persistente, os silêncios sobrevivem à partida e o reenvio de um
+alerta já notificado só ocorre depois do intervalo de repetição da rota.
 
 ## Dashboards
 
@@ -221,8 +347,8 @@ são salvas; edite o JSON e reconstrua a imagem). A fonte de dados é o Promethe
 
 | Dashboard | Conteúdo |
 |---|---|
-| Recorvia: visão geral (página inicial) | indicadores dos alertas (outbox, operações desconhecidas, divergências, faturamento, DLQs), API, faturamento e cobrança (inclusive operações esgotadas), conciliação e dependências, régua de cobrança, notificações e entregas de webhooks |
-| Recorvia: mensageria | filas principais (prontas, atraso, não confirmadas, consumidores), retentativas, DLQs, resultado e duração por consumidor, saturação e outbox |
+| Recorvia: visão geral (página inicial) | indicadores dos alertas (outbox, operações desconhecidas, divergências, faturamento, DLQs, dead letters abertas, atraso das notificações e das entregas de webhooks), API, faturamento e cobrança (inclusive operações esgotadas), conciliação e dependências, régua de cobrança, notificações e entregas de webhooks (resultados, filas e idades) |
+| Recorvia: mensageria | filas principais (prontas, atraso, não confirmadas, consumidores), retentativas, DLQs, resultado e duração por consumidor, saturação, dead letters abertas por consumidor (total e idade) e outbox |
 | Recorvia: banco e processos | pool de conexões por processo, conexões do servidor, tarefas agendadas (resultado, duração, último sucesso) e recursos dos processos |
 
 Os rastros são consultados na interface do Jaeger: a fonte de dados Jaeger do Grafana usa a API
@@ -262,10 +388,18 @@ em cada push e pull request para `develop` e `main`, com as imagens de versões 
 | Configuração do Prometheus | `docker run --rm --entrypoint promtool recorvia-prometheus:local check config /etc/prometheus/prometheus.yml` |
 | Regras | `docker run --rm --entrypoint promtool recorvia-prometheus:local check rules /etc/prometheus/rules/recorvia.yml` |
 | Testes das regras | `promtool test rules recorvia_test.yml` no estágio `rules-test` da imagem do Prometheus |
-| Dashboards e regras | `go test -run 'TestDashboardsAreValidAndUseProvisionedDatasource\|TestAlertRulesAndDashboardsUseDeclaredMetrics\|TestAlertRulesLinkToExistingRunbookSections' ./internal/infra/telemetry/`: JSON válido, uid único, fonte de dados provisionada, somente métricas declaradas no código e runbook existente para cada alerta |
+| Link dos runbooks | toda regra da imagem final do Prometheus com a anotação `runbook_url` |
+| Configuração do Alertmanager | `docker run --rm [-e ALERTMANAGER_...] recorvia-alertmanager:local check-config`: gera a configuração e executa `amtool check-config` sem receptores, com os valores do compose local e com todos os receptores (valores fictícios com caracteres especiais) |
+| Roteamento por severidade | `docker run --rm ... recorvia-alertmanager:local route-test rótulo=valor...` (`amtool config routes test`): crítico em `recorvia-critical`, aviso e alerta sem severidade em `recorvia-warning`, `RecorviaWatchdog` em `recorvia-watchdog` |
+| Variáveis incoerentes | a geração da configuração precisa falhar para destinatário sem SMTP, senha sem usuário, usuário sem senha, senha com TLS desligado, token sem URL, URL sem esquema, valor com quebra de linha e TLS inválido |
+| Dashboards, regras e roteamento | `go test -run 'TestDashboardsAreValidAndUseProvisionedDatasource\|TestAlertRulesAndDashboardsUseDeclaredMetrics\|TestAlertRulesLinkToExistingRunbookSections\|TestAlertRoutingCoversRuleSeveritiesAndInhibitionLabels' ./internal/infra/telemetry/`: JSON válido, uid único, fonte de dados provisionada, somente métricas declaradas no código, runbook existente para cada alerta, rota para cada severidade e rótulos de agregação na inibição |
 
 Os testes Go da última linha não dependem de Docker e também rodam em `make test` (job
-`go-quality`).
+`go-quality`). No mesmo alvo, `TestValidateScriptExplainsEveryFailure` executa o `validate.sh` com
+um `docker` simulado e confere que cada verificação reprovada termina com a mensagem do erro
+(regras sem `runbook_url`, imagem sem regras, falha do `route-test`, combinação incoerente aceita
+pela imagem), e `TestComposeAlertmanagerStateDoesNotOutliveContainer` confere que o compose não
+guarda o estado do Alertmanager em volume.
 
 Testes de integração com as mesmas imagens (Testcontainers, portas aleatórias, sem o compose),
 executados por `make test-integration` (job `go-integration` da CI):
@@ -274,7 +408,14 @@ executados por `make test-integration` (job `go-integration` da CI):
 |---|---|
 | `TestCollectorRedactsSensitiveSpanAttributes` | aplicação → Collector → Jaeger, com redação |
 | `TestGrafanaProvisionsDatasourceAndDashboards` | fonte de dados padrão somente leitura, os três dashboards provisionados na pasta *Recorvia* e a página inicial com acesso anônimo de leitura |
-| `TestPrometheusLoadsAlertRulesAndScrapeTargets` | regras carregadas sem erro e os seis alvos de coleta |
+| `TestPrometheusLoadsAlertRulesAndScrapeTargets` | regras carregadas sem erro e os sete alvos de coleta |
+| `TestAlertPipelineFromPrometheusRuleToEmail` | caminho inteiro de um alerta: `RecorviaWatchdog` dispara no Prometheus, chega ao Alertmanager descoberto pela configuração e o e-mail aparece no Mailpit com o link do runbook; toda regra carregada tem `runbook_url` |
+| `TestAlertmanagerRoutesBySeverityInhibitsAndNotifiesWebhook` | críticos e avisos para destinatários distintos, aviso inibido pelo crítico do mesmo consumidor (e não o de outro), webhook com token e link do runbook, segredos do webhook somente em arquivos de acesso restrito |
+| `TestAlertmanagerKeepsSMTPPasswordInRestrictedFileAndRequiresTLS` | senha do SMTP com TLS exigido: arquivo de acesso restrito com o conteúdo exato, fora da configuração gerada e da exposta pela API |
+| `TestAlertmanagerNotifiesWatchdogAgainAfterEnvironmentRestart` | com o armazenamento declarado no compose, `RecorviaWatchdog` é notificado de novo depois de derrubar e subir o ambiente (Mailpit vazio) e depois de recriar o Alertmanager com outro destinatário |
+| `TestAlertmanagerEntrypointValidatesEnvironment` | geração e validação da configuração para cada combinação de variáveis, recusa das incoerentes (inclusive usuário sem senha e senha com TLS desligado) e ausência de segredos na saída |
+| `TestWorkerCollectsQueueMetrics` (`internal/app`) | `metrics.collect` publica dead letters abertas e as filas de notificações e de webhooks com o relógio da aplicação, sem rótulos de tenant |
+| `TestDeadLetterStatsAggregatesOpenByConsumerAcrossTenants`, `TestNotificationBacklogStatsByState`, `TestWebhookDeliveryBacklogStatsByState`, `TestQueueStatsFunctionsPrivilegesAndIndexes`, `TestQueueMetricsMigrationDownAndUpAgain` (`internal/pgstore`) e `TestQueueMetricsMigrationDownAndUp` (`internal/infra/migrate`) | funções agregadas da migration 00015, privilégios, índices e seção Down (inclusive pelo Goose, com reaplicação) |
 | `TestPrometheusPluginExposesQueueSeriesUsedByAlerts` | séries do plugin do RabbitMQ usadas pelos alertas de filas |
 
 ### Exercício da stack com o compose (job `observability-stack`)
@@ -284,21 +425,28 @@ O job `observability-stack` da CI executa `make up-obs` (ambiente completo, perf
 (`deploy/observability/stack-check.sh`), que consulta as portas publicadas em `127.0.0.1` e
 confere, com prazo por verificação:
 
-- Prometheus: os seis alvos (`recorvia-api`, `recorvia-worker`, `rabbitmq`, `rabbitmq-queues`,
-  `otel-collector`, `prometheus`) com `health=up`; todas as regras do arquivo de regras carregadas
-  e avaliadas com `health=ok`; e as séries das quais os alertas dependem (pool e conexões do
+- Prometheus: os sete alvos (`recorvia-api`, `recorvia-worker`, `rabbitmq`, `rabbitmq-queues`,
+  `otel-collector`, `alertmanager`, `prometheus`) com `health=up`; todas as regras do arquivo de
+  regras carregadas e avaliadas com `health=ok`, cada uma com `runbook_url`; e as séries das quais
+  os alertas dependem (pool e conexões do
   banco, outbox, operações de pagamento, inclusive as esgotadas, dead letters, concorrência dos
   consumidores, falhas de cobrança, requisições HTTP por padrão de rota, último sucesso de
   `billing.run_cycle`, intervalo das tarefas, idade do processo do worker, disponibilidade do
   PostgreSQL e do Redis vista pela API sem consulta a `/readyz`, webhooks recebidos, envios de
-  notificações, entregas de webhooks, ações da régua e as séries por fila do plugin do RabbitMQ,
-  inclusive consumidores conectados à fila principal).
+  notificações, entregas de webhooks, ações da régua, dead letters abertas, filas de notificações
+  e de entregas de webhooks, envios de alertas do Prometheus e notificações do Alertmanager, e as
+  séries por fila do plugin do RabbitMQ, inclusive consumidores conectados à fila principal).
+- Caminho dos alertas, de ponta a ponta: o Alertmanager está pronto e foi descoberto pelo
+  Prometheus; o alerta de teste `RecorviaWatchdog` (sempre ativo) está disparando; o Alertmanager
+  o recebeu e roteou para `recorvia-watchdog`; e o e-mail da notificação está no Mailpit
+  (`/api/v1/search`), com o link do runbook da regra no texto e no HTML.
 - Grafana: banco interno saudável, fonte de dados `prometheus` consultando o Prometheus
   (`/api/datasources/uid/prometheus/health`) e os três dashboards na pasta *Recorvia*.
 - Jaeger: rastros dos serviços `recorvia-api` e `recorvia-worker` recebidos pelo Collector
   (`/api/v3/services`).
 
-Ao final, o script lista os alertas em andamento, apenas para registro. O mesmo alvo pode ser
+Ao final, o script lista os alertas em andamento no Prometheus e no Alertmanager e os e-mails de
+alerta no Mailpit, apenas para registro. O mesmo alvo pode ser
 usado localmente depois de `make up-obs`.
 
 ### Verificação local nesta etapa
@@ -332,5 +480,20 @@ referência para ele é o job `observability-stack` da CI.
   alertas usam `max` e o valor de uma instância que deixou de executar a tarefa só muda na próxima
   execução dela.
 - Rastros ficam apenas em memória no Jaeger (até 50.000 rastros); métricas ficam 7 dias no volume
-  do Prometheus. Não há encaminhamento de alertas (e-mail, plantão).
+  do Prometheus.
+- O Alertmanager roda em instância única, sem cluster. `RecorviaWatchdog` é notificado por e-mail
+  uma vez por dia; não há serviço externo que alerte pela ausência dessa notificação, e a queda
+  simultânea do Prometheus e do Alertmanager só é percebida por quem a acompanha.
+- No compose local, os silêncios e o registro de notificações do Alertmanager não sobrevivem ao
+  container: recriá-lo repete as notificações dos alertas ativos e descarta os silêncios.
+- O envio de e-mail com autenticação e STARTTLS não é exercitado de ponta a ponta (o Mailpit dos
+  testes não usa TLS): os testes cobrem a configuração gerada, o arquivo da senha e a recusa de
+  senha sem TLS.
+- As métricas globais de fila (`recorvia_dead_letters_open`, `recorvia_notifications_backlog`,
+  `recorvia_webhook_deliveries_backlog` e as idades) são atualizadas a cada `metrics.collect`
+  (15 s) pela instância do worker que executou a tarefa, como as demais contagens globais; os
+  limites dos alertas novos são pontos de partida a calibrar com volume real.
+- O link dos runbooks nas notificações aponta para o endereço definido na construção da imagem do
+  Prometheus (`RUNBOOK_BASE_URL`), por padrão o ramo `main` do repositório, que pode estar à frente
+  da versão implantada.
 - A taxa de amostragem dos rastros é de 100% quando a exportação está habilitada.

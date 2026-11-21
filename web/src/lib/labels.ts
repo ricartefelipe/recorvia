@@ -26,6 +26,14 @@ export const invitationStateLabels: Labels = {
   expired: 'Expirado',
 };
 
+/** Situação dos links do portal do cliente. */
+export const portalLinkStatusLabels: Labels = {
+  pending: 'Pendente',
+  used: 'Utilizado',
+  expired: 'Expirado',
+  revoked: 'Revogado',
+};
+
 export const memberStatusLabels: Labels = { active: 'Ativo', removed: 'Removido' };
 
 export const customerKindLabels: Labels = { individual: 'Pessoa física', company: 'Pessoa jurídica' };
@@ -226,6 +234,11 @@ export const reconciliationRunStatusLabels: Labels = {
   failed: 'Falhou',
 };
 
+export const reconciliationRunTriggerLabels: Labels = {
+  manual: 'Manual',
+  scheduled: 'Agendada',
+};
+
 export const templateKeyLabels: Labels = {
   invoice_issued: 'Fatura emitida',
   reminder_before_due: 'Lembrete antes do vencimento',
@@ -330,6 +343,7 @@ const statusColors: Record<string, string> = {
   accepted: 'green',
   revoked: 'gray',
   expired: 'gray',
+  used: 'green',
   removed: 'gray',
   applied: 'green',
   ended: 'gray',

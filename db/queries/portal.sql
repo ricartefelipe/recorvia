@@ -14,6 +14,24 @@ UPDATE customer_portal_links SET revoked_at = @revoked_at, revoke_reason = @revo
  WHERE tenant_id = @tenant_id AND customer_id = @customer_id AND revoked_at IS NULL
 RETURNING id;
 
+-- name: RevokePortalLink :execrows
+-- Revogação explícita de um link do cliente; não altera link já revogado.
+UPDATE customer_portal_links SET revoked_at = @revoked_at, revoke_reason = @revoke_reason
+ WHERE tenant_id = @tenant_id AND customer_id = @customer_id AND id = @id AND revoked_at IS NULL;
+
+-- name: ListPortalLinks :many
+-- Links do cliente para a organização, dos mais novos para os mais antigos.
+-- O hash do token não é lido: a listagem nunca o devolve.
+SELECT l.id, l.tenant_id, l.customer_id, l.created_by_user_id, l.created_by_credential_id, l.created_at, l.expires_at, l.used_at,
+       l.revoked_at, l.revoke_reason, u.display_name AS created_by_user_name, c.name AS created_by_credential_name
+  FROM customer_portal_links l
+  LEFT JOIN users u ON u.id = l.created_by_user_id
+  LEFT JOIN api_credentials c ON c.tenant_id = l.tenant_id AND c.id = l.created_by_credential_id
+ WHERE l.tenant_id = @tenant_id AND l.customer_id = @customer_id
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (l.created_at, l.id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY l.created_at DESC, l.id DESC
+ LIMIT @row_limit;
+
 -- name: GetPortalLink :one
 SELECT * FROM customer_portal_links WHERE tenant_id = @tenant_id AND id = @id;
 
@@ -31,9 +49,13 @@ SELECT link_id::uuid AS link_id, tenant_id::uuid AS tenant_id FROM app_find_port
 -- e sempre filtradas pelo cliente da sessão, além do tenant.
 
 -- name: ListPortalInvoices :many
+-- Paginação por keyset em (issued_at, id): toda fatura emitida tem issued_at
+-- (invoices_issued_fields), que não muda depois da emissão, de modo que
+-- faturas novas entram apenas antes da primeira página.
 SELECT * FROM invoices
- WHERE tenant_id = @tenant_id AND customer_id = @customer_id AND status <> 'draft'
- ORDER BY issued_at DESC NULLS LAST, created_at DESC, id DESC
+ WHERE tenant_id = @tenant_id AND customer_id = @customer_id AND status <> 'draft' AND issued_at IS NOT NULL
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (issued_at, id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY issued_at DESC, id DESC
  LIMIT @row_limit;
 
 -- name: GetPortalInvoice :one

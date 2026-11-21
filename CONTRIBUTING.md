@@ -23,6 +23,11 @@ Regras:
   publicado.
 - Conflitos são resolvidos preservando as regras de negócio, e as verificações
   afetadas são executadas novamente.
+- Branches `feature/*`, `release/*` e `hotfix/*` são apagadas depois do
+  merge; no repositório ficam somente `main` e `develop`.
+- Arquivos do ambiente de cada pessoa (configuração de editor e de ferramentas
+  locais, `.env`, relatórios e caches) ficam fora do repositório, no
+  `.gitignore`.
 
 ## Commits
 
@@ -51,14 +56,19 @@ release.
 2. Ajustes de estabilização e atualização do `CHANGELOG.md`.
 3. PR `release/X.Y.Z → main`; após checks, merge commit.
 4. Tag anotada `vX.Y.Z` no merge em `main`.
-5. PR `release/X.Y.Z → develop` (ou `main → develop`) para reintegrar.
+5. Reintegração: avance a branch da release até o merge de `main`
+   (`git switch release/X.Y.Z && git merge --ff-only origin/main`) e abra o PR
+   `release/X.Y.Z → develop`. Assim `develop` contém o merge da release e nunca
+   fica atrás de `main`.
 
 ### Hotfix
 
 1. `git switch main && git switch -c hotfix/X.Y.Z`
 2. Correção com teste de regressão.
 3. PR para `main`, tag anotada `vX.Y.Z`.
-4. Reintegrar em `develop` e na release ativa, se houver.
+4. Reintegração em `develop` como na release: avance `hotfix/X.Y.Z` até o
+   merge de `main` e abra o PR para `develop` (e para a release ativa, se
+   houver).
 
 ## Pull requests
 

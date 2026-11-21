@@ -219,5 +219,28 @@ func DBPoolStats(db *postgres.DB) func() telemetry.DBPoolStats {
 	}
 }
 
+func reconciliationRunStats(s pgstore.ReconciliationRunStats) telemetry.ReconciliationRunStats {
+	return telemetry.ReconciliationRunStats{Queued: s.Queued, Executing: s.Executing, Stalled: s.Stalled,
+		OldestWaitingSeconds: s.OldestWaitingSeconds}
+}
+
+// ReconciliationRunStats adapta as contagens agregadas das execuções de
+// conciliação em andamento às métricas lidas a cada coleta do Prometheus
+// (telemetry.Metrics.ObserveReconciliationRuns). É usada pela API: ela
+// registra os pedidos de conciliação e, com as métricas, mostra a execução
+// que nenhum worker assumiu mesmo quando não há worker em execução. A falha
+// de leitura é registrada no log e devolvida (as séries mantêm o último
+// valor).
+func ReconciliationRunStats(store *pgstore.Store, log *slog.Logger) func(ctx context.Context) (telemetry.ReconciliationRunStats, error) {
+	return func(ctx context.Context) (telemetry.ReconciliationRunStats, error) {
+		s, err := store.ReconciliationRunStats(ctx)
+		if err != nil {
+			log.WarnContext(ctx, "leitura das execuções de conciliação em andamento falhou", slog.String("error", err.Error()))
+			return telemetry.ReconciliationRunStats{}, err
+		}
+		return reconciliationRunStats(s), nil
+	}
+}
+
 // ErrShutdown sinaliza encerramento solicitado.
 var ErrShutdown = errors.New("encerramento solicitado")

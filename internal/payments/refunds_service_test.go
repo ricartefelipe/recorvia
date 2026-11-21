@@ -424,7 +424,7 @@ func TestRefundConsumesCustomerCreditFromOverpayment(t *testing.T) {
 	if r3 := f.refund(t, c.ID, 1000, ""); !r3.CreditAmount.IsZero() {
 		t.Fatalf("sem excedente: %v", r3.CreditAmount)
 	}
-	for _, m := range []string{"RefundCreditBase", "CustomerCreditBalance", "GrantCustomerCredit"} {
+	for _, m := range []string{"OverpaymentCreditBase", "CustomerCreditBalance", "GrantCustomerCredit"} {
 		t.Run("falha em "+m, func(t *testing.T) {
 			f, _, c := paidFixture(t)
 			f.store.overpaid[c.ID] = brl(2000)

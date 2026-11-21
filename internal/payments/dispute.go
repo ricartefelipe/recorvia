@@ -32,12 +32,19 @@ var disputeTransitions = map[DisputeStatus][]DisputeStatus{
 // valor contestado fica retido (lançamento dispute.opened); a disputa ganha
 // estorna esse lançamento e a perdida registra o chargeback na cobrança.
 type Dispute struct {
-	ID             uuid.UUID
-	TenantID       uuid.UUID
-	ChargeID       uuid.UUID
-	Provider       string
-	Status         DisputeStatus
-	Amount         money.Money
+	ID       uuid.UUID
+	TenantID uuid.UUID
+	ChargeID uuid.UUID
+	Provider string
+	Status   DisputeStatus
+	Amount   money.Money
+	// CreditAmount é a parte do chargeback da disputa perdida que consumiu
+	// crédito do cliente gerado pelo excedente do pagamento da cobrança.
+	CreditAmount money.Money
+	// RecoveryAmount é a parte desse excedente que o cliente já havia usado
+	// quando o pagamento foi estornado: valor a recuperar do cliente, em vez
+	// de saldo de crédito negativo.
+	RecoveryAmount money.Money
 	ProviderStatus string
 	OpenedAt       time.Time
 	ClosedAt       *time.Time

@@ -116,6 +116,10 @@ func run(log *slog.Logger) error {
 	// recorvia_dependency_up reflete o estado atual a cada coleta, sem
 	// depender de consultas a /readyz.
 	metrics.ObserveDependencies(2*time.Second, deps)
+	// A API registra os pedidos de conciliação e exporta, a cada coleta, as
+	// execuções em andamento: a execução que nenhum worker assumiu aparece
+	// nas métricas (e no alerta) mesmo sem worker em execução.
+	metrics.ObserveReconciliationRuns(2*time.Second, app.ReconciliationRunStats(core.Store, log))
 
 	_, router := httpapi.NewRouter(httpapi.Deps{
 		Log: log, Config: cfg, Clock: core.Clock, Metrics: metrics, Store: core.Store, Sessions: sessions, Identity: ids,

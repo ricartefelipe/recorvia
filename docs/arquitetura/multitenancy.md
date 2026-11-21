@@ -42,9 +42,25 @@ trabalho sem abrir dados: `app_tenants_with_due_billing`, `app_tenants_with_pend
 `app_platform_tenant_catalog` (sem valores financeiros), `app_tenants_for_collections`,
 `app_tenants_with_due_notifications` e `app_tenants_with_due_webhook_deliveries` (estas três
 paginadas pelo ID do tenant, com rodízio entre execuções), `app_tenants_due_reconciliation` (tenants
-elegíveis à conciliação agendada) e as contagens agregadas para métricas
-(`app_payment_operation_stats`, `app_open_discrepancy_stats`, `app_refund_stats`). O processamento
-ocorre depois, dentro da transação de cada tenant.
+elegíveis à conciliação agendada), `app_claimable_reconciliation_runs` (execuções de conciliação que
+um worker pode assumir, de todos os tenants: somente os IDs do tenant e da execução) e as contagens
+agregadas para métricas (`app_payment_operation_stats`, `app_open_discrepancy_stats`,
+`app_refund_stats`, `app_reconciliation_run_stats`, que conta as execuções de conciliação em
+andamento por estado, sem identificar tenants, e as três das filas: `app_dead_letter_stats` (dead
+letters abertas por consumidor), `app_notification_backlog_stats` (notificações vencidas, em envio e
+com falha) e `app_webhook_delivery_backlog_stats` (entregas de webhooks pendentes e em retentativa),
+todas devolvendo somente totais e a idade do item mais antigo). O processamento ocorre depois, dentro
+da transação de cada tenant.
+
+Completam o inventário: `app_tenant_slug_available` (disponibilidade de um slug no onboarding;
+responde só sim ou não), `app_tenants_due_platform_statement` (tenants com extrato da plataforma a
+emitir, somente IDs), `app_tenants_with_late_usage` (tenants com consumo a corrigir, somente IDs),
+as demais funções do publicador da outbox (`app_outbox_mark_published`, `app_outbox_release`,
+`app_outbox_purge` e a contagem agregada `app_outbox_stats`), `app_dead_letter_record_untenanted`
+(grava a mensagem sem tenant válido, visível apenas à operação) e `app_idempotency_purge_expired`
+(remove chaves de idempotência concluídas e expiradas). Toda função `SECURITY DEFINER` criada por
+migration precisa constar nesta seção: o teste `TestSecurityDefinerFunctionsAreDocumented`
+(`internal/infra/migrate`) compara as migrations com este documento.
 
 ## Workers, eventos, cache e arquivos
 

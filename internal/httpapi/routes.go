@@ -56,7 +56,9 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	t(get, "/api/v1/customers/{id}/history", tenancy.PermCustomersRead, a.customerHistory)
 	t(get, "/api/v1/customers/{id}/credits", tenancy.PermCustomersRead, a.getCredits)
 	t(post, "/api/v1/customers/{id}/credits", tenancy.PermCreditsWrite, a.grantCredit, idempotent())
+	t(get, "/api/v1/customers/{id}/portal-links", tenancy.PermPortalLinks, a.listPortalLinks)
 	t(post, "/api/v1/customers/{id}/portal-links", tenancy.PermPortalLinks, a.createPortalLink)
+	t(del, "/api/v1/customers/{id}/portal-links/{link_id}", tenancy.PermPortalLinks, a.revokePortalLink)
 
 	t(get, "/api/v1/products", tenancy.PermCatalogRead, a.listProducts)
 	t(post, "/api/v1/products", tenancy.PermCatalogWrite, a.createProduct)
@@ -138,6 +140,7 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 
 	t(get, "/api/v1/reconciliation/runs", tenancy.PermReconciliationRead, a.listReconciliationRuns)
 	t(post, "/api/v1/reconciliation/runs", tenancy.PermReconciliationRun, a.runReconciliation, idempotent())
+	t(get, "/api/v1/reconciliation/runs/{id}", tenancy.PermReconciliationRead, a.getReconciliationRun)
 	t(get, "/api/v1/reconciliation/discrepancies", tenancy.PermReconciliationRead, a.listDiscrepancies)
 	t(get, "/api/v1/reconciliation/discrepancies/{id}", tenancy.PermReconciliationRead, a.getDiscrepancy)
 	t(post, "/api/v1/reconciliation/discrepancies/{id}/resolve", tenancy.PermReconciliationResolve, a.resolveDiscrepancy)

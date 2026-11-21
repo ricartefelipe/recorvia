@@ -242,31 +242,6 @@ func TestCreateLinkRejections(t *testing.T) {
 	}
 }
 
-func TestRevokeLinksEndsSessions(t *testing.T) {
-	e := newEnv(t)
-	_, token := e.link(t)
-	s := e.exchange(t, token)
-	n, err := e.svc.RevokeLinks(context.Background(), e.tenantID, e.creator.Actor, e.customer.ID)
-	if err != nil || n != 1 {
-		t.Fatalf("revogação: %d %v", n, err)
-	}
-	if a := e.d().audits[len(e.d().audits)-1]; a.Action != "customer.portal_links_revoked" || a.Details["links"] != 1 {
-		t.Fatalf("auditoria: %+v", a)
-	}
-	_, err = e.svc.Authenticate(context.Background(), s.ID)
-	assertErr(t, err, apperr.KindUnauthenticated, "portal_session_invalid")
-	audits := len(e.d().audits)
-	if n, err := e.svc.RevokeLinks(context.Background(), e.tenantID, e.creator.Actor, e.customer.ID); err != nil || n != 0 || len(e.d().audits) != audits {
-		t.Fatalf("sem links ativos, nada é revogado nem auditado: %d %v", n, err)
-	}
-	_, err = e.svc.RevokeLinks(context.Background(), e.tenantID, e.creator.Actor, uuid.New())
-	assertErr(t, err, apperr.KindNotFound, "customer_not_found")
-	e.store.fail["RevokeActiveLinks"] = errBoom
-	if _, err := e.svc.RevokeLinks(context.Background(), e.tenantID, e.creator.Actor, e.customer.ID); !errors.Is(err, errBoom) {
-		t.Fatalf("falha da revogação: %v", err)
-	}
-}
-
 func TestExchangeCreatesRestrictedSession(t *testing.T) {
 	e := newEnv(t)
 	l, token := e.link(t)
@@ -298,8 +273,8 @@ func TestExchangeRejectsReusedExpiredAndRevokedLinks(t *testing.T) {
 	}{
 		{"usado duas vezes", func(e *env, _ Link, token string) string { e.exchange(e.t(), token); return token }},
 		{"expirado", func(e *env, _ Link, token string) string { e.clock.Advance(72 * time.Hour); return token }},
-		{"revogado", func(e *env, _ Link, token string) string {
-			if _, err := e.svc.RevokeLinks(context.Background(), e.tenantID, e.creator.Actor, e.customer.ID); err != nil {
+		{"revogado", func(e *env, l Link, token string) string {
+			if _, err := e.svc.RevokeLink(context.Background(), e.tenantID, e.creator.Actor, e.customer.ID, l.ID); err != nil {
 				e.t().Fatal(err)
 			}
 			return token

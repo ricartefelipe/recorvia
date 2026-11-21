@@ -1,0 +1,49 @@
+# Roteamento, agrupamento, inibição e repetição dos alertas do Recorvia
+# (ADR-065). Esta é a parte fixa da configuração: os receptores e as
+# definições globais de SMTP são gerados na partida do container pelo
+# entrypoint.sh, a partir das variáveis ALERTMANAGER_*, e acrescentados a
+# este arquivo. Nenhum endereço, credencial ou URL de destino fica na imagem.
+#
+# Receptores (sempre declarados; sem as variáveis, ficam sem integração e os
+# alertas aparecem apenas na interface do Alertmanager):
+#   recorvia-critical  e-mail (ALERTMANAGER_EMAIL_TO_CRITICAL) e webhook
+#   recorvia-warning   e-mail (ALERTMANAGER_EMAIL_TO) e webhook
+#   recorvia-watchdog  e-mail (ALERTMANAGER_EMAIL_TO): verificação do caminho
+templates:
+  - /etc/alertmanager/templates/*.tmpl
+
+route:
+  # Avisos e alertas sem severidade conhecida: análise no mesmo dia.
+  receiver: recorvia-warning
+  # Um e-mail por alerta e severidade, reunindo consumidores, filas e
+  # instâncias afetados.
+  group_by: [alertname, area, severity]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  routes:
+    # Alerta sempre ativo: uma notificação por dia confirma o caminho
+    # Prometheus -> Alertmanager -> destinatário.
+    - matchers: ['alertname="RecorviaWatchdog"']
+      receiver: recorvia-watchdog
+      group_by: [alertname]
+      group_wait: 10s
+      repeat_interval: 24h
+    # Críticos: ação imediata, com repetição a cada hora enquanto durar.
+    - matchers: ['severity="critical"']
+      receiver: recorvia-critical
+      group_wait: 10s
+      group_interval: 2m
+      repeat_interval: 1h
+    - matchers: ['severity="warning"']
+      receiver: recorvia-warning
+
+inhibit_rules:
+  # Um alerta com as duas severidades (mesmo nome e mesmos rótulos de
+  # agregação) notifica somente a crítica enquanto ela durar. Os rótulos de
+  # "equal" são os usados nas agregações das regras; os ausentes nos dois
+  # alertas contam como iguais.
+  - name: critico-inibe-aviso
+    source_matchers: ['severity="critical"']
+    target_matchers: ['severity="warning"']
+    equal: [alertname, consumer, state, queue, provider, service, instance, task, kind, status, dependency, outcome, integration]

@@ -35,6 +35,10 @@ const (
 	RevenueAdjustments        AccountCode = "revenue_adjustments"
 	BadDebt                   AccountCode = "bad_debt"
 	ReconciliationAdjustments AccountCode = "reconciliation_adjustments"
+	// CustomerRecoverables reúne os valores a recuperar de clientes: crédito
+	// de pagamento excedente já usado quando o pagamento que o gerou foi
+	// estornado por chargeback.
+	CustomerRecoverables AccountCode = "customer_recoverables"
 )
 
 // AccountKind define a natureza da conta.
@@ -71,6 +75,7 @@ var Chart = []AccountDef{
 	{RevenueAdjustments, "Ajustes de faturamento", ContraRevenue},
 	{BadDebt, "Perdas com inadimplência", Expense},
 	{ReconciliationAdjustments, "Ajustes de conciliação", Expense},
+	{CustomerRecoverables, "Valores a recuperar de clientes", Asset},
 }
 
 // AccountKindOf retorna a natureza de uma conta do plano.
@@ -273,6 +278,23 @@ func ChargebackHoldReleased(id, tenant, disputeID uuid.UUID, amount money.Money,
 func ChargebackHoldRestored(id, tenant, refundID uuid.UUID, amount money.Money, at time.Time) (Transaction, bool, error) {
 	return build(id, tenant, "dispute.hold_restored", "Chargeback do valor de reembolso recusado depois da disputa perdida", at, "refund",
 		refundID, "dispute.hold_restored:"+refundID.String(), pair(Chargebacks, ProviderClearing, amount))
+}
+
+// ChargebackCreditReversed: parte do chargeback que corresponde ao excedente
+// do pagamento convertido em crédito do cliente. O valor sai de chargebacks
+// (não é receita perdida): consumed reduz a obrigação com o cliente (crédito
+// ainda disponível, consumido) e recovery é o crédito que o cliente já havia
+// usado e passa a ser valor a recuperar dele. refType e refID identificam a
+// origem: a disputa perdida ou o reembolso recusado depois dela, cujo valor
+// passou ao chargeback (um lançamento por origem).
+func ChargebackCreditReversed(id, tenant uuid.UUID, refType string, refID uuid.UUID, consumed, recovery money.Money, at time.Time) (Transaction, bool, error) {
+	if consumed.IsNegative() || recovery.IsNegative() {
+		return Transaction{}, false, fmt.Errorf("%w: parte do crédito negativa", ErrInvalidEntry)
+	}
+	entries := pair(CustomerCredits, Chargebacks, consumed)
+	entries = append(entries, pair(CustomerRecoverables, Chargebacks, recovery)...)
+	return build(id, tenant, "dispute.credit_reversed", "Chargeback de pagamento excedente: crédito do cliente estornado", at, refType, refID,
+		"dispute.credit_reversed:"+refType+":"+refID.String(), entries)
 }
 
 // InvoiceWrittenOff: saldo considerado incobrável.

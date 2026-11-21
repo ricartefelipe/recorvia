@@ -141,11 +141,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Configurações de observabilidade (otelcol validate, jaeger validate, promtool, dashboards)
+      - name: Configurações de observabilidade (otelcol validate, jaeger validate, promtool, amtool check-config, dashboards)
         run: make obs-check
 
   # Ambiente completo com o perfil observability (make up-obs), como no uso
-  # local: alvos de coleta, regras, séries usadas pelos alertas, fonte de
+  # local: alvos de coleta, regras, séries usadas pelos alertas, o caminho de
+  # um alerta do Prometheus ao e-mail (Alertmanager e Mailpit), fonte de
   # dados e dashboards do Grafana e rastros da API e do worker no Jaeger.
   observability-stack:
     name: observability-stack
@@ -155,13 +156,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Ambiente com o perfil observability e dados de demonstração
         run: make up-obs
-      - name: Coleta, regras, dashboards e rastros
+      - name: Coleta, regras, alerta até o e-mail, dashboards e rastros
         run: make obs-stack-check
       - name: Logs do ambiente em caso de falha
         if: failure()
         run: |
           docker compose --profile observability ps -a >compose-logs.txt 2>&1 || true
-          docker compose --profile observability logs --no-color --tail 300 otel-collector jaeger prometheus grafana api worker rabbitmq >>compose-logs.txt 2>&1 || true
+          docker compose --profile observability logs --no-color --tail 300 otel-collector jaeger prometheus alertmanager mailpit grafana api worker rabbitmq >>compose-logs.txt 2>&1 || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:

@@ -12,6 +12,25 @@ import (
 	"github.com/google/uuid"
 )
 
+const chargeChargebackCreditAmount = `-- name: ChargeChargebackCreditAmount :one
+SELECT COALESCE(sum(credit_amount + recovery_amount), 0)::bigint AS amount FROM disputes
+ WHERE tenant_id = $1 AND charge_id = $2 AND status = 'lost'
+`
+
+type ChargeChargebackCreditAmountParams struct {
+	TenantID uuid.UUID
+	ChargeID uuid.UUID
+}
+
+// Excedente do pagamento da cobrança já estornado por chargeback: crédito
+// consumido do saldo do cliente e valor a recuperar das disputas perdidas.
+func (q *Queries) ChargeChargebackCreditAmount(ctx context.Context, arg ChargeChargebackCreditAmountParams) (int64, error) {
+	row := q.db.QueryRow(ctx, chargeChargebackCreditAmount, arg.TenantID, arg.ChargeID)
+	var amount int64
+	err := row.Scan(&amount)
+	return amount, err
+}
+
 const chargeOverpaymentAmount = `-- name: ChargeOverpaymentAmount :one
 SELECT COALESCE(sum(e.amount), 0)::bigint AS amount
   FROM payments p
@@ -51,30 +70,38 @@ func (q *Queries) ChargeRefundedCreditAmount(ctx context.Context, arg ChargeRefu
 	return amount, err
 }
 
-const failStaleReconciliationRuns = `-- name: FailStaleReconciliationRuns :execrows
-UPDATE reconciliation_runs
-   SET status = 'failed', finished_at = $1, lease_until = NULL, error = $2
- WHERE tenant_id = $3 AND provider_account_id = $4 AND status = 'running' AND lease_until < $1
+const claimableReconciliationRuns = `-- name: ClaimableReconciliationRuns :many
+SELECT r.tenant_id::uuid AS tenant_id, r.run_id::uuid AS run_id FROM app_claimable_reconciliation_runs($1, $2) AS r
 `
 
-type FailStaleReconciliationRunsParams struct {
-	Now               *time.Time
-	Error             *string
-	TenantID          uuid.UUID
-	ProviderAccountID uuid.UUID
+type ClaimableReconciliationRunsParams struct {
+	Now      time.Time
+	RowLimit int32
 }
 
-func (q *Queries) FailStaleReconciliationRuns(ctx context.Context, arg FailStaleReconciliationRunsParams) (int64, error) {
-	result, err := q.db.Exec(ctx, failStaleReconciliationRuns,
-		arg.Now,
-		arg.Error,
-		arg.TenantID,
-		arg.ProviderAccountID,
-	)
+type ClaimableReconciliationRunsRow struct {
+	TenantID uuid.UUID
+	RunID    uuid.UUID
+}
+
+func (q *Queries) ClaimableReconciliationRuns(ctx context.Context, arg ClaimableReconciliationRunsParams) ([]ClaimableReconciliationRunsRow, error) {
+	rows, err := q.db.Query(ctx, claimableReconciliationRuns, arg.Now, arg.RowLimit)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return result.RowsAffected(), nil
+	defer rows.Close()
+	var items []ClaimableReconciliationRunsRow
+	for rows.Next() {
+		var i ClaimableReconciliationRunsRow
+		if err := rows.Scan(&i.TenantID, &i.RunID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const finishReconciliationRun = `-- name: FinishReconciliationRun :exec
@@ -243,7 +270,7 @@ func (q *Queries) GetDiscrepancyForUpdate(ctx context.Context, arg GetDiscrepanc
 }
 
 const getLatestDisputeForCharge = `-- name: GetLatestDisputeForCharge :one
-SELECT id, tenant_id, charge_id, provider, status, amount, currency, provider_status, opened_at, closed_at, created_at, updated_at, version FROM disputes WHERE tenant_id = $1 AND charge_id = $2 ORDER BY opened_at DESC, id DESC LIMIT 1
+SELECT id, tenant_id, charge_id, provider, status, amount, currency, provider_status, opened_at, closed_at, created_at, updated_at, version, credit_amount, recovery_amount FROM disputes WHERE tenant_id = $1 AND charge_id = $2 ORDER BY opened_at DESC, id DESC LIMIT 1
 `
 
 type GetLatestDisputeForChargeParams struct {
@@ -268,12 +295,14 @@ func (q *Queries) GetLatestDisputeForCharge(ctx context.Context, arg GetLatestDi
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Version,
+		&i.CreditAmount,
+		&i.RecoveryAmount,
 	)
 	return i, err
 }
 
 const getReconciliationRun = `-- name: GetReconciliationRun :one
-SELECT id, tenant_id, provider_account_id, provider, trigger_type, status, window_start, window_end, checked_count, discrepancy_count, error, requested_by, request_key, lease_until, started_at, finished_at, updated_at FROM reconciliation_runs WHERE tenant_id = $1 AND id = $2
+SELECT id, tenant_id, provider_account_id, provider, trigger_type, status, window_start, window_end, checked_count, discrepancy_count, error, requested_by, request_key, lease_until, started_at, finished_at, updated_at, attempts FROM reconciliation_runs WHERE tenant_id = $1 AND id = $2
 `
 
 type GetReconciliationRunParams struct {
@@ -302,12 +331,13 @@ func (q *Queries) GetReconciliationRun(ctx context.Context, arg GetReconciliatio
 		&i.StartedAt,
 		&i.FinishedAt,
 		&i.UpdatedAt,
+		&i.Attempts,
 	)
 	return i, err
 }
 
 const getReconciliationRunByRequestKey = `-- name: GetReconciliationRunByRequestKey :one
-SELECT id, tenant_id, provider_account_id, provider, trigger_type, status, window_start, window_end, checked_count, discrepancy_count, error, requested_by, request_key, lease_until, started_at, finished_at, updated_at FROM reconciliation_runs WHERE tenant_id = $1 AND request_key = $2
+SELECT id, tenant_id, provider_account_id, provider, trigger_type, status, window_start, window_end, checked_count, discrepancy_count, error, requested_by, request_key, lease_until, started_at, finished_at, updated_at, attempts FROM reconciliation_runs WHERE tenant_id = $1 AND request_key = $2
 `
 
 type GetReconciliationRunByRequestKeyParams struct {
@@ -336,12 +366,13 @@ func (q *Queries) GetReconciliationRunByRequestKey(ctx context.Context, arg GetR
 		&i.StartedAt,
 		&i.FinishedAt,
 		&i.UpdatedAt,
+		&i.Attempts,
 	)
 	return i, err
 }
 
 const getReconciliationRunForUpdate = `-- name: GetReconciliationRunForUpdate :one
-SELECT id, tenant_id, provider_account_id, provider, trigger_type, status, window_start, window_end, checked_count, discrepancy_count, error, requested_by, request_key, lease_until, started_at, finished_at, updated_at FROM reconciliation_runs WHERE tenant_id = $1 AND id = $2 FOR UPDATE
+SELECT id, tenant_id, provider_account_id, provider, trigger_type, status, window_start, window_end, checked_count, discrepancy_count, error, requested_by, request_key, lease_until, started_at, finished_at, updated_at, attempts FROM reconciliation_runs WHERE tenant_id = $1 AND id = $2 FOR UPDATE
 `
 
 type GetReconciliationRunForUpdateParams struct {
@@ -370,6 +401,7 @@ func (q *Queries) GetReconciliationRunForUpdate(ctx context.Context, arg GetReco
 		&i.StartedAt,
 		&i.FinishedAt,
 		&i.UpdatedAt,
+		&i.Attempts,
 	)
 	return i, err
 }
@@ -637,9 +669,9 @@ func (q *Queries) InsertOperationIfAbsent(ctx context.Context, arg InsertOperati
 
 const insertReconciliationRun = `-- name: InsertReconciliationRun :exec
 INSERT INTO reconciliation_runs (id, tenant_id, provider_account_id, provider, trigger_type, status, window_start, window_end, checked_count,
-                                 discrepancy_count, error, requested_by, request_key, lease_until, started_at, finished_at, updated_at)
+                                 discrepancy_count, error, requested_by, request_key, lease_until, attempts, started_at, finished_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, NULL, $9,
-        $10, $11, $12, NULL, $12)
+        $10, $11, $12, $13, NULL, $13)
 `
 
 type InsertReconciliationRunParams struct {
@@ -654,6 +686,7 @@ type InsertReconciliationRunParams struct {
 	RequestedBy       *uuid.UUID
 	RequestKey        *string
 	LeaseUntil        *time.Time
+	Attempts          int32
 	StartedAt         time.Time
 }
 
@@ -670,6 +703,7 @@ func (q *Queries) InsertReconciliationRun(ctx context.Context, arg InsertReconci
 		arg.RequestedBy,
 		arg.RequestKey,
 		arg.LeaseUntil,
+		arg.Attempts,
 		arg.StartedAt,
 	)
 	return err
@@ -1089,7 +1123,7 @@ func (q *Queries) ListDisputeEvents(ctx context.Context, arg ListDisputeEventsPa
 }
 
 const listDisputes = `-- name: ListDisputes :many
-SELECT id, tenant_id, charge_id, provider, status, amount, currency, provider_status, opened_at, closed_at, created_at, updated_at, version FROM disputes
+SELECT id, tenant_id, charge_id, provider, status, amount, currency, provider_status, opened_at, closed_at, created_at, updated_at, version, credit_amount, recovery_amount FROM disputes
  WHERE tenant_id = $1
    AND ($2::uuid IS NULL OR charge_id = $2)
  ORDER BY opened_at DESC, id DESC
@@ -1125,6 +1159,8 @@ func (q *Queries) ListDisputes(ctx context.Context, arg ListDisputesParams) ([]D
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.Version,
+			&i.CreditAmount,
+			&i.RecoveryAmount,
 		); err != nil {
 			return nil, err
 		}
@@ -1208,7 +1244,7 @@ func (q *Queries) ListOpenDiscrepanciesForSubjects(ctx context.Context, arg List
 }
 
 const listReconciliationRuns = `-- name: ListReconciliationRuns :many
-SELECT id, tenant_id, provider_account_id, provider, trigger_type, status, window_start, window_end, checked_count, discrepancy_count, error, requested_by, request_key, lease_until, started_at, finished_at, updated_at FROM reconciliation_runs WHERE tenant_id = $1 ORDER BY started_at DESC, id DESC LIMIT $2
+SELECT id, tenant_id, provider_account_id, provider, trigger_type, status, window_start, window_end, checked_count, discrepancy_count, error, requested_by, request_key, lease_until, started_at, finished_at, updated_at, attempts FROM reconciliation_runs WHERE tenant_id = $1 ORDER BY started_at DESC, id DESC LIMIT $2
 `
 
 type ListReconciliationRunsParams struct {
@@ -1243,6 +1279,7 @@ func (q *Queries) ListReconciliationRuns(ctx context.Context, arg ListReconcilia
 			&i.StartedAt,
 			&i.FinishedAt,
 			&i.UpdatedAt,
+			&i.Attempts,
 		); err != nil {
 			return nil, err
 		}
@@ -1478,6 +1515,37 @@ func (q *Queries) OpenDiscrepancyStats(ctx context.Context) ([]OpenDiscrepancySt
 	return items, nil
 }
 
+const reconciliationRunStats = `-- name: ReconciliationRunStats :many
+SELECT state::text AS state, total::bigint AS total, oldest_seconds::double precision AS oldest_seconds
+  FROM app_reconciliation_run_stats($1)
+`
+
+type ReconciliationRunStatsRow struct {
+	State         string
+	Total         int64
+	OldestSeconds float64
+}
+
+func (q *Queries) ReconciliationRunStats(ctx context.Context, now time.Time) ([]ReconciliationRunStatsRow, error) {
+	rows, err := q.db.Query(ctx, reconciliationRunStats, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ReconciliationRunStatsRow
+	for rows.Next() {
+		var i ReconciliationRunStatsRow
+		if err := rows.Scan(&i.State, &i.Total, &i.OldestSeconds); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const refundStats = `-- name: RefundStats :many
 SELECT status::text AS status, total::bigint AS total FROM app_refund_stats()
 `
@@ -1505,6 +1573,34 @@ func (q *Queries) RefundStats(ctx context.Context) ([]RefundStatsRow, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const setReconciliationRunLease = `-- name: SetReconciliationRunLease :execrows
+UPDATE reconciliation_runs
+   SET lease_until = $1, attempts = $2
+ WHERE tenant_id = $3 AND id = $4 AND status = 'running'
+`
+
+type SetReconciliationRunLeaseParams struct {
+	LeaseUntil *time.Time
+	Attempts   int32
+	TenantID   uuid.UUID
+	ID         uuid.UUID
+}
+
+// Assume a execução em andamento (novo lease e mais uma tentativa) ou a
+// devolve para ser retomada (lease vencido, mesma contagem de tentativas).
+func (q *Queries) SetReconciliationRunLease(ctx context.Context, arg SetReconciliationRunLeaseParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setReconciliationRunLease,
+		arg.LeaseUntil,
+		arg.Attempts,
+		arg.TenantID,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const tenantsDueReconciliation = `-- name: TenantsDueReconciliation :many
@@ -1591,14 +1687,17 @@ func (q *Queries) UpdateDiscrepancy(ctx context.Context, arg UpdateDiscrepancyPa
 
 const updateDispute = `-- name: UpdateDispute :execrows
 UPDATE disputes
-   SET status = $1, provider_status = $2, closed_at = $3, version = version + 1
- WHERE tenant_id = $4 AND id = $5 AND version = $6
+   SET status = $1, provider_status = $2, closed_at = $3, credit_amount = $4,
+       recovery_amount = $5, version = version + 1
+ WHERE tenant_id = $6 AND id = $7 AND version = $8
 `
 
 type UpdateDisputeParams struct {
 	Status         string
 	ProviderStatus *string
 	ClosedAt       *time.Time
+	CreditAmount   int64
+	RecoveryAmount int64
 	TenantID       uuid.UUID
 	ID             uuid.UUID
 	Version        int32
@@ -1609,6 +1708,8 @@ func (q *Queries) UpdateDispute(ctx context.Context, arg UpdateDisputeParams) (i
 		arg.Status,
 		arg.ProviderStatus,
 		arg.ClosedAt,
+		arg.CreditAmount,
+		arg.RecoveryAmount,
 		arg.TenantID,
 		arg.ID,
 		arg.Version,

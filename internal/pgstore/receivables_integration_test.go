@@ -777,20 +777,31 @@ func TestScheduledReconciliationDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	lease := h.env.Clock.Now().Add(time.Hour)
+	interrupted := uuid.New()
 	_, err = envOwner(t).Exec(ctx, `INSERT INTO reconciliation_runs (id, tenant_id, provider_account_id, provider, trigger_type, status,
-	    window_start, window_end, lease_until, started_at) VALUES ($1, $2, $3, 'simulator', 'manual', 'running', $4, $5, $6, $5)`,
-		uuid.New(), h.tn.ID, accounts[0].ID, h.env.Clock.Now().Add(-time.Hour), h.env.Clock.Now(), lease)
+	    window_start, window_end, lease_until, attempts, started_at) VALUES ($1, $2, $3, 'simulator', 'manual', 'running', $4, $5, $6, 1, $5)`,
+		interrupted, h.tn.ID, accounts[0].ID, h.env.Clock.Now().Add(-time.Hour), h.env.Clock.Now(), lease)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.pay.RunReconciliation(ctx, h.tn.ID, h.tn.Actor, nil, payments.RunInput{}); !apperr.IsKind(err, apperr.KindConflict) {
 		t.Fatalf("execução simultânea: %v", err)
 	}
+	// Lease expirado (worker interrompido): a execução continua sendo a da
+	// conta até um worker retomá-la e concluí-la; depois a conta fica livre.
 	h.env.Clock.Advance(2 * time.Hour)
-	if run, err := h.pay.RunReconciliation(ctx, h.tn.ID, h.tn.Actor, nil, payments.RunInput{}); err != nil || run.Status != payments.RunCompleted {
-		t.Fatalf("execução após lease expirado: %+v %v", run, err)
+	if _, err := h.pay.RunReconciliation(ctx, h.tn.ID, h.tn.Actor, nil, payments.RunInput{}); !apperr.IsKind(err, apperr.KindConflict) {
+		t.Fatalf("execução interrompida ainda em andamento: %v", err)
 	}
-	if n := h.sum(t, `SELECT count(*) FROM reconciliation_runs WHERE tenant_id = $1 AND status = 'failed'`); n != 1 {
-		t.Fatalf("execução interrompida encerrada = %d", n)
+	resumed, outcome, err := h.pay.ExecuteReconciliationRun(ctx, h.tn.ID, interrupted)
+	if err != nil || outcome != payments.RunOutcomeCompleted || resumed.Attempts != 2 || resumed.Status != payments.RunCompleted {
+		t.Fatalf("retomada da execução interrompida: %s %+v %v", outcome, resumed, err)
+	}
+	h.env.Clock.Advance(time.Minute)
+	if run, err := h.pay.RunReconciliation(ctx, h.tn.ID, h.tn.Actor, nil, payments.RunInput{}); err != nil || run.Status != payments.RunCompleted {
+		t.Fatalf("execução depois da retomada: %+v %v", run, err)
+	}
+	if n := h.sum(t, `SELECT count(*) FROM reconciliation_runs WHERE tenant_id = $1 AND status <> 'completed'`); n != 0 {
+		t.Fatalf("execuções não concluídas = %d", n)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -255,6 +256,47 @@ func TestInitSeriesStartAtZero(t *testing.T) {
 	}
 }
 
+// Os medidores de fila gravam tamanho e idade com o mesmo rótulo e aceitam
+// a volta a zero (fila esvaziada), sem rótulos de tenant.
+func TestQueueGaugesSetTotalAndOldestAge(t *testing.T) {
+	m := NewMetrics("worker")
+	m.DeadLetters().Set("payments.provider_webhooks", 4, 5400)
+	m.DeadLetters().Set(OtherConsumer, 1, 12)
+	m.NotificationQueue().Set("due", 30, 900)
+	m.WebhookDeliveryQueue().Set("retrying", 8, 61.5)
+	cases := []struct {
+		name   string
+		labels map[string]string
+		want   float64
+	}{
+		{"recorvia_dead_letters_open", map[string]string{"consumer": "payments.provider_webhooks", "service": "worker"}, 4},
+		{"recorvia_dead_letters_oldest_open_seconds", map[string]string{"consumer": "payments.provider_webhooks"}, 5400},
+		{"recorvia_dead_letters_open", map[string]string{"consumer": OtherConsumer}, 1},
+		{"recorvia_notifications_backlog", map[string]string{"state": "due"}, 30},
+		{"recorvia_notifications_backlog_oldest_seconds", map[string]string{"state": "due"}, 900},
+		{"recorvia_webhook_deliveries_backlog", map[string]string{"state": "retrying"}, 8},
+		{"recorvia_webhook_deliveries_backlog_oldest_due_seconds", map[string]string{"state": "retrying"}, 61.5},
+	}
+	got := gather(t, m)
+	for _, tc := range cases {
+		if v := value(t, got[tc.name], tc.labels); v != tc.want {
+			t.Errorf("%s%v = %v, esperado %v", tc.name, tc.labels, v, tc.want)
+		}
+	}
+	m.DeadLetters().Set("payments.provider_webhooks", 0, 0)
+	got = gather(t, m)
+	for _, name := range []string{"recorvia_dead_letters_open", "recorvia_dead_letters_oldest_open_seconds"} {
+		if v := value(t, got[name], map[string]string{"consumer": "payments.provider_webhooks"}); v != 0 {
+			t.Errorf("%s depois de resolvidas = %v", name, v)
+		}
+	}
+	// Sem leitura, nenhuma série: um zero antes da primeira coleta seria um
+	// valor falso.
+	if f, ok := gather(t, NewMetrics("worker"))["recorvia_notifications_backlog"]; ok && len(f.GetMetric()) > 0 {
+		t.Fatalf("série de fila antes da primeira leitura: %v", f.GetMetric())
+	}
+}
+
 // recorvia_dependency_up acompanha o estado atual das dependências a cada
 // coleta, sem depender de consultas a /readyz: a queda aparece sem nenhuma
 // requisição e a recuperação zera o alerta.
@@ -381,6 +423,142 @@ func TestDependencyChecksHaveIndependentDeadlines(t *testing.T) {
 	}
 }
 
+// A API lê as execuções de conciliação em andamento a cada coleta: a
+// execução registrada e não assumida aparece nas métricas do processo que
+// registra os pedidos, sem depender do worker (que as publica pela tarefa
+// metrics.collect). A leitura que falha mantém o último valor lido.
+func TestReconciliationRunsAreReadOnEachGather(t *testing.T) {
+	m := NewMetrics("api")
+	var (
+		mu        sync.Mutex
+		stats     ReconciliationRunStats
+		failure   error
+		deadlines []time.Duration
+	)
+	m.ObserveReconciliationRuns(2*time.Second, func(ctx context.Context) (ReconciliationRunStats, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if dl, ok := ctx.Deadline(); ok {
+			deadlines = append(deadlines, time.Until(dl))
+		}
+		return stats, failure
+	})
+	type series struct{ queued, executing, stalled, oldest float64 }
+	steps := []struct {
+		name    string
+		stats   ReconciliationRunStats
+		failure error
+		want    series
+	}{
+		{"nenhuma execução", ReconciliationRunStats{}, nil, series{}},
+		{"execução aguardando sem worker", ReconciliationRunStats{Queued: 1, OldestWaitingSeconds: 420}, nil, series{queued: 1, oldest: 420}},
+		{"leitura falhou: último valor", ReconciliationRunStats{}, errors.New("conexão recusada"), series{queued: 1, oldest: 420}},
+		{"execuções interrompidas e em curso", ReconciliationRunStats{Queued: 2, Executing: 1, Stalled: 3, OldestWaitingSeconds: 900.5}, nil,
+			series{queued: 2, executing: 1, stalled: 3, oldest: 900.5}},
+		{"todas assumidas e concluídas", ReconciliationRunStats{}, nil, series{}},
+	}
+	for _, st := range steps {
+		mu.Lock()
+		stats, failure = st.stats, st.failure
+		mu.Unlock()
+		got := gather(t, m)
+		for state, want := range map[string]float64{"queued": st.want.queued, "executing": st.want.executing, "stalled": st.want.stalled} {
+			if v := value(t, got["recorvia_reconciliation_runs_in_progress"], map[string]string{"state": state, "service": "api"}); v != want {
+				t.Errorf("%s: recorvia_reconciliation_runs_in_progress{state=%q} = %v, esperado %v", st.name, state, v, want)
+			}
+		}
+		if v := value(t, got["recorvia_reconciliation_oldest_waiting_seconds"], map[string]string{"service": "api"}); v != st.want.oldest {
+			t.Errorf("%s: recorvia_reconciliation_oldest_waiting_seconds = %v, esperado %v", st.name, v, st.want.oldest)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deadlines) != len(steps) {
+		t.Fatalf("uma leitura a cada coleta: %d", len(deadlines))
+	}
+	for _, d := range deadlines {
+		if d <= 0 || d > 2*time.Second {
+			t.Fatalf("a leitura tem prazo de 2 s: %v", d)
+		}
+	}
+}
+
+// A leitura lenta (pool do banco esgotado) ou que ignora o cancelamento não
+// trava a coleta das métricas: vencido o prazo, as séries saem com o último
+// valor lido.
+func TestReconciliationRunsReadDoesNotBlockGather(t *testing.T) {
+	const timeout = 500 * time.Millisecond
+	cases := []struct {
+		name string
+		slow func(ctx context.Context, release <-chan struct{}) (ReconciliationRunStats, error)
+	}{
+		{"leitura lenta até o prazo", func(ctx context.Context, _ <-chan struct{}) (ReconciliationRunStats, error) {
+			<-ctx.Done()
+			return ReconciliationRunStats{}, ctx.Err()
+		}},
+		{"leitura que ignora o cancelamento", func(_ context.Context, release <-chan struct{}) (ReconciliationRunStats, error) {
+			<-release
+			return ReconciliationRunStats{Queued: 9, OldestWaitingSeconds: 9}, nil
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			var calls atomic.Int32
+			m := NewMetrics("api")
+			m.ObserveReconciliationRuns(timeout, func(ctx context.Context) (ReconciliationRunStats, error) {
+				if calls.Add(1) == 1 {
+					return ReconciliationRunStats{Queued: 1, OldestWaitingSeconds: 600}, nil
+				}
+				return c.slow(ctx, release)
+			})
+			gather(t, m) // primeira leitura, concluída
+			var families []*dto.MetricFamily
+			done := make(chan error, 1)
+			go func() {
+				var err error
+				families, err = m.Registry.Gather()
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(10 * timeout):
+				t.Fatal("a coleta não respeitou o prazo da leitura")
+			}
+			got := map[string]*dto.MetricFamily{}
+			for _, f := range families {
+				got[f.GetName()] = f
+			}
+			if v := value(t, got["recorvia_reconciliation_oldest_waiting_seconds"], map[string]string{"service": "api"}); v != 600 {
+				t.Errorf("espera mais longa = %v, esperado o último valor lido (600)", v)
+			}
+			if v := value(t, got["recorvia_reconciliation_runs_in_progress"], map[string]string{"state": "queued", "service": "api"}); v != 1 {
+				t.Errorf("execuções aguardando = %v, esperado o último valor lido (1)", v)
+			}
+		})
+	}
+}
+
+// SetReconciliationRuns publica os três estados e a espera mais longa (modo
+// do worker, pela tarefa metrics.collect).
+func TestSetReconciliationRunsPublishesEveryState(t *testing.T) {
+	m := NewMetrics("worker")
+	m.SetReconciliationRuns(ReconciliationRunStats{Queued: 4, Executing: 2, Stalled: 1, OldestWaitingSeconds: 37.5})
+	got := gather(t, m)
+	for state, want := range map[string]float64{"queued": 4, "executing": 2, "stalled": 1} {
+		if v := value(t, got["recorvia_reconciliation_runs_in_progress"], map[string]string{"state": state, "service": "worker"}); v != want {
+			t.Errorf("recorvia_reconciliation_runs_in_progress{state=%q} = %v, esperado %v", state, v, want)
+		}
+	}
+	if v := value(t, got["recorvia_reconciliation_oldest_waiting_seconds"], map[string]string{"service": "worker"}); v != 37.5 {
+		t.Errorf("recorvia_reconciliation_oldest_waiting_seconds = %v", v)
+	}
+}
+
 // Arquivos de observabilidade versionados no repositório.
 const observabilityDir = "../../../deploy/observability"
 
@@ -444,10 +622,14 @@ func TestAlertRulesAndDashboardsUseDeclaredMetrics(t *testing.T) {
 	// Métricas de alerta exigidas pela operação precisam estar cobertas.
 	for _, required := range []string{"recorvia_outbox_pending", "recorvia_outbox_oldest_pending_seconds", "recorvia_consumer_messages_total",
 		"recorvia_charge_failures_total", "recorvia_payment_operations", "recorvia_payment_operations_exhausted",
-		"recorvia_reconciliation_open_discrepancies", "recorvia_db_pool_connections", "recorvia_db_server_connections",
+		"recorvia_reconciliation_open_discrepancies", "recorvia_reconciliation_oldest_waiting_seconds", "recorvia_db_pool_connections",
+		"recorvia_db_server_connections",
 		"recorvia_consumer_in_flight", "recorvia_job_interval_seconds", "recorvia_job_last_success_timestamp_seconds",
 		"recorvia_notifications_dispatched_total", "recorvia_webhook_deliveries_total", "recorvia_collection_actions_total",
-		"recorvia_provider_webhooks_total", "recorvia_dependency_up"} {
+		"recorvia_provider_webhooks_total", "recorvia_dependency_up",
+		"recorvia_dead_letters_open", "recorvia_dead_letters_oldest_open_seconds",
+		"recorvia_notifications_backlog", "recorvia_notifications_backlog_oldest_seconds",
+		"recorvia_webhook_deliveries_backlog", "recorvia_webhook_deliveries_backlog_oldest_due_seconds"} {
 		if !used[required] {
 			t.Errorf("métrica %s sem alerta ou painel", required)
 		}
@@ -485,18 +667,24 @@ func TestMetricsCatalogDocumentsEveryMetricAndLabelValue(t *testing.T) {
 		}
 	}
 	values := map[string][]string{
-		"recorvia_consumer_messages_total":        ConsumerOutcomes,
-		"recorvia_charge_failures_total":          ChargeFailureKinds,
-		"recorvia_provider_webhooks_total":        append(slices.Clone(ProviderWebhookOutcomes), OtherProvider),
-		"recorvia_notifications_dispatched_total": NotificationOutcomes,
-		"recorvia_webhook_deliveries_total":       WebhookDeliveryOutcomes,
-		"recorvia_collection_actions_total":       CollectionActionKinds,
-		"recorvia_payment_operations":             {"pending", "in_flight", "unknown"},
-		"recorvia_payment_operations_exhausted":   {"pending", "in_flight", "unknown"},
-		"recorvia_http_requests_total":            {"_OTHER"},
-		"recorvia_dependency_up":                  {"postgres", "redis", "rabbitmq"},
-		"recorvia_refunds_total":                  {"succeeded", "failed"},
-		"recorvia_refunds_in_progress":            {"requested", "unknown"},
+		"recorvia_consumer_messages_total":                       ConsumerOutcomes,
+		"recorvia_charge_failures_total":                         ChargeFailureKinds,
+		"recorvia_provider_webhooks_total":                       append(slices.Clone(ProviderWebhookOutcomes), OtherProvider),
+		"recorvia_notifications_dispatched_total":                NotificationOutcomes,
+		"recorvia_webhook_deliveries_total":                      WebhookDeliveryOutcomes,
+		"recorvia_collection_actions_total":                      CollectionActionKinds,
+		"recorvia_payment_operations":                            {"pending", "in_flight", "unknown"},
+		"recorvia_payment_operations_exhausted":                  {"pending", "in_flight", "unknown"},
+		"recorvia_http_requests_total":                           {"_OTHER"},
+		"recorvia_dependency_up":                                 {"postgres", "redis", "rabbitmq"},
+		"recorvia_refunds_total":                                 {"succeeded", "failed"},
+		"recorvia_refunds_in_progress":                           {"requested", "unknown"},
+		"recorvia_dead_letters_open":                             {OtherConsumer},
+		"recorvia_dead_letters_oldest_open_seconds":              {OtherConsumer},
+		"recorvia_notifications_backlog":                         NotificationBacklogStates,
+		"recorvia_notifications_backlog_oldest_seconds":          NotificationBacklogStates,
+		"recorvia_webhook_deliveries_backlog":                    WebhookBacklogStates,
+		"recorvia_webhook_deliveries_backlog_oldest_due_seconds": WebhookBacklogStates,
 	}
 	for name, want := range values {
 		for _, v := range want {
@@ -559,6 +747,130 @@ func TestAlertRulesLinkToExistingRunbookSections(t *testing.T) {
 			}
 			if !anchors[anchor] {
 				t.Errorf("%s: seção %q inexistente em %s", alerts[i][1], anchor, doc)
+			}
+		}
+	}
+}
+
+var (
+	ruleSeverity   = regexp.MustCompile(`(?m)^\s*severity: (\S+)`)
+	aggregation    = regexp.MustCompile(`\bby \(([a-z_, ]+)\)`)
+	inhibitEqual   = regexp.MustCompile(`(?m)^\s*equal: \[([a-z_, ]+)\]`)
+	routeMatcher   = regexp.MustCompile(`(?m)^\s*- matchers: \['([a-z]+)="([^"]+)"'\]`)
+	routeReceiver  = regexp.MustCompile(`(?m)^\s*receiver: (\S+)`)
+	entryReceiver  = regexp.MustCompile(`(?m)^\s*echo "  - name: (\S+)"`)
+	inhibitMatcher = regexp.MustCompile(`(?m)^\s*(source|target)_matchers: \['severity="([a-z]+)"'\]`)
+)
+
+func splitList(s string) []string {
+	var out []string
+	for _, x := range strings.Split(s, ",") {
+		out = append(out, strings.TrimSpace(x))
+	}
+	return out
+}
+
+// O roteamento do Alertmanager cobre as severidades usadas nas regras, os
+// receptores das rotas são os gerados na partida do container e a inibição
+// (crítico inibe aviso do mesmo alerta) compara todos os rótulos de
+// agregação das regras: sem isso, o crítico de um consumidor silenciaria o
+// aviso de outro.
+func TestAlertRoutingCoversRuleSeveritiesAndInhibitionLabels(t *testing.T) {
+	read := func(parts ...string) string {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(append([]string{observabilityDir}, parts...)...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	rules := read("prometheus", "rules", "recorvia.yml")
+	routing := read("alertmanager", "alertmanager.yml")
+	entrypoint := read("alertmanager", "entrypoint.sh")
+
+	alerts, severities := alertRule.FindAllStringSubmatch(rules, -1), ruleSeverity.FindAllStringSubmatch(rules, -1)
+	if len(alerts) == 0 || len(alerts) != len(severities) {
+		t.Fatalf("%d alertas e %d severidades", len(alerts), len(severities))
+	}
+	bySeverity := map[string][]string{}
+	byAlert := map[string][]string{}
+	for i, a := range alerts {
+		bySeverity[severities[i][1]] = append(bySeverity[severities[i][1]], a[1])
+		byAlert[a[1]] = append(byAlert[a[1]], severities[i][1])
+	}
+	for sev, names := range bySeverity {
+		switch sev {
+		case "critical", "warning":
+		case "info":
+			if !slices.Equal(names, []string{"RecorviaWatchdog"}) {
+				t.Errorf("severidade info reservada à verificação do caminho de alertas: %v", names)
+			}
+		default:
+			t.Errorf("severidade %q sem rota no Alertmanager: %v", sev, names)
+		}
+	}
+	// Um alerta com mais de uma regra tem exatamente as severidades de aviso
+	// e crítica.
+	paired := 0
+	for name, sevs := range byAlert {
+		if len(sevs) == 1 {
+			continue
+		}
+		sort.Strings(sevs)
+		if !slices.Equal(sevs, []string{"critical", "warning"}) {
+			t.Errorf("%s: severidades %v; esperado um aviso e um crítico", name, sevs)
+		}
+		paired++
+	}
+	if paired == 0 {
+		t.Error("nenhum alerta com as duas severidades: a inibição não teria efeito")
+	}
+
+	routes := map[string]bool{}
+	for _, m := range routeMatcher.FindAllStringSubmatch(routing, -1) {
+		routes[m[1]+"="+m[2]] = true
+	}
+	for _, want := range []string{"severity=critical", "severity=warning", "alertname=RecorviaWatchdog"} {
+		if !routes[want] {
+			t.Errorf("rota ausente no Alertmanager: %s (rotas: %v)", want, routes)
+		}
+	}
+	generated := map[string]bool{}
+	for _, m := range entryReceiver.FindAllStringSubmatch(entrypoint, -1) {
+		generated[m[1]] = true
+	}
+	receivers := routeReceiver.FindAllStringSubmatch(routing, -1)
+	if len(receivers) < 4 {
+		t.Fatalf("rotas sem receptor: %v", receivers)
+	}
+	for _, r := range receivers {
+		if !generated[r[1]] {
+			t.Errorf("receptor %s usado no roteamento e não gerado pelo entrypoint.sh (%v)", r[1], generated)
+		}
+	}
+
+	sides := map[string]string{}
+	for _, m := range inhibitMatcher.FindAllStringSubmatch(routing, -1) {
+		sides[m[1]] = m[2]
+	}
+	if sides["source"] != "critical" || sides["target"] != "warning" {
+		t.Fatalf("inibição: origem %q e alvo %q; esperado crítico inibindo aviso", sides["source"], sides["target"])
+	}
+	eq := inhibitEqual.FindStringSubmatch(routing)
+	if eq == nil {
+		t.Fatal("regra de inibição sem a lista equal")
+	}
+	equal := splitList(eq[1])
+	if !slices.Contains(equal, "alertname") {
+		t.Errorf("a inibição precisa comparar o nome do alerta: %v", equal)
+	}
+	if slices.Contains(equal, "severity") {
+		t.Errorf("severity em equal impediria a inibição: %v", equal)
+	}
+	for _, m := range aggregation.FindAllStringSubmatch(rules, -1) {
+		for _, label := range splitList(m[1]) {
+			if !slices.Contains(equal, label) {
+				t.Errorf("rótulo de agregação %q fora de equal na regra de inibição (%v)", label, equal)
 			}
 		}
 	}
@@ -701,12 +1013,16 @@ func TestTotalsCounterIsMonotonic(t *testing.T) {
 	m.Refunds.Set("failed", 2)
 	m.Refunds.Set("succeeded", 3) // leitura menor é ignorada
 	m.Discrepancies.WithLabelValues("fee_mismatch").Set(4)
+	m.ReconciliationRuns.WithLabelValues("queued").Set(2)
+	m.ReconciliationOldestWaiting.Set(90)
 	out := exposition(t, m)
 	for _, want := range []string{
 		"# TYPE recorvia_refunds_total counter",
 		`recorvia_refunds_total{outcome="failed",service="worker"} 2`,
 		`recorvia_refunds_total{outcome="succeeded",service="worker"} 5`,
 		`recorvia_reconciliation_open_discrepancies{kind="fee_mismatch",service="worker"} 4`,
+		`recorvia_reconciliation_runs_in_progress{service="worker",state="queued"} 2`,
+		`recorvia_reconciliation_oldest_waiting_seconds{service="worker"} 90`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("exposição sem %q:\n%s", want, out)

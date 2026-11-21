@@ -51,9 +51,10 @@ SELECT count(*) FILTER (WHERE status IN ('trialing', 'active', 'past_due'))::int
 -- name: DashboardContraRevenue :one
 -- Movimento líquido (débitos menos créditos) das contas de reembolsos e de
 -- chargebacks no período. Os créditos em chargebacks são a retenção liberada
--- na disputa perdida (dispute.hold_released) e o estorno da disputa ganha:
--- somar só os débitos contaria duas vezes o valor reembolsado ao pagador e o
--- valor de disputa ganha.
+-- na disputa perdida (dispute.hold_released), o estorno da disputa ganha e a
+-- parte do chargeback que era pagamento excedente (dispute.credit_reversed):
+-- somar só os débitos contaria duas vezes o valor reembolsado ao pagador, o
+-- valor de disputa ganha e o crédito do cliente estornado.
 SELECT COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END) FILTER (WHERE a.code = 'refunds'), 0)::bigint AS refunds,
        COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END) FILTER (WHERE a.code = 'chargebacks'), 0)::bigint AS chargebacks
   FROM ledger_entries e

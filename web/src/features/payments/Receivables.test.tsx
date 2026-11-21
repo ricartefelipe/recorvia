@@ -164,8 +164,8 @@ describe('reembolsos', () => {
 describe('disputas', () => {
   it('lista disputas abertas e encerradas como devolvidas pela API', async () => {
     const disputes: Dispute[] = [
-      { id: '0195f1a0-0000-7000-8000-0000000d1001', charge_id: CHARGE_ID, status: 'opened', amount: 5000, currency: 'BRL', opened_at: '2026-11-17T12:00:00Z', closed_at: null },
-      { id: '0195f1a0-0000-7000-8000-0000000d1002', charge_id: CHARGE_ID, status: 'lost', amount: 6000, currency: 'BRL', opened_at: '2026-11-10T12:00:00Z', closed_at: '2026-11-15T12:00:00Z' },
+      { id: '0195f1a0-0000-7000-8000-0000000d1001', charge_id: CHARGE_ID, status: 'opened', amount: 5000, credit_amount: 0, recovery_amount: 0, currency: 'BRL', opened_at: '2026-11-17T12:00:00Z', closed_at: null },
+      { id: '0195f1a0-0000-7000-8000-0000000d1002', charge_id: CHARGE_ID, status: 'lost', amount: 6000, credit_amount: 0, recovery_amount: 0, currency: 'BRL', opened_at: '2026-11-10T12:00:00Z', closed_at: '2026-11-15T12:00:00Z' },
     ];
     server.use(http.get('/api/v1/disputes', () => HttpResponse.json({ data: disputes })));
     renderPage(<DisputesPage />, { path: '/disputas' });
@@ -176,5 +176,25 @@ describe('disputas', () => {
     expect(rows[2]).toHaveTextContent('Perdida');
     expect(rows[2]).toHaveTextContent('R$ 60,00');
     expect(within(rows[2]).getByRole('link', { name: /Cobrança 0195f1a0/ })).toHaveAttribute('href', `/cobrancas/${CHARGE_ID}`);
+  });
+
+  it('disputa perdida de pagamento com excedente mostra o crédito consumido e o valor a recuperar', async () => {
+    const disputes: Dispute[] = [
+      { id: '0195f1a0-0000-7000-8000-0000000d1003', charge_id: CHARGE_ID, status: 'lost', amount: 12500, credit_amount: 500, recovery_amount: 2000, currency: 'BRL', opened_at: '2026-11-10T12:00:00Z', closed_at: '2026-11-15T12:00:00Z' },
+      { id: '0195f1a0-0000-7000-8000-0000000d1004', charge_id: CHARGE_ID, status: 'won', amount: 12500, credit_amount: 0, recovery_amount: 0, currency: 'BRL', opened_at: '2026-11-09T12:00:00Z', closed_at: '2026-11-12T12:00:00Z' },
+    ];
+    server.use(http.get('/api/v1/disputes', () => HttpResponse.json({ data: disputes })));
+    renderPage(<DisputesPage />, { path: '/disputas' });
+    const table = await screen.findByRole('table', { name: 'Disputas' });
+    const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
+    expect(headers).toEqual(['Aberta em', 'Cobrança', 'Valor contestado', 'Situação', 'Crédito consumido', 'A recuperar do cliente', 'Encerrada em']);
+    const rows = within(table).getAllByRole('row');
+    const lost = within(rows[1]).getAllByRole('cell');
+    expect(lost[2]).toHaveTextContent('R$ 125,00');
+    expect(lost[4]).toHaveTextContent('R$ 5,00');
+    expect(lost[5]).toHaveTextContent('R$ 20,00');
+    const won = within(rows[2]).getAllByRole('cell');
+    expect(won[4]).toHaveTextContent('—');
+    expect(won[5]).toHaveTextContent('—');
   });
 });

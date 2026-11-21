@@ -74,7 +74,8 @@ UPDATE idempotency_keys SET locked_until = @locked_until
 -- name: CompleteIdempotencyKey :exec
 UPDATE idempotency_keys
    SET status = 'completed', response_status = @response_status, response_body = @response_body,
-       response_content_type = @response_content_type, completed_at = @now, locked_until = NULL
+       response_content_type = @response_content_type, response_location = sqlc.narg(response_location), completed_at = @now,
+       locked_until = NULL
  WHERE tenant_id = @tenant_id AND client_id = @client_id AND operation = @operation AND idempotency_key = @idempotency_key;
 
 -- name: ReleaseIdempotencyKey :exec
