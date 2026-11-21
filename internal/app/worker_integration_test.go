@@ -76,7 +76,7 @@ func TestWorkerReceivablesJobsAndMetrics(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	env := fixture.New(t, 8, time.Now().UTC())
 	tn := env.NewTenant(t, "worker")
-	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "escala"); err != nil {
+	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "escala", env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	st, err := paysim.Load("")

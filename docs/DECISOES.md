@@ -2421,3 +2421,60 @@ pedidos de serviços adicionais, que têm versão mas não exigem `If-Match`. As
 (produtos, planos, cupons, métricas, membros, endpoints de webhook, políticas e templates) continuam sem cursor, com
 os limites atuais. A listagem de operações por criação não tem índice próprio, como a anterior por atualização. A
 interface envia o `If-Match` com a versão exibida e percorre as listagens pelo `next_cursor`.
+
+## ADR-085 If-Match na troca do plano da plataforma e no atendimento dos serviços adicionais; catálogo, pedidos, demonstrativos e reajustes por cursor
+**Status:** aceita. Completa a ADR-083 no RF-15: deixam de valer, nas consequências dela, a troca do plano da plataforma
+e o atendimento dos pedidos de serviços adicionais sem `If-Match` e as listagens de catálogo sem cursor.
+**Contexto:** a troca do plano da plataforma (`PUT /api/v1/platform/plan`) e o atendimento dos pedidos de serviços
+adicionais pela equipe da plataforma (agendar, concluir e cancelar) gravam linhas com `version`, mas sem `If-Match`: a
+última gravação vencia em silêncio. Seis listagens ainda cortavam com `LIMIT` fixo e sem `next_cursor`: produtos,
+planos, cupons e métricas (500), pedidos de serviços adicionais da organização (100), demonstrativos da plataforma (36)
+e reajustes de uma assinatura (200, da vigência mais antiga para a mais recente, de modo que o corte esconderia os
+reajustes mais novos, inclusive os programados). As listas do catálogo alimentam campos de seleção na interface
+(plano da assinatura, produto do plano, métrica do preço, planos do cupom), que precisam de todos os itens.
+**Decisão:**
+- **If-Match.** As quatro rotas entram em `versionedRoutes`, com 428 sem o header e 412 com versão divergente. A
+  versão da assinatura da plataforma passa a ser exposta em `subscription.version` da visão geral, que também traz o
+  `ETag`. O caso de uso confere a versão da linha bloqueada antes de qualquer outra regra (inclusive na troca para o
+  plano atual, que não tem efeito, e no pedido já encerrado) e a gravação é condicionada a ela, na mesma transação:
+  divergente, nada é gravado nem auditado. O fechamento mensal do demonstrativo também gera uma versão nova da
+  assinatura: quem leu a visão geral antes do fechamento recebe 412 e troca o plano sobre a versão recarregada. A
+  versão do pedido é a `version` da lista; as respostas trazem o `ETag` da versão gravada.
+- **Interface.** A troca de plano envia a versão exibida; não há modal que guarde a assinatura (a confirmação já se
+  fechou quando a resposta chega), e "Recarregar dados" traz a visão geral com a versão atual. A tela da equipe não
+  tem organização ativa e por isso não usa `useApiMutation`: a mutation dela ganhou o mesmo comportamento de
+  `onConcurrentReload` (recarrega a fila e fecha os modais de agendamento e de cancelamento, que guardam o pedido).
+- **Paginação por keyset.** As seis listagens aceitam `limit` (1 a 100, padrão 25) e `cursor`, devolvem `next_cursor`
+  e recusam cursor inválido com 422 `invalid_cursor`, como na ADR-083, ordenadas por colunas que não mudam depois da
+  gravação, com desempate pelo identificador: produtos e planos por `(created_at, id)`, do mais recente para o mais
+  antigo (eram ordenados pelo nome, que muda na edição e deslocaria o item entre as páginas); cupons por
+  `(created_at, id)`, como antes; métricas por `(code, id)` (o código é único no tenant e não muda); pedidos de
+  serviços adicionais por `(created_at, id)`; demonstrativos por `(period_start, id)`, do período mais recente; e
+  reajustes por `(effective_date, created_at, id)`, da vigência mais antiga para a mais recente, como antes. Elas já
+  estavam em `listRoutes`, sem ordenação por parâmetro; o contrato declara `limit`, `cursor` e `next_cursor`.
+- **Campos de seleção.** `fetchAllPages` (`web/src/lib/pages.ts`) percorre as páginas pelo `next_cursor` com `limit`
+  100; `useProducts`, `usePlans` e `useMetrics` usam esse auxiliar, e produtos e planos são ordenados pelo nome no
+  navegador, como os campos mostravam. As telas de catálogo, cupons, métricas, plano Recorvia e reajustes paginam
+  com `CursorPager` e `useReturnFromEmptyPage`.
+- **Limites naturais mantidos.** A agenda de mudanças da assinatura (`ListScheduledChanges`, 50 mais recentes) não é
+  uma listagem: faz parte da ficha da assinatura. Há no máximo uma mudança pendente por assinatura (índice único), e
+  ela é sempre a criada mais recentemente (uma mudança nova cancela a pendente), de modo que o corte nunca a esconde;
+  as mudanças antigas, aplicadas ou canceladas, continuam no histórico da assinatura. Os segredos válidos de um
+  endpoint de webhook (5) são limitados pela retenção na rotação e não são expostos como listagem. Não sobrou outra
+  listagem da API com `LIMIT` fixo e sem cursor; as que não têm cursor também não têm corte e são limitadas pelo
+  domínio (papéis, provedores, templates, tipos de evento, contas do ledger, planos e serviços da plataforma, tentativas
+  de uma entrega, recuperações de uma disputa, eventos de uma notificação, endpoints de webhook, até 20) ou devolvem
+  tudo sem corte silencioso (membros, políticas de cobrança, organizações da equipe e histórico da assinatura).
+
+**Alternativas:** keyset pelo nome em produtos e planos, para manter a ordem alfabética das telas, foi descartado: a
+renomeação deslocaria o item entre as páginas, o critério da ADR-083. O cursor por deslocamento (como na ordenação
+de clientes por nome) também desloca itens quando há inclusões durante a navegação. Uma listagem sem limite para os
+campos de seleção (por exemplo, `limit` acima de 100) traria de volta respostas sem limite; o auxiliar segue o cursor
+com o limite máximo. A busca no servidor dentro do campo, como em `CustomerSelect`, fica para quando os catálogos
+crescerem: hoje eles são pequenos e o filtro do próprio campo basta.
+**Consequências:** clientes da API passam a enviar `If-Match` nas quatro rotas (sem ele, 428) e a seguir
+`next_cursor` nas seis listagens, que devolvem 25 itens por padrão em vez de até 500, 100 ou 36; produtos e planos
+passam a vir do mais recente para o mais antigo; um campo de seleção faz uma requisição a cada 100 itens. O exercício
+de recuperação (`deploy/backup/dr-check.sh`) lê a versão da assinatura antes de trocar o plano. Não há migration:
+todas as tabelas envolvidas já tinham `version`; as listagens do catálogo pela criação não têm índice próprio, como as
+anteriores pelo nome, e cada tenant tem poucos itens.

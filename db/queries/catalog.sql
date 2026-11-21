@@ -15,8 +15,13 @@ UPDATE products SET name = @name, description = @description, status = @status, 
  WHERE tenant_id = @tenant_id AND id = @id AND version = @version;
 
 -- name: ListProducts :many
-SELECT * FROM products WHERE tenant_id = @tenant_id AND (sqlc.narg(status)::text IS NULL OR status = sqlc.narg(status))
- ORDER BY lower(name), id LIMIT 500;
+-- Paginação por keyset em (created_at, id), que não mudam depois da criação
+-- (o nome muda na edição e deslocaria o produto entre as páginas).
+SELECT * FROM products
+ WHERE tenant_id = @tenant_id AND (sqlc.narg(status)::text IS NULL OR status = sqlc.narg(status))
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (created_at, id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT @row_limit;
 
 -- name: InsertMetric :exec
 INSERT INTO billable_metrics (id, tenant_id, code, name, unit, aggregation, max_quantity_per_event, late_grace_hours, status, created_at)
@@ -29,7 +34,12 @@ SELECT * FROM billable_metrics WHERE tenant_id = @tenant_id AND id = @id;
 SELECT * FROM billable_metrics WHERE tenant_id = @tenant_id AND code = @code;
 
 -- name: ListMetrics :many
-SELECT * FROM billable_metrics WHERE tenant_id = @tenant_id ORDER BY code LIMIT 500;
+-- Paginação por keyset em (code, id): o código é único no tenant e não muda.
+SELECT * FROM billable_metrics
+ WHERE tenant_id = @tenant_id
+   AND (sqlc.narg(cursor_code)::text IS NULL OR (code, id) > (sqlc.narg(cursor_code)::text, sqlc.narg(cursor_id)::uuid))
+ ORDER BY code, id
+ LIMIT @row_limit;
 
 -- name: InsertPlan :exec
 INSERT INTO plans (id, tenant_id, product_id, code, name, description, billing_interval, currency, trial_days, status,
@@ -49,11 +59,15 @@ UPDATE plans SET name = @name, description = @description, trial_days = @trial_d
  WHERE tenant_id = @tenant_id AND id = @id AND version = @version;
 
 -- name: ListPlans :many
+-- Paginação por keyset em (created_at, id), que não mudam depois da criação
+-- (o nome muda na edição e deslocaria o plano entre as páginas).
 SELECT * FROM plans
  WHERE tenant_id = @tenant_id
    AND (sqlc.narg(status)::text IS NULL OR status = sqlc.narg(status))
    AND (sqlc.narg(product_id)::uuid IS NULL OR product_id = sqlc.narg(product_id))
- ORDER BY lower(name), id LIMIT 500;
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (created_at, id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT @row_limit;
 
 -- name: InsertPriceVersion :exec
 INSERT INTO plan_price_versions (id, tenant_id, plan_id, version, pricing_model, flat_amount, unit_amount, metric_id, included_quantity,
@@ -84,7 +98,12 @@ SELECT * FROM coupons WHERE tenant_id = @tenant_id AND id = @id;
 SELECT * FROM coupons WHERE tenant_id = @tenant_id AND code = @code FOR UPDATE;
 
 -- name: ListCoupons :many
-SELECT * FROM coupons WHERE tenant_id = @tenant_id ORDER BY created_at DESC, id DESC LIMIT 500;
+-- Paginação por keyset em (created_at, id), que não mudam depois da criação.
+SELECT * FROM coupons
+ WHERE tenant_id = @tenant_id
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (created_at, id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT @row_limit;
 
 -- name: ArchiveCoupon :execrows
 UPDATE coupons SET status = 'archived', version = version + 1 WHERE tenant_id = @tenant_id AND id = @id AND version = @version;

@@ -46,18 +46,21 @@ func (a *API) adminAddonOrders(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, r, http.StatusOK, newPage(out, pg.NextCursor))
 }
 
-// adminAddonOrderTarget lê o tenant e o pedido do caminho.
-func adminAddonOrderTarget(r *http.Request) (uuid.UUID, uuid.UUID, error) {
-	tenantID, err := pathUUID(r, "tenant_id")
-	if err != nil {
-		return uuid.Nil, uuid.Nil, err
+// adminAddonOrderTarget lê o tenant e o pedido do caminho e a versão
+// esperada do pedido (If-Match).
+func adminAddonOrderTarget(r *http.Request) (tenantID, id uuid.UUID, version int, err error) {
+	if tenantID, err = pathUUID(r, "tenant_id"); err != nil {
+		return uuid.Nil, uuid.Nil, 0, err
 	}
-	id, err := pathUUID(r, "id")
-	return tenantID, id, err
+	if id, err = pathUUID(r, "id"); err != nil {
+		return uuid.Nil, uuid.Nil, 0, err
+	}
+	version, err = ifMatch(r)
+	return tenantID, id, version, err
 }
 
 func (a *API) adminScheduleAddonOrder(w http.ResponseWriter, r *http.Request) {
-	tenantID, id, err := adminAddonOrderTarget(r)
+	tenantID, id, version, err := adminAddonOrderTarget(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -69,30 +72,30 @@ func (a *API) adminScheduleAddonOrder(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	o, err := a.Platform.ScheduleAddonOrder(r.Context(), a.staff(r), tenantID, id, in.ScheduledFor)
+	o, err := a.Platform.ScheduleAddonOrder(r.Context(), a.staff(r), tenantID, id, in.ScheduledFor, version)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, addonOrderDTO(o))
+	a.writeVersioned(w, r, http.StatusOK, o.Version, addonOrderDTO(o))
 }
 
 func (a *API) adminCompleteAddonOrder(w http.ResponseWriter, r *http.Request) {
-	tenantID, id, err := adminAddonOrderTarget(r)
+	tenantID, id, version, err := adminAddonOrderTarget(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	o, err := a.Platform.CompleteAddonOrder(r.Context(), a.staff(r), tenantID, id)
+	o, err := a.Platform.CompleteAddonOrder(r.Context(), a.staff(r), tenantID, id, version)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, addonOrderDTO(o))
+	a.writeVersioned(w, r, http.StatusOK, o.Version, addonOrderDTO(o))
 }
 
 func (a *API) adminCancelAddonOrder(w http.ResponseWriter, r *http.Request) {
-	tenantID, id, err := adminAddonOrderTarget(r)
+	tenantID, id, version, err := adminAddonOrderTarget(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -104,10 +107,10 @@ func (a *API) adminCancelAddonOrder(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	o, err := a.Platform.CancelAddonOrder(r.Context(), a.staff(r), tenantID, id, in.Reason)
+	o, err := a.Platform.CancelAddonOrder(r.Context(), a.staff(r), tenantID, id, in.Reason, version)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, addonOrderDTO(o))
+	a.writeVersioned(w, r, http.StatusOK, o.Version, addonOrderDTO(o))
 }

@@ -110,18 +110,28 @@ func (s *Service) Plans(ctx context.Context) ([]Plan, error) { return s.store.Pl
 // Addons lista os serviços adicionais.
 func (s *Service) Addons(ctx context.Context) ([]Addon, error) { return s.store.Addons(ctx) }
 
-// ChangePlan troca o plano da plataforma, validando o consumo atual (membros
-// ativos, convites pendentes e contratos ativos) contra os limites do plano
-// de destino. A mudança vale a partir do período corrente. A leitura da
-// assinatura bloqueia a linha: convites, aceites e criações de assinatura
-// leem o plano com o mesmo bloqueio, de modo que nenhum deles conta o consumo
-// durante a troca.
-func (s *Service) ChangePlan(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, planCode string) (Subscription, error) {
+// errSubscriptionVersion recusa a troca de plano com versão da assinatura
+// diferente da informada no If-Match.
+var errSubscriptionVersion = apperr.PreconditionFailed("version_mismatch",
+	"A assinatura da plataforma foi alterada por outra pessoa. Recarregue e tente novamente.")
+
+// ChangePlan troca o plano da plataforma na versão esperada da assinatura
+// (If-Match), validando o consumo atual (membros ativos, convites pendentes e
+// contratos ativos) contra os limites do plano de destino. A mudança vale a
+// partir do período corrente. A leitura da assinatura bloqueia a linha:
+// convites, aceites e criações de assinatura leem o plano com o mesmo
+// bloqueio, de modo que nenhum deles conta o consumo durante a troca. Com a
+// versão divergente nada é gravado nem auditado (412), inclusive na troca
+// para o plano atual, que não tem efeito.
+func (s *Service) ChangePlan(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, planCode string, expectedVersion int) (Subscription, error) {
 	var out Subscription
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
 		sub, err := tx.Subscription(ctx)
 		if err != nil {
 			return err
+		}
+		if sub.Version != expectedVersion {
+			return errSubscriptionVersion
 		}
 		if sub.PlanCode == planCode {
 			out = sub
@@ -139,7 +149,7 @@ func (s *Service) ChangePlan(ctx context.Context, tenantID uuid.UUID, actor audi
 			return err
 		}
 		previous := sub.PlanCode
-		sub.PlanCode = target.Code
+		sub.PlanCode, sub.Version = target.Code, expectedVersion
 		if err := tx.UpdateSubscription(ctx, sub); err != nil {
 			return err
 		}
@@ -286,20 +296,23 @@ type Staff struct {
 
 func (st Staff) actor() audit.Actor { return audit.User(st.UserID, st.DisplayName) }
 
-// ScheduleAddonOrder agenda o atendimento do pedido.
-func (s *Service) ScheduleAddonOrder(ctx context.Context, staff Staff, tenantID, orderID uuid.UUID, at time.Time) (AddonOrder, error) {
-	return s.handleAddonOrder(ctx, staff, tenantID, orderID, "platform.addon_scheduled", func(o *AddonOrder, _ Subscription, now time.Time) error {
+// ScheduleAddonOrder agenda o atendimento do pedido na versão esperada
+// (If-Match).
+func (s *Service) ScheduleAddonOrder(ctx context.Context, staff Staff, tenantID, orderID uuid.UUID, at time.Time,
+	expectedVersion int) (AddonOrder, error) {
+	return s.handleAddonOrder(ctx, staff, tenantID, orderID, expectedVersion, "platform.addon_scheduled", func(o *AddonOrder, _ Subscription, now time.Time) error {
 		return o.Schedule(at, now, staff.UserID)
 	})
 }
 
-// CompleteAddonOrder conclui o atendimento: o valor do pedido entra no
-// demonstrativo do período em que a conclusão ocorreu (ou no seguinte, se
-// esse já estiver fechado). Com a assinatura da plataforma cancelada não há
-// demonstrativo a fechar: a conclusão é recusada (o pedido é cancelado),
-// para que nenhum pedido fique concluído sem cobrança.
-func (s *Service) CompleteAddonOrder(ctx context.Context, staff Staff, tenantID, orderID uuid.UUID) (AddonOrder, error) {
-	return s.handleAddonOrder(ctx, staff, tenantID, orderID, "platform.addon_completed", func(o *AddonOrder, sub Subscription, now time.Time) error {
+// CompleteAddonOrder conclui o atendimento na versão esperada (If-Match): o
+// valor do pedido entra no demonstrativo do período em que a conclusão
+// ocorreu (ou no seguinte, se esse já estiver fechado). Com a assinatura da
+// plataforma cancelada não há demonstrativo a fechar: a conclusão é recusada
+// (o pedido é cancelado), para que nenhum pedido fique concluído sem
+// cobrança.
+func (s *Service) CompleteAddonOrder(ctx context.Context, staff Staff, tenantID, orderID uuid.UUID, expectedVersion int) (AddonOrder, error) {
+	return s.handleAddonOrder(ctx, staff, tenantID, orderID, expectedVersion, "platform.addon_completed", func(o *AddonOrder, sub Subscription, now time.Time) error {
 		if sub.Status == StatusCanceled {
 			return apperr.Conflict("platform_subscription_canceled",
 				"A assinatura da plataforma desta organização está cancelada: o serviço não pode ser concluído nem cobrado. Cancele o pedido.")
@@ -308,19 +321,28 @@ func (s *Service) CompleteAddonOrder(ctx context.Context, staff Staff, tenantID,
 	})
 }
 
-// CancelAddonOrder cancela o pedido em aberto, sem cobrança.
-func (s *Service) CancelAddonOrder(ctx context.Context, staff Staff, tenantID, orderID uuid.UUID, reason string) (AddonOrder, error) {
-	return s.handleAddonOrder(ctx, staff, tenantID, orderID, "platform.addon_canceled", func(o *AddonOrder, _ Subscription, now time.Time) error {
+// CancelAddonOrder cancela o pedido em aberto, sem cobrança, na versão
+// esperada (If-Match).
+func (s *Service) CancelAddonOrder(ctx context.Context, staff Staff, tenantID, orderID uuid.UUID, reason string,
+	expectedVersion int) (AddonOrder, error) {
+	return s.handleAddonOrder(ctx, staff, tenantID, orderID, expectedVersion, "platform.addon_canceled", func(o *AddonOrder, _ Subscription, now time.Time) error {
 		return o.Cancel(reason, now, staff.UserID)
 	})
 }
+
+// errAddonOrderVersion recusa a transição do pedido com versão diferente da
+// informada no If-Match.
+var errAddonOrderVersion = apperr.PreconditionFailed("version_mismatch",
+	"O pedido foi alterado por outra pessoa. Recarregue e tente novamente.")
 
 // handleAddonOrder aplica a transição na transação do tenant do pedido, com
 // auditoria na trilha do tenant. A assinatura da plataforma é bloqueada
 // antes do pedido, na mesma ordem do fechamento do demonstrativo: a
 // conclusão e o fechamento não se cruzam, e o pedido concluído é cobrado
-// exatamente uma vez.
-func (s *Service) handleAddonOrder(ctx context.Context, staff Staff, tenantID, orderID uuid.UUID, action string,
+// exatamente uma vez. O pedido bloqueado precisa estar na versão esperada
+// (If-Match), que também condiciona a gravação: divergente, nada é gravado
+// nem auditado (412).
+func (s *Service) handleAddonOrder(ctx context.Context, staff Staff, tenantID, orderID uuid.UUID, expectedVersion int, action string,
 	apply func(o *AddonOrder, sub Subscription, now time.Time) error) (AddonOrder, error) {
 	var out AddonOrder
 	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
@@ -331,6 +353,9 @@ func (s *Service) handleAddonOrder(ctx context.Context, staff Staff, tenantID, o
 		o, err := tx.AddonOrder(ctx, orderID)
 		if err != nil {
 			return err
+		}
+		if o.Version != expectedVersion {
+			return errAddonOrderVersion
 		}
 		now := s.clock.Now()
 		from := o.Status

@@ -762,7 +762,7 @@ func TestScheduledReconciliationDiscovery(t *testing.T) {
 	if due() {
 		t.Fatal("plano sem o recurso não é elegível")
 	}
-	if _, err := h.env.Platform.ChangePlan(ctx, h.tn.ID, h.tn.Actor, "escala"); err != nil {
+	if _, err := h.env.Platform.ChangePlan(ctx, h.tn.ID, h.tn.Actor, "escala", h.env.PlatformVersion(t, h.tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	if !due() {

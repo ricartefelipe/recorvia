@@ -79,7 +79,7 @@ func TestAddonMigrationKeepsBillingOfOldOrders(t *testing.T) {
 	}
 	links := func() map[uuid.UUID]*uuid.UUID {
 		t.Helper()
-		orders, err := fx.Store.Platform().AddonOrders(ctx, tn.ID)
+		orders, _, err := fx.Store.Platform().AddonOrders(ctx, tn.ID, 100, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -96,7 +96,7 @@ func TestAddonMigrationKeepsBillingOfOldOrders(t *testing.T) {
 	if _, err := fx.Platform.CloseDueStatements(ctx); err != nil {
 		t.Fatal(err)
 	}
-	sts, err := fx.Store.Platform().Statements(ctx, tn.ID)
+	sts, _, err := fx.Store.Platform().Statements(ctx, tn.ID, 100, "")
 	if err != nil || len(sts) != 2 {
 		t.Fatalf("demonstrativos: %+v %v", sts, err)
 	}
@@ -107,7 +107,7 @@ func TestAddonMigrationKeepsBillingOfOldOrders(t *testing.T) {
 
 	// C é concluído no fluxo novo e fica para o próximo fechamento; Down e Up
 	// mantêm A e B nos demonstrativos que os cobraram e C sem cobrança.
-	if _, err := fx.Platform.CompleteAddonOrder(ctx, platformbilling.Staff{UserID: newUser(t, fx).ID, DisplayName: "Equipe"}, tn.ID, laterC); err != nil {
+	if _, err := fx.Platform.CompleteAddonOrder(ctx, platformbilling.Staff{UserID: newUser(t, fx).ID, DisplayName: "Equipe"}, tn.ID, laterC, 1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := migrate.DownTo(ctx, env.OwnerURL, 20); err != nil {
@@ -127,7 +127,7 @@ func TestAddonMigrationKeepsBillingOfOldOrders(t *testing.T) {
 	if _, err := fx.Platform.CloseDueStatements(ctx); err != nil {
 		t.Fatal(err)
 	}
-	sts, err = fx.Store.Platform().Statements(ctx, tn.ID)
+	sts, _, err = fx.Store.Platform().Statements(ctx, tn.ID, 100, "")
 	if err != nil || len(sts) != 3 || sts[0].AddonsAmount.Amount() != 250000 {
 		t.Fatalf("o fechamento seguinte cobra só C: %+v %v", sts, err)
 	}

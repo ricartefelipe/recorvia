@@ -188,7 +188,7 @@ func (w *workerEnv) tenantWithInvoice(t *testing.T, name string) (fixture.Tenant
 	tn := env.NewTenant(t, name)
 	// Plano com conciliação automática: a tarefa payments.reconcile consulta
 	// o provedor.
-	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "escala"); err != nil {
+	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "escala", env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := w.core.Payments.ConfigureAccount(ctx, tn.ID, tn.Actor, payments.AccountInput{Provider: "simulator", Environment: "local",

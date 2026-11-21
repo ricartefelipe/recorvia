@@ -196,7 +196,9 @@ func (c Coupon) InitialCycles() *int {
 type CouponTx interface {
 	InsertCoupon(ctx context.Context, c Coupon) error
 	Coupon(ctx context.Context, id uuid.UUID, forUpdate bool) (Coupon, error)
-	Coupons(ctx context.Context) ([]Coupon, error)
+	// Coupons devolve uma página dos cupons, dos criados mais recentemente
+	// para os mais antigos (limite e cursor opaco).
+	Coupons(ctx context.Context, limit int, cursor string) (Page[Coupon], error)
 	// ArchiveCoupon arquiva o cupom na versão informada (412
 	// version_mismatch se a linha tiver outra versão).
 	ArchiveCoupon(ctx context.Context, id uuid.UUID, version int) error
@@ -247,12 +249,13 @@ func (s *CouponService) Create(ctx context.Context, tenantID uuid.UUID, actor au
 	return c, err
 }
 
-// List lista os cupons do tenant.
-func (s *CouponService) List(ctx context.Context, tenantID uuid.UUID) ([]Coupon, error) {
-	var out []Coupon
+// List lista os cupons do tenant, dos criados mais recentemente para os mais
+// antigos, em páginas por cursor.
+func (s *CouponService) List(ctx context.Context, tenantID uuid.UUID, limit int, cursor string) (Page[Coupon], error) {
+	var out Page[Coupon]
 	err := s.store.InCouponTx(ctx, tenantID, func(tx CouponTx) error {
 		var err error
-		out, err = tx.Coupons(ctx)
+		out, err = tx.Coupons(ctx, limit, cursor)
 		return err
 	})
 	return out, err

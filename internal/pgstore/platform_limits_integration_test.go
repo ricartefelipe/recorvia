@@ -236,7 +236,7 @@ func TestDowngradeCountsPendingInvitationsAndAcceptRechecksLimit(t *testing.T) {
 	ctx := context.Background()
 	env := fixture.New(t, 4, now)
 	tn := env.NewTenant(t, "rebaixamento")
-	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "profissional"); err != nil {
+	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "profissional", env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	first := newUser(t, env)
@@ -247,7 +247,7 @@ func TestDowngradeCountsPendingInvitationsAndAcceptRechecksLimit(t *testing.T) {
 	tokB, tokC := invite(t, env, tn, b, tenancy.RoleOperator), invite(t, env, tn, c, tenancy.RoleOperator)
 
 	// 2 membros + 2 convites pendentes não cabem nos 3 usuários do essencial.
-	_, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "essencial")
+	_, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "essencial", env.PlatformVersion(t, tn.ID))
 	wantCode(t, err, "platform_downgrade_users")
 	ov, err := env.Platform.Overview(ctx, tn.ID)
 	if err != nil || ov.Plan.Code != "profissional" || ov.Usage.ActiveUsers != 2 || ov.Usage.PendingInvitations != 2 {
@@ -533,17 +533,17 @@ func TestAddonOrderHandlingAndStatement(t *testing.T) {
 	staffUser := newUser(t, env)
 	staff := platformbilling.Staff{UserID: staffUser.ID, DisplayName: "Equipe Recorvia"}
 	at := env.Clock.Now().Add(72 * time.Hour)
-	if _, err := env.Platform.ScheduleAddonOrder(ctx, staff, tn.ID, order.ID, at); err != nil {
+	if _, err := env.Platform.ScheduleAddonOrder(ctx, staff, tn.ID, order.ID, at, order.Version); err != nil {
 		t.Fatal(err)
 	}
 	// O tenant do caminho delimita o pedido: outro tenant não o encontra.
-	_, err = env.Platform.CompleteAddonOrder(ctx, staff, other.ID, order.ID)
+	_, err = env.Platform.CompleteAddonOrder(ctx, staff, other.ID, order.ID, order.Version+1)
 	wantCode(t, err, "addon_order_not_found")
-	if _, err := env.Platform.CancelAddonOrder(ctx, staff, other.ID, canceled.ID, "Cliente desistiu."); err != nil {
+	if _, err := env.Platform.CancelAddonOrder(ctx, staff, other.ID, canceled.ID, "Cliente desistiu.", canceled.Version); err != nil {
 		t.Fatal(err)
 	}
 	env.Clock.Advance(time.Hour)
-	done, err := env.Platform.CompleteAddonOrder(ctx, staff, tn.ID, order.ID)
+	done, err := env.Platform.CompleteAddonOrder(ctx, staff, tn.ID, order.ID, order.Version+1)
 	if err != nil || done.Status != platformbilling.AddonCompleted || done.ScheduledFor == nil || !done.ScheduledFor.Equal(at) {
 		t.Fatalf("conclusão: %+v %v", done, err)
 	}
@@ -581,14 +581,14 @@ func TestAddonOrderHandlingAndStatement(t *testing.T) {
 	if _, err := env.Platform.CloseDueStatements(ctx); err != nil {
 		t.Fatal(err)
 	}
-	sts, err := env.Store.Platform().Statements(ctx, tn.ID)
+	sts, _, err := env.Store.Platform().Statements(ctx, tn.ID, 100, "")
 	if err != nil || len(sts) != 1 {
 		t.Fatalf("demonstrativos: %+v %v", sts, err)
 	}
 	if sts[0].AddonsAmount.Amount() != 250000 || !sts[0].PeriodStart.Equal(ov.Subscription.PeriodStart) {
 		t.Fatalf("o serviço deve entrar no demonstrativo do período da conclusão: %+v", sts[0])
 	}
-	orders, err := env.Store.Platform().AddonOrders(ctx, tn.ID)
+	orders, _, err := env.Store.Platform().AddonOrders(ctx, tn.ID, 100, "")
 	if err != nil || len(orders) != 1 || orders[0].StatementID == nil || *orders[0].StatementID != sts[0].ID {
 		t.Fatalf("o pedido deve ficar vinculado ao demonstrativo: %+v %v", orders, err)
 	}
@@ -603,10 +603,10 @@ func TestAddonOrderHandlingAndStatement(t *testing.T) {
 	if _, err := env.Platform.CloseDueStatements(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if sts, err := env.Store.Platform().Statements(ctx, tn.ID); err != nil || len(sts) != 2 || sts[0].AddonsAmount.Amount() != 0 {
+	if sts, _, err := env.Store.Platform().Statements(ctx, tn.ID, 100, ""); err != nil || len(sts) != 2 || sts[0].AddonsAmount.Amount() != 0 {
 		t.Fatalf("o serviço não pode ser cobrado de novo: %+v %v", sts, err)
 	}
-	otherSts, err := env.Store.Platform().Statements(ctx, other.ID)
+	otherSts, _, err := env.Store.Platform().Statements(ctx, other.ID, 100, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -696,7 +696,7 @@ func TestStaffAddonOrdersPagination(t *testing.T) {
 	}
 	// Agendados em ordem inversa à da solicitação.
 	for i, id := range ids {
-		if _, err := env.Platform.ScheduleAddonOrder(ctx, staff, tn.ID, id, env.Clock.Now().Add(time.Duration(10-i)*time.Hour)); err != nil {
+		if _, err := env.Platform.ScheduleAddonOrder(ctx, staff, tn.ID, id, env.Clock.Now().Add(time.Duration(10-i)*time.Hour), 1); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -708,9 +708,9 @@ func TestStaffAddonOrdersPagination(t *testing.T) {
 		env.Clock.Advance(time.Minute)
 		var err error
 		if i%2 == 0 {
-			_, err = env.Platform.CompleteAddonOrder(ctx, staff, tn.ID, id)
+			_, err = env.Platform.CompleteAddonOrder(ctx, staff, tn.ID, id, 2)
 		} else {
-			_, err = env.Platform.CancelAddonOrder(ctx, staff, tn.ID, id, "Cliente desistiu.")
+			_, err = env.Platform.CancelAddonOrder(ctx, staff, tn.ID, id, "Cliente desistiu.", 2)
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -761,7 +761,7 @@ func (tx holdingPlatformTx) UnbilledAddonsTotal(ctx context.Context, before time
 
 func billedAddons(t *testing.T, env *fixture.Env, tn fixture.Tenant) (int64, []platformbilling.Statement) {
 	t.Helper()
-	sts, err := env.Store.Platform().Statements(context.Background(), tn.ID)
+	sts, _, err := env.Store.Platform().Statements(context.Background(), tn.ID, 100, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -802,7 +802,7 @@ func TestAddonCompletionConcurrentWithStatementClose(t *testing.T) {
 
 	errClose, errComplete := concurrently(t, store.reached, release,
 		func() error { _, err := worker.CloseDueStatements(ctx); return err },
-		func() error { _, err := api.CompleteAddonOrder(ctx, staff, tn.ID, order.ID); return err })
+		func() error { _, err := api.CompleteAddonOrder(ctx, staff, tn.ID, order.ID, order.Version); return err })
 	if errClose != nil || errComplete != nil {
 		t.Fatalf("fechamento: %v; conclusão: %v", errClose, errComplete)
 	}
@@ -839,7 +839,7 @@ func TestAddonCompletedAfterPeriodEndBeforeClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.Clock.Set(ov.Subscription.PeriodEnd.Add(time.Hour)) // o fechamento ainda não rodou
-	if _, err := env.Platform.CompleteAddonOrder(ctx, platformbilling.Staff{UserID: newUser(t, env).ID, DisplayName: "Equipe"}, tn.ID, order.ID); err != nil {
+	if _, err := env.Platform.CompleteAddonOrder(ctx, platformbilling.Staff{UserID: newUser(t, env).ID, DisplayName: "Equipe"}, tn.ID, order.ID, order.Version); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := env.Platform.CloseDueStatements(ctx); err != nil {

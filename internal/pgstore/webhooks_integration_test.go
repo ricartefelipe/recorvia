@@ -101,7 +101,7 @@ func webhookService(env *fixture.Env, client *safehttp.Client) *webhooks.Service
 func webhookTenant(t *testing.T, env *fixture.Env, prefix string) fixture.Tenant {
 	t.Helper()
 	tn := env.NewTenant(t, prefix)
-	if _, err := env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "profissional"); err != nil {
+	if _, err := env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "profissional", env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	return tn
@@ -515,7 +515,7 @@ func TestWebhookManualRetryLimitAndDisableAfterDowngrade(t *testing.T) {
 	if ae, ok := apperr.As(err); !ok || ae.Kind != apperr.KindConflict || ae.Code != "delivery_attempts_limit" {
 		t.Fatalf("reenvio além do limite: %v", err)
 	}
-	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "essencial"); err != nil {
+	if _, err := env.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "essencial", env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := svc.UpdateEndpoint(ctx, tn.ID, tn.Actor, ep.ID, webhooks.Input{URL: ep.URL, EventTypes: ep.EventTypes}, "disabled", 0)

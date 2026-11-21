@@ -137,8 +137,13 @@ func (t *fakeTx) UpdateSubscription(_ context.Context, s Subscription) error {
 	if err := t.store.err("UpdateSubscription"); err != nil {
 		return err
 	}
+	// Como a gravação condicionada do armazenamento: somente na versão lida.
+	if s.Version != t.st.sub.Version {
+		return apperr.PreconditionFailed("version_mismatch", "versão divergente")
+	}
 	t.st.updates++
 	t.st.sub = s
+	t.st.sub.Version++
 	return nil
 }
 

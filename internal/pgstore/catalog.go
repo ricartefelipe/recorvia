@@ -2,6 +2,10 @@ package pgstore
 
 import (
 	"context"
+	"encoding/base64"
+	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -59,13 +63,26 @@ func (tx catalogTx) UpdateProduct(ctx context.Context, p catalog.Product) error 
 	return versionConflict(n, "O produto foi alterado por outra pessoa.")
 }
 
-func (tx catalogTx) Products(ctx context.Context, status catalog.Status) ([]catalog.Product, error) {
-	rows, err := tx.q.ListProducts(ctx, dbgen.ListProductsParams{TenantID: tx.tenantID, Status: strPtr(string(status))})
-	out := make([]catalog.Product, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, productFromRow(r))
+// Products lista os produtos, dos criados mais recentemente para os mais
+// antigos, em páginas por cursor.
+func (tx catalogTx) Products(ctx context.Context, status catalog.Status, limit int, cursor string) (catalog.Page[catalog.Product], error) {
+	cts, cid, err := parseTimeCursor(cursor)
+	if err != nil {
+		return catalog.Page[catalog.Product]{}, err
 	}
-	return out, err
+	limit = pageLimit(limit)
+	rows, err := tx.q.ListProducts(ctx, dbgen.ListProductsParams{TenantID: tx.tenantID, Status: strPtr(string(status)), CursorTs: cts,
+		CursorID: cid, RowLimit: int32(limit + 1)})
+	if err != nil {
+		return catalog.Page[catalog.Product]{}, err
+	}
+	var p catalog.Page[catalog.Product]
+	rows, p.NextCursor = keysetPage(rows, limit, func(r dbgen.Product) (time.Time, uuid.UUID) { return r.CreatedAt, r.ID })
+	p.Items = make([]catalog.Product, 0, len(rows))
+	for _, r := range rows {
+		p.Items = append(p.Items, productFromRow(r))
+	}
+	return p, nil
 }
 
 func metricFromRow(r dbgen.BillableMetric) (catalog.Metric, error) {
@@ -103,20 +120,62 @@ func (b base) metric(ctx context.Context, id uuid.UUID) (catalog.Metric, error) 
 	return metricFromRow(r)
 }
 
-func (tx catalogTx) Metrics(ctx context.Context) ([]catalog.Metric, error) {
-	rows, err := tx.q.ListMetrics(ctx, tx.tenantID)
-	if err != nil {
-		return nil, err
+// codeCursor codifica a posição (código, id) da listagem de métricas: o
+// código é único no tenant e não muda depois da criação.
+func codeCursor(code string, id uuid.UUID) string {
+	return base64.RawURLEncoding.EncodeToString([]byte("k:" + code + "|" + id.String()))
+}
+
+// parseCodeCursor decodifica o cursor de codeCursor; vazio é a primeira
+// página. Um código que o banco recusaria como texto (UTF-8 inválido ou byte
+// nulo) torna o cursor inválido, em vez de falhar na consulta.
+func parseCodeCursor(c string) (*string, *uuid.UUID, error) {
+	if c == "" {
+		return nil, nil, nil
 	}
-	out := make([]catalog.Metric, 0, len(rows))
+	invalid := apperr.Invalid("invalid_cursor", "Cursor de paginação inválido.")
+	b, err := base64.RawURLEncoding.DecodeString(c)
+	if err != nil {
+		return nil, nil, invalid
+	}
+	raw, ok := strings.CutPrefix(string(b), "k:")
+	sep := strings.LastIndex(raw, "|")
+	if !ok || sep < 0 || !utf8.ValidString(raw) || strings.ContainsRune(raw, 0) {
+		return nil, nil, invalid
+	}
+	id, err := uuid.Parse(raw[sep+1:])
+	if err != nil {
+		return nil, nil, invalid
+	}
+	code := raw[:sep]
+	return &code, &id, nil
+}
+
+// Metrics lista as métricas pelo código, em páginas por cursor.
+func (tx catalogTx) Metrics(ctx context.Context, limit int, cursor string) (catalog.Page[catalog.Metric], error) {
+	code, cid, err := parseCodeCursor(cursor)
+	if err != nil {
+		return catalog.Page[catalog.Metric]{}, err
+	}
+	limit = pageLimit(limit)
+	rows, err := tx.q.ListMetrics(ctx, dbgen.ListMetricsParams{TenantID: tx.tenantID, CursorCode: code, CursorID: cid, RowLimit: int32(limit + 1)})
+	if err != nil {
+		return catalog.Page[catalog.Metric]{}, err
+	}
+	var p catalog.Page[catalog.Metric]
+	if len(rows) > limit {
+		rows = rows[:limit]
+		p.NextCursor = codeCursor(rows[limit-1].Code, rows[limit-1].ID)
+	}
+	p.Items = make([]catalog.Metric, 0, len(rows))
 	for _, r := range rows {
 		m, err := metricFromRow(r)
 		if err != nil {
-			return nil, err
+			return catalog.Page[catalog.Metric]{}, err
 		}
-		out = append(out, m)
+		p.Items = append(p.Items, m)
 	}
-	return out, nil
+	return p, nil
 }
 
 func planFromRow(r dbgen.Plan) (catalog.Plan, error) {
@@ -170,20 +229,30 @@ func (tx catalogTx) UpdatePlan(ctx context.Context, p catalog.Plan) error {
 	return versionConflict(n, "O plano foi alterado por outra pessoa.")
 }
 
-func (tx catalogTx) Plans(ctx context.Context, status catalog.Status, productID *uuid.UUID) ([]catalog.Plan, error) {
-	rows, err := tx.q.ListPlans(ctx, dbgen.ListPlansParams{TenantID: tx.tenantID, Status: strPtr(string(status)), ProductID: productID})
+// Plans lista os planos, dos criados mais recentemente para os mais antigos,
+// em páginas por cursor.
+func (tx catalogTx) Plans(ctx context.Context, status catalog.Status, productID *uuid.UUID, limit int, cursor string) (catalog.Page[catalog.Plan], error) {
+	cts, cid, err := parseTimeCursor(cursor)
 	if err != nil {
-		return nil, err
+		return catalog.Page[catalog.Plan]{}, err
 	}
-	out := make([]catalog.Plan, 0, len(rows))
+	limit = pageLimit(limit)
+	rows, err := tx.q.ListPlans(ctx, dbgen.ListPlansParams{TenantID: tx.tenantID, Status: strPtr(string(status)), ProductID: productID,
+		CursorTs: cts, CursorID: cid, RowLimit: int32(limit + 1)})
+	if err != nil {
+		return catalog.Page[catalog.Plan]{}, err
+	}
+	var page catalog.Page[catalog.Plan]
+	rows, page.NextCursor = keysetPage(rows, limit, func(r dbgen.Plan) (time.Time, uuid.UUID) { return r.CreatedAt, r.ID })
+	page.Items = make([]catalog.Plan, 0, len(rows))
 	for _, r := range rows {
 		p, err := planFromRow(r)
 		if err != nil {
-			return nil, err
+			return catalog.Page[catalog.Plan]{}, err
 		}
-		out = append(out, p)
+		page.Items = append(page.Items, p)
 	}
-	return out, nil
+	return page, nil
 }
 
 func priceFromRow(r dbgen.PlanPriceVersion) (catalog.PriceVersion, error) {

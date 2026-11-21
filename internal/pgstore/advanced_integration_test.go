@@ -146,7 +146,7 @@ func (a *advEnv) newPerUnitPlan(t *testing.T, tn fixture.Tenant, unitAmount stri
 func (a *advEnv) newMeteredPlan(t *testing.T, tn fixture.Tenant, agg catalog.Aggregation, price catalog.PriceInput) (catalog.Metric, catalog.PlanDetails) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := a.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "profissional"); err != nil {
+	if _, err := a.Platform.ChangePlan(ctx, tn.ID, tn.Actor, "profissional", a.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	m, err := a.Catalog.CreateMetric(ctx, tn.ID, tn.Actor, catalog.MetricInput{Code: "metrica." + uniqueSuffix(), Name: "Métrica de teste",
@@ -538,7 +538,7 @@ func TestAdvancedTablesIsolateTenantsUnderAppRole(t *testing.T) {
 	})
 
 	t.Run("casos de uso no contexto de outro tenant", func(t *testing.T) {
-		if _, err := a.Terms.Adjustments(ctx, tb.ID, subA.ID); !apperr.IsKind(err, apperr.KindNotFound) {
+		if _, err := a.Terms.Adjustments(ctx, tb.ID, subA.ID, 25, ""); !apperr.IsKind(err, apperr.KindNotFound) {
 			t.Errorf("reajustes de A listados por B: %v", err)
 		}
 		if err := a.Terms.CancelAdjustment(ctx, tb.ID, tb.Actor, subA.ID, adj.ID); !apperr.IsKind(err, apperr.KindNotFound) {
@@ -578,7 +578,8 @@ func TestAdvancedTablesIsolateTenantsUnderAppRole(t *testing.T) {
 			terms.ScheduledChanges[0].Status != subscriptions.ChangePending {
 			t.Errorf("mudança agendada de A: %+v %v", terms.ScheduledChanges, err)
 		}
-		adjs, err := a.Terms.Adjustments(ctx, ta.ID, subA.ID)
+		adjPage, err := a.Terms.Adjustments(ctx, ta.ID, subA.ID, 100, "")
+		adjs := adjPage.Items
 		if err != nil || len(adjs) != 1 || adjs[0].Status != subscriptions.AdjustmentScheduled {
 			t.Errorf("reajustes de A: %+v %v", adjs, err)
 		}
@@ -951,7 +952,8 @@ func TestPriceAdjustmentsAppliedAtCorrectCycle(t *testing.T) {
 		}
 	}
 
-	adjs, err := a.Terms.Adjustments(ctx, tn.ID, sub.ID)
+	adjPage, err := a.Terms.Adjustments(ctx, tn.ID, sub.ID, 100, "")
+	adjs := adjPage.Items
 	if err != nil {
 		t.Fatal(err)
 	}

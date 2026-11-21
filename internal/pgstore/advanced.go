@@ -2,8 +2,10 @@ package pgstore
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -478,12 +480,66 @@ func (tx termsTx) InsertAdjustment(ctx context.Context, a subscriptions.PriceAdj
 	return err
 }
 
-func (tx termsTx) Adjustments(ctx context.Context, subscriptionID uuid.UUID) ([]subscriptions.PriceAdjustment, error) {
-	rows, err := tx.q.ListPriceAdjustments(ctx, dbgen.ListPriceAdjustmentsParams{TenantID: tx.tenantID, SubscriptionID: subscriptionID})
-	if err != nil {
-		return nil, err
+// adjustmentCursor codifica a posição (vigência, programação, id) da
+// listagem de reajustes, que não muda depois da programação.
+func adjustmentCursor(a dbgen.SubscriptionPriceAdjustment) string {
+	return base64.RawURLEncoding.EncodeToString([]byte("a:" + dateFromPg(a.EffectiveDate).String() + "|" +
+		a.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + a.ID.String()))
+}
+
+// parseAdjustmentCursor decodifica o cursor de adjustmentCursor; vazio é a
+// primeira página.
+func parseAdjustmentCursor(c string) (dbgen.ListPriceAdjustmentsParams, error) {
+	var p dbgen.ListPriceAdjustmentsParams
+	if c == "" {
+		return p, nil
 	}
-	return adjustmentsFromRows(rows)
+	invalid := apperr.Invalid("invalid_cursor", "Cursor de paginação inválido.")
+	b, err := base64.RawURLEncoding.DecodeString(c)
+	if err != nil {
+		return p, invalid
+	}
+	raw, ok := strings.CutPrefix(string(b), "a:")
+	parts := strings.Split(raw, "|")
+	if !ok || len(parts) != 3 {
+		return p, invalid
+	}
+	d, err := calendar.ParseDate(parts[0])
+	if err != nil {
+		return p, invalid
+	}
+	ts, err := time.Parse(time.RFC3339Nano, parts[1])
+	if err != nil {
+		return p, invalid
+	}
+	id, err := uuid.Parse(parts[2])
+	if err != nil {
+		return p, invalid
+	}
+	p.CursorDate, p.CursorTs, p.CursorID = dateToPg(d), &ts, &id
+	return p, nil
+}
+
+// Adjustments lista os reajustes da assinatura, da vigência mais antiga para
+// a mais recente, em páginas por cursor.
+func (tx termsTx) Adjustments(ctx context.Context, subscriptionID uuid.UUID, limit int, cursor string) (subscriptions.AdjustmentPage, error) {
+	args, err := parseAdjustmentCursor(cursor)
+	if err != nil {
+		return subscriptions.AdjustmentPage{}, err
+	}
+	limit = pageLimit(limit)
+	args.TenantID, args.SubscriptionID, args.RowLimit = tx.tenantID, subscriptionID, int32(limit+1)
+	rows, err := tx.q.ListPriceAdjustments(ctx, args)
+	if err != nil {
+		return subscriptions.AdjustmentPage{}, err
+	}
+	var p subscriptions.AdjustmentPage
+	if len(rows) > limit {
+		rows = rows[:limit]
+		p.NextCursor = adjustmentCursor(rows[limit-1])
+	}
+	p.Items, err = adjustmentsFromRows(rows)
+	return p, err
 }
 
 func (tx termsTx) Adjustment(ctx context.Context, subscriptionID, id uuid.UUID) (subscriptions.PriceAdjustment, error) {
@@ -560,16 +616,25 @@ func (tx couponTx) Coupon(ctx context.Context, id uuid.UUID, forUpdate bool) (ca
 	return couponFromRow(r), nil
 }
 
-func (tx couponTx) Coupons(ctx context.Context) ([]catalog.Coupon, error) {
-	rows, err := tx.q.ListCoupons(ctx, tx.tenantID)
+// Coupons lista os cupons, dos criados mais recentemente para os mais
+// antigos, em páginas por cursor.
+func (tx couponTx) Coupons(ctx context.Context, limit int, cursor string) (catalog.Page[catalog.Coupon], error) {
+	cts, cid, err := parseTimeCursor(cursor)
 	if err != nil {
-		return nil, err
+		return catalog.Page[catalog.Coupon]{}, err
 	}
-	out := make([]catalog.Coupon, len(rows))
+	limit = pageLimit(limit)
+	rows, err := tx.q.ListCoupons(ctx, dbgen.ListCouponsParams{TenantID: tx.tenantID, CursorTs: cts, CursorID: cid, RowLimit: int32(limit + 1)})
+	if err != nil {
+		return catalog.Page[catalog.Coupon]{}, err
+	}
+	var p catalog.Page[catalog.Coupon]
+	rows, p.NextCursor = keysetPage(rows, limit, func(r dbgen.Coupon) (time.Time, uuid.UUID) { return r.CreatedAt, r.ID })
+	p.Items = make([]catalog.Coupon, len(rows))
 	for i, r := range rows {
-		out[i] = couponFromRow(r)
+		p.Items[i] = couponFromRow(r)
 	}
-	return out, nil
+	return p, nil
 }
 
 func (tx couponTx) ArchiveCoupon(ctx context.Context, id uuid.UUID, version int) error {

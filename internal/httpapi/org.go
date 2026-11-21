@@ -344,7 +344,7 @@ func overviewDTO(o platformbilling.Overview) map[string]any {
 	return map[string]any{
 		"plan": platformPlanDTOFrom(o.Plan),
 		"subscription": map[string]any{"plan_code": o.Subscription.PlanCode, "status": o.Subscription.Status, "trial_ends_at": o.Subscription.TrialEndsAt,
-			"current_period_start": o.Subscription.PeriodStart, "current_period_end": o.Subscription.PeriodEnd},
+			"current_period_start": o.Subscription.PeriodStart, "current_period_end": o.Subscription.PeriodEnd, "version": o.Subscription.Version},
 		"usage": map[string]any{"active_users": o.Usage.ActiveUsers, "pending_invitations": o.Usage.PendingInvitations,
 			"active_subscriptions": o.Usage.ActiveSubscriptions},
 	}
@@ -356,7 +356,7 @@ func (a *API) platformOverview(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, overviewDTO(o))
+	a.writeVersioned(w, r, http.StatusOK, o.Subscription.Version, overviewDTO(o))
 }
 
 func (a *API) platformPlans(w http.ResponseWriter, r *http.Request) {
@@ -373,6 +373,11 @@ func (a *API) platformPlans(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) changePlatformPlan(w http.ResponseWriter, r *http.Request) {
+	version, err := ifMatch(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	var in struct {
 		PlanCode string `json:"plan_code"`
 	}
@@ -381,7 +386,7 @@ func (a *API) changePlatformPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := mustPrincipal(r)
-	if _, err := a.Platform.ChangePlan(r.Context(), p.TenantID, p.Actor(), in.PlanCode); err != nil {
+	if _, err := a.Platform.ChangePlan(r.Context(), p.TenantID, p.Actor(), in.PlanCode, version); err != nil {
 		a.writeError(w, r, err)
 		return
 	}
@@ -409,7 +414,12 @@ func addonOrderDTO(o platformbilling.AddonOrder) map[string]any {
 }
 
 func (a *API) listAddonOrders(w http.ResponseWriter, r *http.Request) {
-	orders, err := a.Store.Platform().AddonOrders(r.Context(), mustPrincipal(r).TenantID)
+	limit, cursor, err := pageParams(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	orders, next, err := a.Store.Platform().AddonOrders(r.Context(), mustPrincipal(r).TenantID, limit, cursor)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -418,7 +428,7 @@ func (a *API) listAddonOrders(w http.ResponseWriter, r *http.Request) {
 	for _, o := range orders {
 		out = append(out, addonOrderDTO(o))
 	}
-	a.writeJSON(w, r, http.StatusOK, list(out))
+	a.writeJSON(w, r, http.StatusOK, newPage(out, next))
 }
 
 func (a *API) createAddonOrder(w http.ResponseWriter, r *http.Request) {
@@ -440,7 +450,12 @@ func (a *API) createAddonOrder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) listPlatformStatements(w http.ResponseWriter, r *http.Request) {
-	sts, err := a.Store.Platform().Statements(r.Context(), mustPrincipal(r).TenantID)
+	limit, cursor, err := pageParams(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	sts, next, err := a.Store.Platform().Statements(r.Context(), mustPrincipal(r).TenantID, limit, cursor)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -451,5 +466,5 @@ func (a *API) listPlatformStatements(w http.ResponseWriter, r *http.Request) {
 			"subscription_amount": s.SubscriptionAmount.Amount(), "addons_amount": s.AddonsAmount.Amount(), "total": s.Total.Amount(),
 			"currency": s.Total.Currency().Code(), "status": s.Status})
 	}
-	a.writeJSON(w, r, http.StatusOK, list(out))
+	a.writeJSON(w, r, http.StatusOK, newPage(out, next))
 }

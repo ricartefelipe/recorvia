@@ -198,26 +198,26 @@ func TestCouponServiceList(t *testing.T) {
 	if _, err := e.svc.Create(context.Background(), uuid.New(), e.actor, couponWith(func(in *CouponInput) { in.Code = "ALHEIO" })); err != nil {
 		t.Fatal(err)
 	}
-	list, err := e.svc.List(context.Background(), e.tenantID)
+	list, err := e.svc.List(context.Background(), e.tenantID, 10, "cursor")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 2 || list[0].ID != newer.ID || list[1].ID != older.ID {
-		t.Fatalf("lista inesperada: %+v", list)
+	if len(list.Items) != 2 || list.Items[0].ID != newer.ID || list.Items[1].ID != older.ID || e.st().page != (pageRequest{10, "cursor"}) {
+		t.Fatalf("lista inesperada: %+v (página pedida %+v)", list, e.st().page)
 	}
 }
 
 func TestCouponServiceListEmptyAndErrors(t *testing.T) {
 	e := newCouponEnv()
-	list, err := e.svc.List(context.Background(), e.tenantID)
-	if err != nil || len(list) != 0 {
+	list, err := e.svc.List(context.Background(), e.tenantID, 25, "")
+	if err != nil || len(list.Items) != 0 || list.NextCursor != "" {
 		t.Fatalf("lista = %v, erro = %v", list, err)
 	}
 	for _, op := range []string{"InCouponTx", "Coupons"} {
 		t.Run(op, func(t *testing.T) {
 			e := newCouponEnv()
 			e.store.fail[op] = errBoom
-			if _, err := e.svc.List(context.Background(), e.tenantID); !errors.Is(err, errBoom) {
+			if _, err := e.svc.List(context.Background(), e.tenantID, 25, ""); !errors.Is(err, errBoom) {
 				t.Fatalf("erro = %v, esperado a falha simulada", err)
 			}
 		})

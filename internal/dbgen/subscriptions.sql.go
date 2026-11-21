@@ -853,17 +853,34 @@ func (q *Queries) ListOpenPendingItems(ctx context.Context, arg ListOpenPendingI
 }
 
 const listPriceAdjustments = `-- name: ListPriceAdjustments :many
-SELECT id, tenant_id, subscription_id, effective_date, kind, percent_bp, new_amount, index_name, reason, status, previous_amount, resulting_amount, applied_period_start, applied_at, canceled_at, cancel_reason, created_by, created_at FROM subscription_price_adjustments WHERE tenant_id = $1 AND subscription_id = $2
- ORDER BY effective_date, created_at, id LIMIT 200
+SELECT id, tenant_id, subscription_id, effective_date, kind, percent_bp, new_amount, index_name, reason, status, previous_amount, resulting_amount, applied_period_start, applied_at, canceled_at, cancel_reason, created_by, created_at FROM subscription_price_adjustments
+ WHERE tenant_id = $1 AND subscription_id = $2
+   AND ($3::date IS NULL
+        OR (effective_date, created_at, id) > ($3::date, $4::timestamptz, $5::uuid))
+ ORDER BY effective_date, created_at, id
+ LIMIT $6
 `
 
 type ListPriceAdjustmentsParams struct {
 	TenantID       uuid.UUID
 	SubscriptionID uuid.UUID
+	CursorDate     pgtype.Date
+	CursorTs       *time.Time
+	CursorID       *uuid.UUID
+	RowLimit       int32
 }
 
+// Paginação por keyset em (effective_date, created_at, id), que não mudam
+// depois da programação.
 func (q *Queries) ListPriceAdjustments(ctx context.Context, arg ListPriceAdjustmentsParams) ([]SubscriptionPriceAdjustment, error) {
-	rows, err := q.db.Query(ctx, listPriceAdjustments, arg.TenantID, arg.SubscriptionID)
+	rows, err := q.db.Query(ctx, listPriceAdjustments,
+		arg.TenantID,
+		arg.SubscriptionID,
+		arg.CursorDate,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

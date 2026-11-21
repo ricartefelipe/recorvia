@@ -339,7 +339,7 @@ func TestCollectionsAPINotificationHistory(t *testing.T) {
 func proTenant(t *testing.T, env *fixture.Env, prefix string) fixture.Tenant {
 	t.Helper()
 	tn := env.NewTenant(t, prefix)
-	if _, err := env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "profissional"); err != nil {
+	if _, err := env.Platform.ChangePlan(context.Background(), tn.ID, tn.Actor, "profissional", env.PlatformVersion(t, tn.ID)); err != nil {
 		t.Fatal(err)
 	}
 	return tn

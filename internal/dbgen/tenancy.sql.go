@@ -578,11 +578,28 @@ func (q *Queries) InsertTenantPlatformSubscription(ctx context.Context, arg Inse
 }
 
 const listAddonOrders = `-- name: ListAddonOrders :many
-SELECT id, tenant_id, addon_code, status, notes, price_amount, requested_by, created_at, updated_at, scheduled_for, completed_at, canceled_at, cancel_reason, handled_by, statement_id, version FROM platform_addon_orders WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT 100
+SELECT id, tenant_id, addon_code, status, notes, price_amount, requested_by, created_at, updated_at, scheduled_for, completed_at, canceled_at, cancel_reason, handled_by, statement_id, version FROM platform_addon_orders
+ WHERE tenant_id = $1
+   AND ($2::timestamptz IS NULL OR (created_at, id) < ($2::timestamptz, $3::uuid))
+ ORDER BY created_at DESC, id DESC
+ LIMIT $4
 `
 
-func (q *Queries) ListAddonOrders(ctx context.Context, tenantID uuid.UUID) ([]PlatformAddonOrder, error) {
-	rows, err := q.db.Query(ctx, listAddonOrders, tenantID)
+type ListAddonOrdersParams struct {
+	TenantID uuid.UUID
+	CursorTs *time.Time
+	CursorID *uuid.UUID
+	RowLimit int32
+}
+
+// Paginação por keyset em (created_at, id), que não mudam depois do pedido.
+func (q *Queries) ListAddonOrders(ctx context.Context, arg ListAddonOrdersParams) ([]PlatformAddonOrder, error) {
+	rows, err := q.db.Query(ctx, listAddonOrders,
+		arg.TenantID,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -823,11 +840,29 @@ func (q *Queries) ListPlatformPlans(ctx context.Context) ([]PlatformPlan, error)
 }
 
 const listPlatformStatements = `-- name: ListPlatformStatements :many
-SELECT id, tenant_id, period_start, period_end, plan_code, subscription_amount, addons_amount, total_amount, currency, status, created_at FROM platform_statements WHERE tenant_id = $1 ORDER BY period_start DESC, id DESC LIMIT 36
+SELECT id, tenant_id, period_start, period_end, plan_code, subscription_amount, addons_amount, total_amount, currency, status, created_at FROM platform_statements
+ WHERE tenant_id = $1
+   AND ($2::timestamptz IS NULL OR (period_start, id) < ($2::timestamptz, $3::uuid))
+ ORDER BY period_start DESC, id DESC
+ LIMIT $4
 `
 
-func (q *Queries) ListPlatformStatements(ctx context.Context, tenantID uuid.UUID) ([]PlatformStatement, error) {
-	rows, err := q.db.Query(ctx, listPlatformStatements, tenantID)
+type ListPlatformStatementsParams struct {
+	TenantID uuid.UUID
+	CursorTs *time.Time
+	CursorID *uuid.UUID
+	RowLimit int32
+}
+
+// Paginação por keyset em (period_start, id), que não mudam depois do
+// fechamento.
+func (q *Queries) ListPlatformStatements(ctx context.Context, arg ListPlatformStatementsParams) ([]PlatformStatement, error) {
+	rows, err := q.db.Query(ctx, listPlatformStatements,
+		arg.TenantID,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
