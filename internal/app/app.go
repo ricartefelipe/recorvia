@@ -33,6 +33,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/pgstore"
 	"github.com/ricartefelipe/recorvia/internal/platformbilling"
 	"github.com/ricartefelipe/recorvia/internal/reporting"
+	"github.com/ricartefelipe/recorvia/internal/retention"
 	"github.com/ricartefelipe/recorvia/internal/subscriptions"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
 	"github.com/ricartefelipe/recorvia/internal/webhooks"
@@ -67,6 +68,7 @@ type Core struct {
 	Notifications *notifications.Service
 	Collections   *collections.Service
 	Webhooks      *webhooks.Service
+	Retention     *retention.Service
 }
 
 // mailSender adapta o cliente SMTP à porta de envio das notificações.
@@ -175,6 +177,10 @@ func Assemble(cfg *config.Config, log *slog.Logger, db *postgres.DB, keyring *se
 	if webhookBase == "" && cfg.PublicURL != nil {
 		webhookBase = strings.TrimRight(cfg.PublicURL.String(), "/") + "/webhooks/providers"
 	}
+	purge, err := retention.NewService(store.Retention(), c, RetentionPolicy(cfg), log)
+	if err != nil {
+		return nil, err
+	}
 	return &Core{
 		Config: cfg, Log: log, Clock: c, DB: db, Keyring: keyring, Store: store, Resolver: resolver,
 		Tenancy:       tenancy.NewService(store.Tenancy(), c).WithTokenSealer(keyring),
@@ -199,7 +205,21 @@ func Assemble(cfg *config.Config, log *slog.Logger, db *postgres.DB, keyring *se
 		Webhooks: webhooks.NewService(store.Webhooks(), webhookTransport{c: webhookClient}, webhookClient, c, webhooks.Config{
 			RequireHTTPS: cfg.Env == config.Production, Lease: webhookLease, Timeout: webhookRequestTimeout + 5*time.Second,
 			IsPermanent: func(err error) bool { return errors.Is(err, safehttp.ErrBlocked) }, Log: log}),
+		Retention: purge,
 	}, nil
+}
+
+// RetentionPolicy converte os prazos configurados (em dias) na política do
+// expurgo por idade; os limites de execução são os padrões do pacote.
+func RetentionPolicy(cfg *config.Config) retention.Policy {
+	r := cfg.Retention
+	p := retention.DefaultPolicy()
+	p.Inbox, p.DeadLetters, p.Webhooks = retention.Days(r.InboxDays), retention.Days(r.DeadLettersDays), retention.Days(r.WebhooksDays)
+	p.ProviderWebhookPayloads = retention.Days(r.ProviderWebhookPayloadsDays)
+	p.NotificationContent, p.Notifications = retention.Days(r.NotificationContentDays), retention.Days(r.NotificationsDays)
+	p.PortalLinks, p.UsageEvents, p.Invitations = retention.Days(r.PortalLinksDays), retention.Days(r.UsageEventsDays), retention.Days(r.InvitationsDays)
+	p.BatchSize = r.BatchSize
+	return p
 }
 
 // Close libera recursos.

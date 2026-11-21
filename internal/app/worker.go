@@ -21,6 +21,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/outbox"
 	"github.com/ricartefelipe/recorvia/internal/payments"
 	"github.com/ricartefelipe/recorvia/internal/pgstore"
+	"github.com/ricartefelipe/recorvia/internal/retention"
 	"github.com/ricartefelipe/recorvia/internal/scheduler"
 	"github.com/ricartefelipe/recorvia/internal/webhooks"
 )
@@ -309,15 +310,23 @@ func (w *Worker) Jobs() []scheduler.Job {
 			_, err := c.Store.PurgeIdempotency(ctx)
 			return err
 		}},
+		// Expurgo por idade dos dados técnicos (ADR-060): cada execução é
+		// limitada pelo orçamento da política e continua na seguinte.
+		{Name: JobRetention, Interval: time.Hour, Timeout: 10 * time.Minute, Run: func(ctx context.Context) error {
+			res, err := c.Retention.Run(ctx)
+			recordRetention(w.Metrics, res)
+			return err
+		}},
 	}
 }
 
-// Tarefas da régua de cobrança, do envio de notificações e das entregas de
-// webhooks.
+// Tarefas da régua de cobrança, do envio de notificações, das entregas de
+// webhooks e do expurgo por idade.
 const (
 	JobCollections   = "collections.run"
 	JobNotifications = "notifications.dispatch"
 	JobWebhooks      = "webhooks.deliver"
+	JobRetention     = "retention.purge"
 )
 
 func addCount(v *prometheus.CounterVec, label string, n int) {
@@ -333,6 +342,21 @@ func recordCollections(m *telemetry.Metrics, r collections.RunResult) {
 	addCount(m.CollectionActions, "invoice_overdue", r.Overdue)
 	addCount(m.CollectionActions, "subscription_suspended", r.Suspended)
 	addCount(m.CollectionActions, "subscription_reactivated", r.Reactivated)
+}
+
+// recordRetention registra os resultados de uma execução do expurgo por
+// idade: registros removidos, tipos com falha e tipos interrompidos com
+// registros vencidos restantes (resultados parciais também são contados).
+func recordRetention(m *telemetry.Metrics, r retention.Result) {
+	for k, n := range r.Purged {
+		addCount(m.RetentionPurged, string(k), n)
+	}
+	for _, k := range r.Failed {
+		m.RetentionPurgeFailures.WithLabelValues(string(k)).Inc()
+	}
+	for _, k := range r.Incomplete {
+		m.RetentionPurgeIncomplete.WithLabelValues(string(k)).Inc()
+	}
 }
 
 // exhaustedStatuses são as situações exportadas em
@@ -424,6 +448,7 @@ func (w *Worker) initMetrics(jobs []scheduler.Job) {
 		w.Metrics.InitJob(j.Name, j.Interval)
 	}
 	w.Metrics.InitDispatchResults()
+	w.Metrics.InitRetention()
 }
 
 // Run inicia conexão, relay, consumidores e agendador até ctx terminar.
