@@ -7,6 +7,7 @@ package dbgen
 
 import (
 	"context"
+	"time"
 )
 
 const databaseConnectionStats = `-- name: DatabaseConnectionStats :one
@@ -35,4 +36,108 @@ func (q *Queries) DatabaseConnectionStats(ctx context.Context) (DatabaseConnecti
 	var i DatabaseConnectionStatsRow
 	err := row.Scan(&i.Connections, &i.AvailableConnections)
 	return i, err
+}
+
+const deadLetterStats = `-- name: DeadLetterStats :many
+SELECT consumer::text AS consumer, open_total::bigint AS open_total, oldest_open_seconds::double precision AS oldest_open_seconds
+  FROM app_dead_letter_stats($1)
+`
+
+type DeadLetterStatsRow struct {
+	Consumer          string
+	OpenTotal         int64
+	OldestOpenSeconds float64
+}
+
+// Dead letters abertas por consumidor (todos os tenants e as registradas sem
+// tenant, sem identificá-los) e a idade da mais antiga.
+func (q *Queries) DeadLetterStats(ctx context.Context, now time.Time) ([]DeadLetterStatsRow, error) {
+	rows, err := q.db.Query(ctx, deadLetterStats, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DeadLetterStatsRow
+	for rows.Next() {
+		var i DeadLetterStatsRow
+		if err := rows.Scan(&i.Consumer, &i.OpenTotal, &i.OldestOpenSeconds); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const notificationBacklogStats = `-- name: NotificationBacklogStats :many
+SELECT state::text AS state, total::bigint AS total, oldest_seconds::double precision AS oldest_seconds
+  FROM app_notification_backlog_stats($1, $2)
+`
+
+type NotificationBacklogStatsParams struct {
+	Now         time.Time
+	FailedSince time.Time
+}
+
+type NotificationBacklogStatsRow struct {
+	State         string
+	Total         int64
+	OldestSeconds float64
+}
+
+// Fila de notificações por situação (due, sending, failed), sem identificação
+// de tenant; failed considera as falhas definitivas desde failed_since.
+func (q *Queries) NotificationBacklogStats(ctx context.Context, arg NotificationBacklogStatsParams) ([]NotificationBacklogStatsRow, error) {
+	rows, err := q.db.Query(ctx, notificationBacklogStats, arg.Now, arg.FailedSince)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []NotificationBacklogStatsRow
+	for rows.Next() {
+		var i NotificationBacklogStatsRow
+		if err := rows.Scan(&i.State, &i.Total, &i.OldestSeconds); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const webhookDeliveryBacklogStats = `-- name: WebhookDeliveryBacklogStats :many
+SELECT state::text AS state, total::bigint AS total, oldest_due_seconds::double precision AS oldest_due_seconds
+  FROM app_webhook_delivery_backlog_stats($1)
+`
+
+type WebhookDeliveryBacklogStatsRow struct {
+	State            string
+	Total            int64
+	OldestDueSeconds float64
+}
+
+// Fila de entregas de webhooks enviados por situação (pending, retrying), sem
+// identificação de tenant, com o atraso da entrega devida mais antiga.
+func (q *Queries) WebhookDeliveryBacklogStats(ctx context.Context, now time.Time) ([]WebhookDeliveryBacklogStatsRow, error) {
+	rows, err := q.db.Query(ctx, webhookDeliveryBacklogStats, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WebhookDeliveryBacklogStatsRow
+	for rows.Next() {
+		var i WebhookDeliveryBacklogStatsRow
+		if err := rows.Scan(&i.State, &i.Total, &i.OldestDueSeconds); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
