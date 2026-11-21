@@ -6,6 +6,78 @@ Todas as mudanças relevantes são registradas aqui. Formato baseado em
 
 ## [Não lançado]
 
+## [0.2.0] - 2026-11-21
+
+### Adicionado
+- Expurgo automático por idade (tarefa `retention.purge` do worker, horária, com lease, por
+  tenant e em lotes): inbox, dead letters tratadas, eventos, entregas e segredos vencidos de
+  webhooks enviados, corpo dos webhooks recebidos do provedor, conteúdo e histórico de
+  notificações, links do portal, convites não aceitos e consumo já faturado. Prazos em
+  `RECORVIA_RETENTION_*_DAYS`, com mínimos validados na partida. Registros financeiros e de
+  auditoria ficam retidos de propósito (ADR-060).
+- Anonimização de cliente (`POST /api/v1/customers/{id}/anonymize`, permissão
+  `customers.anonymize`, só por sessão de usuário), irreversível e idempotente, com a ação na
+  ficha do cliente; faturas emitidas, pagamentos, ledger e auditoria permanecem (ADR-061).
+- Exercício automatizado de recuperação de desastre (`make dr-check` e job `disaster-recovery`):
+  backup com as chaves guardadas à parte, destruição, restauração num servidor novo, recusa de
+  chave errada ou ausente, conciliação da janela perdida antes de religar o worker e conferência
+  de que nada se duplicou, com RPO e RTO observados.
+- Conferência das chaves de cifragem contra o banco na partida da API e do worker e no subcomando
+  `keyring-check` (`RECORVIA_ENCRYPTION_STARTUP_CHECK`: `enforce`, `warn` ou `off`), e declaração
+  de chave perdida (`RECORVIA_ENCRYPTION_LOST_KEYS`) (ADR-063 e ADR-064).
+- Subcomando `reconcile-pending` do worker: executa as conciliações registradas e termina, sem
+  agendador, consumidores nem publicador da outbox.
+- Alertmanager no perfil `observability`: roteamento por severidade, agrupamento, inibição e
+  repetição, envio por e-mail e por webhook configurado por variáveis de ambiente, link do
+  runbook em cada notificação (ADR-065).
+- Métricas de fila sem rótulos de tenant: dead letters abertas por consumidor, fila de
+  notificações e de entregas de webhooks, com a idade do item mais antigo; alertas, painéis e
+  runbooks correspondentes (ADR-066 e ADR-067).
+- Links do portal: listagem e revogação explícita
+  (`GET` e `DELETE /api/v1/customers/{id}/portal-links`), que encerra as sessões abertas pelo link;
+  aba Portal na ficha do cliente (ADR-068).
+- Paginação por cursor das faturas do portal do cliente (ADR-069).
+- Chargeback de pagamento com excedente: a disputa perdida consome o crédito do cliente gerado
+  pelo excedente; o crédito já usado vira valor a recuperar, na conta `customer_recoverables`
+  (ADR-070).
+- `GET /api/v1/reconciliation/runs/{id}` para acompanhar uma execução de conciliação, e executor
+  de conciliações no worker, com lease e retomada sem duplicar divergências (ADR-071).
+- Métricas e alertas das execuções de conciliação à espera do worker e do expurgo por idade.
+- Baixa do valor a recuperar das disputas perdidas, total ou parcial, como recebido (`cash`) ou
+  perdido (`bad_debt`), com justificativa, data efetiva, auditoria e evento
+  `dispute.recovery_settled`; o limite é garantido pelo banco, inclusive com pedidos simultâneos
+  (`GET` e `POST /api/v1/disputes/{id}/recovery-settlements`, `GET /api/v1/disputes/{id}`,
+  permissão `payments.settle_recovery`). A tela de disputas mostra o saldo a recuperar e o painel
+  ganha o indicador "Valores a recuperar de clientes" (ADR-073).
+- Migrations `00014` a `00018` (a numeração `00016` não foi usada).
+
+### Alterado
+- **Contrato:** `POST /api/v1/reconciliation/runs` passou a ser assíncrono: registra a execução e
+  responde `202` com `Location`; antes respondia `200` com a execução encerrada (ADR-072).
+  Respostas `202` não ficam registradas na `Idempotency-Key`.
+- **Contrato:** `GET /api/portal/v1/invoices` devolve 25 faturas por página por padrão (antes, até
+  100 sem paginação); `POST /api/v1/customers/{id}/portal-links` devolve também o `id` do link.
+- A API e o worker não iniciam quando as chaves de cifragem não decifram os dados em uso; antes
+  iniciavam, e o worker encerrava notificações e entregas de webhook sem volta.
+- `customers.anonymize` não pode ser concedida a credenciais de API; cliente anonimizado recusa
+  novos contatos, endereço e assinaturas.
+- O indicador de chargebacks do painel financeiro deixa de incluir a parte que era pagamento
+  excedente.
+- O guia de desenvolvimento passa a ser `docs/DESENVOLVIMENTO.md`; arquivos de ambiente local
+  ficam fora do repositório.
+
+### Corrigido
+- O chargeback de um pagamento com excedente deixava o crédito com o cliente e registrava como
+  receita estornada um valor que nunca foi receita.
+- Credenciais de provedor que não decifram respondem 503 `provider_credentials_unreadable` em vez
+  de 500; a reconfiguração do provedor não depende mais das credenciais anteriores.
+- Teste de cifragem das notificações que acusava falso alarme por coincidência nos bytes
+  cifrados.
+
+### Removido
+- `portal.Service.RevokeLinks` (revogação em massa não exposta por nenhuma rota), substituída pela
+  revogação por identificador.
+
 ## [0.1.0] - 2026-11-20
 
 ### Adicionado
@@ -107,5 +179,6 @@ Todas as mudanças relevantes são registradas aqui. Formato baseado em
   `user_session_required`, e o tratamento de dead letters grava a auditoria,
   com a justificativa, na mesma transação da resolução (ADR-059).
 
-[Não lançado]: https://github.com/ricartefelipe/recorvia/compare/v0.1.0...HEAD
+[Não lançado]: https://github.com/ricartefelipe/recorvia/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ricartefelipe/recorvia/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ricartefelipe/recorvia/releases/tag/v0.1.0

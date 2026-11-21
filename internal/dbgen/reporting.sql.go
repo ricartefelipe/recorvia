@@ -68,9 +68,10 @@ type DashboardContraRevenueRow struct {
 
 // Movimento líquido (débitos menos créditos) das contas de reembolsos e de
 // chargebacks no período. Os créditos em chargebacks são a retenção liberada
-// na disputa perdida (dispute.hold_released) e o estorno da disputa ganha:
-// somar só os débitos contaria duas vezes o valor reembolsado ao pagador e o
-// valor de disputa ganha.
+// na disputa perdida (dispute.hold_released), o estorno da disputa ganha e a
+// parte do chargeback que era pagamento excedente (dispute.credit_reversed):
+// somar só os débitos contaria duas vezes o valor reembolsado ao pagador, o
+// valor de disputa ganha e o crédito do cliente estornado.
 func (q *Queries) DashboardContraRevenue(ctx context.Context, arg DashboardContraRevenueParams) (DashboardContraRevenueRow, error) {
 	row := q.db.QueryRow(ctx, dashboardContraRevenue, arg.TenantID, arg.FromTs, arg.ToTs)
 	var i DashboardContraRevenueRow
@@ -200,6 +201,23 @@ func (q *Queries) DashboardReceived(ctx context.Context, arg DashboardReceivedPa
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const dashboardRecoverables = `-- name: DashboardRecoverables :one
+SELECT COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END), 0)::bigint AS balance
+  FROM ledger_entries e
+  JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+ WHERE e.tenant_id = $1 AND a.code = 'customer_recoverables'
+`
+
+// Saldo atual da conta de valores a recuperar de clientes (débitos menos
+// créditos): o excedente já usado estornado por chargeback menos as baixas
+// recebidas e perdidas.
+func (q *Queries) DashboardRecoverables(ctx context.Context, tenantID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, dashboardRecoverables, tenantID)
+	var balance int64
+	err := row.Scan(&balance)
+	return balance, err
 }
 
 const dashboardSubscriptionCounts = `-- name: DashboardSubscriptionCounts :one

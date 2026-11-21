@@ -23,6 +23,7 @@ export type PlatformStatement = S['PlatformStatement'];
 export type CustomerInput = S['CustomerInput'];
 export type Customer = S['Customer'];
 export type CustomerDetails = S['CustomerDetails'];
+export type CustomerAnonymization = S['CustomerAnonymization'];
 export type CustomerPage = S['CustomerPage'];
 export type ContactInput = S['ContactInput'];
 export type Contact = S['Contact'];
@@ -72,6 +73,8 @@ export type ChargePage = S['ChargePage'];
 export type Refund = S['Refund'];
 export type Payment = S['Payment'];
 export type Dispute = S['Dispute'];
+export type RecoverySettlement = S['RecoverySettlement'];
+export type RecoverySettlementInput = S['RecoverySettlementInput'];
 export type PaymentOperation = S['PaymentOperation'];
 
 export type ProviderAccountInput = S['ProviderAccountInput'];
@@ -105,6 +108,9 @@ export type Dashboard = S['Dashboard'];
 
 export type PortalSession = S['PortalSession'];
 export type PortalInvoice = S['PortalInvoice'];
+export type PortalInvoicePage = S['PortalInvoicePage'];
+export type PortalLink = S['PortalLink'];
+export type PortalLinkPage = S['PortalLinkPage'];
 
 /** Resposta de lista simples do contrato. */
 export interface DataList<T> {

@@ -12,3 +12,21 @@ SELECT (SELECT count(*)
        (current_setting('max_connections')::int
         - current_setting('superuser_reserved_connections')::int
         - current_setting('reserved_connections')::int)::bigint AS available_connections;
+
+-- name: DeadLetterStats :many
+-- Dead letters abertas por consumidor (todos os tenants e as registradas sem
+-- tenant, sem identificá-los) e a idade da mais antiga.
+SELECT consumer::text AS consumer, open_total::bigint AS open_total, oldest_open_seconds::double precision AS oldest_open_seconds
+  FROM app_dead_letter_stats(@now);
+
+-- name: NotificationBacklogStats :many
+-- Fila de notificações por situação (due, sending, failed), sem identificação
+-- de tenant; failed considera as falhas definitivas desde failed_since.
+SELECT state::text AS state, total::bigint AS total, oldest_seconds::double precision AS oldest_seconds
+  FROM app_notification_backlog_stats(@now, @failed_since);
+
+-- name: WebhookDeliveryBacklogStats :many
+-- Fila de entregas de webhooks enviados por situação (pending, retrying), sem
+-- identificação de tenant, com o atraso da entrega devida mais antiga.
+SELECT state::text AS state, total::bigint AS total, oldest_due_seconds::double precision AS oldest_due_seconds
+  FROM app_webhook_delivery_backlog_stats(@now);

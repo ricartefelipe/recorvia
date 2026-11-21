@@ -419,6 +419,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/customers/{id}/anonymize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Anonimiza um cliente (irreversível)
+         * @description Substitui de forma irreversível os dados pessoais de um cliente sem assinatura ativa,
+         *     fatura em aberto nem faturamento pendente: nome, documento, razão social, e-mail, telefone
+         *     e identificador externo recebem valores neutros; contatos (com as preferências de e-mail),
+         *     endereço de cobrança,
+         *     identificadores do cliente nos provedores de pagamento e notificações (destinatários,
+         *     assunto, conteúdo e histórico de envio) são excluídos; os links do portal são revogados,
+         *     o que encerra as sessões abertas; o corpo dos webhooks recebidos das cobranças do
+         *     cliente é esvaziado. O cliente fica arquivado e não aceita novas alterações.
+         *
+         *     Registros financeiros e a trilha de auditoria não são alterados: as faturas emitidas
+         *     mantêm a cópia do cadastro do momento da emissão (`customer_snapshot`), e pagamentos,
+         *     cobranças, créditos e lançamentos continuam vinculados ao cliente pelo identificador.
+         *     O cadastro do cliente no provedor de pagamento não é alterado por esta operação:
+         *     `provider_customers` devolve os identificadores removidos do cadastro do Recorvia para
+         *     que sejam tratados no provedor. Eles ficam registrados na auditoria da anonimização
+         *     (`customer.anonymized`, em `details.provider_customers`), gravada na mesma transação, e
+         *     voltam também na repetição do pedido, de modo que não se perdem se a resposta não chegar.
+         *
+         *     Responde 409 `customer_has_obligations` enquanto o cliente tiver assinatura ativa (em
+         *     avaliação, ativa, inadimplente ou suspensa), fatura em aberto ou faturamento pendente:
+         *     assinatura com fechamento ainda por faturar (como o consumo final de uma assinatura
+         *     cancelada), item pendente sem fatura, consumo atrasado ainda por corrigir ou período de
+         *     consumo fechado dentro da tolerância de atraso da métrica. Depois da anonimização, a
+         *     ingestão rejeita consumo do cliente e nenhuma fatura nova é emitida para ele.
+         *
+         *     A operação é idempotente: para um cliente já anonimizado, devolve o estado atual com
+         *     `already_anonymized` verdadeiro, sem novo registro de auditoria. A justificativa é
+         *     obrigatória, fica na auditoria (`customer.anonymized`) e não pode conter dados pessoais
+         *     do cliente. Exige a permissão `customers.anonymize`, que não é delegável a credenciais.
+         */
+        post: operations["anonymizeCustomer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/customers/{id}/contacts": {
         parameters: {
             query?: never;
@@ -428,6 +476,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Adiciona um contato ao cliente. Responde 409 `customer_anonymized` para cliente anonimizado, que não volta a receber dados pessoais, e 409 `contact_limit` quando o cliente já tem 20 contatos. */
         post: operations["addCustomerContact"];
         delete?: never;
         options?: never;
@@ -459,6 +508,7 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
+        /** @description Grava o endereço de cobrança do cliente. Responde 409 `customer_anonymized` para cliente anonimizado, que não volta a receber dados pessoais. */
         put: operations["setCustomerAddress"];
         post?: never;
         delete?: never;
@@ -506,10 +556,34 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * Lista os links do portal de um cliente, dos mais novos para os mais antigos
+         * @description Exige a permissão `customers.portal_links`, a mesma da geração e da revogação. A resposta nunca traz o token nem o hash do token: o link só é exibido na resposta da geração.
+         */
+        get: operations["listPortalLinks"];
         put?: never;
         post: operations["createPortalLink"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/customers/{id}/portal-links/{link_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoga um link do portal e encerra as sessões abertas com ele
+         * @description O link pendente deixa de poder ser trocado por sessão e as sessões do portal abertas com um link já usado são encerradas. A operação é idempotente: repetir a chamada para um link já revogado responde 204 sem alterar o link nem gerar nova auditoria. Link inexistente, de outro cliente ou de outra organização responde 404 `portal_link_not_found`. Aceita credenciais de API com o escopo `customers.portal_links`; quem revogou fica registrado na auditoria (`customer.portal_link_revoked`).
+         */
+        delete: operations["revokePortalLink"];
         options?: never;
         head?: never;
         patch?: never;
@@ -876,7 +950,10 @@ export interface paths {
         };
         get: operations["listUsageEvents"];
         put?: never;
-        /** Ingestão de eventos de consumo (deduplicados por external_id) */
+        /**
+         * Ingestão de eventos de consumo (deduplicados por external_id)
+         * @description Cada evento recebe um resultado próprio (`accepted`, `late`, `duplicate` ou `rejected`, com a mensagem). Consumo de assinatura de cliente anonimizado é rejeitado; o reenvio de um evento já gravado continua respondido como `duplicate`.
+         */
         post: operations["ingestUsageEvents"];
         delete?: never;
         options?: never;
@@ -1141,6 +1218,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/disputes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Consulta uma disputa
+         * @description Devolve a disputa com o valor a recuperar do cliente, as baixas já feitas e o saldo que ainda falta recuperar.
+         */
+        get: operations["getDispute"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/disputes/{id}/recovery-settlements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Lista as baixas do valor a recuperar da disputa
+         * @description Baixas recebidas e perdidas do valor a recuperar do cliente, em ordem de registro.
+         */
+        get: operations["listRecoverySettlements"];
+        put?: never;
+        /**
+         * Dá baixa no valor a recuperar do cliente
+         * @description Registra a baixa, total ou parcial, do valor a recuperar de uma disputa perdida (ADR-073). `received`: o cliente pagou fora do provedor; o ledger debita o disponível liquidado (`cash`). `written_off`: o tenant desistiu de cobrar; o ledger debita as perdas com inadimplência (`bad_debt`). Nos dois casos o crédito é em `customer_recoverables`. A soma das baixas nunca passa do valor a recuperar, inclusive com pedidos concorrentes. A repetição com a mesma `Idempotency-Key` devolve a mesma baixa. Com credencial de API, `settled_by` fica nulo e a autoria vai para a auditoria.
+         */
+        post: operations["settleRecovery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/payment-operations": {
         parameters: {
             query?: never;
@@ -1250,7 +1371,31 @@ export interface paths {
         };
         get: operations["listReconciliationRuns"];
         put?: never;
+        /**
+         * Registra a conciliação manual, executada de forma assíncrona
+         * @description Registra a execução da conciliação do provedor padrão sobre a janela padrão e responde de imediato, sem esperar a coleta no provedor: o worker assume a execução, com lease, e a conclui fora da requisição. Acompanhe por GET /api/v1/reconciliation/runs/{id} (header Location) até a situação completed (com aviso em error quando a execução foi parcial) ou failed (com a causa em error). Há no máximo uma execução em andamento por conta do provedor, inclusive enquanto ela aguarda o worker ou a retomada: outro pedido responde 409 reconciliation_running com Retry-After. A execução interrompida (worker reiniciado) é retomada do início, sem duplicar divergências, e encerrada como failed depois de três tentativas interrompidas. A repetição com a mesma Idempotency-Key devolve a mesma execução na situação atual: 202 enquanto estiver em andamento (a resposta 202 não fica registrada na chave) e 200 depois de encerrada.
+         */
         post: operations["runReconciliation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/reconciliation/runs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Consulta uma execução de conciliação
+         * @description Devolve a execução na situação atual, para acompanhar a conciliação registrada até o encerramento.
+         */
+        get: operations["getReconciliationRun"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1676,6 +1821,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /**
+         * Lista em páginas as faturas emitidas do cliente da sessão, das mais recentes para as mais antigas
+         * @description O cliente e a organização vêm sempre da sessão do portal. O cursor guarda apenas a posição da última fatura da página anterior (emissão e identificador): faturas emitidas durante a navegação não deslocam as páginas seguintes.
+         */
         get: operations["portalListInvoices"];
         put?: never;
         post?: never;
@@ -1969,11 +2118,38 @@ export interface components {
             /** @enum {string} */
             status: "active" | "archived";
             payment_terms_days?: number | null;
+            /**
+             * Format: date-time
+             * @description Instante da anonimização; nulo enquanto o cliente não foi anonimizado.
+             */
+            anonymized_at?: string | null;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
             updated_at: string;
             version: number;
+        };
+        CustomerAnonymization: {
+            customer: components["schemas"]["CustomerDetails"];
+            /** @description Verdadeiro quando o cliente já estava anonimizado e nada foi alterado; `removed` vem então zerado e `provider_customers` repete os identificadores registrados na anonimização. */
+            already_anonymized: boolean;
+            /** @description Identificadores do cliente nos provedores de pagamento, removidos do cadastro do Recorvia e registrados na auditoria da anonimização; a repetição do pedido devolve os mesmos. O cadastro no provedor precisa ser tratado no próprio provedor. */
+            provider_customers: {
+                provider: string;
+                provider_customer_id: string;
+            }[];
+            removed: {
+                /** @description Contatos excluídos. */
+                contacts: number;
+                /** @description Indica se havia endereço de cobrança. */
+                billing_address: boolean;
+                /** @description Links do portal revogados. */
+                portal_links_revoked: number;
+                /** @description Notificações excluídas, com o histórico de envio. */
+                notifications: number;
+                /** @description Webhooks recebidos do provedor com o corpo esvaziado. */
+                provider_webhook_payloads: number;
+            };
         };
         CustomerDetails: components["schemas"]["Customer"] & {
             contacts: components["schemas"]["Contact"][];
@@ -2620,13 +2796,85 @@ export interface components {
             charge_id: string;
             /** @enum {string} */
             status: "opened" | "under_review" | "won" | "lost";
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Valor contestado na abertura da disputa.
+             */
             amount: number;
+            /**
+             * Format: int64
+             * @description Crédito do cliente consumido pelo chargeback da disputa perdida: a parte do valor estornado que corresponde ao excedente do pagamento desta cobrança convertido em crédito e ainda disponível no saldo do cliente.
+             */
+            credit_amount: number;
+            /**
+             * Format: int64
+             * @description Valor a recuperar do cliente: a parte desse excedente que o cliente já havia usado quando o pagamento foi estornado. O saldo de crédito nunca fica negativo; o valor é lançado no ledger na conta customer_recoverables.
+             */
+            recovery_amount: number;
+            /**
+             * Format: int64
+             * @description Total das baixas do valor a recuperar recebidas do cliente fora do provedor.
+             */
+            recovery_received_amount: number;
+            /**
+             * Format: int64
+             * @description Total das baixas do valor a recuperar reconhecidas como perda.
+             */
+            recovery_written_off_amount: number;
+            /**
+             * Format: int64
+             * @description Quanto ainda falta recuperar do cliente: recovery_amount menos as baixas recebidas e perdidas. Zero quando não há valor a recuperar ou quando tudo foi baixado.
+             */
+            recovery_outstanding_amount: number;
             currency: string;
             /** Format: date-time */
             opened_at: string;
             /** Format: date-time */
             closed_at?: string | null;
+        };
+        RecoverySettlementInput: {
+            /**
+             * @description `received`: recebido do cliente fora do provedor. `written_off`: perdido (o tenant desistiu de cobrar).
+             * @enum {string}
+             */
+            outcome: "received" | "written_off";
+            /**
+             * Format: int64
+             * @description Valor da baixa em centavos; no máximo o saldo a recuperar.
+             */
+            amount: number;
+            /**
+             * Format: date
+             * @description Data do recebimento ou da decisão, no fuso da organização (AAAA-MM-DD). Padrão: hoje. Não pode estar no futuro nem antes do encerramento da disputa.
+             */
+            effective_date?: string;
+            justification: string;
+        };
+        RecoverySettlement: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            dispute_id: string;
+            /** @enum {string} */
+            outcome: "received" | "written_off";
+            /** Format: int64 */
+            amount: number;
+            currency: string;
+            /** Format: date */
+            effective_date: string;
+            justification: string;
+            /**
+             * Format: uuid
+             * @description Usuário que registrou a baixa; nulo quando feita por credencial de API (autoria na auditoria).
+             */
+            settled_by: string | null;
+            /**
+             * Format: uuid
+             * @description Lançamento da baixa no ledger.
+             */
+            ledger_transaction_id: string;
+            /** Format: date-time */
+            created_at: string;
         };
         PaymentOperation: {
             /** Format: uuid */
@@ -2712,7 +2960,15 @@ export interface components {
             /** Format: uuid */
             id: string;
             provider: string;
-            /** @enum {string} */
+            /**
+             * @description Origem da execução.
+             * @enum {string}
+             */
+            trigger: "manual" | "scheduled";
+            /**
+             * @description running enquanto a execução aguarda o worker, está sendo executada ou aguarda a retomada; completed quando concluída (error traz o aviso quando parcial); failed quando encerrada sem concluir (error traz a causa).
+             * @enum {string}
+             */
             status: "running" | "completed" | "failed";
             /** Format: date-time */
             window_start: string;
@@ -2720,8 +2976,14 @@ export interface components {
             window_end: string;
             checked_count: number;
             discrepancy_count: number;
+            /** @description Causa da falha (failed) ou aviso de execução parcial (completed); vazio nos demais casos. */
             error?: string;
-            /** Format: date-time */
+            /** @description Vezes em que um worker assumiu a execução: 0 enquanto aguarda o worker, 1 na primeira execução e mais que 1 quando foi retomada depois de interrompida. */
+            attempts: number;
+            /**
+             * Format: date-time
+             * @description Instante em que a execução foi registrada.
+             */
             started_at: string;
             /** Format: date-time */
             finished_at?: string | null;
@@ -2955,9 +3217,14 @@ export interface components {
             refunds: number;
             /**
              * Format: int64
-             * @description Movimento líquido da conta de chargebacks no mês (débitos menos créditos). A retenção liberada e a disputa ganha reduzem o mês em que ocorrem; negativo quando a disputa aberta em mês anterior é ganha.
+             * @description Movimento líquido da conta de chargebacks no mês (débitos menos créditos). A retenção liberada, a disputa ganha e a parte do chargeback que corresponde a pagamento excedente (crédito do cliente consumido ou valor a recuperar) reduzem o mês em que ocorrem; negativo quando a disputa aberta em mês anterior é ganha. A baixa do valor a recuperar não altera este indicador.
              */
             chargebacks: number;
+            /**
+             * Format: int64
+             * @description Saldo atual dos valores a recuperar de clientes (conta customer_recoverables): crédito de pagamento excedente já usado e estornado por chargeback, menos as baixas recebidas e perdidas. Não depende do mês consultado.
+             */
+            open_recoverables: number;
             open_discrepancies?: number;
             unknown_operations?: number;
             definitions: {
@@ -2975,6 +3242,45 @@ export interface components {
             };
             csrf_token: string;
             contacts: components["schemas"]["Contact"][];
+        };
+        PortalInvoicePage: {
+            data: components["schemas"]["PortalInvoice"][];
+            next_cursor?: string | null;
+        };
+        PortalLinkPage: {
+            data: components["schemas"]["PortalLink"][];
+            next_cursor?: string | null;
+        };
+        /** @description Link do portal como a organização o vê; nunca inclui o token nem o hash do token. */
+        PortalLink: {
+            /** Format: uuid */
+            id: string;
+            /**
+             * @description Situação no instante da consulta: `pending` (ainda não aberto), `used` (trocado por sessão), `expired` (venceu sem uso) ou `revoked` (revogado; prevalece sobre as demais).
+             * @enum {string}
+             */
+            status: "pending" | "used" | "expired" | "revoked";
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: date-time */
+            used_at?: string | null;
+            /** Format: date-time */
+            revoked_at?: string | null;
+            /**
+             * @description `superseded`: substituído por um link mais novo do mesmo cliente; `revoked`: revogação explícita.
+             * @enum {string|null}
+             */
+            revoke_reason?: "superseded" | "revoked" | null;
+            created_by: {
+                /** @enum {string} */
+                type: "user" | "api_credential";
+                /** Format: uuid */
+                id: string;
+                /** @description Nome do membro ou da credencial de API */
+                name?: string | null;
+            };
         };
         PortalInvoice: {
             /** Format: uuid */
@@ -3041,7 +3347,7 @@ export interface components {
         CSRF: string;
         /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
         IfMatch: string;
-        /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
+        /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
         IdempotencyKey: string;
         ID: string;
         Limit: number;
@@ -3882,6 +4188,47 @@ export interface operations {
             409: components["responses"]["Problem"];
         };
     };
+    anonymizeCustomer: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+                /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
+                "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description Justificativa (protocolo do pedido e motivo), sem dados pessoais do cliente. */
+                    reason: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Cliente anonimizado */
+            200: {
+                headers: {
+                    ETag?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CustomerAnonymization"];
+                };
+            };
+            403: components["responses"]["UserSessionRequired"];
+            404: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+        };
+    };
     addCustomerContact: {
         parameters: {
             query?: never;
@@ -3911,6 +4258,7 @@ export interface operations {
                     "application/json": components["schemas"]["Contact"];
                 };
             };
+            409: components["responses"]["Problem"];
         };
     };
     removeCustomerContact: {
@@ -3968,6 +4316,7 @@ export interface operations {
                     "application/json": components["schemas"]["Address"];
                 };
             };
+            409: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
         };
     };
@@ -4031,7 +4380,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -4060,6 +4409,36 @@ export interface operations {
             };
         };
     };
+    listPortalLinks: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
+            header?: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Links do portal do cliente */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortalLinkPage"];
+                };
+            };
+            404: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+        };
+    };
     createPortalLink: {
         parameters: {
             query?: never;
@@ -4083,12 +4462,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": {
+                        /**
+                         * Format: uuid
+                         * @description Identificador do link (usado para revogá-lo)
+                         */
+                        id: string;
                         url: string;
                         /** Format: date-time */
                         expires_at: string;
                     };
                 };
             };
+        };
+    };
+    revokePortalLink: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+                /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
+                "X-CSRF-Token"?: components["parameters"]["CSRF"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+                link_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Link revogado (ou já revogado) */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["Problem"];
         };
     };
     listProducts: {
@@ -5212,7 +5623,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5250,7 +5661,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5285,7 +5696,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5315,7 +5726,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path?: never;
@@ -5396,7 +5807,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5508,6 +5919,104 @@ export interface operations {
                     };
                 };
             };
+        };
+    };
+    getDispute: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Disputa */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dispute"];
+                };
+            };
+            404: components["responses"]["Problem"];
+        };
+    };
+    listRecoverySettlements: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Baixas da disputa */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["RecoverySettlement"][];
+                    };
+                };
+            };
+            404: components["responses"]["Problem"];
+        };
+    };
+    settleRecovery: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+                /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
+                "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecoverySettlementInput"];
+            };
+        };
+        responses: {
+            /** @description Baixa registrada */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoverySettlement"];
+                };
+            };
+            404: components["responses"]["Problem"];
+            /** @description A disputa não tem valor a recuperar (`dispute_without_recovery`), o saldo já foi baixado por completo (`recovery_already_settled`), o valor passa do saldo (`recovery_exceeds_outstanding`) ou a chave já foi usada em outra baixa (`request_key_reused`). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            422: components["responses"]["Problem"];
         };
     };
     listPaymentOperations: {
@@ -5722,7 +6231,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente. */
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path?: never;
@@ -5730,7 +6239,56 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Execução concluída */
+            /** @description Repetição do pedido de uma execução já encerrada */
+            200: {
+                headers: {
+                    /** @description Endereço da execução */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReconciliationRun"];
+                };
+            };
+            /** @description Execução registrada e em andamento */
+            202: {
+                headers: {
+                    /** @description Endereço da execução para acompanhamento */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReconciliationRun"];
+                };
+            };
+            /** @description Outra execução em andamento para o provedor (reconciliation_running, com Retry-After) ou nenhum provedor padrão ativo (provider_not_configured) */
+            409: {
+                headers: {
+                    /** @description Segundos até a nova tentativa (reconciliation_running) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    getReconciliationRun: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Execução */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5739,6 +6297,7 @@ export interface operations {
                     "application/json": components["schemas"]["ReconciliationRun"];
                 };
             };
+            404: components["responses"]["Problem"];
         };
     };
     listDiscrepancies: {
@@ -6580,7 +7139,10 @@ export interface operations {
     };
     portalListInvoices: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -6593,11 +7155,11 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        data: components["schemas"]["PortalInvoice"][];
-                    };
+                    "application/json": components["schemas"]["PortalInvoicePage"];
                 };
             };
+            401: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
         };
     };
     portalGetInvoice: {

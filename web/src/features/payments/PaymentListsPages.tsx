@@ -1,8 +1,9 @@
 import { Alert, Anchor, Badge, Button, Code, Group, Select, Stack, Table, Text } from '@mantine/core';
-import { IconAlertTriangle, IconRefreshDot } from '@tabler/icons-react';
+import { IconAlertTriangle, IconReceiptRefund, IconRefreshDot } from '@tabler/icons-react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
 import { Link } from 'react-router';
-import type { PaymentOperation } from '../../api/types';
+import type { Dispute, PaymentOperation } from '../../api/types';
 import { DateTime, Money, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { confirmAction, CursorPager, PageHeader } from '../../components/ui';
@@ -19,6 +20,7 @@ import {
 } from '../../lib/labels';
 import { usePermission, useTenant } from '../../session/SessionContext';
 import { paymentsApi, type PaymentOperationStatus } from './api';
+import { RecoverySettlementModal } from './RecoverySettlementModal';
 
 function ChargeLink({ id }: { id: string }) {
   return (
@@ -172,50 +174,81 @@ export function RefundsPage() {
 
 export function DisputesPage() {
   const { keys } = useTenant();
+  const canSettle = usePermission('payments.settle_recovery');
+  const [selected, setSelected] = useState<Dispute | null>(null);
   const query = useQuery({ queryKey: keys('disputes', 'list'), queryFn: ({ signal }) => paymentsApi.listDisputes(signal) });
   return (
     <Stack gap={0}>
-      <PageHeader title="Disputas e chargebacks" description="Contestações abertas pelo pagador junto ao provedor, inclusive as que chegam tardiamente." />
+      <PageHeader
+        title="Disputas e chargebacks"
+        description="Contestações abertas pelo pagador junto ao provedor, inclusive as que chegam tardiamente. Na disputa perdida de um pagamento com excedente, o crédito gerado pelo excedente é consumido; a parte que o cliente já usou fica como valor a recuperar, baixado como recebido ou perdido."
+      />
       <QueryContent query={query}>
         {({ data }) =>
           data.length === 0 ? (
             <EmptyState title="Nenhuma disputa" description="Contestações informadas pelo provedor aparecem aqui." />
           ) : (
-            <Table.ScrollContainer minWidth={720}>
+            <Table.ScrollContainer minWidth={1100}>
               <Table aria-label="Disputas">
                 <Table.Thead>
                   <Table.Tr>
                     <Table.Th>Aberta em</Table.Th>
                     <Table.Th>Cobrança</Table.Th>
-                    <Table.Th ta="right">Valor</Table.Th>
+                    <Table.Th ta="right">Valor contestado</Table.Th>
                     <Table.Th>Situação</Table.Th>
+                    <Table.Th ta="right">Crédito consumido</Table.Th>
+                    <Table.Th ta="right">A recuperar do cliente</Table.Th>
+                    <Table.Th ta="right">Saldo a recuperar</Table.Th>
                     <Table.Th>Encerrada em</Table.Th>
+                    <Table.Th aria-label="Ações" />
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
-                  {data.map((d) => (
-                    <Table.Tr key={d.id}>
-                      <Table.Td>
-                        <DateTime value={d.opened_at} />
-                      </Table.Td>
-                      <Table.Td>
-                        <ChargeLink id={d.charge_id} />
-                      </Table.Td>
-                      <Table.Td ta="right">
-                        <Money value={d.amount} currency={d.currency} />
-                      </Table.Td>
-                      <Table.Td>
-                        <StatusBadge status={d.status} labels={disputeStatusLabels} />
-                      </Table.Td>
-                      <Table.Td>{d.closed_at ? <DateTime value={d.closed_at} /> : '—'}</Table.Td>
-                    </Table.Tr>
-                  ))}
+                  {data.map((d) => {
+                    const outstanding = d.recovery_outstanding_amount;
+                    return (
+                      <Table.Tr key={d.id}>
+                        <Table.Td>
+                          <DateTime value={d.opened_at} />
+                        </Table.Td>
+                        <Table.Td>
+                          <ChargeLink id={d.charge_id} />
+                        </Table.Td>
+                        <Table.Td ta="right">
+                          <Money value={d.amount} currency={d.currency} />
+                        </Table.Td>
+                        <Table.Td>
+                          <StatusBadge status={d.status} labels={disputeStatusLabels} />
+                        </Table.Td>
+                        <Table.Td ta="right">{d.credit_amount > 0 ? <Money value={d.credit_amount} currency={d.currency} /> : '—'}</Table.Td>
+                        <Table.Td ta="right">{d.recovery_amount > 0 ? <Money value={d.recovery_amount} currency={d.currency} /> : '—'}</Table.Td>
+                        <Table.Td ta="right">
+                          {d.recovery_amount > 0 ? <Money value={outstanding} currency={d.currency} strong={outstanding > 0} /> : '—'}
+                        </Table.Td>
+                        <Table.Td>{d.closed_at ? <DateTime value={d.closed_at} /> : '—'}</Table.Td>
+                        <Table.Td>
+                          {d.recovery_amount > 0 && (
+                            <Button
+                              size="xs"
+                              variant="light"
+                              leftSection={<IconReceiptRefund size={14} />}
+                              onClick={() => setSelected(d)}
+                              aria-label={`${canSettle && outstanding > 0 ? 'Dar baixa' : 'Ver baixas'} da disputa da cobrança ${d.charge_id.slice(0, 8)}`}
+                            >
+                              {canSettle && outstanding > 0 ? 'Dar baixa' : 'Ver baixas'}
+                            </Button>
+                          )}
+                        </Table.Td>
+                      </Table.Tr>
+                    );
+                  })}
                 </Table.Tbody>
               </Table>
             </Table.ScrollContainer>
           )
         }
       </QueryContent>
+      {selected && <RecoverySettlementModal dispute={selected} opened onClose={() => setSelected(null)} />}
     </Stack>
   );
 }

@@ -50,14 +50,16 @@ func (q *Queries) ClaimScheduledJob(ctx context.Context, arg ClaimScheduledJobPa
 const completeIdempotencyKey = `-- name: CompleteIdempotencyKey :exec
 UPDATE idempotency_keys
    SET status = 'completed', response_status = $1, response_body = $2,
-       response_content_type = $3, completed_at = $4, locked_until = NULL
- WHERE tenant_id = $5 AND client_id = $6 AND operation = $7 AND idempotency_key = $8
+       response_content_type = $3, response_location = $4, completed_at = $5,
+       locked_until = NULL
+ WHERE tenant_id = $6 AND client_id = $7 AND operation = $8 AND idempotency_key = $9
 `
 
 type CompleteIdempotencyKeyParams struct {
 	ResponseStatus      *int32
 	ResponseBody        []byte
 	ResponseContentType *string
+	ResponseLocation    *string
 	Now                 *time.Time
 	TenantID            uuid.UUID
 	ClientID            string
@@ -70,6 +72,7 @@ func (q *Queries) CompleteIdempotencyKey(ctx context.Context, arg CompleteIdempo
 		arg.ResponseStatus,
 		arg.ResponseBody,
 		arg.ResponseContentType,
+		arg.ResponseLocation,
 		arg.Now,
 		arg.TenantID,
 		arg.ClientID,
@@ -153,7 +156,7 @@ func (q *Queries) GetDeadLetterForUpdate(ctx context.Context, arg GetDeadLetterF
 }
 
 const getIdempotencyKey = `-- name: GetIdempotencyKey :one
-SELECT tenant_id, client_id, operation, idempotency_key, request_hash, status, response_status, response_body, response_content_type, locked_until, created_at, completed_at, expires_at FROM idempotency_keys
+SELECT tenant_id, client_id, operation, idempotency_key, request_hash, status, response_status, response_body, response_content_type, locked_until, created_at, completed_at, expires_at, response_location FROM idempotency_keys
  WHERE tenant_id = $1 AND client_id = $2 AND operation = $3 AND idempotency_key = $4
 `
 
@@ -186,6 +189,7 @@ func (q *Queries) GetIdempotencyKey(ctx context.Context, arg GetIdempotencyKeyPa
 		&i.CreatedAt,
 		&i.CompletedAt,
 		&i.ExpiresAt,
+		&i.ResponseLocation,
 	)
 	return i, err
 }
@@ -731,6 +735,75 @@ func (q *Queries) ResolveDeadLetter(ctx context.Context, arg ResolveDeadLetterPa
 		arg.ID,
 	)
 	return err
+}
+
+const retentionPurge = `-- name: RetentionPurge :one
+SELECT purged::int AS purged, more::boolean AS more
+  FROM app_retention_purge($1, $2, $3, $4, $5)
+`
+
+type RetentionPurgeParams struct {
+	Kind      string
+	TenantID  uuid.UUID
+	Cutoff    time.Time
+	Now       time.Time
+	BatchSize int32
+}
+
+type RetentionPurgeRow struct {
+	Purged int32
+	More   bool
+}
+
+// Remove um lote vencido do tipo informado, na transação do tenant.
+func (q *Queries) RetentionPurge(ctx context.Context, arg RetentionPurgeParams) (RetentionPurgeRow, error) {
+	row := q.db.QueryRow(ctx, retentionPurge,
+		arg.Kind,
+		arg.TenantID,
+		arg.Cutoff,
+		arg.Now,
+		arg.BatchSize,
+	)
+	var i RetentionPurgeRow
+	err := row.Scan(&i.Purged, &i.More)
+	return i, err
+}
+
+const retentionTenants = `-- name: RetentionTenants :many
+SELECT t::uuid AS tenant_id FROM app_retention_tenants($1, $2, $3::uuid, $4) AS t
+`
+
+type RetentionTenantsParams struct {
+	Kind        string
+	Cutoff      time.Time
+	AfterTenant *uuid.UUID
+	MaxTenants  int32
+}
+
+// Tenants com dados do tipo informado vencidos no corte (somente IDs).
+func (q *Queries) RetentionTenants(ctx context.Context, arg RetentionTenantsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, retentionTenants,
+		arg.Kind,
+		arg.Cutoff,
+		arg.AfterTenant,
+		arg.MaxTenants,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var tenant_id uuid.UUID
+		if err := rows.Scan(&tenant_id); err != nil {
+			return nil, err
+		}
+		items = append(items, tenant_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const takeOverIdempotencyKey = `-- name: TakeOverIdempotencyKey :execrows

@@ -154,9 +154,30 @@ stateDiagram-v2
 ```
 
 Na disputa perdida, a parte da retenção correspondente ao valor reembolsado (confirmado durante a disputa
-ou ainda reservado) volta aos valores em liquidação (`dispute.hold_released`): `chargebacks` registra
-somente o valor estornado. Reembolso reservado recusado depois da perda passa ao chargeback
-(`dispute.hold_restored`).
+ou ainda reservado) volta aos valores em liquidação (`dispute.hold_released`). Reembolso reservado recusado
+depois da perda passa ao chargeback (`dispute.hold_restored`).
+
+Quando a cobrança foi paga com excedente convertido em crédito do cliente, a parte do valor estornado que
+corresponde ao excedente ainda não devolvido sai de `chargebacks` pelo lançamento `dispute.credit_reversed`
+(um pela disputa perdida e um por reembolso recusado depois da perda): o crédito ainda disponível é
+consumido (`disputes.credit_amount`) e o que o cliente já usou vira valor a recuperar dele
+(`disputes.recovery_amount`, conta `customer_recoverables`), sem deixar o saldo de crédito negativo. Assim,
+`chargebacks` registra o valor estornado menos o excedente, isto é, a receita efetivamente perdida
+(ADR-070). A disputa ganha não mexe no crédito.
+
+A disputa perdida com valor a recuperar não muda de situação com a baixa (ADR-073): continua `lost`, e o
+saldo a recuperar diminui a cada baixa, recebida (`recovery_received_amount`) ou perdida
+(`recovery_written_off_amount`), até zero. Baixas parciais são permitidas; a soma nunca passa de
+`recovery_amount`. O saldo pode voltar a crescer se um reembolso reservado for recusado depois da perda
+(`dispute.chargeback_increased`).
+
+```mermaid
+stateDiagram-v2
+  [*] --> a_recuperar: disputa perdida com recovery_amount > 0
+  a_recuperar --> a_recuperar: baixa parcial (recebida ou perdida)
+  a_recuperar --> baixado: baixa do saldo restante
+  baixado --> a_recuperar: reembolso reservado recusado depois da perda aumenta o valor a recuperar
+```
 
 Cada transição gera uma entrada imutável em `dispute_events`. Há no máximo uma disputa aberta por
 cobrança.
@@ -165,10 +186,17 @@ cobrança.
 
 ```mermaid
 stateDiagram-v2
-  [*] --> running
-  running --> completed
-  running --> failed: erro do provedor ou lease expirado
+  [*] --> running: registrada (manual, aguardando um worker) ou assumida (agendada)
+  running --> running: assumida pelo worker, devolvida no encerramento dele ou retomada com o lease expirado (attempts + 1)
+  running --> completed: coleta concluída (parcial com aviso em error)
+  running --> failed: erro do provedor ou da leitura, ou três tentativas interrompidas
 ```
+
+A situação `running` cobre três estados, distinguidos pelo lease: aguardando um worker (`lease_until`
+nulo), em execução (lease vigente) e interrompida (lease expirado). O lease expirado não encerra a
+execução: ela continua em `running`, a conta do provedor continua ocupada (novos pedidos respondem `409
+reconciliation_running`) e qualquer worker a retoma do início. Só ao ser assumida depois de três tentativas
+interrompidas ela passa a `failed`, com a causa (ADR-071).
 
 ```mermaid
 stateDiagram-v2

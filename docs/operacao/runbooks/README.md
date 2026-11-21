@@ -8,10 +8,13 @@ verificação.
 | Runbook | Alertas |
 |---|---|
 | [Faturamento e cobrança](faturamento.md) | `RecorviaBillingCycleStale`, `RecorviaScheduledTaskFailing`, `RecorviaScheduledTaskStale`, `RecorviaMetricsCollectionStale`, `RecorviaChargesDeclined`, `RecorviaPaymentProviderUnavailable`, `RecorviaPaymentOperationsPending`, `RecorviaWebhooksRejected`, `RecorviaDBPoolSaturated`, `RecorviaDBPoolWaiting`, `RecorviaDBServerConnectionsHigh`, `RecorviaHTTPErrorRate` |
-| [Filas e DLQ](filas-e-dlq.md) | `RecorviaTargetDown`, `RecorviaOutboxBacklog`, `RecorviaOutboxStalled`, `RecorviaOutboxPublishFailures`, `RecorviaQueueBacklog`, `RecorviaQueueLag`, `RecorviaQueueWithoutConsumer`, `RecorviaDeadLetterQueueNotDrained`, `RecorviaMessagesDeadLettered`, `RecorviaConsumerRetryRate`, `RecorviaMessagesRequeued`, `RecorviaWorkerSaturated`, `RecorviaDependencyUnavailable` |
-| [Conciliação](conciliacao.md) | `RecorviaPaymentOperationsUnknown`, `RecorviaPaymentOperationsExhausted`, `RecorviaRefundsUnknown`, `RecorviaRefundsFailed`, `RecorviaReconciliationDiscrepanciesOpen`, `RecorviaReconciliationDiscrepanciesHigh` |
-| [Notificações e webhooks enviados](notificacoes-e-webhooks.md) | `RecorviaEmailDeliveryStalled`, `RecorviaNotificationsFailed`, `RecorviaWebhookDeliveriesFailing` |
+| [Filas e DLQ](filas-e-dlq.md) | `RecorviaTargetDown`, `RecorviaOutboxBacklog`, `RecorviaOutboxStalled`, `RecorviaOutboxPublishFailures`, `RecorviaQueueBacklog`, `RecorviaQueueLag`, `RecorviaQueueWithoutConsumer`, `RecorviaDeadLetterQueueNotDrained`, `RecorviaMessagesDeadLettered`, `RecorviaDeadLettersOpen`, `RecorviaConsumerRetryRate`, `RecorviaMessagesRequeued`, `RecorviaWorkerSaturated`, `RecorviaDependencyUnavailable` |
+| [Conciliação](conciliacao.md) | `RecorviaPaymentOperationsUnknown`, `RecorviaPaymentOperationsExhausted`, `RecorviaRefundsUnknown`, `RecorviaRefundsFailed`, `RecorviaReconciliationDiscrepanciesOpen`, `RecorviaReconciliationDiscrepanciesHigh`, `RecorviaReconciliationRunsWaiting` |
+| [Notificações e webhooks enviados](notificacoes-e-webhooks.md) | `RecorviaEmailDeliveryStalled`, `RecorviaNotificationsFailed`, `RecorviaNotificationsBacklog`, `RecorviaWebhookDeliveriesFailing`, `RecorviaWebhookDeliveriesBacklog` |
+| [Expurgo por retenção](retencao.md) | `RecorviaRetentionPurgeStale`, `RecorviaRetentionPurgeBacklog` |
+| [Encaminhamento de alertas](alertas.md) | `RecorviaWatchdog`, `RecorviaAlertDeliveryFailing`, `RecorviaAlertNotificationsFailing` |
 | [Isolamento de dados](isolamento-de-dados.md) | sem alerta automático (incidente aberto por suspeita ou relato) |
+| [Recuperação de desastre e chaves de cifragem](recuperacao-de-desastre.md) | sem alerta próprio (`RecorviaDependencyUnavailable` e `RecorviaTargetDown` acompanham a perda do banco e a recusa de inicialização por chave errada) |
 
 ## Convenções dos comandos
 
@@ -27,8 +30,14 @@ substitua pelo acesso equivalente ao banco e ao broker.
   `docker compose exec postgres psql -U recorvia_app -d recorvia` e, na transação,
   `SELECT set_config('app.tenant_id', '<tenant>', true);`.
 - **API**: `curl` com uma sessão de usuário com a permissão indicada (o roteiro de login está em
-  `docs/roteiro-demo.md`). Os endpoints citados estão em `api/openapi.yaml`.
+  `docs/roteiro-demo.md`) ou, onde o comando usa `Authorization: Bearer $TOKEN`, com uma credencial
+  de API da organização (`rcv_...`) que tenha a permissão; `$API` é o endereço da API. A equipe da
+  plataforma não tem acesso aos dados de um tenant: a credencial é sempre da organização. Os
+  endpoints citados estão em `api/openapi.yaml`.
 - **Métricas**: Prometheus em http://localhost:9090 (consultas PromQL citadas) e dashboards do
   Grafana em http://localhost:3000 (pasta *Recorvia*).
+- **Alertas**: as notificações (e-mail e webhook) trazem o link da seção do runbook. No ambiente
+  local, os e-mails ficam no Mailpit (http://localhost:8025) e os alertas ativos, silêncios e
+  inibições, no Alertmanager (http://localhost:9093).
 - Ao abrir um incidente, registre horário, alerta, consultas executadas e ações tomadas. Não copie
   dados pessoais de clientes para o registro; use identificadores.

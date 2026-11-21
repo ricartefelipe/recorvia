@@ -23,6 +23,9 @@ var ErrDecrypt = errors.New("secrets: falha ao decifrar")
 type Keyring struct {
 	aeads  map[string]cipher.AEAD
 	active string
+	// lost guarda os identificadores de chaves declaradas perdidas: dados
+	// cifrados com elas não decifram e não contam como engano de keyring.
+	lost map[string]bool
 }
 
 // NewKeyring cria o keyring a partir de chaves de 32 bytes.
@@ -46,6 +49,26 @@ func NewKeyring(keys map[string][]byte, active string) (*Keyring, error) {
 		return nil, fmt.Errorf("secrets: chave ativa %q não configurada", active)
 	}
 	return k, nil
+}
+
+// WithLostKeys devolve um keyring com as mesmas chaves e os identificadores
+// informados declarados como perdidos (chaves que não existem mais em lugar
+// nenhum). A declaração não muda a cifragem nem a decifragem: serve à
+// conferência (Audit), que deixa de tratar como engano de configuração os
+// dados cifrados com essas chaves. Uma chave configurada não pode ser
+// declarada perdida.
+func (k *Keyring) WithLostKeys(ids []string) (*Keyring, error) {
+	out := &Keyring{aeads: k.aeads, active: k.active, lost: map[string]bool{}}
+	for _, id := range ids {
+		if id == "" {
+			return nil, errors.New("secrets: identificador vazio entre as chaves declaradas perdidas")
+		}
+		if _, ok := k.aeads[id]; ok {
+			return nil, fmt.Errorf("secrets: a chave %q está configurada e não pode ser declarada perdida", id)
+		}
+		out.lost[id] = true
+	}
+	return out, nil
 }
 
 // ActiveKeyID retorna a chave usada nas novas cifragens.

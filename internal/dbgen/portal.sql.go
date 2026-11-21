@@ -252,21 +252,33 @@ func (q *Queries) ListPortalInvoiceItems(ctx context.Context, arg ListPortalInvo
 const listPortalInvoices = `-- name: ListPortalInvoices :many
 
 SELECT id, tenant_id, customer_id, subscription_id, number, status, kind, currency, billing_period_start, billing_period_end, issued_at, due_at, subtotal, discount_total, total, credit_applied, amount_paid, amount_credited, amount_written_off, amount_due, customer_snapshot, memo, paid_at, voided_at, void_reason, uncollectible_at, created_at, updated_at, version FROM invoices
- WHERE tenant_id = $1 AND customer_id = $2 AND status <> 'draft'
- ORDER BY issued_at DESC NULLS LAST, created_at DESC, id DESC
- LIMIT $3
+ WHERE tenant_id = $1 AND customer_id = $2 AND status <> 'draft' AND issued_at IS NOT NULL
+   AND ($3::timestamptz IS NULL OR (issued_at, id) < ($3::timestamptz, $4::uuid))
+ ORDER BY issued_at DESC, id DESC
+ LIMIT $5
 `
 
 type ListPortalInvoicesParams struct {
 	TenantID   uuid.UUID
 	CustomerID uuid.UUID
+	CursorTs   *time.Time
+	CursorID   *uuid.UUID
 	RowLimit   int32
 }
 
 // Faturas exibidas no portal: somente as emitidas (rascunhos nunca aparecem)
 // e sempre filtradas pelo cliente da sessão, além do tenant.
+// Paginação por keyset em (issued_at, id): toda fatura emitida tem issued_at
+// (invoices_issued_fields), que não muda depois da emissão, de modo que
+// faturas novas entram apenas antes da primeira página.
 func (q *Queries) ListPortalInvoices(ctx context.Context, arg ListPortalInvoicesParams) ([]Invoice, error) {
-	rows, err := q.db.Query(ctx, listPortalInvoices, arg.TenantID, arg.CustomerID, arg.RowLimit)
+	rows, err := q.db.Query(ctx, listPortalInvoices,
+		arg.TenantID,
+		arg.CustomerID,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -304,6 +316,82 @@ func (q *Queries) ListPortalInvoices(ctx context.Context, arg ListPortalInvoices
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.Version,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPortalLinks = `-- name: ListPortalLinks :many
+SELECT l.id, l.tenant_id, l.customer_id, l.created_by_user_id, l.created_by_credential_id, l.created_at, l.expires_at, l.used_at,
+       l.revoked_at, l.revoke_reason, u.display_name AS created_by_user_name, c.name AS created_by_credential_name
+  FROM customer_portal_links l
+  LEFT JOIN users u ON u.id = l.created_by_user_id
+  LEFT JOIN api_credentials c ON c.tenant_id = l.tenant_id AND c.id = l.created_by_credential_id
+ WHERE l.tenant_id = $1 AND l.customer_id = $2
+   AND ($3::timestamptz IS NULL OR (l.created_at, l.id) < ($3::timestamptz, $4::uuid))
+ ORDER BY l.created_at DESC, l.id DESC
+ LIMIT $5
+`
+
+type ListPortalLinksParams struct {
+	TenantID   uuid.UUID
+	CustomerID uuid.UUID
+	CursorTs   *time.Time
+	CursorID   *uuid.UUID
+	RowLimit   int32
+}
+
+type ListPortalLinksRow struct {
+	ID                      uuid.UUID
+	TenantID                uuid.UUID
+	CustomerID              uuid.UUID
+	CreatedByUserID         *uuid.UUID
+	CreatedByCredentialID   *uuid.UUID
+	CreatedAt               time.Time
+	ExpiresAt               time.Time
+	UsedAt                  *time.Time
+	RevokedAt               *time.Time
+	RevokeReason            *string
+	CreatedByUserName       *string
+	CreatedByCredentialName *string
+}
+
+// Links do cliente para a organização, dos mais novos para os mais antigos.
+// O hash do token não é lido: a listagem nunca o devolve.
+func (q *Queries) ListPortalLinks(ctx context.Context, arg ListPortalLinksParams) ([]ListPortalLinksRow, error) {
+	rows, err := q.db.Query(ctx, listPortalLinks,
+		arg.TenantID,
+		arg.CustomerID,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPortalLinksRow
+	for rows.Next() {
+		var i ListPortalLinksRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.CustomerID,
+			&i.CreatedByUserID,
+			&i.CreatedByCredentialID,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.UsedAt,
+			&i.RevokedAt,
+			&i.RevokeReason,
+			&i.CreatedByUserName,
+			&i.CreatedByCredentialName,
 		); err != nil {
 			return nil, err
 		}
@@ -407,4 +495,32 @@ func (q *Queries) RevokeActivePortalLinks(ctx context.Context, arg RevokeActiveP
 		return nil, err
 	}
 	return items, nil
+}
+
+const revokePortalLink = `-- name: RevokePortalLink :execrows
+UPDATE customer_portal_links SET revoked_at = $1, revoke_reason = $2
+ WHERE tenant_id = $3 AND customer_id = $4 AND id = $5 AND revoked_at IS NULL
+`
+
+type RevokePortalLinkParams struct {
+	RevokedAt    *time.Time
+	RevokeReason *string
+	TenantID     uuid.UUID
+	CustomerID   uuid.UUID
+	ID           uuid.UUID
+}
+
+// Revogação explícita de um link do cliente; não altera link já revogado.
+func (q *Queries) RevokePortalLink(ctx context.Context, arg RevokePortalLinkParams) (int64, error) {
+	result, err := q.db.Exec(ctx, revokePortalLink,
+		arg.RevokedAt,
+		arg.RevokeReason,
+		arg.TenantID,
+		arg.CustomerID,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

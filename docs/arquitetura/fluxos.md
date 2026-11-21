@@ -117,7 +117,8 @@ um pagamento já confirmado. Inserções com chave estrangeira para `customers` 
 cliente nessa ordem.
 
 Reembolsos, disputas e conciliação seguem a mesma ordem: o pedido e a confirmação de reembolso bloqueiam a
-cobrança, depois o reembolso, a fatura (histórico) e por último o cliente (consumo de crédito). O registro
+cobrança, depois o reembolso, a fatura (histórico) e por último o cliente (consumo de crédito); a disputa
+perdida que estorna crédito do excedente bloqueia a cobrança, a fatura e o cliente, nessa ordem. O registro
 do resultado de uma operação externa bloqueia a operação e depois a cobrança; a sincronização feita sob o
 bloqueio da cobrança (webhook) só altera operações que não estão em execução. A resolução de divergência
 bloqueia a divergência antes da cobrança, e a execução da conciliação bloqueia as divergências antes de gravar
@@ -160,15 +161,30 @@ referências às cobranças.
    fechado com agregado da métrica aceita o evento como `late` (dentro da tolerância), ainda que o
    plano tenha mudado. Período cujo fechamento já passou sem agregado da métrica, ou que nunca
    será fechado (inteiramente suspenso), rejeita o evento; o período em que a suspensão começou
-   continua aberto depois da reativação até o primeiro faturamento após ela. Rejeições valem por
+   continua aberto depois da reativação até o primeiro faturamento após ela. Cliente anonimizado
+   (ADR-061): todo evento novo é rejeitado com "Cliente anonimizado: consumo não é mais aceito.",
+   antes das demais validações que dependem do estado atual; como a deduplicação vem antes, o
+   reenvio de um evento já gravado continua respondido como `duplicate`. Rejeições valem por
    evento e não desfazem o lote.
 4. O fechamento agrega por período conforme a métrica (`sum`, `max`, `unique_count`, `last`) e
    vincula o agregado ao item da fatura.
 5. Ordem de bloqueio: no início da transação do lote, antes de qualquer outra leitura ou
    gravação, a ingestão bloqueia com `FOR SHARE` as assinaturas distintas do lote, uma vez cada e
-   em ordem crescente de ID; só depois consulta métrica, mudança agendada, deduplicação e
-   fechamento e grava os eventos. A mudança agendada é lida sem bloqueio: o agendamento e a
-   aplicação pelo motor bloqueiam a assinatura com `FOR UPDATE` antes de alterá-la. O motor
+   em ordem crescente de ID; só depois consulta métrica, deduplicação, cliente, mudança agendada
+   e fechamento e grava os eventos. O cliente da assinatura é lido com `FOR KEY SHARE` (o mesmo
+   bloqueio da chave estrangeira do evento), sempre depois dos bloqueios das assinaturas, uma vez
+   por cliente no lote, no primeiro evento dele que passa pela deduplicação: é a primeira
+   verificação de estado, feita antes das demais e da gravação, de modo que o bloqueio é tomado
+   também quando o evento acaba rejeitado por outra regra (só não o tomam os eventos recusados
+   antes disso: conteúdo inválido, assinatura ou métrica inexistente e reenvio de evento já
+   gravado). A anonimização mantém o cliente com `FOR UPDATE` até confirmar e não bloqueia
+   assinaturas: um lote que chega durante a anonimização espera nessa leitura, enxerga o cliente
+   anonimizado e rejeita o evento, em vez de gravá-lo como `late` com a situação lida antes (a
+   correção de consumo tentaria faturá-lo e a fatura seria recusada por
+   `invoices_customer_guard`); uma anonimização que chega durante o lote espera o commit dele e
+   avalia o faturamento pendente já com os eventos gravados. A mudança agendada é lida sem
+   bloqueio: o agendamento e a aplicação pelo motor bloqueiam a assinatura com `FOR UPDATE` antes
+   de alterá-la. O motor
    reivindica a assinatura com `FOR UPDATE SKIP LOCKED` e fecha o período na mesma transação:
    enquanto um lote mantém a assinatura, a reivindicação a pula (ela é faturada numa reivindicação
    seguinte); um lote que chega durante o fechamento espera o commit e classifica o evento como
@@ -258,7 +274,7 @@ sequenceDiagram
   else ganha
     P->>DB: disputa won; estorno da retenção; cobrança paid, partially_refunded ou refunded (conforme os reembolsos); dispute.closed
   else perdida
-    P->>DB: disputa lost; amount_charged_back pelo saldo não reembolsado nem reservado; ledger dispute.hold_released (parte reembolsada); cobrança charged_back; histórico da fatura (chargeback); dispute.closed
+    P->>DB: disputa lost; amount_charged_back pelo saldo não reembolsado nem reservado; ledger dispute.hold_released (parte reembolsada); crédito do excedente consumido ou a recuperar (dispute.credit_reversed); cobrança charged_back; histórico da fatura (chargeback); dispute.closed
   end
 ```
 
@@ -268,11 +284,63 @@ fatura. O estorno não inclui o que foi devolvido ao pagador por reembolso confi
 nem o que está reservado por reembolso em andamento; essa parte da retenção volta a `provider_clearing`
 (`dispute.hold_released`), e a confirmação posterior do reembolso reservado cabe no saldo; se o reembolso
 reservado for recusado depois da perda, o valor passa ao chargeback (`dispute.hold_restored`). Assim,
-`chargebacks` e `refunds` nunca somam mais que o pago. Webhook
+`chargebacks` e `refunds` nunca somam mais que o pago.
+
+Quando o pagamento contestado gerou crédito do cliente por excedente, a disputa perdida estorna também esse
+crédito, com a mesma base do reembolso (ADR-070): a parte do valor estornado que corresponde ao excedente
+ainda não devolvido ao pagador (por reembolso ou chargeback anterior) sai de `chargebacks` pelo lançamento
+`dispute.credit_reversed`. O crédito ainda disponível é consumido (`customer_credit_entries`, débito em
+`customer_credits`, `disputes.credit_amount`); o que o cliente já usou em outras faturas não deixa o saldo
+negativo e vira valor a recuperar dele (débito em `customer_recoverables`, `disputes.recovery_amount`). O
+mesmo vale para o valor de um reembolso reservado recusado depois da perda (lançamento por reembolso). A
+disputa ganha não mexe no crédito. Ordem de bloqueio: cobrança, fatura e cliente (crédito), como no
+reembolso.
+
+Webhook
 da decisão que chega antes do da abertura abre e decide a disputa na mesma transação; o da abertura, que
 chega depois com retrato anterior, é ignorado. Eventos repetidos, fora de ordem ou anteriores ao
 encerramento não reabrem disputas (ADR-036). Durante a disputa e depois do chargeback a cobrança não aceita
-reembolso. `GET /api/v1/disputes` (`payments.read`) lista as disputas mais recentes.
+reembolso. `GET /api/v1/disputes` (`payments.read`) lista as disputas mais recentes e
+`GET /api/v1/disputes/{id}` devolve uma delas, com o saldo a recuperar.
+
+## Baixa do valor a recuperar
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as Usuário ou credencial (payments.settle_recovery)
+  participant A as API
+  participant P as Pagamentos
+  participant DB as PostgreSQL
+  U->>A: POST /api/v1/disputes/{id}/recovery-settlements (Idempotency-Key)
+  A->>P: SettleRecovery (desfecho, valor, data efetiva, justificativa)
+  P->>DB: tx: disputa FOR UPDATE; baixa já registrada pela chave?
+  alt chave já usada na mesma baixa
+    P-->>A: baixa registrada (sem novo efeito)
+  else nova baixa
+    P->>DB: confere disputa perdida, saldo a recuperar e data efetiva
+    P->>DB: ledger dispute.recovery_received (cash) ou dispute.recovery_written_off (bad_debt), crédito em customer_recoverables
+    P->>DB: dispute_recovery_settlements; gatilho acumula o total na disputa (disputes_recovery_settled_within)
+    P->>DB: outbox dispute.recovery_settled; auditoria dispute.recovery_settled
+  end
+  A-->>U: 201 com a baixa
+```
+
+1. **Pedido.** A rota exige `payments.settle_recovery` e `Idempotency-Key`. A repetição com a mesma chave
+   devolve a mesma baixa, também depois da expiração do registro HTTP (chave de negócio `request_key`); a
+   chave usada com outro valor ou desfecho é recusada (`request_key_reused`).
+2. **Validação.** Só a disputa perdida com valor a recuperar aceita baixa (`dispute_without_recovery`); o
+   valor é positivo e no máximo o saldo (`recovery_exceeds_outstanding`, `recovery_already_settled`); a data
+   efetiva, no fuso do tenant, não fica no futuro nem antes do encerramento da disputa; a justificativa tem
+   de 10 a 2.000 caracteres.
+3. **Concorrência.** A disputa é bloqueada no início; mesmo sem a verificação da aplicação, o gatilho que
+   acumula a baixa atualiza a linha da disputa (esperando a baixa concorrente) e a constraint
+   `disputes_recovery_settled_within` recusa a soma acima do valor a recuperar.
+4. **Ledger.** Um lançamento por baixa, com o instante do registro (meses fechados não mudam) e referência
+   `dispute_recovery_settlement`. `chargebacks` não muda; o indicador `open_recoverables` do painel é o saldo
+   de `customer_recoverables`.
+5. **Autoria.** `settled_by` é o usuário da sessão; com credencial de API fica nulo e a auditoria registra o
+   ator `api_credential` (ADR-059).
 
 ## Cancelamento no provedor
 
@@ -412,17 +480,24 @@ destino informado.
 ```mermaid
 sequenceDiagram
   autonumber
-  participant J as Job payments.reconcile ou usuário (reconciliation.run)
-  participant P as Pagamentos
+  participant U as Usuário ou credencial (reconciliation.run)
+  participant A as API
   participant DB as PostgreSQL
+  participant W as Worker (executor de conciliações)
   participant G as Provedor
-  J->>P: RunReconciliation(janela)
-  P->>DB: tx: execução running (uma por conta, lease); encerra execuções interrompidas
-  P->>G: ListCharges paginado (sem transação, dentro do prazo da coleta)
-  P->>DB: cobranças listadas e depois as da janela (até o limite), cobranças do rodízio, reembolsos, operações unknown
-  P->>G: GetCharge das locais ausentes da listagem e das cobranças do rodízio
-  P->>P: Compare (pura): divergências por tipo e chave de deduplicação
-  P->>DB: tx: grava/atualiza/reabre divergências; resolve automaticamente as não constatadas; registra as cobranças verificadas; conclui a execução
+  U->>A: POST /api/v1/reconciliation/runs (Idempotency-Key)
+  A->>DB: tx: execução running sem lease (uma por conta; chave do pedido); auditoria
+  A-->>U: 202 + Location (execução em andamento)
+  loop a cada 2 s, em cada worker
+    W->>DB: execuções running sem lease ou com lease expirado (app_claimable_reconciliation_runs)
+    W->>DB: tx: FOR UPDATE; lease de 15 min e tentativa + 1 (ou failed depois de 3 tentativas)
+  end
+  W->>G: ListCharges paginado (sem transação, dentro do prazo da coleta)
+  W->>DB: cobranças listadas e depois as da janela (até o limite), cobranças do rodízio, reembolsos, operações unknown
+  W->>G: GetCharge das locais ausentes da listagem e das cobranças do rodízio
+  W->>W: Compare (pura): divergências por tipo e chave de deduplicação
+  W->>DB: tx: confere a tentativa; grava/atualiza/reabre divergências; resolve automaticamente as não constatadas; registra as cobranças verificadas; conclui a execução
+  U->>A: GET /api/v1/reconciliation/runs/{id} até completed ou failed
 ```
 
 A conciliação compara cobranças, pagamentos, reembolsos e chargebacks locais com o provedor na janela e
@@ -436,15 +511,24 @@ listagem pela data de criação). O rodízio é de melhor esforço: a consulta q
 volta na próxima execução, e o prazo da coleta, o cancelamento ou três falhas seguidas de provedor
 indisponível interrompem só o rodízio, sem tornar a execução parcial nem fazê-la falhar.
 
-- **Execução manual.** `POST /api/v1/reconciliation/runs` (`reconciliation.run`, `Idempotency-Key`) executa
-  na requisição a janela padrão de 30 dias do provedor padrão e devolve a execução encerrada. A coleta não
-  depende do prazo da requisição: tem prazo próprio de 40 segundos e, esgotado o prazo, a execução é
-  concluída com o que foi coletado e com aviso de execução parcial em `error`. Falha do provedor encerra a
-  execução como `failed`, com a causa em `error` (resposta 200); a repetição com a mesma chave devolve a
-  mesma execução. Sem provedor padrão, 409 `provider_not_configured`; com outra execução em andamento na
-  conta, 409 `reconciliation_running`, conflito transitório com `Retry-After` que não fica registrado na
-  `Idempotency-Key` (a repetição com a mesma chave executa a conciliação depois que a outra execução
-  terminar). Com credencial de API, `requested_by` fica nulo e a autoria fica na auditoria.
+- **Execução manual (assíncrona, ADR-071).** `POST /api/v1/reconciliation/runs` (`reconciliation.run`,
+  `Idempotency-Key`) registra a execução da janela padrão de 30 dias do provedor padrão e responde `202`
+  com a execução em andamento e o header `Location`, sem chamar o provedor. O executor do worker (duas
+  instâncias por processo, fora do agendador) descobre a cada 2 segundos as execuções que aguardam, assume
+  uma por vez com lease de 15 minutos, coleta com prazo de 13 minutos por tentativa e a encerra; quem pediu
+  acompanha por `GET /api/v1/reconciliation/runs/{id}`. Falha do provedor encerra a execução como `failed`,
+  com a causa em `error`. A repetição com a mesma chave devolve a mesma execução na situação atual: `202`
+  enquanto está em andamento (a resposta 202 não fica registrada na `Idempotency-Key`) e `200` depois de
+  encerrada. Sem provedor padrão, 409 `provider_not_configured`; com outra execução em andamento na conta
+  (inclusive aguardando o worker ou a retomada), 409 `reconciliation_running`, conflito transitório com
+  `Retry-After` que também não fica registrado na chave. Com credencial de API, `requested_by` fica nulo e
+  a autoria fica na auditoria.
+- **Retomada.** A execução cujo worker foi interrompido fica com o lease até ele expirar e então é assumida
+  de novo, por qualquer instância, e reexecutada do início (`reconciliation.run_resumed`); o worker que
+  encerra normalmente devolve a execução (`reconciliation.run_released`) e ela é retomada de imediato. As
+  divergências só são gravadas na transação que encerra a execução, pela chave de deduplicação, e só a
+  tentativa que ainda detém a execução (contagem de tentativas) pode encerrá-la: a retomada não duplica
+  divergências. Depois de três tentativas interrompidas, a execução é encerrada como `failed`, com a causa.
 - **Execução parcial.** Limite de páginas da listagem ou de consultas individuais, prazo da coleta,
   limite de cobranças locais da janela (5000; as cobranças listadas pelo provedor vêm primeiro e nunca ficam
   de fora) ou de operações com resultado desconhecido (500) concluem a execução com aviso de execução
@@ -453,8 +537,10 @@ indisponível interrompem só o rodízio, sem tornar a execução parcial nem fa
   deixa de ter resultado desconhecido.
 - **Execução agendada.** O job `payments.reconcile` (a cada hora, com lease do agendador) concilia, com
   janela de 7 dias, os tenants cujo plano da plataforma tem `reconciliation_automation`, com provedor padrão
-  ativo e sem execução agendada nas últimas 24 horas.
-- **Consulta.** `GET /api/v1/reconciliation/runs` e `GET /api/v1/reconciliation/discrepancies` (filtros
+  ativo e sem execução agendada nas últimas 24 horas. A execução é registrada já assumida e executada na
+  própria tarefa; se a tarefa for interrompida, a execução é retomada pelo executor do worker.
+- **Consulta.** `GET /api/v1/reconciliation/runs`, `GET /api/v1/reconciliation/runs/{id}` e
+  `GET /api/v1/reconciliation/discrepancies` (filtros
   `status` e `kind`) exigem `reconciliation.read`; o detalhe traz o histórico de auditoria da divergência
   (detecção, reabertura, resolução automática e resolução).
 - **Resolução.** `POST /api/v1/reconciliation/discrepancies/{id}/resolve` exige `reconciliation.resolve`,
@@ -476,9 +562,11 @@ indisponível interrompem só o rodízio, sem tornar a execução parcial nem fa
 | `payments.invoice_voided`, `payments.invoice_credited` | cancelam a cobrança em aberto no Recorvia e, depois do commit, no provedor |
 | `payments.recover_operations` (1 min) | retoma operações `create_charge`, `refund` e `cancel_charge` pendentes, desconhecidas ou com lease expirado, sempre consultando o provedor antes de repetir |
 | `payments.reconcile` (1 h) | conciliação agendada dos tenants elegíveis |
-| `metrics.collect` (15 s) | `recorvia_reconciliation_open_discrepancies{kind}`, `recorvia_refunds_total{outcome}` e `recorvia_refunds_in_progress{status}` a partir de contagens agregadas do banco (ADR-039) |
+| executor de conciliações (laço próprio, a cada 2 s, 2 instâncias por worker) | assume com lease e executa as conciliações registradas pela API e retoma as interrompidas (ADR-071) |
+| `metrics.collect` (15 s) | `recorvia_reconciliation_open_discrepancies{kind}`, `recorvia_reconciliation_runs_in_progress{state}`, `recorvia_reconciliation_oldest_waiting_seconds`, `recorvia_refunds_total{outcome}` e `recorvia_refunds_in_progress{status}` a partir de contagens agregadas do banco (ADR-039) |
+| API, a cada coleta do Prometheus | `recorvia_reconciliation_runs_in_progress{state}` e `recorvia_reconciliation_oldest_waiting_seconds`, lidas das mesmas contagens agregadas: a execução registrada que nenhum worker assumiu aparece nas métricas mesmo sem worker em execução (ADR-071) |
 
-Os eventos `refund.succeeded`, `refund.failed`, `dispute.opened`, `dispute.closed` e
+Os eventos `refund.succeeded`, `refund.failed`, `dispute.opened`, `dispute.closed`, `dispute.recovery_settled` e
 `reconciliation.discrepancy_detected` são gravados na outbox na mesma transação dos efeitos e publicados no
 RabbitMQ; nesta versão nenhum consumidor interno depende deles (ficam disponíveis para notificações e
 webhooks enviados).
@@ -549,23 +637,32 @@ sequenceDiagram
   C->>A: /api/portal/v1/* com o cookie (X-CSRF-Token nos métodos que alteram estado)
   A->>R: sessão (expiração absoluta e por inatividade)
   A->>DB: tx do tenant da sessão: link não revogado, cliente e organização ativos
-  C->>A: GET /api/portal/v1/invoices, /invoices/{id}, /invoices/{id}/document
-  A->>DB: tx do tenant da sessão: faturas emitidas do cliente da sessão (tenant_id e customer_id), itens e link de pagamento em aberto
-  A-->>C: faturas do cliente (outro cliente, outro tenant ou rascunho: 404)
+  C->>A: GET /api/portal/v1/invoices?limit=…&cursor=…, /invoices/{id}, /invoices/{id}/document
+  A->>DB: tx do tenant da sessão: faturas emitidas do cliente da sessão (tenant_id e customer_id) depois da posição do cursor, itens e link de pagamento em aberto
+  A-->>C: página de faturas do cliente e next_cursor (outro cliente, outro tenant ou rascunho: 404)
   C->>A: PUT /api/portal/v1/contact-preferences (X-CSRF-Token)
   A->>DB: tx: cliente bloqueado; contatos do próprio cliente; grava só o que mudou; auditoria (customer_portal)
   C->>A: POST /api/portal/v1/logout (X-CSRF-Token)
   A->>DB: auditoria do encerramento
   A->>R: remove a sessão
   A-->>C: 204 + cookie expirado
+  U->>A: GET /api/v1/customers/{id}/portal-links
+  A-->>U: links do cliente (situação, datas, quem gerou; sem token nem hash)
+  U->>A: DELETE /api/v1/customers/{id}/portal-links/{link_id}
+  A->>DB: tx: cliente FOR NO KEY UPDATE; link FOR UPDATE (do cliente e do tenant); revoked_at; auditoria
+  A->>R: remove as sessões abertas com o link (índice por link)
+  A-->>U: 204 (também para link já revogado, sem nova auditoria)
 ```
 
-Um novo link para o mesmo cliente revoga o anterior e encerra a sessão aberta com ele; arquivar o
-cliente ou suspender a organização também encerra o acesso. O portal não aceita a sessão do painel
-nem credenciais de API.
+Um novo link para o mesmo cliente revoga o anterior e encerra a sessão aberta com ele; a organização
+também lista os links do cliente e revoga um link de forma explícita (ADR-068), com a mesma
+permissão da geração (`customers.portal_links`). Arquivar o cliente ou suspender a organização
+também encerra o acesso. O portal não aceita a sessão do painel nem credenciais de API.
 
-O cliente vê as 100 faturas emitidas mais recentes, sem histórico, cobranças ou identificadores
-internos; os itens aparecem pelo valor líquido do desconto. O botão de pagamento usa o link do
+O cliente vê as faturas emitidas em páginas de até 100 (25 por padrão), das mais recentes para as
+mais antigas, com cursor por emissão e identificador (ADR-069): o cursor é só uma posição, e a
+organização e o cliente consultados vêm sempre da sessão. A lista não traz histórico, cobranças ou
+identificadores internos; os itens aparecem pelo valor líquido do desconto. O botão de pagamento usa o link do
 pagamento hospedado da cobrança mais recente aguardando pagamento e só aparece para fatura em
 aberto com saldo. O documento comercial é o mesmo HTML do painel, exibido em `iframe` isolado; a
 baixa como incobrável aparece ao cliente como "Encerrada". Nas

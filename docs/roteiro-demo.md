@@ -55,9 +55,10 @@ Mailpit em http://localhost:8025 e RabbitMQ em http://localhost:15672.
       curl -X POST http://localhost:8090/sim/charges/<id_no_simulador>/actions -d '{"action":"diverge","fee":999}'
       ```
    3. *Conciliação*: em *Conciliação → Execuções*, use *Executar conciliação agora*
-      (`POST /api/v1/reconciliation/runs`). A execução conclui com as cobranças verificadas e uma
-      divergência; o job `payments.reconcile` faz o mesmo a cada hora para planos com conciliação
-      automática.
+      (`POST /api/v1/reconciliation/runs`). O pedido é aceito de imediato (`202`, execução em
+      andamento) e o worker executa em segundo plano; a tela acompanha a execução e avisa quando ela
+      conclui, com as cobranças verificadas e uma divergência. O job `payments.reconcile` concilia a
+      cada hora os planos com conciliação automática.
    4. *Análise*: na aba *Divergências*, a divergência *Taxa divergente* da cobrança está *Aberta*.
       *Analisar* mostra o comparativo local × provedor, com a taxa destacada (local: taxa original;
       provedor: R$ 9,99) e o histórico com `reconciliation.discrepancy_detected`.

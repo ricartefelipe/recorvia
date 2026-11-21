@@ -75,6 +75,9 @@ func (r *Reporting) Raw(ctx context.Context, tenantID uuid.UUID, from, to, now t
 			return err
 		}
 		raw.Refunds, raw.Chargebacks = contra.Refunds, contra.Chargebacks
+		if raw.OpenRecoverables, err = b.q.DashboardRecoverables(ctx, tenantID); err != nil {
+			return err
+		}
 		unknown, err := b.q.DashboardUnknownOperations(ctx, tenantID)
 		raw.UnknownOperations = int(unknown)
 		return err

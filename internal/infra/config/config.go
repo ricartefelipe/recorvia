@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -72,6 +73,13 @@ type Config struct {
 
 	EncryptionKeys      map[string][]byte
 	EncryptionActiveKey string
+	// EncryptionStartupCheck define o que a API e o worker fazem, ao iniciar,
+	// quando o keyring não decifra os dados cifrados em uso no banco.
+	EncryptionStartupCheck KeyringCheckMode
+	// EncryptionLostKeys lista os identificadores de chaves declaradas
+	// perdidas (RECORVIA_ENCRYPTION_LOST_KEYS): os dados cifrados com elas
+	// não são recuperáveis e deixam de impedir a inicialização.
+	EncryptionLostKeys []string
 
 	SMTPAddr     string
 	SMTPFrom     string
@@ -89,7 +97,84 @@ type Config struct {
 	RateLimitPerMinute int
 	// APICredentialRateLimitPerMinute limita requisições por credencial de API.
 	APICredentialRateLimitPerMinute int
+
+	// Retention são os prazos do expurgo automático executado pelo worker.
+	Retention Retention
 }
+
+// Retention reúne os prazos de retenção dos dados técnicos, em dias contados
+// do instante em que o registro deixou de ser necessário, e o tamanho do
+// lote do expurgo. Registros financeiros e de auditoria não têm prazo: não
+// são expurgados.
+type Retention struct {
+	// InboxDays: registros de deduplicação dos consumidores.
+	InboxDays int
+	// DeadLettersDays: mensagens não processadas já tratadas.
+	DeadLettersDays int
+	// WebhooksDays: entregas concluídas, eventos e segredos vencidos dos
+	// webhooks enviados.
+	WebhooksDays int
+	// ProviderWebhookPayloadsDays: corpo dos webhooks recebidos dos provedores.
+	ProviderWebhookPayloadsDays int
+	// NotificationContentDays: conteúdo cifrado das notificações encerradas.
+	NotificationContentDays int
+	// NotificationsDays: notificações encerradas e o histórico de envio.
+	NotificationsDays int
+	// PortalLinksDays: links do portal com a validade encerrada.
+	PortalLinksDays int
+	// UsageEventsDays: eventos de consumo de períodos faturados.
+	UsageEventsDays int
+	// InvitationsDays: convites não aceitos com a validade encerrada.
+	InvitationsDays int
+	// BatchSize: registros removidos por transação.
+	BatchSize int
+}
+
+// retentionLimit descreve os limites aceitos de uma variável de retenção.
+type retentionLimit struct {
+	env      string
+	value    int
+	min, max int
+}
+
+// Limites das variáveis de retenção. Os mínimos são os de
+// internal/retention (Minimum), conferidos por teste em internal/app.
+const (
+	maxRetentionDays      = 3650
+	minRetentionBatchSize = 10
+	maxRetentionBatchSize = 5000
+)
+
+func (r Retention) limits() []retentionLimit {
+	return []retentionLimit{
+		{"RECORVIA_RETENTION_INBOX_DAYS", r.InboxDays, 14, maxRetentionDays},
+		{"RECORVIA_RETENTION_DEAD_LETTERS_DAYS", r.DeadLettersDays, 30, maxRetentionDays},
+		{"RECORVIA_RETENTION_WEBHOOKS_DAYS", r.WebhooksDays, 7, maxRetentionDays},
+		{"RECORVIA_RETENTION_PROVIDER_WEBHOOK_PAYLOADS_DAYS", r.ProviderWebhookPayloadsDays, 7, maxRetentionDays},
+		{"RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS", r.NotificationContentDays, 7, maxRetentionDays},
+		{"RECORVIA_RETENTION_NOTIFICATIONS_DAYS", r.NotificationsDays, 30, maxRetentionDays},
+		{"RECORVIA_RETENTION_PORTAL_LINKS_DAYS", r.PortalLinksDays, 1, maxRetentionDays},
+		{"RECORVIA_RETENTION_USAGE_EVENTS_DAYS", r.UsageEventsDays, 30, maxRetentionDays},
+		{"RECORVIA_RETENTION_INVITATIONS_DAYS", r.InvitationsDays, 7, maxRetentionDays},
+		{"RECORVIA_RETENTION_BATCH_SIZE", r.BatchSize, minRetentionBatchSize, maxRetentionBatchSize},
+	}
+}
+
+// KeyringCheckMode é o modo da conferência do keyring na inicialização
+// (RECORVIA_ENCRYPTION_STARTUP_CHECK).
+type KeyringCheckMode string
+
+// Modos da conferência do keyring na inicialização.
+const (
+	// KeyringCheckEnforce impede a inicialização com keyring incompatível.
+	KeyringCheckEnforce KeyringCheckMode = "enforce"
+	// KeyringCheckWarn registra o problema e inicia assim mesmo, inclusive
+	// quando a conferência não pôde ser concluída (uso: emergência; para uma
+	// chave perdida, declare-a em RECORVIA_ENCRYPTION_LOST_KEYS).
+	KeyringCheckWarn KeyringCheckMode = "warn"
+	// KeyringCheckOff não confere.
+	KeyringCheckOff KeyringCheckMode = "off"
+)
 
 // Getenv abstrai a leitura do ambiente para testes.
 type Getenv func(string) string
@@ -153,49 +238,63 @@ func Load(get Getenv) (*Config, error) {
 	}
 	l := &loader{get: get}
 	c := &Config{
-		Env:                 Environment(l.str("RECORVIA_ENV", string(Development))),
-		LogLevel:            l.str("RECORVIA_LOG_LEVEL", "info"),
-		HTTPAddr:            l.str("RECORVIA_HTTP_ADDR", ":8081"),
-		MetricsAddr:         l.str("RECORVIA_METRICS_ADDR", ":9091"),
-		ShutdownTimeout:     l.dur("RECORVIA_SHUTDOWN_TIMEOUT", 20*time.Second),
-		DatabaseURL:         l.str("RECORVIA_DATABASE_URL", ""),
-		DatabaseMaxConns:    int32(l.intv("RECORVIA_DATABASE_MAX_CONNS", 20)),
-		MigrationsDBURL:     l.str("RECORVIA_MIGRATIONS_DATABASE_URL", ""),
-		RedisURL:            l.str("RECORVIA_REDIS_URL", ""),
-		AMQPURL:             l.str("RECORVIA_AMQP_URL", ""),
-		WorkerConcurrency:   l.intv("RECORVIA_WORKER_CONCURRENCY", 8),
-		WorkerPrefetch:      l.intv("RECORVIA_WORKER_PREFETCH", 16),
-		WorkerID:            l.str("RECORVIA_WORKER_ID", hostnameOr("worker")),
-		OutboxBatchSize:     l.intv("RECORVIA_OUTBOX_BATCH_SIZE", 100),
-		OutboxLease:         l.dur("RECORVIA_OUTBOX_LEASE", 30*time.Second),
-		SchedulerTick:       l.dur("RECORVIA_SCHEDULER_TICK", 5*time.Second),
-		ConsumerMaxAttempts: l.intv("RECORVIA_CONSUMER_MAX_ATTEMPTS", 5),
-		OIDCIssuer:          l.str("RECORVIA_OIDC_ISSUER", ""),
-		OIDCDiscoveryURL:    l.str("RECORVIA_OIDC_DISCOVERY_URL", ""),
-		OIDCClientID:        l.str("RECORVIA_OIDC_CLIENT_ID", ""),
-		OIDCClientSecret:    l.str("RECORVIA_OIDC_CLIENT_SECRET", ""),
-		OIDCRedirectURL:     l.str("RECORVIA_OIDC_REDIRECT_URL", ""),
-		SessionTTL:          l.dur("RECORVIA_SESSION_TTL", 12*time.Hour),
-		SessionIdleTTL:      l.dur("RECORVIA_SESSION_IDLE_TTL", 2*time.Hour),
-		CookieSecure:        l.boolv("RECORVIA_COOKIE_SECURE", true),
-		CookieName:          l.str("RECORVIA_COOKIE_NAME", "__Host-recorvia_session"),
-		EncryptionActiveKey: l.str("RECORVIA_ENCRYPTION_ACTIVE_KEY", ""),
-		SMTPAddr:            l.str("RECORVIA_SMTP_ADDR", ""),
-		SMTPFrom:            l.str("RECORVIA_SMTP_FROM", ""),
-		SMTPUsername:        l.str("RECORVIA_SMTP_USERNAME", ""),
-		SMTPPassword:        l.str("RECORVIA_SMTP_PASSWORD", ""),
-		SMTPTLS:             l.str("RECORVIA_SMTP_TLS", "starttls"),
-		SMTPTimeout:         l.dur("RECORVIA_SMTP_TIMEOUT", 15*time.Second),
-		PaySimURL:           l.str("RECORVIA_PAYSIM_URL", ""),
-		PaySimPublicURL:     l.str("RECORVIA_PAYSIM_PUBLIC_URL", ""),
-		WebhookPublicURL:    l.str("RECORVIA_WEBHOOK_PUBLIC_URL", ""),
-		RateLimitPerMinute:  l.intv("RECORVIA_RATE_LIMIT_PER_MINUTE", 600),
+		Env:                    Environment(l.str("RECORVIA_ENV", string(Development))),
+		LogLevel:               l.str("RECORVIA_LOG_LEVEL", "info"),
+		HTTPAddr:               l.str("RECORVIA_HTTP_ADDR", ":8081"),
+		MetricsAddr:            l.str("RECORVIA_METRICS_ADDR", ":9091"),
+		ShutdownTimeout:        l.dur("RECORVIA_SHUTDOWN_TIMEOUT", 20*time.Second),
+		DatabaseURL:            l.str("RECORVIA_DATABASE_URL", ""),
+		DatabaseMaxConns:       int32(l.intv("RECORVIA_DATABASE_MAX_CONNS", 20)),
+		MigrationsDBURL:        l.str("RECORVIA_MIGRATIONS_DATABASE_URL", ""),
+		RedisURL:               l.str("RECORVIA_REDIS_URL", ""),
+		AMQPURL:                l.str("RECORVIA_AMQP_URL", ""),
+		WorkerConcurrency:      l.intv("RECORVIA_WORKER_CONCURRENCY", 8),
+		WorkerPrefetch:         l.intv("RECORVIA_WORKER_PREFETCH", 16),
+		WorkerID:               l.str("RECORVIA_WORKER_ID", hostnameOr("worker")),
+		OutboxBatchSize:        l.intv("RECORVIA_OUTBOX_BATCH_SIZE", 100),
+		OutboxLease:            l.dur("RECORVIA_OUTBOX_LEASE", 30*time.Second),
+		SchedulerTick:          l.dur("RECORVIA_SCHEDULER_TICK", 5*time.Second),
+		ConsumerMaxAttempts:    l.intv("RECORVIA_CONSUMER_MAX_ATTEMPTS", 5),
+		OIDCIssuer:             l.str("RECORVIA_OIDC_ISSUER", ""),
+		OIDCDiscoveryURL:       l.str("RECORVIA_OIDC_DISCOVERY_URL", ""),
+		OIDCClientID:           l.str("RECORVIA_OIDC_CLIENT_ID", ""),
+		OIDCClientSecret:       l.str("RECORVIA_OIDC_CLIENT_SECRET", ""),
+		OIDCRedirectURL:        l.str("RECORVIA_OIDC_REDIRECT_URL", ""),
+		SessionTTL:             l.dur("RECORVIA_SESSION_TTL", 12*time.Hour),
+		SessionIdleTTL:         l.dur("RECORVIA_SESSION_IDLE_TTL", 2*time.Hour),
+		CookieSecure:           l.boolv("RECORVIA_COOKIE_SECURE", true),
+		CookieName:             l.str("RECORVIA_COOKIE_NAME", "__Host-recorvia_session"),
+		EncryptionActiveKey:    l.str("RECORVIA_ENCRYPTION_ACTIVE_KEY", ""),
+		EncryptionStartupCheck: KeyringCheckMode(l.str("RECORVIA_ENCRYPTION_STARTUP_CHECK", string(KeyringCheckEnforce))),
+		SMTPAddr:               l.str("RECORVIA_SMTP_ADDR", ""),
+		SMTPFrom:               l.str("RECORVIA_SMTP_FROM", ""),
+		SMTPUsername:           l.str("RECORVIA_SMTP_USERNAME", ""),
+		SMTPPassword:           l.str("RECORVIA_SMTP_PASSWORD", ""),
+		SMTPTLS:                l.str("RECORVIA_SMTP_TLS", "starttls"),
+		SMTPTimeout:            l.dur("RECORVIA_SMTP_TIMEOUT", 15*time.Second),
+		PaySimURL:              l.str("RECORVIA_PAYSIM_URL", ""),
+		PaySimPublicURL:        l.str("RECORVIA_PAYSIM_PUBLIC_URL", ""),
+		WebhookPublicURL:       l.str("RECORVIA_WEBHOOK_PUBLIC_URL", ""),
+		RateLimitPerMinute:     l.intv("RECORVIA_RATE_LIMIT_PER_MINUTE", 600),
 
 		PortalLinkTTL:        l.dur("RECORVIA_PORTAL_LINK_TTL", 72*time.Hour),
 		PortalSessionTTL:     l.dur("RECORVIA_PORTAL_SESSION_TTL", 2*time.Hour),
 		PortalSessionIdleTTL: l.dur("RECORVIA_PORTAL_SESSION_IDLE_TTL", 30*time.Minute),
 
 		APICredentialRateLimitPerMinute: l.intv("RECORVIA_API_CREDENTIAL_RATE_LIMIT_PER_MINUTE", 600),
+
+		Retention: Retention{
+			InboxDays:                   l.intv("RECORVIA_RETENTION_INBOX_DAYS", 90),
+			DeadLettersDays:             l.intv("RECORVIA_RETENTION_DEAD_LETTERS_DAYS", 180),
+			WebhooksDays:                l.intv("RECORVIA_RETENTION_WEBHOOKS_DAYS", 90),
+			ProviderWebhookPayloadsDays: l.intv("RECORVIA_RETENTION_PROVIDER_WEBHOOK_PAYLOADS_DAYS", 90),
+			NotificationContentDays:     l.intv("RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS", 90),
+			NotificationsDays:           l.intv("RECORVIA_RETENTION_NOTIFICATIONS_DAYS", 365),
+			PortalLinksDays:             l.intv("RECORVIA_RETENTION_PORTAL_LINKS_DAYS", 90),
+			UsageEventsDays:             l.intv("RECORVIA_RETENTION_USAGE_EVENTS_DAYS", 400),
+			InvitationsDays:             l.intv("RECORVIA_RETENTION_INVITATIONS_DAYS", 90),
+			BatchSize:                   l.intv("RECORVIA_RETENTION_BATCH_SIZE", 500),
+		},
 	}
 	// Sem configuração explícita, o cookie do portal segue o prefixo do
 	// cookie de sessão (__Host- quando seguro).
@@ -204,6 +303,11 @@ func Load(get Getenv) (*Config, error) {
 	case Development, Test, Production:
 	default:
 		l.errs = append(l.errs, fmt.Errorf("RECORVIA_ENV: valor desconhecido %q", c.Env))
+	}
+	switch c.EncryptionStartupCheck {
+	case KeyringCheckEnforce, KeyringCheckWarn, KeyringCheckOff:
+	default:
+		l.errs = append(l.errs, fmt.Errorf("RECORVIA_ENCRYPTION_STARTUP_CHECK: use enforce, warn ou off (recebido %q)", c.EncryptionStartupCheck))
 	}
 	if raw := l.str("RECORVIA_PUBLIC_URL", "http://localhost:8080"); raw != "" {
 		u, err := url.Parse(raw)
@@ -219,6 +323,7 @@ func Load(get Getenv) (*Config, error) {
 		}
 	}
 	c.EncryptionKeys = parseKeys(l, l.str("RECORVIA_ENCRYPTION_KEYS", ""))
+	c.EncryptionLostKeys = parseLostKeys(l, l.str("RECORVIA_ENCRYPTION_LOST_KEYS", ""), c.EncryptionKeys)
 	for _, p := range strings.Split(l.str("RECORVIA_WEBHOOK_ALLOWED_PRIVATE_CIDRS", ""), ",") {
 		if p = strings.TrimSpace(p); p == "" {
 			continue
@@ -268,6 +373,31 @@ func parseKeys(l *loader, raw string) map[string][]byte {
 	return keys
 }
 
+// parseLostKeys lê a lista de identificadores de chaves declaradas perdidas:
+// só o identificador (nunca o valor), e nenhum que esteja configurado em
+// RECORVIA_ENCRYPTION_KEYS.
+func parseLostKeys(l *loader, raw string, keys map[string][]byte) []string {
+	var lost []string
+	for _, id := range strings.Split(raw, ",") {
+		id = strings.TrimSpace(id)
+		switch {
+		case id == "" || slices.Contains(lost, id):
+			continue
+		case strings.Contains(id, ":"):
+			l.errs = append(l.errs, errors.New("RECORVIA_ENCRYPTION_LOST_KEYS: informe somente os identificadores, separados por vírgula"))
+			continue
+		}
+		if _, ok := keys[id]; ok {
+			l.errs = append(l.errs, fmt.Errorf("RECORVIA_ENCRYPTION_LOST_KEYS: a chave %q está em RECORVIA_ENCRYPTION_KEYS; "+
+				"uma chave configurada não pode ser declarada perdida", id))
+			continue
+		}
+		lost = append(lost, id)
+	}
+	slices.Sort(lost)
+	return lost
+}
+
 func hostnameOr(def string) string {
 	if h, err := os.Hostname(); err == nil && h != "" {
 		return h
@@ -298,8 +428,12 @@ func (c *Config) validateCommon() []error {
 			errs = append(errs, errors.New("em produção destinos privados de webhook não são permitidos"))
 		}
 	}
-	return errs
+	return append(errs, c.validateRetention()...)
 }
+
+// ValidateStore valida o que os comandos que usam somente o banco e o
+// keyring exigem (por exemplo, a conferência do keyring).
+func (c *Config) ValidateStore() error { return errors.Join(c.validateCommon()...) }
 
 // ValidateAPI valida o que a API utiliza.
 func (c *Config) ValidateAPI() error {
@@ -369,6 +503,29 @@ func (c *Config) ValidateWorker() error {
 		errs = append(errs, errors.New("em produção o SMTP deve usar TLS"))
 	}
 	return errors.Join(errs...)
+}
+
+// validateRetention confere os prazos do expurgo automático: nenhum
+// executável sobe com um prazo abaixo do mínimo (que removeria dados ainda
+// úteis à operação) nem acima do máximo. O expurgo é executado pelo worker; a
+// API valida os mesmos valores porque monta os mesmos serviços.
+func (c *Config) validateRetention() []error {
+	var errs []error
+	r := c.Retention
+	for _, l := range r.limits() {
+		if l.value < l.min || l.value > l.max {
+			errs = append(errs, fmt.Errorf("%s deve ficar entre %d e %d", l.env, l.min, l.max))
+		}
+	}
+	if r.NotificationsDays < r.NotificationContentDays {
+		errs = append(errs, errors.New("RECORVIA_RETENTION_NOTIFICATIONS_DAYS não pode ser menor que RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS"))
+	}
+	// A sessão do portal é conferida contra o link que a originou enquanto
+	// durar: o link não pode ser expurgado antes do fim da sessão.
+	if time.Duration(r.PortalLinksDays)*24*time.Hour < c.PortalSessionTTL {
+		errs = append(errs, errors.New("RECORVIA_RETENTION_PORTAL_LINKS_DAYS não pode ser menor que RECORVIA_PORTAL_SESSION_TTL"))
+	}
+	return errs
 }
 
 // ValidateMigrations valida o executável de migrations.

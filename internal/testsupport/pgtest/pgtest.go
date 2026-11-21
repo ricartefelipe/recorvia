@@ -9,10 +9,13 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -120,11 +123,69 @@ func withCredentials(raw, user, password string) (string, error) {
 	return u.String(), nil
 }
 
+// Isolated cria, no mesmo servidor, um banco exclusivo do teste (bootstrap e
+// migrations) e devolve as URLs dele. Serve a cenários que conferem o banco
+// inteiro e não podem conviver com os dados dos demais testes do pacote (por
+// exemplo, a conferência do keyring, que percorre todas as organizações). O
+// banco é removido ao fim do teste.
+func Isolated(t testing.TB) Env {
+	t.Helper()
+	base := Start(t)
+	name := "recorvia_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:16]
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := migrate.Bootstrap(ctx, base.SuperURL, migrate.BootstrapOptions{
+		Database: name, OwnerPassword: ownerPassword, AppPassword: appPassword,
+	}); err != nil {
+		t.Fatalf("pgtest: bootstrap do banco isolado: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		conn, err := pgx.Connect(ctx, base.SuperURL)
+		if err != nil {
+			t.Errorf("pgtest: remoção do banco isolado: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close(ctx) }() // conexão de limpeza: falha de fechamento não afeta o teste
+		if _, err := conn.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
+			t.Errorf("pgtest: remoção do banco isolado: %v", err)
+		}
+	})
+	env := base
+	var err error
+	if env.OwnerURL, err = withDatabase(base.OwnerURL, name); err != nil {
+		t.Fatal(err)
+	}
+	if env.AppURL, err = withDatabase(base.AppURL, name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := migrate.Up(ctx, env.OwnerURL); err != nil {
+		t.Fatalf("pgtest: migrations do banco isolado: %v", err)
+	}
+	return env
+}
+
+func withDatabase(raw, name string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("pgtest: URL do container: %w", err)
+	}
+	u.Path = "/" + name
+	return u.String(), nil
+}
+
 // AppDB abre um pool com o papel da aplicação. maxConns=1 força a
 // reutilização da mesma conexão entre transações.
 func AppDB(t testing.TB, maxConns int32) *postgres.DB {
 	t.Helper()
-	env := Start(t)
+	return AppDBOf(t, Start(t), maxConns)
+}
+
+// AppDBOf abre um pool com o papel da aplicação no banco de env (por
+// exemplo, um banco criado por Isolated).
+func AppDBOf(t testing.TB, env Env, maxConns int32) *postgres.DB {
+	t.Helper()
 	cfg, err := pgxpool.ParseConfig(env.AppURL)
 	if err != nil {
 		t.Fatal(err)

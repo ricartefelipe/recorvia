@@ -446,30 +446,50 @@ func (s *Service) finishRefundOperation(ctx context.Context, tx Tx, ops map[uuid
 	return tx.UpdateOperation(ctx, op)
 }
 
-// refundCreditPortion calcula a parte do reembolso que devolve crédito do
-// cliente gerado pelo excedente do pagamento desta cobrança, limitada ao
-// excedente ainda não devolvido e ao saldo de crédito disponível. O crédito
-// do cliente é bloqueado antes da leitura do saldo: a parte calculada é a
-// mesma que o consumo valida, mesmo com outra fatura consumindo o crédito ao
-// mesmo tempo.
-func refundCreditPortion(ctx context.Context, tx Tx, c *Charge, amount money.Money) (money.Money, error) {
+// overpaymentPortion calcula a parte de amount que corresponde ao excedente
+// do pagamento da cobrança convertido em crédito do cliente e ainda não
+// devolvido ao pagador (por reembolso ou por chargeback). O valor devolvido
+// ao pagador sai primeiro desse excedente, tanto no reembolso quanto no
+// chargeback, para que o mesmo excedente nunca seja devolvido duas vezes.
+func overpaymentPortion(ctx context.Context, tx Tx, c *Charge, amount money.Money) (money.Money, error) {
 	zero := money.Zero(amount.Currency())
-	overpaid, used, err := tx.RefundCreditBase(ctx, c.ID)
+	overpaid, returned, err := tx.OverpaymentCreditBase(ctx, c.ID)
 	if err != nil {
 		return money.Money{}, err
 	}
-	avail, err := overpaid.Sub(used)
-	if err != nil || !avail.IsPositive() {
+	avail, err := overpaid.Sub(returned)
+	if err != nil || !avail.IsPositive() || !amount.IsPositive() {
 		return zero, err
 	}
+	return money.Min(amount, avail)
+}
+
+// lockedCreditBalance bloqueia as movimentações de crédito do cliente e
+// devolve o saldo disponível (nunca negativo). O bloqueio antecede a leitura:
+// o saldo lido é o mesmo que o consumo valida, mesmo com outra fatura
+// consumindo o crédito ao mesmo tempo.
+func lockedCreditBalance(ctx context.Context, tx Tx, c *Charge, cur money.Currency) (money.Money, error) {
 	if err := tx.LockCustomerCredits(ctx, c.CustomerID); err != nil {
 		return money.Money{}, err
 	}
 	balance, err := tx.CustomerCreditBalance(ctx, c.CustomerID)
 	if err != nil || !balance.IsPositive() {
-		return zero, err
+		return money.Zero(cur), err
 	}
-	part, err := money.Min(amount, avail)
+	return balance, nil
+}
+
+// refundCreditPortion calcula a parte do reembolso que devolve crédito do
+// cliente gerado pelo excedente do pagamento desta cobrança, limitada ao
+// excedente ainda não devolvido (overpaymentPortion) e ao saldo de crédito
+// disponível. O crédito já usado pelo cliente não é cobrado de volta: o
+// reembolso é uma devolução voluntária e essa parte reduz a receita.
+func refundCreditPortion(ctx context.Context, tx Tx, c *Charge, amount money.Money) (money.Money, error) {
+	part, err := overpaymentPortion(ctx, tx, c, amount)
+	if err != nil || !part.IsPositive() {
+		return part, err
+	}
+	balance, err := lockedCreditBalance(ctx, tx, c, amount.Currency())
 	if err != nil {
 		return money.Money{}, err
 	}
@@ -600,7 +620,9 @@ func (s *Service) failRefund(ctx context.Context, tx Tx, c *Charge, r *Refund, r
 // do estorno por estar reservado ao pagador (closeLostDispute); sem o
 // reembolso, o valor contestado é debitado pelo chargeback. O lançamento
 // dispute.hold_restored devolve a retenção liberada na perda, e chargebacks e
-// reembolsos da cobrança continuam somando o valor contestado.
+// reembolsos da cobrança continuam somando o valor contestado. A parte desse
+// valor que corresponde ao excedente do pagamento consome o crédito do
+// cliente, como na perda da disputa (reverseChargebackCredit).
 func (s *Service) chargeBackFailedRefund(ctx context.Context, tx Tx, c *Charge, r Refund, now time.Time, actor audit.Actor) error {
 	d, err := tx.LatestDispute(ctx, c.ID)
 	if err != nil || d == nil || d.Status != DisputeLost {
@@ -618,8 +640,18 @@ func (s *Service) chargeBackFailedRefund(ctx context.Context, tx Tx, c *Charge, 
 			return err
 		}
 	}
+	credit, err := s.reverseChargebackCredit(ctx, tx, c, d, r.Amount, "refund", r.ID, now)
+	if err != nil {
+		return err
+	}
+	if credit.changed() {
+		if err := tx.UpdateDispute(ctx, d); err != nil {
+			return err
+		}
+	}
 	return tx.Audit(ctx, audit.New(c.TenantID, now, actor, "dispute.chargeback_increased", "dispute", d.ID.String(),
-		map[string]any{"charge_id": c.ID, "refund_id": r.ID, "amount": r.Amount.Amount(), "charged_back_amount": c.AmountChargedBack.Amount()}))
+		map[string]any{"charge_id": c.ID, "refund_id": r.ID, "amount": r.Amount.Amount(), "charged_back_amount": c.AmountChargedBack.Amount(),
+			"credit_amount": credit.consumed.Amount(), "recovery_amount": credit.recovery.Amount()}))
 }
 
 // recordProviderRefund registra um reembolso feito diretamente no provedor.

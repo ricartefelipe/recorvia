@@ -28,7 +28,7 @@ tenant, RabbitMQ para eventos, Redis para sessões, Keycloak para identidade. De
 - [Modelo comercial (hipóteses)](docs/negocio/modelo-comercial.md)
 - [Roteiro demonstrativo](docs/roteiro-demo.md)
 - [Contrato da API (OpenAPI)](api/openapi.yaml)
-- [Guia de desenvolvimento](CLAUDE.md) · [Contribuição (GitFlow)](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
+- [Guia de desenvolvimento](docs/DESENVOLVIMENTO.md) · [Contribuição (GitFlow)](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
 ## Executar localmente (a partir de um checkout limpo)
 
@@ -74,23 +74,28 @@ e [retenção e anonimização](docs/operacao/retencao-e-anonimizacao.md).
 ### Observabilidade
 
 ```bash
-make up-obs          # ambiente completo + OpenTelemetry Collector, Jaeger, Prometheus e Grafana
-make obs-stack-check # confere alvos de coleta, regras, séries, dashboards e rastros da stack em execução
-make obs-check       # valida configurações, regras de alerta e dashboards (otelcol, jaeger, promtool)
+make up-obs          # ambiente completo + OpenTelemetry Collector, Jaeger, Prometheus, Alertmanager e Grafana
+make obs-stack-check # confere alvos de coleta, regras, séries, um alerta até o e-mail, dashboards e rastros da stack em execução
+make obs-check       # valida configurações, regras de alerta, roteamento e dashboards (otelcol, jaeger, promtool, amtool)
 ```
 
 | Serviço | Endereço |
 |---|---|
 | Grafana (pasta *Recorvia*; leitura anônima, administrador `admin` com `GRAFANA_ADMIN_PASSWORD`) | http://localhost:3000 |
 | Prometheus (alvos, regras e alertas) | http://localhost:9090 |
+| Alertmanager (alertas recebidos, silêncios e inibições; e-mails no Mailpit, http://localhost:8025) | http://localhost:9093 |
 | Jaeger (rastros da API e do worker) | http://localhost:16686 |
 
 Dashboards provisionados: *visão geral* (página inicial), *mensageria* (filas, retentativas, DLQs,
 consumidores e outbox) e *banco e processos* (pools de conexão, conexões do servidor e tarefas
-agendadas). Cada alerta do Prometheus aponta para a seção do runbook correspondente:
+agendadas). O Alertmanager roteia os alertas por severidade e os notifica por e-mail (no ambiente
+local, o Mailpit) e por um webhook genérico, configurados por variáveis `ALERTMANAGER_*`
+([encaminhamento de alertas](docs/operacao/observabilidade.md#encaminhamento-de-alertas)). Cada
+alerta aponta para a seção do runbook correspondente, com o link em cada notificação:
 [faturamento e cobrança](docs/operacao/runbooks/faturamento.md),
 [filas e DLQ](docs/operacao/runbooks/filas-e-dlq.md), [conciliação](docs/operacao/runbooks/conciliacao.md),
-[notificações e webhooks enviados](docs/operacao/runbooks/notificacoes-e-webhooks.md)
+[notificações e webhooks enviados](docs/operacao/runbooks/notificacoes-e-webhooks.md),
+[encaminhamento de alertas](docs/operacao/runbooks/alertas.md)
 e [isolamento de dados](docs/operacao/runbooks/isolamento-de-dados.md).
 
 Sondas: `/livez` indica que o processo responde, sem consultar dependências; `/readyz` exige
@@ -105,11 +110,15 @@ Na CI, o job `observability-check` executa `make obs-check` e o job `observabili
 make backup                 # pg_dump no container: backups/recorvia-<instante>.{dump,manifest,sha256}
 make restore-check          # restaura o backup mais recente num banco novo e confere contagens, ledger e RLS
 make restore-check DUMP=backups/recorvia-20261118T120000Z.dump
+make dr-check               # recuperação de desastre de ponta a ponta num projeto isolado do compose (relatório em backups/dr-check)
 ```
 
 O procedimento é exercitado pelo job `backup-restore` da CI (ambiente do compose com migrations,
 dados de demonstração e lançamento no ledger; `make backup`, `make restore-check` e recuperação num
-servidor PostgreSQL novo). O que é exercitado e as recomendações para produção estão em
+servidor PostgreSQL novo) e pelo job `disaster-recovery` (`make dr-check`: backup com as chaves de
+cifragem guardadas à parte, destruição do banco, restauração, recusa de chave errada, conciliação
+da janela perdida e API e worker religados sobre o banco restaurado, com os tempos medidos). O que
+é exercitado, a guarda das chaves e as recomendações para produção estão em
 [`docs/operacao/backup-e-restauracao.md`](docs/operacao/backup-e-restauracao.md).
 
 ### Análise de imagens
@@ -128,6 +137,16 @@ Variáveis `RECORVIA_*` validadas na inicialização (`internal/infra/config`); 
 exigidos HTTPS, cookie `__Host-` seguro, SMTP com TLS e ausência de destinos privados de webhook.
 Credenciais de provedores ficam cifradas (AES-256-GCM) com chave fornecida por
 `RECORVIA_ENCRYPTION_KEYS`/`RECORVIA_ENCRYPTION_ACTIVE_KEY` (rotação por identificador de chave).
+A API e o worker conferem, ao iniciar, se essas chaves decifram os dados em uso no banco e não
+iniciam com chave errada ou ausente (`RECORVIA_ENCRYPTION_STARTUP_CHECK`: `enforce`, `warn` ou
+`off`); o subcomando `keyring-check` faz a mesma conferência sem iniciar o serviço
+(`docker compose run --rm --no-deps worker keyring-check`). Uma chave que não existe mais é
+declarada em `RECORVIA_ENCRYPTION_LOST_KEYS`, e a rotação é feita em duas fases (distribuir a
+chave a todos os processos, conferir cada processo em execução com
+`docker compose exec -T <serviço> /app keyring-check` e só depois ativá-la):
+`docs/operacao/backup-e-restauracao.md`. Na recuperação de desastre, as conciliações pedidas pela
+API são executadas sem religar o worker por
+`docker compose run --rm --no-deps worker reconcile-pending`.
 
 ## Limitações conhecidas
 

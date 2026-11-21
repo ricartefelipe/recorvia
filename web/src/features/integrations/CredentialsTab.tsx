@@ -23,6 +23,7 @@ export const NON_DELEGABLE_SCOPES: readonly string[] = [
   'members.manage',
   'platform_billing.manage',
   'api_credentials.manage',
+  'customers.anonymize',
 ] satisfies Permission[];
 
 /**

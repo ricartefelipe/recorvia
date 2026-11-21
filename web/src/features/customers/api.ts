@@ -5,10 +5,12 @@ import type {
   Contact,
   ContactInput,
   CreditBalance,
+  CustomerAnonymization,
   CustomerDetails,
   CustomerInput,
   CustomerPage,
   DataList,
+  PortalLinkPage,
 } from '../../api/types';
 
 const enc = encodeURIComponent;
@@ -29,6 +31,8 @@ export const customersApi = {
   update: (id: string, version: number, input: CustomerInput) =>
     api.patch<CustomerDetails>(`/api/v1/customers/${enc(id)}`, input, { ifMatch: version }),
   archive: (id: string) => api.post<CustomerDetails>(`/api/v1/customers/${enc(id)}/archive`),
+  anonymize: (id: string, input: { reason: string }, idempotencyKey: string) =>
+    api.post<CustomerAnonymization>(`/api/v1/customers/${enc(id)}/anonymize`, input, { idempotencyKey }),
   addContact: (id: string, input: ContactInput) => api.post<Contact>(`/api/v1/customers/${enc(id)}/contacts`, input),
   removeContact: (id: string, contactId: string) =>
     api.delete(`/api/v1/customers/${enc(id)}/contacts/${enc(contactId)}`),
@@ -39,5 +43,9 @@ export const customersApi = {
   grantCredit: (id: string, input: { amount: number; reason: string }, idempotencyKey: string) =>
     api.post<CreditBalance>(`/api/v1/customers/${enc(id)}/credits`, input, { idempotencyKey }),
   createPortalLink: (id: string) =>
-    api.post<{ url: string; expires_at: string }>(`/api/v1/customers/${enc(id)}/portal-links`),
+    api.post<{ id: string; url: string; expires_at: string }>(`/api/v1/customers/${enc(id)}/portal-links`),
+  portalLinks: (id: string, params: { cursor?: string; limit?: number }, signal?: AbortSignal) =>
+    api.get<PortalLinkPage>(`/api/v1/customers/${enc(id)}/portal-links`, { query: { ...params }, signal }),
+  revokePortalLink: (id: string, linkId: string) =>
+    api.delete(`/api/v1/customers/${enc(id)}/portal-links/${enc(linkId)}`),
 };

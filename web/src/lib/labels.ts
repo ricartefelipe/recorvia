@@ -26,6 +26,14 @@ export const invitationStateLabels: Labels = {
   expired: 'Expirado',
 };
 
+/** Situação dos links do portal do cliente. */
+export const portalLinkStatusLabels: Labels = {
+  pending: 'Pendente',
+  used: 'Utilizado',
+  expired: 'Expirado',
+  revoked: 'Revogado',
+};
+
 export const memberStatusLabels: Labels = { active: 'Ativo', removed: 'Removido' };
 
 export const customerKindLabels: Labels = { individual: 'Pessoa física', company: 'Pessoa jurídica' };
@@ -152,6 +160,11 @@ export const disputeStatusLabels: Labels = {
   lost: 'Perdida',
 };
 
+export const recoveryOutcomeLabels: Labels = {
+  received: 'Recebido',
+  written_off: 'Perdido',
+};
+
 export const paymentOperationStatusLabels: Labels = {
   pending: 'Pendente',
   in_flight: 'Em andamento',
@@ -193,6 +206,7 @@ export const ledgerReferenceLabels: Labels = {
   payment: 'Pagamento',
   refund: 'Reembolso',
   dispute: 'Disputa',
+  dispute_recovery_settlement: 'Baixa de valor a recuperar',
   credit_note: 'Nota de crédito',
   customer_credit: 'Crédito de cliente',
   settlement: 'Liquidação',
@@ -224,6 +238,11 @@ export const reconciliationRunStatusLabels: Labels = {
   running: 'Em execução',
   completed: 'Concluída',
   failed: 'Falhou',
+};
+
+export const reconciliationRunTriggerLabels: Labels = {
+  manual: 'Manual',
+  scheduled: 'Agendada',
 };
 
 export const templateKeyLabels: Labels = {
@@ -312,6 +331,8 @@ const statusColors: Record<string, string> = {
   under_review: 'yellow',
   won: 'green',
   lost: 'red',
+  received: 'green',
+  written_off: 'red',
   in_flight: 'blue',
   resolved: 'green',
   dismissed: 'gray',
@@ -330,6 +351,7 @@ const statusColors: Record<string, string> = {
   accepted: 'green',
   revoked: 'gray',
   expired: 'gray',
+  used: 'green',
   removed: 'gray',
   applied: 'green',
   ended: 'gray',

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Recorvia API
-  version: 0.1.0
+  version: 0.2.0
   description: |
     API do Recorvia: gestão de assinaturas, faturamento recorrente, cobranças,
     inadimplência e conciliação de recebíveis.
@@ -24,8 +24,8 @@ info:
       vinculada a uma organização). A autoria das ações feitas por credencial
       fica na auditoria (ator `api_credential`). Operações que exigem uma pessoa
       identificada (conta e sessão, gestão de membros, do plano da plataforma e
-      de credenciais) aceitam apenas `session` e respondem 403
-      `user_session_required` a credenciais.
+      de credenciais, e a anonimização de clientes) aceitam apenas `session` e
+      respondem 403 `user_session_required` a credenciais.
 servers:
   - url: /
 tags:
@@ -403,16 +403,76 @@ paths:
       responses:
         "200": { description: Arquivado, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerDetails" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/customers/{id}/anonymize:
+    post:
+      tags: [customers]
+      operationId: anonymizeCustomer
+      summary: Anonimiza um cliente (irreversível)
+      description: |
+        Substitui de forma irreversível os dados pessoais de um cliente sem assinatura ativa,
+        fatura em aberto nem faturamento pendente: nome, documento, razão social, e-mail, telefone
+        e identificador externo recebem valores neutros; contatos (com as preferências de e-mail),
+        endereço de cobrança,
+        identificadores do cliente nos provedores de pagamento e notificações (destinatários,
+        assunto, conteúdo e histórico de envio) são excluídos; os links do portal são revogados,
+        o que encerra as sessões abertas; o corpo dos webhooks recebidos das cobranças do
+        cliente é esvaziado. O cliente fica arquivado e não aceita novas alterações.
+
+        Registros financeiros e a trilha de auditoria não são alterados: as faturas emitidas
+        mantêm a cópia do cadastro do momento da emissão (`customer_snapshot`), e pagamentos,
+        cobranças, créditos e lançamentos continuam vinculados ao cliente pelo identificador.
+        O cadastro do cliente no provedor de pagamento não é alterado por esta operação:
+        `provider_customers` devolve os identificadores removidos do cadastro do Recorvia para
+        que sejam tratados no provedor. Eles ficam registrados na auditoria da anonimização
+        (`customer.anonymized`, em `details.provider_customers`), gravada na mesma transação, e
+        voltam também na repetição do pedido, de modo que não se perdem se a resposta não chegar.
+
+        Responde 409 `customer_has_obligations` enquanto o cliente tiver assinatura ativa (em
+        avaliação, ativa, inadimplente ou suspensa), fatura em aberto ou faturamento pendente:
+        assinatura com fechamento ainda por faturar (como o consumo final de uma assinatura
+        cancelada), item pendente sem fatura, consumo atrasado ainda por corrigir ou período de
+        consumo fechado dentro da tolerância de atraso da métrica. Depois da anonimização, a
+        ingestão rejeita consumo do cliente e nenhuma fatura nova é emitida para ele.
+
+        A operação é idempotente: para um cliente já anonimizado, devolve o estado atual com
+        `already_anonymized` verdadeiro, sem novo registro de auditoria. A justificativa é
+        obrigatória, fica na auditoria (`customer.anonymized`) e não pode conter dados pessoais
+        do cliente. Exige a permissão `customers.anonymize`, que não é delegável a credenciais.
+      security: [ { session: [] } ]
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 10
+                  maxLength: 500
+                  description: Justificativa (protocolo do pedido e motivo), sem dados pessoais do cliente.
+      responses:
+        "200": { description: Cliente anonimizado, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerAnonymization" } } } }
+        "403": { $ref: "#/components/responses/UserSessionRequired" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/contacts:
     post:
       tags: [customers]
       operationId: addCustomerContact
+      description: >-
+        Adiciona um contato ao cliente. Responde 409 `customer_anonymized` para cliente anonimizado, que não
+        volta a receber dados pessoais, e 409 `contact_limit` quando o cliente já tem 20 contatos.
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/ContactInput" } } }
       responses:
         "201": { description: Contato adicionado, content: { application/json: { schema: { $ref: "#/components/schemas/Contact" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/contacts/{contact_id}:
     delete:
       tags: [customers]
@@ -428,12 +488,16 @@ paths:
     put:
       tags: [customers]
       operationId: setCustomerAddress
+      description: >-
+        Grava o endereço de cobrança do cliente. Responde 409 `customer_anonymized` para cliente anonimizado,
+        que não volta a receber dados pessoais.
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/Address" } } }
       responses:
         "200": { description: Endereço gravado, content: { application/json: { schema: { $ref: "#/components/schemas/Address" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/history:
     get:
@@ -466,6 +530,22 @@ paths:
       responses:
         "201": { description: Crédito concedido, content: { application/json: { schema: { $ref: "#/components/schemas/CreditBalance" } } } }
   /api/v1/customers/{id}/portal-links:
+    get:
+      tags: [customers]
+      operationId: listPortalLinks
+      summary: Lista os links do portal de um cliente, dos mais novos para os mais antigos
+      description: >-
+        Exige a permissão `customers.portal_links`, a mesma da geração e da revogação. A resposta nunca traz o token
+        nem o hash do token: o link só é exibido na resposta da geração.
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/ID" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { description: Links do portal do cliente, content: { application/json: { schema: { $ref: "#/components/schemas/PortalLinkPage" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
     post:
       tags: [customers]
       operationId: createPortalLink
@@ -477,10 +557,30 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [url, expires_at]
+                required: [id, url, expires_at]
                 properties:
+                  id: { type: string, format: uuid, description: Identificador do link (usado para revogá-lo) }
                   url: { type: string }
                   expires_at: { type: string, format: date-time }
+  /api/v1/customers/{id}/portal-links/{link_id}:
+    delete:
+      tags: [customers]
+      operationId: revokePortalLink
+      summary: Revoga um link do portal e encerra as sessões abertas com ele
+      description: >-
+        O link pendente deixa de poder ser trocado por sessão e as sessões do portal abertas com um link já usado são
+        encerradas. A operação é idempotente: repetir a chamada para um link já revogado responde 204 sem alterar o
+        link nem gerar nova auditoria. Link inexistente, de outro cliente ou de outra organização responde 404
+        `portal_link_not_found`. Aceita credenciais de API com o escopo `customers.portal_links`; quem revogou fica
+        registrado na auditoria (`customer.portal_link_revoked`).
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/CSRF" }
+        - { $ref: "#/components/parameters/ID" }
+        - { name: link_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Link revogado (ou já revogado) }
+        "404": { $ref: "#/components/responses/Problem" }
 
   /api/v1/products:
     get:
@@ -800,6 +900,10 @@ paths:
       tags: [usage]
       operationId: ingestUsageEvents
       summary: Ingestão de eventos de consumo (deduplicados por external_id)
+      description: >-
+        Cada evento recebe um resultado próprio (`accepted`, `late`, `duplicate` ou `rejected`, com a mensagem).
+        Consumo de assinatura de cliente anonimizado é rejeitado; o reenvio de um evento já gravado continua
+        respondido como `duplicate`.
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
       requestBody:
         required: true
@@ -988,6 +1092,50 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Tenant" } ]
       responses:
         "200": { description: Disputas e chargebacks, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/Dispute" } } } } } } }
+  /api/v1/disputes/{id}:
+    get:
+      tags: [payments]
+      operationId: getDispute
+      summary: Consulta uma disputa
+      description: Devolve a disputa com o valor a recuperar do cliente, as baixas já feitas e o saldo que ainda falta recuperar.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Disputa, content: { application/json: { schema: { $ref: "#/components/schemas/Dispute" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/disputes/{id}/recovery-settlements:
+    get:
+      tags: [payments]
+      operationId: listRecoverySettlements
+      summary: Lista as baixas do valor a recuperar da disputa
+      description: Baixas recebidas e perdidas do valor a recuperar do cliente, em ordem de registro.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Baixas da disputa, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/RecoverySettlement" } } } } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+    post:
+      tags: [payments]
+      operationId: settleRecovery
+      summary: Dá baixa no valor a recuperar do cliente
+      description: >-
+        Registra a baixa, total ou parcial, do valor a recuperar de uma disputa perdida (ADR-073). `received`: o cliente pagou
+        fora do provedor; o ledger debita o disponível liquidado (`cash`). `written_off`: o tenant desistiu de cobrar; o ledger
+        debita as perdas com inadimplência (`bad_debt`). Nos dois casos o crédito é em `customer_recoverables`. A soma das baixas
+        nunca passa do valor a recuperar, inclusive com pedidos concorrentes. A repetição com a mesma `Idempotency-Key` devolve
+        a mesma baixa. Com credencial de API, `settled_by` fica nulo e a autoria vai para a auditoria.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/RecoverySettlementInput" } } }
+      responses:
+        "201": { description: Baixa registrada, content: { application/json: { schema: { $ref: "#/components/schemas/RecoverySettlement" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409":
+          description: >-
+            A disputa não tem valor a recuperar (`dispute_without_recovery`), o saldo já foi baixado por completo
+            (`recovery_already_settled`), o valor passa do saldo (`recovery_exceeds_outstanding`) ou a chave já foi usada em outra
+            baixa (`request_key_reused`).
+          content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/payment-operations:
     get:
       tags: [payments]
@@ -1068,9 +1216,32 @@ paths:
     post:
       tags: [reconciliation]
       operationId: runReconciliation
+      summary: Registra a conciliação manual, executada de forma assíncrona
+      description: >-
+        Registra a execução da conciliação do provedor padrão sobre a janela padrão e responde de imediato, sem
+        esperar a coleta no provedor: o worker assume a execução, com lease, e a conclui fora da requisição. Acompanhe
+        por GET /api/v1/reconciliation/runs/{id} (header Location) até a situação completed (com aviso em error
+        quando a execução foi parcial) ou failed (com a causa em error). Há no máximo uma execução em andamento por
+        conta do provedor, inclusive enquanto ela aguarda o worker ou a retomada: outro pedido responde 409
+        reconciliation_running com Retry-After. A execução interrompida (worker reiniciado) é retomada do início, sem
+        duplicar divergências, e encerrada como failed depois de três tentativas interrompidas. A repetição com a
+        mesma Idempotency-Key devolve a mesma execução na situação atual: 202 enquanto estiver em andamento (a
+        resposta 202 não fica registrada na chave) e 200 depois de encerrada.
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" } ]
       responses:
-        "200": { description: Execução concluída, content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationRun" } } } }
+        "200": { description: Repetição do pedido de uma execução já encerrada, headers: { Location: { description: Endereço da execução, schema: { type: string } } }, content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationRun" } } } }
+        "202": { description: Execução registrada e em andamento, headers: { Location: { description: Endereço da execução para acompanhamento, schema: { type: string } } }, content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationRun" } } } }
+        "409": { description: "Outra execução em andamento para o provedor (reconciliation_running, com Retry-After) ou nenhum provedor padrão ativo (provider_not_configured)", headers: { Retry-After: { description: Segundos até a nova tentativa (reconciliation_running), schema: { type: integer } } }, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+  /api/v1/reconciliation/runs/{id}:
+    get:
+      tags: [reconciliation]
+      operationId: getReconciliationRun
+      summary: Consulta uma execução de conciliação
+      description: Devolve a execução na situação atual, para acompanhar a conciliação registrada até o encerramento.
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      responses:
+        "200": { description: Execução, content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationRun" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
   /api/v1/reconciliation/discrepancies:
     get:
       tags: [reconciliation]
@@ -1396,8 +1567,18 @@ paths:
       tags: [portal]
       operationId: portalListInvoices
       security: [ { portalSession: [] } ]
+      summary: Lista em páginas as faturas emitidas do cliente da sessão, das mais recentes para as mais antigas
+      description: >-
+        O cliente e a organização vêm sempre da sessão do portal. O cursor guarda apenas a posição da última fatura
+        da página anterior (emissão e identificador): faturas emitidas durante a navegação não deslocam as páginas
+        seguintes.
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
       responses:
-        "200": { description: Faturas do cliente, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/PortalInvoice" } } } } } } }
+        "200": { description: Faturas do cliente, content: { application/json: { schema: { $ref: "#/components/schemas/PortalInvoicePage" } } } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/portal/v1/invoices/{id}:
     get:
       tags: [portal]
@@ -1491,8 +1672,9 @@ components:
       required: true
       description: >-
         Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx,
-        401, 403, 429 e conflitos transitórios com Retry-After (por exemplo, reconciliation_running) não ficam registradas, e a
-        repetição com a mesma chave executa o pedido novamente.
+        401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido
+        aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente;
+        o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito.
       schema: { type: string, minLength: 8, maxLength: 255 }
     ID:
       name: id
@@ -1773,9 +1955,45 @@ components:
         external_id: { type: string }
         status: { type: string, enum: [active, archived] }
         payment_terms_days: { type: integer, nullable: true }
+        anonymized_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Instante da anonimização; nulo enquanto o cliente não foi anonimizado.
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         version: { type: integer }
+    CustomerAnonymization:
+      type: object
+      required: [customer, already_anonymized, provider_customers, removed]
+      properties:
+        customer: { $ref: "#/components/schemas/CustomerDetails" }
+        already_anonymized:
+          type: boolean
+          description: >-
+            Verdadeiro quando o cliente já estava anonimizado e nada foi alterado; `removed` vem então zerado e
+            `provider_customers` repete os identificadores registrados na anonimização.
+        provider_customers:
+          type: array
+          description: >-
+            Identificadores do cliente nos provedores de pagamento, removidos do cadastro do Recorvia e registrados
+            na auditoria da anonimização; a repetição do pedido devolve os mesmos. O cadastro no provedor precisa
+            ser tratado no próprio provedor.
+          items:
+            type: object
+            required: [provider, provider_customer_id]
+            properties:
+              provider: { type: string }
+              provider_customer_id: { type: string }
+        removed:
+          type: object
+          required: [contacts, billing_address, portal_links_revoked, notifications, provider_webhook_payloads]
+          properties:
+            contacts: { type: integer, description: Contatos excluídos. }
+            billing_address: { type: boolean, description: Indica se havia endereço de cobrança. }
+            portal_links_revoked: { type: integer, description: Links do portal revogados. }
+            notifications: { type: integer, description: "Notificações excluídas, com o histórico de envio." }
+            provider_webhook_payloads: { type: integer, description: Webhooks recebidos do provedor com o corpo esvaziado. }
     CustomerDetails:
       allOf:
         - { $ref: "#/components/schemas/Customer" }
@@ -2363,15 +2581,76 @@ components:
         created_at: { type: string, format: date-time }
     Dispute:
       type: object
-      required: [id, charge_id, status, amount, currency, opened_at]
+      required: [id, charge_id, status, amount, credit_amount, recovery_amount, recovery_received_amount, recovery_written_off_amount,
+                 recovery_outstanding_amount, currency, opened_at]
       properties:
         id: { type: string, format: uuid }
         charge_id: { type: string, format: uuid }
         status: { type: string, enum: [opened, under_review, won, lost] }
-        amount: { type: integer, format: int64 }
+        amount: { type: integer, format: int64, description: Valor contestado na abertura da disputa. }
+        credit_amount:
+          type: integer
+          format: int64
+          description: >-
+            Crédito do cliente consumido pelo chargeback da disputa perdida: a parte do valor estornado que corresponde ao
+            excedente do pagamento desta cobrança convertido em crédito e ainda disponível no saldo do cliente.
+        recovery_amount:
+          type: integer
+          format: int64
+          description: >-
+            Valor a recuperar do cliente: a parte desse excedente que o cliente já havia usado quando o pagamento foi
+            estornado. O saldo de crédito nunca fica negativo; o valor é lançado no ledger na conta customer_recoverables.
+        recovery_received_amount:
+          type: integer
+          format: int64
+          description: Total das baixas do valor a recuperar recebidas do cliente fora do provedor.
+        recovery_written_off_amount:
+          type: integer
+          format: int64
+          description: Total das baixas do valor a recuperar reconhecidas como perda.
+        recovery_outstanding_amount:
+          type: integer
+          format: int64
+          description: >-
+            Quanto ainda falta recuperar do cliente: recovery_amount menos as baixas recebidas e perdidas. Zero quando não há
+            valor a recuperar ou quando tudo foi baixado.
         currency: { type: string }
         opened_at: { type: string, format: date-time }
         closed_at: { type: string, format: date-time, nullable: true }
+    RecoverySettlementInput:
+      type: object
+      required: [outcome, amount, justification]
+      properties:
+        outcome:
+          type: string
+          enum: [received, written_off]
+          description: "`received`: recebido do cliente fora do provedor. `written_off`: perdido (o tenant desistiu de cobrar)."
+        amount: { type: integer, format: int64, minimum: 1, description: Valor da baixa em centavos; no máximo o saldo a recuperar. }
+        effective_date:
+          type: string
+          format: date
+          description: >-
+            Data do recebimento ou da decisão, no fuso da organização (AAAA-MM-DD). Padrão: hoje. Não pode estar no futuro nem
+            antes do encerramento da disputa.
+        justification: { type: string, minLength: 10, maxLength: 2000 }
+    RecoverySettlement:
+      type: object
+      required: [id, dispute_id, outcome, amount, currency, effective_date, justification, settled_by, ledger_transaction_id, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        dispute_id: { type: string, format: uuid }
+        outcome: { type: string, enum: [received, written_off] }
+        amount: { type: integer, format: int64 }
+        currency: { type: string }
+        effective_date: { type: string, format: date }
+        justification: { type: string }
+        settled_by:
+          type: string
+          format: uuid
+          nullable: true
+          description: Usuário que registrou a baixa; nulo quando feita por credencial de API (autoria na auditoria).
+        ledger_transaction_id: { type: string, format: uuid, description: Lançamento da baixa no ledger. }
+        created_at: { type: string, format: date-time }
     PaymentOperation:
       type: object
       required: [id, charge_id, kind, status, external_reference, attempts, next_attempt_at, created_at, updated_at]
@@ -2452,17 +2731,30 @@ components:
       enum: [missing_local, missing_provider, amount_mismatch, fee_mismatch, payment_not_reflected, refund_pending, chargeback_pending, unknown_operation]
     ReconciliationRun:
       type: object
-      required: [id, provider, status, window_start, window_end, checked_count, discrepancy_count, started_at]
+      required: [id, provider, trigger, status, window_start, window_end, checked_count, discrepancy_count, attempts, started_at]
       properties:
         id: { type: string, format: uuid }
         provider: { type: string }
-        status: { type: string, enum: [running, completed, failed] }
+        trigger: { type: string, enum: [manual, scheduled], description: Origem da execução. }
+        status:
+          type: string
+          enum: [running, completed, failed]
+          description: >-
+            running enquanto a execução aguarda o worker, está sendo executada ou aguarda a retomada; completed quando
+            concluída (error traz o aviso quando parcial); failed quando encerrada sem concluir (error traz a causa).
         window_start: { type: string, format: date-time }
         window_end: { type: string, format: date-time }
         checked_count: { type: integer }
         discrepancy_count: { type: integer }
-        error: { type: string }
-        started_at: { type: string, format: date-time }
+        error:
+          type: string
+          description: Causa da falha (failed) ou aviso de execução parcial (completed); vazio nos demais casos.
+        attempts:
+          type: integer
+          description: >-
+            Vezes em que um worker assumiu a execução: 0 enquanto aguarda o worker, 1 na primeira execução e mais que 1
+            quando foi retomada depois de interrompida.
+        started_at: { type: string, format: date-time, description: Instante em que a execução foi registrada. }
         finished_at: { type: string, format: date-time, nullable: true }
     Discrepancy:
       type: object
@@ -2650,7 +2942,8 @@ components:
     Dashboard:
       type: object
       required: [month, currency, mrr, arr, billed, received, open_receivables, overdue_receivables, delinquency_rate_bp,
-                 churn_rate_bp, active_subscriptions, new_subscriptions, canceled_subscriptions, refunds, chargebacks, definitions]
+                 churn_rate_bp, active_subscriptions, new_subscriptions, canceled_subscriptions, refunds, chargebacks, open_recoverables,
+                 definitions]
       properties:
         month: { type: string }
         currency: { type: string }
@@ -2672,8 +2965,16 @@ components:
           type: integer
           format: int64
           description: >-
-            Movimento líquido da conta de chargebacks no mês (débitos menos créditos). A retenção liberada e a disputa ganha
-            reduzem o mês em que ocorrem; negativo quando a disputa aberta em mês anterior é ganha.
+            Movimento líquido da conta de chargebacks no mês (débitos menos créditos). A retenção liberada, a disputa ganha e
+            a parte do chargeback que corresponde a pagamento excedente (crédito do cliente consumido ou valor a recuperar)
+            reduzem o mês em que ocorrem; negativo quando a disputa aberta em mês anterior é ganha. A baixa do valor a recuperar
+            não altera este indicador.
+        open_recoverables:
+          type: integer
+          format: int64
+          description: >-
+            Saldo atual dos valores a recuperar de clientes (conta customer_recoverables): crédito de pagamento excedente já usado
+            e estornado por chargeback, menos as baixas recebidas e perdidas. Não depende do mês consultado.
         open_discrepancies: { type: integer }
         unknown_operations: { type: integer }
         definitions: { type: object, additionalProperties: { type: string } }
@@ -2695,6 +2996,46 @@ components:
             name: { type: string }
         csrf_token: { type: string }
         contacts: { type: array, items: { $ref: "#/components/schemas/Contact" } }
+    PortalInvoicePage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/PortalInvoice" } }
+        next_cursor: { type: string, nullable: true }
+    PortalLinkPage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/PortalLink" } }
+        next_cursor: { type: string, nullable: true }
+    PortalLink:
+      type: object
+      description: Link do portal como a organização o vê; nunca inclui o token nem o hash do token.
+      required: [id, status, created_at, expires_at, created_by]
+      properties:
+        id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [pending, used, expired, revoked]
+          description: >-
+            Situação no instante da consulta: `pending` (ainda não aberto), `used` (trocado por sessão), `expired`
+            (venceu sem uso) ou `revoked` (revogado; prevalece sobre as demais).
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        used_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        revoke_reason:
+          type: string
+          nullable: true
+          enum: [superseded, revoked, null]
+          description: "`superseded`: substituído por um link mais novo do mesmo cliente; `revoked`: revogação explícita."
+        created_by:
+          type: object
+          required: [type, id]
+          properties:
+            type: { type: string, enum: [user, api_credential] }
+            id: { type: string, format: uuid }
+            name: { type: string, nullable: true, description: Nome do membro ou da credencial de API }
     PortalInvoice:
       type: object
       required: [id, number, status, currency, total, amount_due, items]

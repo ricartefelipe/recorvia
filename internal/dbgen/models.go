@@ -243,19 +243,23 @@ type DeadLetter struct {
 }
 
 type Dispute struct {
-	ID             uuid.UUID
-	TenantID       uuid.UUID
-	ChargeID       uuid.UUID
-	Provider       string
-	Status         string
-	Amount         int64
-	Currency       string
-	ProviderStatus *string
-	OpenedAt       time.Time
-	ClosedAt       *time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	Version        int32
+	ID                       uuid.UUID
+	TenantID                 uuid.UUID
+	ChargeID                 uuid.UUID
+	Provider                 string
+	Status                   string
+	Amount                   int64
+	Currency                 string
+	ProviderStatus           *string
+	OpenedAt                 time.Time
+	ClosedAt                 *time.Time
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+	Version                  int32
+	CreditAmount             int64
+	RecoveryAmount           int64
+	RecoveryReceivedAmount   int64
+	RecoveryWrittenOffAmount int64
 }
 
 type DisputeEvent struct {
@@ -268,6 +272,21 @@ type DisputeEvent struct {
 	OccurredAt     time.Time
 	RecordedAt     time.Time
 	Details        []byte
+}
+
+type DisputeRecoverySettlement struct {
+	ID                  uuid.UUID
+	TenantID            uuid.UUID
+	DisputeID           uuid.UUID
+	Outcome             string
+	Amount              int64
+	Currency            string
+	EffectiveDate       pgtype.Date
+	Justification       string
+	SettledBy           *uuid.UUID
+	RequestKey          *string
+	LedgerTransactionID uuid.UUID
+	CreatedAt           time.Time
 }
 
 type IdempotencyKey struct {
@@ -284,6 +303,7 @@ type IdempotencyKey struct {
 	CreatedAt           time.Time
 	CompletedAt         *time.Time
 	ExpiresAt           time.Time
+	ResponseLocation    *string
 }
 
 type Invitation struct {
@@ -417,6 +437,7 @@ type Notification struct {
 	SentAt            *time.Time
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+	ContentPurgedAt   *time.Time
 }
 
 type NotificationEvent struct {
@@ -641,6 +662,7 @@ type ProviderWebhookEvent struct {
 	Status            string
 	ProcessedAt       *time.Time
 	Error             *string
+	PayloadPurgedAt   *time.Time
 }
 
 type ReconciliationDiscrepancy struct {
@@ -692,6 +714,7 @@ type ReconciliationRun struct {
 	StartedAt         time.Time
 	FinishedAt        *time.Time
 	UpdatedAt         time.Time
+	Attempts          int32
 }
 
 type Refund struct {
@@ -852,6 +875,7 @@ type UsageAggregate struct {
 	PriceVersionID    *uuid.UUID
 	CorrectedQuantity pgtype.Numeric
 	CorrectedAmount   *int64
+	EventsPurgedAt    *time.Time
 }
 
 type UsageEvent struct {

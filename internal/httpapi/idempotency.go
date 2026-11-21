@@ -70,7 +70,8 @@ func (b *bufferedWriter) WriteHeader(code int) {
 // idempotency implementa Idempotency-Key com escopo de tenant, cliente da
 // API e operação:
 //   - repetição equivalente (mesma impressão do pedido) devolve o resultado
-//     registrado;
+//     registrado: status, corpo, Content-Type e o header Location, quando a
+//     resposta original o trazia;
 //   - mesma chave com conteúdo diferente gera 409;
 //   - pedido concorrente com a mesma chave gera 409 enquanto o primeiro
 //     estiver em processamento;
@@ -110,6 +111,11 @@ func (a *API) idempotency(info RouteInfo, next http.Handler) http.Handler {
 				return
 			case rec.Completed:
 				w.Header().Set("Content-Type", rec.ResponseCT)
+				// O endereço do recurso faz parte do resultado: a repetição
+				// o devolve como a resposta original.
+				if rec.ResponseLocation != "" {
+					w.Header().Set("Location", rec.ResponseLocation)
+				}
 				w.Header().Set("Idempotent-Replayed", "true")
 				w.WriteHeader(rec.ResponseStatus)
 				if _, err := w.Write(rec.ResponseBody); err != nil {
@@ -141,14 +147,19 @@ func (a *API) idempotency(info RouteInfo, next http.Handler) http.Handler {
 		// Falhas transitórias (5xx, 429 e respostas com Retry-After, como o
 		// conflito com outra conciliação em andamento) ou de autorização
 		// liberam a chave para nova tentativa; resultados definitivos ficam
-		// registrados.
+		// registrados. O pedido aceito e ainda em processamento (202, como a
+		// conciliação executada pelo worker) também libera a chave: o retrato
+		// "em andamento" não é o resultado, e a repetição com a mesma chave
+		// volta ao caso de uso, que devolve o mesmo recurso pela chave de
+		// negócio, na situação atual.
 		persistCtx := context.WithoutCancel(r.Context())
 		if bw.status >= 500 || bw.status == http.StatusUnauthorized || bw.status == http.StatusForbidden || bw.status == http.StatusTooManyRequests ||
-			bw.header.Get("Retry-After") != "" {
+			bw.status == http.StatusAccepted || bw.header.Get("Retry-After") != "" {
 			if err := a.Store.IdempotencyRelease(persistCtx, k); err != nil {
 				a.log.WarnContext(r.Context(), "liberação de chave de idempotência falhou", slog.String("error", err.Error()))
 			}
-		} else if err := a.Store.IdempotencyComplete(persistCtx, k, bw.status, bw.buf.Bytes(), bw.header.Get("Content-Type")); err != nil {
+		} else if err := a.Store.IdempotencyComplete(persistCtx, k, bw.status, bw.buf.Bytes(), bw.header.Get("Content-Type"),
+			bw.header.Get("Location")); err != nil {
 			a.log.ErrorContext(r.Context(), "registro do resultado idempotente falhou", slog.String("error", err.Error()))
 		}
 		for name, vals := range bw.header {

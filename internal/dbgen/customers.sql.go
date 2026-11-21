@@ -12,6 +12,66 @@ import (
 	"github.com/google/uuid"
 )
 
+const anonymizeCustomer = `-- name: AnonymizeCustomer :one
+UPDATE customers
+   SET name = $1, legal_name = NULL, document_number = $2, email = NULL, phone = NULL, external_id = NULL,
+       status = 'archived', anonymized_at = $3, version = version + 1
+ WHERE tenant_id = $4 AND id = $5 AND anonymized_at IS NULL
+RETURNING version, updated_at
+`
+
+type AnonymizeCustomerParams struct {
+	Name           string
+	DocumentNumber string
+	AnonymizedAt   *time.Time
+	TenantID       uuid.UUID
+	ID             uuid.UUID
+}
+
+type AnonymizeCustomerRow struct {
+	Version   int32
+	UpdatedAt time.Time
+}
+
+// Substitui os dados pessoais por valores neutros, arquiva e marca a
+// anonimização. O gatilho customers_anonymized_guard impede alterações
+// posteriores. Devolve a versão e o instante de atualização gravados (o
+// gatilho customers_touch define updated_at).
+func (q *Queries) AnonymizeCustomer(ctx context.Context, arg AnonymizeCustomerParams) (AnonymizeCustomerRow, error) {
+	row := q.db.QueryRow(ctx, anonymizeCustomer,
+		arg.Name,
+		arg.DocumentNumber,
+		arg.AnonymizedAt,
+		arg.TenantID,
+		arg.ID,
+	)
+	var i AnonymizeCustomerRow
+	err := row.Scan(&i.Version, &i.UpdatedAt)
+	return i, err
+}
+
+const customerAnonymizationDetails = `-- name: CustomerAnonymizationDetails :one
+SELECT details FROM audit_log
+ WHERE tenant_id = $1 AND resource_type = 'customer' AND resource_id = $2 AND action = 'customer.anonymized'
+ ORDER BY occurred_at DESC, id DESC
+ LIMIT 1
+`
+
+type CustomerAnonymizationDetailsParams struct {
+	TenantID   uuid.UUID
+	ResourceID *string
+}
+
+// Detalhes registrados na auditoria da anonimização do cliente, na mesma
+// transação: é de onde a repetição do pedido relê os identificadores do
+// cliente nos provedores, já excluídos do cadastro.
+func (q *Queries) CustomerAnonymizationDetails(ctx context.Context, arg CustomerAnonymizationDetailsParams) ([]byte, error) {
+	row := q.db.QueryRow(ctx, customerAnonymizationDetails, arg.TenantID, arg.ResourceID)
+	var details []byte
+	err := row.Scan(&details)
+	return details, err
+}
+
 const customerCreditBalance = `-- name: CustomerCreditBalance :one
 SELECT COALESCE(sum(amount), 0)::bigint FROM customer_credit_entries WHERE tenant_id = $1 AND customer_id = $2
 `
@@ -47,6 +107,45 @@ func (q *Queries) CustomerHasOpenObligations(ctx context.Context, arg CustomerHa
 	return column_1, err
 }
 
+const customerHasPendingBilling = `-- name: CustomerHasPendingBilling :one
+SELECT (EXISTS (SELECT 1 FROM subscriptions s WHERE s.tenant_id = $1 AND s.customer_id = $2
+                 AND s.next_billing_at IS NOT NULL)
+     OR EXISTS (SELECT 1 FROM subscriptions s
+                  JOIN pending_invoice_items p ON p.tenant_id = s.tenant_id AND p.subscription_id = s.id
+                 WHERE s.tenant_id = $1 AND s.customer_id = $2 AND p.invoice_id IS NULL)
+     OR EXISTS (SELECT 1 FROM subscriptions s
+                  JOIN usage_events e ON e.tenant_id = s.tenant_id AND e.subscription_id = s.id
+                 WHERE s.tenant_id = $1 AND s.customer_id = $2 AND e.status = 'late' AND e.corrected_at IS NULL)
+     OR EXISTS (SELECT 1 FROM subscriptions s
+                  JOIN usage_aggregates a ON a.tenant_id = s.tenant_id AND a.subscription_id = s.id
+                  JOIN billable_metrics bm ON bm.tenant_id = a.tenant_id AND bm.id = a.metric_id
+                 WHERE s.tenant_id = $1 AND s.customer_id = $2
+                   AND (LEAST(a.period_end, COALESCE(s.ended_at, a.period_end)) + make_interval(hours => bm.late_grace_hours) >= $3::timestamptz
+                        OR EXISTS (SELECT 1 FROM usage_events e
+                                    WHERE e.tenant_id = a.tenant_id AND e.subscription_id = a.subscription_id AND e.metric_id = a.metric_id
+                                      AND e.period_start = a.period_start AND e.status = 'accepted' AND e.aggregate_id IS NULL))))::boolean
+`
+
+type CustomerHasPendingBillingParams struct {
+	TenantID   uuid.UUID
+	CustomerID uuid.UUID
+	Now        time.Time
+}
+
+// Faturamento do cliente que ainda vai gerar fatura, crédito ou item, mesmo
+// sem assinatura ativa nem fatura em aberto: assinatura com fechamento
+// agendado (inclusive o consumo final de uma assinatura cancelada), item
+// pendente ainda sem fatura, consumo atrasado ou sem agregado ainda por
+// corrigir e período fechado dentro da tolerância de atraso da métrica (até
+// lá a ingestão aceita consumo atrasado, que corrige o faturamento). O fim
+// do período é limitado pelo encerramento da assinatura, como na ingestão.
+func (q *Queries) CustomerHasPendingBilling(ctx context.Context, arg CustomerHasPendingBillingParams) (bool, error) {
+	row := q.db.QueryRow(ctx, customerHasPendingBilling, arg.TenantID, arg.CustomerID, arg.Now)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const deleteContact = `-- name: DeleteContact :execrows
 DELETE FROM customer_contacts WHERE tenant_id = $1 AND customer_id = $2 AND id = $3
 `
@@ -63,6 +162,91 @@ func (q *Queries) DeleteContact(ctx context.Context, arg DeleteContactParams) (i
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const deleteCustomerAddress = `-- name: DeleteCustomerAddress :execrows
+DELETE FROM customer_billing_addresses WHERE tenant_id = $1 AND customer_id = $2
+`
+
+type DeleteCustomerAddressParams struct {
+	TenantID   uuid.UUID
+	CustomerID uuid.UUID
+}
+
+func (q *Queries) DeleteCustomerAddress(ctx context.Context, arg DeleteCustomerAddressParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteCustomerAddress, arg.TenantID, arg.CustomerID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteCustomerContacts = `-- name: DeleteCustomerContacts :execrows
+DELETE FROM customer_contacts WHERE tenant_id = $1 AND customer_id = $2
+`
+
+type DeleteCustomerContactsParams struct {
+	TenantID   uuid.UUID
+	CustomerID uuid.UUID
+}
+
+func (q *Queries) DeleteCustomerContacts(ctx context.Context, arg DeleteCustomerContactsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteCustomerContacts, arg.TenantID, arg.CustomerID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteCustomerNotifications = `-- name: DeleteCustomerNotifications :one
+SELECT app_customer_delete_notifications($1, $2)::int AS deleted
+`
+
+type DeleteCustomerNotificationsParams struct {
+	TenantID   uuid.UUID
+	CustomerID uuid.UUID
+}
+
+func (q *Queries) DeleteCustomerNotifications(ctx context.Context, arg DeleteCustomerNotificationsParams) (int32, error) {
+	row := q.db.QueryRow(ctx, deleteCustomerNotifications, arg.TenantID, arg.CustomerID)
+	var deleted int32
+	err := row.Scan(&deleted)
+	return deleted, err
+}
+
+const deleteCustomerProviderRefs = `-- name: DeleteCustomerProviderRefs :many
+DELETE FROM customer_provider_refs WHERE tenant_id = $1 AND customer_id = $2
+RETURNING provider, provider_customer_id
+`
+
+type DeleteCustomerProviderRefsParams struct {
+	TenantID   uuid.UUID
+	CustomerID uuid.UUID
+}
+
+type DeleteCustomerProviderRefsRow struct {
+	Provider           string
+	ProviderCustomerID string
+}
+
+func (q *Queries) DeleteCustomerProviderRefs(ctx context.Context, arg DeleteCustomerProviderRefsParams) ([]DeleteCustomerProviderRefsRow, error) {
+	rows, err := q.db.Query(ctx, deleteCustomerProviderRefs, arg.TenantID, arg.CustomerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DeleteCustomerProviderRefsRow
+	for rows.Next() {
+		var i DeleteCustomerProviderRefsRow
+		if err := rows.Scan(&i.Provider, &i.ProviderCustomerID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getAddress = `-- name: GetAddress :one
@@ -483,6 +667,50 @@ func (q *Queries) LockCustomerCredits(ctx context.Context, arg LockCustomerCredi
 	var id uuid.UUID
 	err := row.Scan(&id)
 	return id, err
+}
+
+const purgeCustomerProviderWebhookPayloads = `-- name: PurgeCustomerProviderWebhookPayloads :execrows
+UPDATE provider_webhook_events w
+   SET payload = '{}'::jsonb, payload_purged_at = $1
+  FROM charges c
+ WHERE w.tenant_id = $2 AND c.tenant_id = w.tenant_id AND c.customer_id = $3
+   AND c.provider = w.provider AND c.provider_charge_id = w.provider_charge_id
+   AND w.status IN ('processed', 'ignored') AND w.payload_purged_at IS NULL
+`
+
+type PurgeCustomerProviderWebhookPayloadsParams struct {
+	Now        *time.Time
+	TenantID   uuid.UUID
+	CustomerID uuid.UUID
+}
+
+// Esvazia o corpo dos webhooks já processados das cobranças do cliente (o
+// corpo recebido do provedor pode trazer dados do pagador).
+func (q *Queries) PurgeCustomerProviderWebhookPayloads(ctx context.Context, arg PurgeCustomerProviderWebhookPayloadsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, purgeCustomerProviderWebhookPayloads, arg.Now, arg.TenantID, arg.CustomerID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const revokeCustomerPortalLinks = `-- name: RevokeCustomerPortalLinks :execrows
+UPDATE customer_portal_links SET revoked_at = $1, revoke_reason = 'revoked'
+ WHERE tenant_id = $2 AND customer_id = $3 AND revoked_at IS NULL
+`
+
+type RevokeCustomerPortalLinksParams struct {
+	RevokedAt  *time.Time
+	TenantID   uuid.UUID
+	CustomerID uuid.UUID
+}
+
+func (q *Queries) RevokeCustomerPortalLinks(ctx context.Context, arg RevokeCustomerPortalLinksParams) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeCustomerPortalLinks, arg.RevokedAt, arg.TenantID, arg.CustomerID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const setContactBillingPreference = `-- name: SetContactBillingPreference :execrows

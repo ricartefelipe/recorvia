@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/base64"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -222,5 +223,233 @@ func TestPortalValidation(t *testing.T) {
 				t.Fatalf("esperava erro com %q: %v", tc.frag, err)
 			}
 		})
+	}
+}
+
+func TestRetentionDefaults(t *testing.T) {
+	c, err := Load(env(baseEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Retention{InboxDays: 90, DeadLettersDays: 180, WebhooksDays: 90, ProviderWebhookPayloadsDays: 90, NotificationContentDays: 90,
+		NotificationsDays: 365, PortalLinksDays: 90, UsageEventsDays: 400, InvitationsDays: 90, BatchSize: 500}
+	if c.Retention != want {
+		t.Fatalf("prazos padrão: %+v", c.Retention)
+	}
+	if err := c.ValidateWorker(); err != nil {
+		t.Fatalf("os prazos padrão devem ser válidos: %v", err)
+	}
+	// A API monta os mesmos serviços e recusa os mesmos valores.
+	m := baseEnv()
+	m["RECORVIA_RETENTION_INBOX_DAYS"] = "1"
+	c, err = Load(env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ValidateAPI(); err == nil || !strings.Contains(err.Error(), "RECORVIA_RETENTION_INBOX_DAYS deve ficar entre 14 e 3650") {
+		t.Fatalf("ValidateAPI com prazo abaixo do mínimo: %v", err)
+	}
+}
+
+// O worker não sobe com prazo de retenção abaixo do mínimo, acima do máximo
+// ou incoerente.
+func TestRetentionValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		set  map[string]string
+		want string // trecho esperado do erro; vazio = válido
+	}{
+		{"mínimos", map[string]string{"RECORVIA_RETENTION_INBOX_DAYS": "14", "RECORVIA_RETENTION_DEAD_LETTERS_DAYS": "30",
+			"RECORVIA_RETENTION_WEBHOOKS_DAYS": "7", "RECORVIA_RETENTION_PROVIDER_WEBHOOK_PAYLOADS_DAYS": "7",
+			"RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS": "7", "RECORVIA_RETENTION_NOTIFICATIONS_DAYS": "30",
+			"RECORVIA_RETENTION_PORTAL_LINKS_DAYS": "1", "RECORVIA_RETENTION_USAGE_EVENTS_DAYS": "30",
+			"RECORVIA_RETENTION_INVITATIONS_DAYS": "7", "RECORVIA_RETENTION_BATCH_SIZE": "10"}, ""},
+		{"máximos", map[string]string{"RECORVIA_RETENTION_USAGE_EVENTS_DAYS": "3650", "RECORVIA_RETENTION_BATCH_SIZE": "5000"}, ""},
+		{"inbox", map[string]string{"RECORVIA_RETENTION_INBOX_DAYS": "13"}, "RECORVIA_RETENTION_INBOX_DAYS deve ficar entre 14 e 3650"},
+		{"dead letters", map[string]string{"RECORVIA_RETENTION_DEAD_LETTERS_DAYS": "29"}, "RECORVIA_RETENTION_DEAD_LETTERS_DAYS deve ficar entre 30 e 3650"},
+		{"webhooks", map[string]string{"RECORVIA_RETENTION_WEBHOOKS_DAYS": "6"}, "RECORVIA_RETENTION_WEBHOOKS_DAYS deve ficar entre 7 e 3650"},
+		{"corpo de webhooks recebidos", map[string]string{"RECORVIA_RETENTION_PROVIDER_WEBHOOK_PAYLOADS_DAYS": "0"},
+			"RECORVIA_RETENTION_PROVIDER_WEBHOOK_PAYLOADS_DAYS deve ficar entre 7 e 3650"},
+		{"conteúdo", map[string]string{"RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS": "6"},
+			"RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS deve ficar entre 7 e 3650"},
+		{"notificações", map[string]string{"RECORVIA_RETENTION_NOTIFICATIONS_DAYS": "29", "RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS": "7"},
+			"RECORVIA_RETENTION_NOTIFICATIONS_DAYS deve ficar entre 30 e 3650"},
+		{"links do portal", map[string]string{"RECORVIA_RETENTION_PORTAL_LINKS_DAYS": "0"}, "RECORVIA_RETENTION_PORTAL_LINKS_DAYS deve ficar entre 1 e 3650"},
+		{"consumo", map[string]string{"RECORVIA_RETENTION_USAGE_EVENTS_DAYS": "29"}, "RECORVIA_RETENTION_USAGE_EVENTS_DAYS deve ficar entre 30 e 3650"},
+		{"convites", map[string]string{"RECORVIA_RETENTION_INVITATIONS_DAYS": "6"}, "RECORVIA_RETENTION_INVITATIONS_DAYS deve ficar entre 7 e 3650"},
+		{"acima do máximo", map[string]string{"RECORVIA_RETENTION_INBOX_DAYS": "3651"}, "RECORVIA_RETENTION_INBOX_DAYS deve ficar entre 14 e 3650"},
+		{"lote pequeno", map[string]string{"RECORVIA_RETENTION_BATCH_SIZE": "9"}, "RECORVIA_RETENTION_BATCH_SIZE deve ficar entre 10 e 5000"},
+		{"lote grande", map[string]string{"RECORVIA_RETENTION_BATCH_SIZE": "5001"}, "RECORVIA_RETENTION_BATCH_SIZE deve ficar entre 10 e 5000"},
+		{"notificações antes do conteúdo", map[string]string{"RECORVIA_RETENTION_NOTIFICATIONS_DAYS": "100",
+			"RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS": "120"}, "não pode ser menor que RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS"},
+		{"link expurgado antes do fim da sessão do portal", map[string]string{"RECORVIA_RETENTION_PORTAL_LINKS_DAYS": "1",
+			"RECORVIA_PORTAL_SESSION_TTL": "48h"}, "não pode ser menor que RECORVIA_PORTAL_SESSION_TTL"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := baseEnv()
+			for k, v := range tc.set {
+				m[k] = v
+			}
+			c, err := Load(env(m))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.ValidateWorker()
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatalf("erro inesperado: %v", err)
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+				t.Fatalf("erro %v, esperado conter %q", err, tc.want)
+			}
+		})
+	}
+	// Valor que não é inteiro é erro de formato, acumulado no carregamento.
+	m := baseEnv()
+	m["RECORVIA_RETENTION_INBOX_DAYS"] = "noventa"
+	if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), "RECORVIA_RETENTION_INBOX_DAYS") {
+		t.Fatalf("formato inválido: %v", err)
+	}
+}
+
+func TestEncryptionStartupCheckMode(t *testing.T) {
+	cases := []struct {
+		value   string
+		want    KeyringCheckMode
+		wantErr bool
+	}{
+		{value: "", want: KeyringCheckEnforce},
+		{value: "enforce", want: KeyringCheckEnforce},
+		{value: "warn", want: KeyringCheckWarn},
+		{value: "off", want: KeyringCheckOff},
+		{value: "talvez", wantErr: true},
+	}
+	for _, tc := range cases {
+		m := baseEnv()
+		m["RECORVIA_ENCRYPTION_STARTUP_CHECK"] = tc.value
+		c, err := Load(env(m))
+		if tc.wantErr {
+			if err == nil || !strings.Contains(err.Error(), "RECORVIA_ENCRYPTION_STARTUP_CHECK") {
+				t.Errorf("%q: erro = %v, esperado erro citando a variável", tc.value, err)
+			}
+			continue
+		}
+		if err != nil || c.EncryptionStartupCheck != tc.want {
+			t.Errorf("%q: modo = %q, erro = %v; esperado %q", tc.value, c.EncryptionStartupCheck, err, tc.want)
+		}
+	}
+}
+
+func TestValidateStoreRequiresDatabaseAndKeys(t *testing.T) {
+	c, err := Load(env(baseEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ValidateStore(); err != nil {
+		t.Fatalf("ValidateStore: %v", err)
+	}
+	m := baseEnv()
+	delete(m, "RECORVIA_DATABASE_URL")
+	delete(m, "RECORVIA_ENCRYPTION_KEYS")
+	// Sem identidade, Redis ou broker: a conferência do keyring só usa o banco.
+	delete(m, "RECORVIA_OIDC_ISSUER")
+	delete(m, "RECORVIA_REDIS_URL")
+	c, err = Load(env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.ValidateStore()
+	if err == nil {
+		t.Fatal("esperava erro sem banco e sem chaves")
+	}
+	for _, frag := range []string{"RECORVIA_DATABASE_URL", "RECORVIA_ENCRYPTION_KEYS"} {
+		if !strings.Contains(err.Error(), frag) {
+			t.Errorf("erro não menciona %s: %v", frag, err)
+		}
+	}
+	for _, frag := range []string{"OIDC", "REDIS"} {
+		if strings.Contains(err.Error(), frag) {
+			t.Errorf("erro não deveria exigir %s: %v", frag, err)
+		}
+	}
+}
+
+func TestEncryptionLostKeys(t *testing.T) {
+	cases := []struct {
+		value   string
+		want    []string
+		wantErr string
+	}{
+		{value: ""},
+		{value: "antiga", want: []string{"antiga"}},
+		{value: " k9 , antiga,,k9 ", want: []string{"antiga", "k9"}},
+		{value: "antiga:c2VncmVkbw==", wantErr: "informe somente os identificadores"},
+		{value: "k1", wantErr: `a chave "k1" está em RECORVIA_ENCRYPTION_KEYS`},
+	}
+	for _, tc := range cases {
+		m := baseEnv()
+		m["RECORVIA_ENCRYPTION_LOST_KEYS"] = tc.value
+		c, err := Load(env(m))
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), "RECORVIA_ENCRYPTION_LOST_KEYS") || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("%q: erro = %v, esperado conter %q", tc.value, err, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil || !slices.Equal(c.EncryptionLostKeys, tc.want) {
+			t.Errorf("%q: chaves perdidas = %v, erro = %v; esperado %v", tc.value, c.EncryptionLostKeys, err, tc.want)
+		}
+	}
+}
+
+// Chave ativa perdida: a fase 1 da rotação (acrescentar a chave nova
+// mantendo a ativa) não é possível, porque a ativa não está mais na lista; a
+// troca num único passo (chave nova ativa e a perdida declarada) é aceita
+// pela API, pelo worker e pelo keyring-check.
+func TestLostActiveKeyIsReplacedInOneStep(t *testing.T) {
+	validators := map[string]func(*Config) error{
+		"api": (*Config).ValidateAPI, "worker": (*Config).ValidateWorker, "keyring-check": (*Config).ValidateStore,
+	}
+	cases := []struct {
+		name, keys, active, lost string
+		wantErr                  string
+	}{
+		{name: "fase 1 com a chave ativa perdida", keys: "k1:" + key32 + ",k3:" + key32, active: "k2",
+			wantErr: "RECORVIA_ENCRYPTION_ACTIVE_KEY deve referenciar uma chave configurada"},
+		{name: "fase 1 com a perda já declarada", keys: "k1:" + key32 + ",k3:" + key32, active: "k2", lost: "k2",
+			wantErr: "RECORVIA_ENCRYPTION_ACTIVE_KEY deve referenciar uma chave configurada"},
+		{name: "troca num único passo", keys: "k1:" + key32 + ",k3:" + key32, active: "k3", lost: "k2"},
+		{name: "única chave perdida", keys: "k3:" + key32, active: "k3", lost: "k2"},
+	}
+	for _, tc := range cases {
+		m := baseEnv()
+		m["RECORVIA_ENCRYPTION_KEYS"] = tc.keys
+		m["RECORVIA_ENCRYPTION_ACTIVE_KEY"] = tc.active
+		m["RECORVIA_ENCRYPTION_LOST_KEYS"] = tc.lost
+		c, err := Load(env(m))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		for process, validate := range validators {
+			err := validate(c)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("%s (%s): erro inesperado: %v", tc.name, process, err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Errorf("%s (%s): erro = %v, esperado conter %q", tc.name, process, err, tc.wantErr)
+			}
+		}
+		if tc.wantErr == "" && (c.EncryptionActiveKey != tc.active || !slices.Equal(c.EncryptionLostKeys, []string{tc.lost})) {
+			t.Errorf("%s: ativa = %q, perdidas = %v", tc.name, c.EncryptionActiveKey, c.EncryptionLostKeys)
+		}
+	}
+	// O identificador da chave perdida não pode ser reutilizado pela chave
+	// nova: uma chave configurada não pode ser declarada perdida.
+	m := baseEnv()
+	m["RECORVIA_ENCRYPTION_KEYS"] = "k1:" + key32 + ",k2:" + key32
+	m["RECORVIA_ENCRYPTION_ACTIVE_KEY"] = "k2"
+	m["RECORVIA_ENCRYPTION_LOST_KEYS"] = "k2"
+	if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), `a chave "k2" está em RECORVIA_ENCRYPTION_KEYS`) {
+		t.Errorf("erro = %v, esperado recusar o identificador reutilizado", err)
 	}
 }

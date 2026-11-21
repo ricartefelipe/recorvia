@@ -48,6 +48,12 @@ SELECT COALESCE(sum(e.amount), 0)::bigint AS amount
 SELECT COALESCE(sum(credit_amount), 0)::bigint AS amount FROM refunds
  WHERE tenant_id = @tenant_id AND charge_id = @charge_id AND status = 'succeeded';
 
+-- name: ChargeChargebackCreditAmount :one
+-- Excedente do pagamento da cobrança já estornado por chargeback: crédito
+-- consumido do saldo do cliente e valor a recuperar das disputas perdidas.
+SELECT COALESCE(sum(credit_amount + recovery_amount), 0)::bigint AS amount FROM disputes
+ WHERE tenant_id = @tenant_id AND charge_id = @charge_id AND status = 'lost';
+
 -- Bloqueio consultivo até o fim da transação: serializa a reivindicação das
 -- operações de reembolso de uma cobrança sem bloquear a linha da cobrança.
 -- name: LockChargeRefundClaims :exec
@@ -83,8 +89,32 @@ SELECT * FROM disputes WHERE tenant_id = @tenant_id AND charge_id = @charge_id O
 
 -- name: UpdateDispute :execrows
 UPDATE disputes
-   SET status = @status, provider_status = sqlc.narg(provider_status), closed_at = sqlc.narg(closed_at), version = version + 1
+   SET status = @status, provider_status = sqlc.narg(provider_status), closed_at = sqlc.narg(closed_at), credit_amount = @credit_amount,
+       recovery_amount = @recovery_amount, version = version + 1
  WHERE tenant_id = @tenant_id AND id = @id AND version = @version;
+
+-- name: GetDispute :one
+SELECT * FROM disputes WHERE tenant_id = @tenant_id AND id = @id;
+
+-- name: GetDisputeForUpdate :one
+-- Bloqueia a disputa até o fim da transação: serializa as baixas do valor a
+-- recuperar e a repetição do pedido com a mesma chave.
+SELECT * FROM disputes WHERE tenant_id = @tenant_id AND id = @id FOR UPDATE;
+
+-- name: InsertRecoverySettlement :exec
+-- O gatilho dispute_recovery_settlements_apply acumula a baixa nos totais da
+-- disputa; a constraint disputes_recovery_settled_within recusa a baixa
+-- acima do valor a recuperar.
+INSERT INTO dispute_recovery_settlements (id, tenant_id, dispute_id, outcome, amount, currency, effective_date, justification, settled_by,
+                                          request_key, ledger_transaction_id, created_at)
+VALUES (@id, @tenant_id, @dispute_id, @outcome, @amount, @currency, @effective_date, @justification, sqlc.narg(settled_by),
+        sqlc.narg(request_key), @ledger_transaction_id, @created_at);
+
+-- name: GetRecoverySettlementByRequestKey :one
+SELECT * FROM dispute_recovery_settlements WHERE tenant_id = @tenant_id AND request_key = @request_key;
+
+-- name: ListDisputeRecoverySettlements :many
+SELECT * FROM dispute_recovery_settlements WHERE tenant_id = @tenant_id AND dispute_id = @dispute_id ORDER BY created_at, id;
 
 -- name: InsertDisputeEvent :exec
 INSERT INTO dispute_events (id, tenant_id, dispute_id, from_status, to_status, provider_status, occurred_at, recorded_at, details)
@@ -102,9 +132,9 @@ SELECT * FROM dispute_events WHERE tenant_id = @tenant_id AND dispute_id = ANY (
 
 -- name: InsertReconciliationRun :exec
 INSERT INTO reconciliation_runs (id, tenant_id, provider_account_id, provider, trigger_type, status, window_start, window_end, checked_count,
-                                 discrepancy_count, error, requested_by, request_key, lease_until, started_at, finished_at, updated_at)
+                                 discrepancy_count, error, requested_by, request_key, lease_until, attempts, started_at, finished_at, updated_at)
 VALUES (@id, @tenant_id, @provider_account_id, @provider, @trigger_type, @status, @window_start, @window_end, 0, 0, NULL, sqlc.narg(requested_by),
-        sqlc.narg(request_key), sqlc.narg(lease_until), @started_at, NULL, @started_at);
+        sqlc.narg(request_key), sqlc.narg(lease_until), @attempts, @started_at, NULL, @started_at);
 
 -- name: GetReconciliationRun :one
 SELECT * FROM reconciliation_runs WHERE tenant_id = @tenant_id AND id = @id;
@@ -115,10 +145,19 @@ SELECT * FROM reconciliation_runs WHERE tenant_id = @tenant_id AND id = @id FOR 
 -- name: GetReconciliationRunByRequestKey :one
 SELECT * FROM reconciliation_runs WHERE tenant_id = @tenant_id AND request_key = @request_key;
 
--- name: FailStaleReconciliationRuns :execrows
+-- name: SetReconciliationRunLease :execrows
+-- Assume a execução em andamento (novo lease e mais uma tentativa) ou a
+-- devolve para ser retomada (lease vencido, mesma contagem de tentativas).
 UPDATE reconciliation_runs
-   SET status = 'failed', finished_at = @now, lease_until = NULL, error = @error
- WHERE tenant_id = @tenant_id AND provider_account_id = @provider_account_id AND status = 'running' AND lease_until < @now;
+   SET lease_until = sqlc.narg(lease_until), attempts = @attempts
+ WHERE tenant_id = @tenant_id AND id = @id AND status = 'running';
+
+-- name: ClaimableReconciliationRuns :many
+SELECT r.tenant_id::uuid AS tenant_id, r.run_id::uuid AS run_id FROM app_claimable_reconciliation_runs(@now, @row_limit) AS r;
+
+-- name: ReconciliationRunStats :many
+SELECT state::text AS state, total::bigint AS total, oldest_seconds::double precision AS oldest_seconds
+  FROM app_reconciliation_run_stats(@now);
 
 -- name: FinishReconciliationRun :exec
 UPDATE reconciliation_runs

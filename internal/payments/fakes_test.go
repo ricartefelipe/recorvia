@@ -463,6 +463,19 @@ func (s *payStore) GrantCustomerCredit(_ context.Context, customerID uuid.UUID, 
 		return err
 	}
 	s.locks = append(s.locks, "customer")
+	// Como no banco: o consumo nunca deixa o saldo negativo.
+	balance, ok := s.creditBalance[customerID]
+	if !ok {
+		balance = brl(0)
+	}
+	next, err := balance.Add(amount)
+	if err != nil {
+		return err
+	}
+	if amount.IsNegative() && next.IsNegative() {
+		return apperr.Conflict("insufficient_credit", "Saldo de crédito insuficiente.")
+	}
+	s.creditBalance[customerID] = next
 	s.credits = append(s.credits, creditGrant{customerID, amount, kind, invoiceID, reason})
 	return nil
 }

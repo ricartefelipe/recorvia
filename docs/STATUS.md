@@ -16,6 +16,8 @@ resultado real) e as pendências.
 | 7 | Portal do cliente, credenciais de API com escopos | `feature/portal-e-credenciais` | integrada em `develop` (PR #5) |
 | 8 | Observabilidade (perfil opcional), alertas, runbooks, backup/restauração, análise de imagens | `feature/operacao` | integrada em `develop` (PR #8) |
 | 9 | Release `0.1.0` | `release/0.1.0` | integrada em `main` com a tag `v0.1.0` |
+| 10 | Pendências da 0.1.0: retenção automática, recuperação de desastre exercitada, Alertmanager e métricas de fila, portal, chargeback com crédito, conciliação assíncrona, baixa do valor a recuperar | sete branches `feature/*` | integradas em `develop` (PRs #12 a #18) |
+| 11 | Release `0.2.0` | `release/0.2.0` | integrada em `main` com a tag `v0.2.0` |
 
 A autoria das operações feitas por credencial de API foi corrigida depois das etapas 6 e 7
 (`feature/autoria-credenciais-api`, PR #9).
@@ -108,6 +110,24 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
   ESLint 10 (ADR-057).
 - **Runbooks** em `docs/operacao/runbooks/`.
 
+### Etapa 10: pendências da versão 0.1.0
+- **Retenção automática** (ADR-060 a ADR-062): a tarefa `retention.purge` expurga por idade, em
+  lotes e por tenant, onze tipos de dado técnico, com prazos configuráveis e sem tocar no que ainda
+  é necessário; registros financeiros e de auditoria ficam retidos de propósito. **Anonimização de
+  cliente**, irreversível e idempotente, por sessão de usuário.
+- **Recuperação de desastre exercitada** (ADR-063 e ADR-064): `make dr-check` e o job
+  `disaster-recovery` destroem e restauram o ambiente com as chaves guardadas à parte, conciliam a
+  janela perdida antes de religar o worker (subcomando `reconcile-pending`) e conferem que nada se
+  duplicou. A API e o worker não iniciam com chave de cifragem errada ou ausente.
+- **Alertmanager** (ADR-065) com envio por e-mail e webhook e **métricas de fila** sem rótulos de
+  tenant: dead letters abertas, fila de notificações e de entregas de webhooks (ADR-066, ADR-067).
+- **Portal**: revogação explícita e listagem de links (ADR-068) e paginação das faturas (ADR-069).
+- **Recebíveis**: chargeback consome o crédito do excedente (ADR-070), conciliação manual
+  assíncrona executada pelo worker (ADR-071, ADR-072) e baixa do valor a recuperar (ADR-073).
+- **Repositório**: arquivos de ambiente local fora do versionamento; guia de desenvolvimento em
+  `docs/DESENVOLVIMENTO.md`.
+- **API**: 134 operações no contrato, todas implementadas; migrations até a `00018`.
+
 ## Verificações executadas
 
 | Data | Comando | Resultado |
@@ -143,48 +163,37 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
 | 2026-11-20 | CI dos PRs #7, #8 e #9 | todos os checks aprovados; no #8 e no #9 também `backup-restore`, `observability-check`, `observability-stack` e Trivy nas 7 imagens; no #7, a primeira execução de `web-quality` falhou por notificação que vazava entre testes (corrigido) |
 | 2026-11-20 | Correção da autoria por credencial (PR #9) | o teste estático apontou 17 violações nos handlers originais; 43 pacotes de integração aprovados |
 | 2026-11-20 | Release: testes de integração com dependência de tempo | `internal/infra/rabbit` e `TestEndToEndDunningNotificationsAndWebhooks` corrigidos e aprovados |
+| 2026-11-21 | Revisão independente das cinco frentes (2 lentes, 1 verificador por achado, revisão das correções) | retenção: 6 achados confirmados; recuperação de desastre: 10; alertas: 4; portal: 1; recebíveis: 5; todos corrigidos com teste, e os problemas apontados na revisão das correções também |
+| 2026-11-21 | `make test-integration` em cada frente, depois de integrar `develop` | aprovado (44 pacotes); na recuperação de desastre, o teste que ainda esperava a conciliação síncrona foi adaptado |
+| 2026-11-21 | `make dr-check` local e job `disaster-recovery` da CI | aprovados; na CI, janela perdida de 49 s e 26 s do desastre ao worker pronto (dados de demonstração); a primeira execução na CI falhou por um escopo não delegável, corrigido com teste que confere as três listas |
+| 2026-11-21 | `make obs-check` (frentes de alertas e retenção) | Collector, Jaeger e Alertmanager válidos; regras e `promtool test rules` aprovados; roteamento por severidade conferido |
+| 2026-11-21 | CI dos PRs #12 a #18 | todos os checks aprovados, inclusive `observability-stack` (alerta entregue por e-mail no Mailpit) e `disaster-recovery`; no #12, um teste de cifragem com falso alarme ocasional foi corrigido |
+| 2026-11-21 | Baixa do valor a recuperar: concorrência | 8 pedidos simultâneos de 6,00 sobre saldo de 20,00: exatamente 3 aceitos; gravação direta no banco também recusada acima do limite |
 
 ## Pendências reais
 
 - **Asaas**: o adaptador segue a documentação oficial e é coberto por testes de contrato, mas **não
   foi exercitado no sandbox**: exige chave de API do sandbox e URL pública para receber webhooks. O
   passo a passo está em `docs/integracoes/asaas.md`.
-- **Conciliação manual** executa dentro da requisição, como o contrato define; em contas grandes, a
-  execução é encerrada como parcial quando o prazo acaba.
-- **Chargeback** não consome o crédito do cliente gerado por pagamento excedente (ADR-036).
-- **Observabilidade**: não há Alertmanager, gauge global de dead letters abertas nem métricas de fila
-  acumulada de notificações e entregas; os limites dos alertas são pontos de partida a calibrar
-  (ADR-053).
-- **Retenção**: anonimização e expurgo de inbox, dead letters, eventos de webhook, auditoria e
-  consumo não são automatizados; o procedimento manual está documentado (ADR-056).
-- **Recuperação de desastre**: a troca da API e do worker para o banco restaurado e o uso das chaves
-  de cifragem guardadas à parte são descritos, mas não exercitados.
-- **Portal do cliente**: não há rota de revogação explícita de links (gerar um novo link revoga o
-  anterior); a lista de faturas devolve as 100 mais recentes, sem paginação.
+- **Limites dos alertas**: são pontos de partida; a calibração depende de volume real.
+- **Retenção e anonimização**: os dados pessoais copiados nas faturas já emitidas permanecem (a
+  fatura emitida é imutável, ADR-061); o cadastro do cliente no provedor de pagamento não é alterado;
+  não há anonimização de usuários, membros e organizações.
+- **Recuperação de desastre**: o exercício usa um servidor e dados de demonstração; réplicas,
+  arquivamento contínuo de WAL, outra região e backup do Keycloak ficam fora. Não há meio de
+  plataforma para pedir a conciliação de todas as organizações de uma vez.
+- **Alertmanager**: instância única; nada alerta pela ausência do sinal diário `RecorviaWatchdog`
+  fora do ambiente local.
+- **Valor a recuperar**: não há estorno de baixa nem registro de recebimento depois de uma baixa
+  como perda; o recebido entra no disponível sem conciliação com o extrato bancário.
+- **Migrations com índices sem `CONCURRENTLY`** (00014 e 00015): em bancos grandes, a criação
+  bloqueia escritas durante a aplicação.
 - **Revisão independente**: o repositório tem um único mantenedor; a proteção de branches exige os
   checks da CI e PR, com 0 aprovações obrigatórias. Recomenda-se exigir ao menos uma aprovação quando
   houver outro revisor.
 
-## Ambiente de desenvolvimento observado
-
-- O checkout está em partição vfat sem bit de execução: ferramentas Go são instaladas em
-  `$(go env GOPATH)/bin`; o frontend é desenvolvido em worktree em outro sistema de arquivos ou via
-  Docker.
-- Docker Desktop: bind mounts de `/run/media` aparecem vazios no container; por isso o compose não
-  usa bind mounts (ADR-020).
-- Portas 6379 e 8081 do host já estavam ocupadas por outros projetos: Redis publicado em
-  `127.0.0.1:6380` e API em `127.0.0.1:18081`.
-- O Docker Desktop guarda o disco virtual no disco interno da máquina: builds de imagens e
-  Testcontainers em paralelo chegaram a encher esse disco, e o daemon só voltou a responder depois
-  de reiniciado. As worktrees de desenvolvimento ficam fora do checkout, num sistema de arquivos com
-  permissão de execução.
-- O BuildKit do Docker Desktop chegou a falhar ao obter o token do Docker Hub pelo proxy interno
-  (TLS handshake timeout) com a rede do host funcionando; baixar antes as imagens-base com
-  `docker pull` contornou o problema.
-- Duas suítes de integração em paralelo na mesma máquina expuseram testes com dependência de tempo,
-  corrigidos na release.
-
 ## Ponto de retomada
 
-Versão `0.1.0` publicada (tag `v0.1.0` em `main`). Próximo passo sugerido: validar o adaptador do
-Asaas no sandbox (`docs/integracoes/asaas.md`) e tratar os itens de **Pendências reais**.
+Versão `0.2.0` publicada (tag `v0.2.0` em `main`). Próximos passos sugeridos: validar o adaptador do
+Asaas no sandbox (`docs/integracoes/asaas.md`), escolher onde hospedar a produção e calibrar os
+limites dos alertas com o volume real.

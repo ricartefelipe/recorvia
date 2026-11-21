@@ -65,21 +65,35 @@ func aad(tenantID uuid.UUID, provider, purpose string) []byte {
 	return []byte(tenantID.String() + "/" + provider + "/" + purpose)
 }
 
-func (tx paymentsTx) accountFromRow(r dbgen.PaymentProviderAccount) (payments.ProviderAccount, error) {
-	a := payments.ProviderAccount{ID: r.ID, TenantID: r.TenantID, Provider: r.Provider, Environment: r.Environment, Status: r.Status,
+// accountMetadata converte a linha sem decifrar as credenciais.
+func accountMetadata(r dbgen.PaymentProviderAccount) payments.ProviderAccount {
+	return payments.ProviderAccount{ID: r.ID, TenantID: r.TenantID, Provider: r.Provider, Environment: r.Environment, Status: r.Status,
 		IsDefault: r.IsDefault, APIKeyHint: deref(r.ApiKeyHint), CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: int(r.Version)}
+}
+
+// credentialsUnreadable traduz a falha de decifragem das credenciais (chave
+// ausente do keyring, chave com outro valor ou dado corrompido) num erro de
+// aplicação com código estável, em vez de um erro interno sem explicação.
+func credentialsUnreadable(err error) error {
+	return apperr.Unavailable("provider_credentials_unreadable",
+		"As credenciais do provedor de pagamento não puderam ser decifradas com as chaves de cifragem configuradas. "+
+			"Confira o keyring da instalação ou configure o provedor novamente.").Wrap(err)
+}
+
+func (tx paymentsTx) accountFromRow(r dbgen.PaymentProviderAccount) (payments.ProviderAccount, error) {
+	a := accountMetadata(r)
 	kr := tx.store.keyring
 	if r.ApiKeyCiphertext != nil && r.ApiKeyKeyID != nil {
 		pt, err := kr.Decrypt(r.ApiKeyCiphertext, *r.ApiKeyKeyID, aad(r.TenantID, r.Provider, "api_key"))
 		if err != nil {
-			return payments.ProviderAccount{}, err
+			return payments.ProviderAccount{}, credentialsUnreadable(err)
 		}
 		a.APIKey = string(pt)
 	}
 	if r.WebhookSecretCiphertext != nil && r.WebhookSecretKeyID != nil {
 		pt, err := kr.Decrypt(r.WebhookSecretCiphertext, *r.WebhookSecretKeyID, aad(r.TenantID, r.Provider, "webhook_secret"))
 		if err != nil {
-			return payments.ProviderAccount{}, err
+			return payments.ProviderAccount{}, credentialsUnreadable(err)
 		}
 		a.Secret = string(pt)
 	}
@@ -102,12 +116,15 @@ func (tx paymentsTx) Account(ctx context.Context, id uuid.UUID) (payments.Provid
 	return tx.accountFromRow(r)
 }
 
+// AccountByProvider devolve a conta sem as credenciais: serve à troca da
+// configuração, que precisa continuar possível quando as credenciais
+// gravadas não decifram mais (chave de cifragem perdida).
 func (tx paymentsTx) AccountByProvider(ctx context.Context, provider string) (payments.ProviderAccount, error) {
 	r, err := tx.q.GetProviderAccountByProvider(ctx, dbgen.GetProviderAccountByProviderParams{TenantID: tx.tenantID, Provider: provider})
 	if err != nil {
 		return payments.ProviderAccount{}, notFound(err, "provider_account_not_found", "Conta do provedor não encontrada.")
 	}
-	return tx.accountFromRow(r)
+	return accountMetadata(r), nil
 }
 
 func (tx paymentsTx) SaveAccount(ctx context.Context, a payments.ProviderAccount, endpointTokenHash []byte) error {
@@ -137,9 +154,7 @@ func (tx paymentsTx) Accounts(ctx context.Context) ([]payments.ProviderAccount, 
 	}
 	out := make([]payments.ProviderAccount, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, payments.ProviderAccount{ID: r.ID, TenantID: r.TenantID, Provider: r.Provider, Environment: r.Environment,
-			Status: r.Status, IsDefault: r.IsDefault, APIKeyHint: deref(r.ApiKeyHint), CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
-			Version: int(r.Version)})
+		out = append(out, accountMetadata(r))
 	}
 	return out, nil
 }

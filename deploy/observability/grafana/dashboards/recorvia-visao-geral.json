@@ -464,6 +464,212 @@
       }
     },
     {
+      "id": 24,
+      "type": "stat",
+      "title": "Dead letters abertas",
+      "description": "Mensagens registradas em dead_letters e ainda sem triagem, em todos os tenants; acima de zero por 30 minutos dispara RecorviaDeadLettersOpen.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(max by (consumer) (recorvia_dead_letters_open))",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "sem dados",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 25,
+      "type": "stat",
+      "title": "Atraso do envio de notificações",
+      "description": "Atraso da notificação vencida mais antiga ou tempo da mais antiga presa em envio; acima de 15 minutos dispara RecorviaNotificationsBacklog.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(recorvia_notifications_backlog_oldest_seconds{state=~\"due|sending\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "sem dados",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 26,
+      "type": "stat",
+      "title": "Atraso das entregas de webhooks",
+      "description": "Atraso da entrega de webhook devida mais antiga (sem a espera do backoff); acima de 15 minutos dispara RecorviaWebhookDeliveriesBacklog.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(recorvia_webhook_deliveries_backlog_oldest_due_seconds)",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "sem dados",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
       "id": 8,
       "type": "row",
       "title": "API",
@@ -472,7 +678,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 9
       },
       "panels": []
     },
@@ -489,7 +695,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 6
+        "y": 10
       },
       "targets": [
         {
@@ -546,7 +752,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 6
+        "y": 10
       },
       "targets": [
         {
@@ -599,7 +805,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 18
       },
       "panels": []
     },
@@ -616,7 +822,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 15
+        "y": 19
       },
       "targets": [
         {
@@ -673,7 +879,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 15
+        "y": 19
       },
       "targets": [
         {
@@ -730,7 +936,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 23
+        "y": 27
       },
       "targets": [
         {
@@ -797,7 +1003,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 23
+        "y": 27
       },
       "targets": [
         {
@@ -850,7 +1056,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 31
+        "y": 35
       },
       "panels": []
     },
@@ -867,7 +1073,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 32
+        "y": 36
       },
       "targets": [
         {
@@ -924,7 +1130,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 32
+        "y": 36
       },
       "targets": [
         {
@@ -988,7 +1194,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 40
+        "y": 44
       },
       "panels": []
     },
@@ -1005,7 +1211,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 41
+        "y": 45
       },
       "targets": [
         {
@@ -1062,7 +1268,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 41
+        "y": 45
       },
       "targets": [
         {
@@ -1119,7 +1325,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 41
+        "y": 45
       },
       "targets": [
         {
@@ -1164,6 +1370,234 @@
       }
     },
     {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Fila de notificações",
+      "description": "Notificações por situação, em todos os tenants: due (agendadas com o horário de envio vencido), sending (em envio) e failed (falha definitiva nas últimas 24 horas).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 53
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (state) (recorvia_notifications_backlog)",
+          "legendFormat": "{{state}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "sem dados",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Idade da fila de notificações",
+      "description": "Atraso da notificação vencida mais antiga (due), tempo desde a reivindicação da mais antiga em envio (sending) e tempo desde a falha mais antiga da janela (failed).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 53
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (state) (recorvia_notifications_backlog_oldest_seconds)",
+          "legendFormat": "{{state}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "sem dados",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Fila de entregas de webhooks",
+      "description": "Entregas de webhooks enviados por situação, em todos os tenants: pending (aguardando a primeira tentativa) e retrying (aguardando nova tentativa, inclusive em backoff).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 53
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (state) (recorvia_webhook_deliveries_backlog)",
+          "legendFormat": "{{state}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "sem dados",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Atraso das entregas de webhooks",
+      "description": "Atraso da entrega devida mais antiga em relação ao horário da tentativa; a espera do backoff não conta.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 53
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (state) (recorvia_webhook_deliveries_backlog_oldest_due_seconds)",
+          "legendFormat": "{{state}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "sem dados",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
       "id": 19,
       "type": "text",
       "title": "Rastreamento e procedimentos",
@@ -1171,11 +1605,11 @@
         "h": 4,
         "w": 24,
         "x": 0,
-        "y": 49
+        "y": 61
       },
       "options": {
         "mode": "markdown",
-        "content": "Rastros: interface do Jaeger em [http://localhost:16686](http://localhost:16686) (serviços `recorvia-api` e `recorvia-worker`; busque pela tag `recorvia.request_id`, o mesmo `request_id` dos logs e do corpo de erro).\n\nAlertas: **Alerting → Alert rules** (regras do Prometheus) ou a página *Alerts* do Prometheus.\n\nProcedimentos: `docs/operacao/runbooks/` (faturamento, filas e DLQ, conciliação, notificações e webhooks, isolamento de dados)."
+        "content": "Rastros: interface do Jaeger em [http://localhost:16686](http://localhost:16686) (serviços `recorvia-api` e `recorvia-worker`; busque pela tag `recorvia.request_id`, o mesmo `request_id` dos logs e do corpo de erro).\n\nAlertas: **Alerting → Alert rules** (regras do Prometheus) ou a página *Alerts* do Prometheus; o encaminhamento por e-mail e webhook, os silêncios e as inibições ficam no Alertmanager em [http://localhost:9093](http://localhost:9093).\n\nProcedimentos: `docs/operacao/runbooks/` (faturamento, filas e DLQ, conciliação, notificações e webhooks, encaminhamento de alertas, isolamento de dados)."
       }
     }
   ]

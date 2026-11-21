@@ -66,6 +66,8 @@ type Tx interface {
 
 	DefaultAccount(ctx context.Context) (ProviderAccount, error)
 	Account(ctx context.Context, id uuid.UUID) (ProviderAccount, error)
+	// AccountByProvider devolve a conta sem as credenciais (APIKey e Secret
+	// vazios): a troca da configuração não depende de decifrar a anterior.
 	AccountByProvider(ctx context.Context, provider string) (ProviderAccount, error)
 	SaveAccount(ctx context.Context, a ProviderAccount, endpointTokenHash []byte) error
 	Accounts(ctx context.Context) ([]ProviderAccount, error)
@@ -118,6 +120,10 @@ type Store interface {
 	// TenantsDueReconciliation descobre tenants elegíveis à conciliação
 	// agendada sem execução no intervalo informado.
 	TenantsDueReconciliation(ctx context.Context, now time.Time, every time.Duration) ([]uuid.UUID, error)
+	// ClaimableReconciliationRuns descobre, entre todos os tenants, as
+	// execuções de conciliação em andamento que aguardam um worker ou cujo
+	// lease expirou, das mais antigas para as mais novas.
+	ClaimableReconciliationRuns(ctx context.Context, now time.Time, limit int) ([]RunRef, error)
 }
 
 // Config parametriza o serviço.
@@ -131,9 +137,10 @@ type Config struct {
 	Lease time.Duration
 	// Log registra falhas tratadas em melhor esforço (opcional).
 	Log *slog.Logger
-	// ManualReconciliationBudget limita a coleta da conciliação manual
-	// (padrão ManualReconciliationBudget).
-	ManualReconciliationBudget time.Duration
+	// ReconciliationBudget limita a coleta (chamadas ao provedor) de cada
+	// tentativa de execução da conciliação; padrão e máximo
+	// ReconciliationCollectionBudget, para caber no lease da execução.
+	ReconciliationBudget time.Duration
 }
 
 // Service implementa os casos de uso de pagamentos.
@@ -152,8 +159,8 @@ func NewService(store Store, resolver GatewayResolver, c clock.Clock, cfg Config
 	if cfg.Lease <= cfg.CallTimeout {
 		cfg.Lease = 3 * cfg.CallTimeout
 	}
-	if cfg.ManualReconciliationBudget <= 0 {
-		cfg.ManualReconciliationBudget = ManualReconciliationBudget
+	if cfg.ReconciliationBudget <= 0 || cfg.ReconciliationBudget > ReconciliationCollectionBudget {
+		cfg.ReconciliationBudget = ReconciliationCollectionBudget
 	}
 	return &Service{store: store, resolver: resolver, clock: c, cfg: cfg}
 }

@@ -48,6 +48,8 @@ const (
 	PermCustomersRead  Permission = "customers.read"
 	PermCustomersWrite Permission = "customers.write"
 	PermPortalLinks    Permission = "customers.portal_links"
+	// PermCustomersAnonymize permite anonimizar um cliente (irreversível).
+	PermCustomersAnonymize Permission = "customers.anonymize"
 
 	PermCatalogRead  Permission = "catalog.read"
 	PermCatalogWrite Permission = "catalog.write"
@@ -70,6 +72,9 @@ const (
 	PermPaymentsCharge Permission = "payments.charge"
 	PermPaymentsRefund Permission = "payments.refund"
 	PermPaymentsManual Permission = "payments.record_manual"
+	// PermPaymentsRecovery permite dar baixa no valor a recuperar de cliente
+	// de uma disputa perdida, como recebido ou perdido (ADR-073).
+	PermPaymentsRecovery Permission = "payments.settle_recovery"
 
 	PermLedgerRead Permission = "ledger.read"
 
@@ -103,14 +108,14 @@ var rolePermissions = map[Role][]Permission{
 	RoleOwner: nil, // todas
 	RoleAdmin: append(slices.Clone(readAll),
 		PermOrganizationUpdate, PermMembersManage,
-		PermCustomersWrite, PermPortalLinks, PermCatalogWrite, PermSubscriptionsWrite, PermSubscriptionsCancel,
+		PermCustomersWrite, PermPortalLinks, PermCustomersAnonymize, PermCatalogWrite, PermSubscriptionsWrite, PermSubscriptionsCancel,
 		PermUsageWrite, PermInvoicesWrite, PermInvoicesVoid, PermInvoicesExport, PermBillingRun, PermCreditsWrite,
-		PermPaymentsCharge, PermPaymentsRefund, PermPaymentsManual,
+		PermPaymentsCharge, PermPaymentsRefund, PermPaymentsManual, PermPaymentsRecovery,
 		PermReconciliationRun, PermReconciliationResolve, PermCollectionsWrite,
 		PermIntegrationsWrite, PermWebhooksWrite, PermAPICredentials, PermAuditRead, PermOperationsReprocess),
 	RoleFinance: append(slices.Clone(readAll),
 		PermPortalLinks, PermInvoicesWrite, PermInvoicesVoid, PermInvoicesExport, PermBillingRun, PermCreditsWrite,
-		PermPaymentsCharge, PermPaymentsRefund, PermPaymentsManual,
+		PermPaymentsCharge, PermPaymentsRefund, PermPaymentsManual, PermPaymentsRecovery,
 		PermReconciliationRun, PermReconciliationResolve, PermCollectionsWrite, PermSubscriptionsCancel),
 	RoleOperator: {
 		PermOrganizationRead, PermMembersRead, PermCustomersRead, PermCustomersWrite, PermPortalLinks,
@@ -124,9 +129,9 @@ var rolePermissions = map[Role][]Permission{
 func AllPermissions() []Permission {
 	all := append(slices.Clone(readAll),
 		PermOrganizationUpdate, PermMembersManage, PermPlatformManage,
-		PermCustomersWrite, PermPortalLinks, PermCatalogWrite, PermSubscriptionsWrite, PermSubscriptionsCancel,
+		PermCustomersWrite, PermPortalLinks, PermCustomersAnonymize, PermCatalogWrite, PermSubscriptionsWrite, PermSubscriptionsCancel,
 		PermUsageWrite, PermInvoicesWrite, PermInvoicesVoid, PermInvoicesExport, PermBillingRun, PermCreditsWrite,
-		PermPaymentsCharge, PermPaymentsRefund, PermPaymentsManual,
+		PermPaymentsCharge, PermPaymentsRefund, PermPaymentsManual, PermPaymentsRecovery,
 		PermReconciliationRun, PermReconciliationResolve, PermCollectionsWrite,
 		PermIntegrationsWrite, PermWebhooksWrite, PermAPICredentials, PermAuditRead, PermOperationsReprocess)
 	slices.Sort(all)

@@ -170,8 +170,16 @@ func (b base) insertNotification(ctx context.Context, n *notifications.Notificat
 		}
 	}
 	if n.CustomerID != nil {
-		if err := b.q.LockCustomerKeyShare(ctx, dbgen.LockCustomerKeyShareParams{TenantID: b.tenantID, ID: *n.CustomerID}); err != nil {
+		// Cliente inexistente segue adiante e é recusado pela chave
+		// estrangeira, como antes. Cliente anonimizado depois da composição
+		// (os dados do conteúdo e os destinatários foram lidos antes): nada
+		// é gravado.
+		anonymizedAt, err := b.q.LockCustomerKeyShare(ctx, dbgen.LockCustomerKeyShareParams{TenantID: b.tenantID, ID: *n.CustomerID})
+		if err != nil && !postgres.IsNoRows(err) {
 			return false, err
+		}
+		if anonymizedAt != nil {
+			return false, nil
 		}
 	}
 	p := dbgen.InsertNotificationParams{ID: n.ID, TenantID: b.tenantID, BusinessKey: n.BusinessKey, TemplateKey: string(n.TemplateKey),

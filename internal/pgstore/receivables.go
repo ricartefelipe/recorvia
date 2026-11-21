@@ -27,6 +27,22 @@ func (p *Payments) TenantsDueReconciliation(ctx context.Context, now time.Time, 
 	return out, err
 }
 
+// ClaimableReconciliationRuns descobre, entre todos os tenants, as execuções
+// de conciliação em andamento sem lease vigente (aguardando um worker ou
+// interrompidas), das mais antigas para as mais novas.
+func (p *Payments) ClaimableReconciliationRuns(ctx context.Context, now time.Time, limit int) ([]payments.RunRef, error) {
+	var out []payments.RunRef
+	err := p.s.inGlobal(ctx, func(q *dbgen.Queries) error {
+		rows, err := q.ClaimableReconciliationRuns(ctx, dbgen.ClaimableReconciliationRunsParams{Now: now, RowLimit: int32(limit)})
+		out = make([]payments.RunRef, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, payments.RunRef{TenantID: r.TenantID, RunID: r.RunID})
+		}
+		return err
+	})
+	return out, err
+}
+
 func refundFromRow(r dbgen.Refund) (payments.Refund, error) {
 	cur, err := money.ParseCurrency(r.Currency)
 	if err != nil {
@@ -142,16 +158,24 @@ func (tx paymentsTx) EnsureOperation(ctx context.Context, op payments.Operation)
 	return n == 1, err
 }
 
-func (tx paymentsTx) RefundCreditBase(ctx context.Context, chargeID uuid.UUID) (money.Money, money.Money, error) {
+func (tx paymentsTx) OverpaymentCreditBase(ctx context.Context, chargeID uuid.UUID) (money.Money, money.Money, error) {
 	over, err := tx.q.ChargeOverpaymentAmount(ctx, dbgen.ChargeOverpaymentAmountParams{TenantID: tx.tenantID, ChargeID: &chargeID})
 	if err != nil {
 		return money.Money{}, money.Money{}, err
 	}
-	used, err := tx.q.ChargeRefundedCreditAmount(ctx, dbgen.ChargeRefundedCreditAmountParams{TenantID: tx.tenantID, ChargeID: chargeID})
+	refunded, err := tx.q.ChargeRefundedCreditAmount(ctx, dbgen.ChargeRefundedCreditAmountParams{TenantID: tx.tenantID, ChargeID: chargeID})
 	if err != nil {
 		return money.Money{}, money.Money{}, err
 	}
-	return brl(over), brl(used), nil
+	chargedBack, err := tx.q.ChargeChargebackCreditAmount(ctx, dbgen.ChargeChargebackCreditAmountParams{TenantID: tx.tenantID, ChargeID: chargeID})
+	if err != nil {
+		return money.Money{}, money.Money{}, err
+	}
+	returned, err := brl(refunded).Add(brl(chargedBack))
+	if err != nil {
+		return money.Money{}, money.Money{}, err
+	}
+	return brl(over), returned, nil
 }
 
 func (tx paymentsTx) LockCustomerCredits(ctx context.Context, customerID uuid.UUID) error {
@@ -169,7 +193,9 @@ func disputeFromRow(r dbgen.Dispute) (payments.Dispute, error) {
 		return payments.Dispute{}, err
 	}
 	return payments.Dispute{ID: r.ID, TenantID: r.TenantID, ChargeID: r.ChargeID, Provider: r.Provider, Status: payments.DisputeStatus(r.Status),
-		Amount: money.New(r.Amount, cur), ProviderStatus: deref(r.ProviderStatus), OpenedAt: r.OpenedAt, ClosedAt: r.ClosedAt,
+		Amount: money.New(r.Amount, cur), CreditAmount: money.New(r.CreditAmount, cur), RecoveryAmount: money.New(r.RecoveryAmount, cur),
+		RecoveryReceived: money.New(r.RecoveryReceivedAmount, cur), RecoveryWrittenOff: money.New(r.RecoveryWrittenOffAmount, cur),
+		ProviderStatus: deref(r.ProviderStatus), OpenedAt: r.OpenedAt, ClosedAt: r.ClosedAt,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: int(r.Version)}, nil
 }
 
@@ -197,7 +223,8 @@ func (tx paymentsTx) InsertDispute(ctx context.Context, d payments.Dispute) erro
 
 func (tx paymentsTx) UpdateDispute(ctx context.Context, d *payments.Dispute) error {
 	n, err := tx.q.UpdateDispute(ctx, dbgen.UpdateDisputeParams{TenantID: tx.tenantID, ID: d.ID, Status: string(d.Status),
-		ProviderStatus: strPtr(d.ProviderStatus), ClosedAt: d.ClosedAt, Version: int32(d.Version)})
+		ProviderStatus: strPtr(d.ProviderStatus), ClosedAt: d.ClosedAt, CreditAmount: d.CreditAmount.Amount(),
+		RecoveryAmount: d.RecoveryAmount.Amount(), Version: int32(d.Version)})
 	if err != nil {
 		return err
 	}
@@ -225,11 +252,73 @@ func (tx paymentsTx) InsertDisputeEvent(ctx context.Context, e payments.DisputeE
 		ToStatus: string(e.To), ProviderStatus: strPtr(e.ProviderStatus), OccurredAt: e.OccurredAt, RecordedAt: e.RecordedAt, Details: details})
 }
 
+func (tx paymentsTx) Dispute(ctx context.Context, id uuid.UUID, forUpdate bool) (payments.Dispute, error) {
+	var r dbgen.Dispute
+	var err error
+	if forUpdate {
+		r, err = tx.q.GetDisputeForUpdate(ctx, dbgen.GetDisputeForUpdateParams{TenantID: tx.tenantID, ID: id})
+	} else {
+		r, err = tx.q.GetDispute(ctx, dbgen.GetDisputeParams{TenantID: tx.tenantID, ID: id})
+	}
+	if err != nil {
+		return payments.Dispute{}, notFound(err, "dispute_not_found", "Disputa não encontrada.")
+	}
+	return disputeFromRow(r)
+}
+
+func recoverySettlementFromRow(r dbgen.DisputeRecoverySettlement) (payments.RecoverySettlement, error) {
+	cur, err := money.ParseCurrency(r.Currency)
+	if err != nil {
+		return payments.RecoverySettlement{}, err
+	}
+	return payments.RecoverySettlement{ID: r.ID, TenantID: r.TenantID, DisputeID: r.DisputeID, Outcome: payments.RecoveryOutcome(r.Outcome),
+		Amount: money.New(r.Amount, cur), EffectiveDate: dateFromPg(r.EffectiveDate), Justification: r.Justification, SettledBy: r.SettledBy,
+		RequestKey: deref(r.RequestKey), LedgerTransactionID: r.LedgerTransactionID, CreatedAt: r.CreatedAt}, nil
+}
+
+func (tx paymentsTx) InsertRecoverySettlement(ctx context.Context, st payments.RecoverySettlement) error {
+	err := tx.q.InsertRecoverySettlement(ctx, dbgen.InsertRecoverySettlementParams{ID: st.ID, TenantID: tx.tenantID, DisputeID: st.DisputeID,
+		Outcome: string(st.Outcome), Amount: st.Amount.Amount(), Currency: st.Amount.Currency().Code(), EffectiveDate: dateToPg(st.EffectiveDate),
+		Justification: st.Justification, SettledBy: st.SettledBy, RequestKey: strPtr(st.RequestKey), LedgerTransactionID: st.LedgerTransactionID,
+		CreatedAt: st.CreatedAt})
+	switch {
+	case postgres.IsNamedCheckViolation(err, "disputes_recovery_settled_within"):
+		return apperr.Conflict("recovery_exceeds_outstanding", "A baixa excede o saldo a recuperar da disputa.")
+	case postgres.IsUniqueViolation(err, "dispute_recovery_settlements_request_key"):
+		return apperr.Conflict("request_key_reused", "A chave do pedido já foi usada em outra baixa.")
+	}
+	return err
+}
+
+func (tx paymentsTx) RecoverySettlementByRequestKey(ctx context.Context, key string) (payments.RecoverySettlement, error) {
+	r, err := tx.q.GetRecoverySettlementByRequestKey(ctx, dbgen.GetRecoverySettlementByRequestKeyParams{TenantID: tx.tenantID, RequestKey: &key})
+	if err != nil {
+		return payments.RecoverySettlement{}, notFound(err, "recovery_settlement_not_found", "Baixa do valor a recuperar não encontrada.")
+	}
+	return recoverySettlementFromRow(r)
+}
+
+func (tx paymentsTx) RecoverySettlements(ctx context.Context, disputeID uuid.UUID) ([]payments.RecoverySettlement, error) {
+	rows, err := tx.q.ListDisputeRecoverySettlements(ctx, dbgen.ListDisputeRecoverySettlementsParams{TenantID: tx.tenantID, DisputeID: disputeID})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]payments.RecoverySettlement, 0, len(rows))
+	for _, r := range rows {
+		st, err := recoverySettlementFromRow(r)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, nil
+}
+
 func runFromRow(r dbgen.ReconciliationRun) payments.ReconciliationRun {
 	return payments.ReconciliationRun{ID: r.ID, TenantID: r.TenantID, ProviderAccountID: r.ProviderAccountID, Provider: r.Provider,
 		Trigger: payments.RunTrigger(r.TriggerType), Status: payments.RunStatus(r.Status), WindowStart: r.WindowStart, WindowEnd: r.WindowEnd,
 		CheckedCount: int(r.CheckedCount), DiscrepancyCount: int(r.DiscrepancyCount), Error: deref(r.Error), RequestedBy: r.RequestedBy,
-		RequestKey: deref(r.RequestKey), LeaseUntil: r.LeaseUntil, StartedAt: r.StartedAt, FinishedAt: r.FinishedAt}
+		RequestKey: deref(r.RequestKey), LeaseUntil: r.LeaseUntil, Attempts: int(r.Attempts), StartedAt: r.StartedAt, FinishedAt: r.FinishedAt}
 }
 
 func (tx paymentsTx) ReconciliationRun(ctx context.Context, id uuid.UUID, forUpdate bool) (payments.ReconciliationRun, error) {
@@ -254,17 +343,23 @@ func (tx paymentsTx) ReconciliationRunByRequestKey(ctx context.Context, key stri
 	return runFromRow(r), nil
 }
 
-func (tx paymentsTx) FailStaleReconciliationRuns(ctx context.Context, accountID uuid.UUID, now time.Time) (int, error) {
-	msg := "Execução interrompida antes da conclusão (lease expirado)."
-	n, err := tx.q.FailStaleReconciliationRuns(ctx, dbgen.FailStaleReconciliationRunsParams{TenantID: tx.tenantID, ProviderAccountID: accountID,
-		Now: &now, Error: &msg})
-	return int(n), err
+func (tx paymentsTx) UpdateReconciliationRunLease(ctx context.Context, r payments.ReconciliationRun) error {
+	n, err := tx.q.SetReconciliationRunLease(ctx, dbgen.SetReconciliationRunLeaseParams{TenantID: tx.tenantID, ID: r.ID, LeaseUntil: r.LeaseUntil,
+		Attempts: int32(r.Attempts)})
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return apperr.Conflict("reconciliation_run_interrupted", "A execução foi encerrada por outra instância.")
+	}
+	return nil
 }
 
 func (tx paymentsTx) InsertReconciliationRun(ctx context.Context, r payments.ReconciliationRun) error {
 	err := tx.q.InsertReconciliationRun(ctx, dbgen.InsertReconciliationRunParams{ID: r.ID, TenantID: tx.tenantID, ProviderAccountID: r.ProviderAccountID,
 		Provider: r.Provider, TriggerType: string(r.Trigger), Status: string(r.Status), WindowStart: r.WindowStart, WindowEnd: r.WindowEnd,
-		RequestedBy: r.RequestedBy, RequestKey: strPtr(r.RequestKey), LeaseUntil: r.LeaseUntil, StartedAt: r.StartedAt})
+		RequestedBy: r.RequestedBy, RequestKey: strPtr(r.RequestKey), LeaseUntil: r.LeaseUntil, Attempts: int32(r.Attempts),
+		StartedAt: r.StartedAt})
 	switch {
 	case postgres.IsUniqueViolation(err, "reconciliation_runs_running_key"):
 		return apperr.Conflict("reconciliation_running", "Já há uma conciliação em andamento para este provedor.")
@@ -619,6 +714,40 @@ func (s *Store) RefundStats(ctx context.Context) (map[string]int64, error) {
 		rows, err := q.RefundStats(ctx)
 		for _, r := range rows {
 			out[r.Status] = r.Total
+		}
+		return err
+	})
+	return out, err
+}
+
+// ReconciliationRunStats são as execuções de conciliação em andamento por
+// estado (todos os tenants, sem identificá-los), para métricas.
+type ReconciliationRunStats struct {
+	// Queued aguardam um worker; Executing têm lease vigente; Stalled
+	// tiveram o lease expirado e aguardam a retomada.
+	Queued    int64
+	Executing int64
+	Stalled   int64
+	// OldestWaitingSeconds é a espera mais longa entre as que aguardam um
+	// worker (desde o registro) e as interrompidas (desde o fim do lease).
+	OldestWaitingSeconds float64
+}
+
+// ReconciliationRunStats conta as execuções de conciliação em andamento.
+func (s *Store) ReconciliationRunStats(ctx context.Context) (ReconciliationRunStats, error) {
+	var out ReconciliationRunStats
+	err := s.inGlobal(ctx, func(q *dbgen.Queries) error {
+		out = ReconciliationRunStats{}
+		rows, err := q.ReconciliationRunStats(ctx, s.clock.Now())
+		for _, r := range rows {
+			switch r.State {
+			case "queued":
+				out.Queued, out.OldestWaitingSeconds = r.Total, max(out.OldestWaitingSeconds, r.OldestSeconds)
+			case "stalled":
+				out.Stalled, out.OldestWaitingSeconds = r.Total, max(out.OldestWaitingSeconds, r.OldestSeconds)
+			case "executing":
+				out.Executing = r.Total
+			}
 		}
 		return err
 	})

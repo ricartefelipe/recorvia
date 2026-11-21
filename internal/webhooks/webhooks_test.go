@@ -93,7 +93,7 @@ func TestEventCatalogExcludesInternalEvents(t *testing.T) {
 			t.Errorf("evento interno assinável: %s", internal)
 		}
 	}
-	if !Subscribable(outbox.EventInvoiceOverdue) || len(types) != 21 {
+	if !Subscribable(outbox.EventInvoiceOverdue) || !Subscribable(outbox.EventDisputeRecoverySettled) || len(types) != 22 {
 		t.Fatalf("catálogo inesperado: %v", types)
 	}
 	for i := 1; i < len(types); i++ {

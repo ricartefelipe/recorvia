@@ -126,7 +126,7 @@ up: env ## Sobe o ambiente local completo e carrega os dados de demonstração
 	$(COMPOSE) --profile seed run --rm --build seed
 
 .PHONY: up-obs
-up-obs: env ## Sobe o ambiente com OpenTelemetry Collector, Jaeger, Prometheus e Grafana
+up-obs: env ## Sobe o ambiente com OpenTelemetry Collector, Jaeger, Prometheus, Alertmanager e Grafana
 	OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 $(COMPOSE) --profile observability up -d --build --wait
 	$(COMPOSE) --profile seed run --rm --build seed
 
@@ -144,11 +144,11 @@ logs: ## Acompanha logs da API e do worker
 
 ## ---------- Operação ----------
 .PHONY: obs-check
-obs-check: ## Valida as configurações de observabilidade (otelcol, jaeger, promtool, dashboards)
+obs-check: ## Valida as configurações de observabilidade (otelcol, jaeger, promtool, amtool, dashboards)
 	bash deploy/observability/validate.sh
 
 .PHONY: obs-stack-check
-obs-stack-check: ## Confere a stack em execução (make up-obs): alvos, regras, séries, dashboards e rastros
+obs-stack-check: ## Confere a stack em execução (make up-obs): alvos, regras, séries, alerta até o e-mail, dashboards e rastros
 	bash deploy/observability/stack-check.sh
 
 .PHONY: backup
@@ -158,6 +158,10 @@ backup: ## Backup lógico do PostgreSQL do ambiente (pg_dump no container) em ba
 .PHONY: restore-check
 restore-check: ## Restaura o último backup (ou DUMP=arquivo) num banco novo e confere o manifesto
 	bash deploy/backup/restore-check.sh $(DUMP)
+
+.PHONY: dr-check
+dr-check: ## Exercício de recuperação de desastre de ponta a ponta num projeto isolado do compose (relatório em backups/dr-check)
+	bash deploy/backup/dr-check.sh
 
 ## ---------- Imagens ----------
 GO_IMAGES := api worker migrate seed paysim

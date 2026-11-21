@@ -33,6 +33,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/pgstore"
 	"github.com/ricartefelipe/recorvia/internal/platformbilling"
 	"github.com/ricartefelipe/recorvia/internal/reporting"
+	"github.com/ricartefelipe/recorvia/internal/retention"
 	"github.com/ricartefelipe/recorvia/internal/subscriptions"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
 	"github.com/ricartefelipe/recorvia/internal/webhooks"
@@ -67,6 +68,7 @@ type Core struct {
 	Notifications *notifications.Service
 	Collections   *collections.Service
 	Webhooks      *webhooks.Service
+	Retention     *retention.Service
 }
 
 // mailSender adapta o cliente SMTP à porta de envio das notificações.
@@ -142,6 +144,9 @@ func Open(ctx context.Context, cfg *config.Config, log *slog.Logger, appName str
 	if err != nil {
 		return nil, err
 	}
+	if keyring, err = keyring.WithLostKeys(cfg.EncryptionLostKeys); err != nil {
+		return nil, err
+	}
 	db, err := postgres.Open(ctx, cfg.DatabaseURL, postgres.Options{MaxConns: cfg.DatabaseMaxConns, ApplicationName: appName,
 		Tracer: otelpgx.NewTracer()})
 	if err != nil {
@@ -175,6 +180,10 @@ func Assemble(cfg *config.Config, log *slog.Logger, db *postgres.DB, keyring *se
 	if webhookBase == "" && cfg.PublicURL != nil {
 		webhookBase = strings.TrimRight(cfg.PublicURL.String(), "/") + "/webhooks/providers"
 	}
+	purge, err := retention.NewService(store.Retention(), c, RetentionPolicy(cfg), log)
+	if err != nil {
+		return nil, err
+	}
 	return &Core{
 		Config: cfg, Log: log, Clock: c, DB: db, Keyring: keyring, Store: store, Resolver: resolver,
 		Tenancy:       tenancy.NewService(store.Tenancy(), c).WithTokenSealer(keyring),
@@ -199,7 +208,21 @@ func Assemble(cfg *config.Config, log *slog.Logger, db *postgres.DB, keyring *se
 		Webhooks: webhooks.NewService(store.Webhooks(), webhookTransport{c: webhookClient}, webhookClient, c, webhooks.Config{
 			RequireHTTPS: cfg.Env == config.Production, Lease: webhookLease, Timeout: webhookRequestTimeout + 5*time.Second,
 			IsPermanent: func(err error) bool { return errors.Is(err, safehttp.ErrBlocked) }, Log: log}),
+		Retention: purge,
 	}, nil
+}
+
+// RetentionPolicy converte os prazos configurados (em dias) na política do
+// expurgo por idade; os limites de execução são os padrões do pacote.
+func RetentionPolicy(cfg *config.Config) retention.Policy {
+	r := cfg.Retention
+	p := retention.DefaultPolicy()
+	p.Inbox, p.DeadLetters, p.Webhooks = retention.Days(r.InboxDays), retention.Days(r.DeadLettersDays), retention.Days(r.WebhooksDays)
+	p.ProviderWebhookPayloads = retention.Days(r.ProviderWebhookPayloadsDays)
+	p.NotificationContent, p.Notifications = retention.Days(r.NotificationContentDays), retention.Days(r.NotificationsDays)
+	p.PortalLinks, p.UsageEvents, p.Invitations = retention.Days(r.PortalLinksDays), retention.Days(r.UsageEventsDays), retention.Days(r.InvitationsDays)
+	p.BatchSize = r.BatchSize
+	return p
 }
 
 // Close libera recursos.
@@ -213,6 +236,29 @@ func DBPoolStats(db *postgres.DB) func() telemetry.DBPoolStats {
 		return telemetry.DBPoolStats{Acquired: s.AcquiredConns(), Idle: s.IdleConns(), Constructing: s.ConstructingConns(), Max: s.MaxConns(),
 			Acquires: s.AcquireCount(), EmptyAcquires: s.EmptyAcquireCount(), CanceledAcquires: s.CanceledAcquireCount(),
 			EmptyAcquireWait: s.EmptyAcquireWaitTime()}
+	}
+}
+
+func reconciliationRunStats(s pgstore.ReconciliationRunStats) telemetry.ReconciliationRunStats {
+	return telemetry.ReconciliationRunStats{Queued: s.Queued, Executing: s.Executing, Stalled: s.Stalled,
+		OldestWaitingSeconds: s.OldestWaitingSeconds}
+}
+
+// ReconciliationRunStats adapta as contagens agregadas das execuções de
+// conciliação em andamento às métricas lidas a cada coleta do Prometheus
+// (telemetry.Metrics.ObserveReconciliationRuns). É usada pela API: ela
+// registra os pedidos de conciliação e, com as métricas, mostra a execução
+// que nenhum worker assumiu mesmo quando não há worker em execução. A falha
+// de leitura é registrada no log e devolvida (as séries mantêm o último
+// valor).
+func ReconciliationRunStats(store *pgstore.Store, log *slog.Logger) func(ctx context.Context) (telemetry.ReconciliationRunStats, error) {
+	return func(ctx context.Context) (telemetry.ReconciliationRunStats, error) {
+		s, err := store.ReconciliationRunStats(ctx)
+		if err != nil {
+			log.WarnContext(ctx, "leitura das execuções de conciliação em andamento falhou", slog.String("error", err.Error()))
+			return telemetry.ReconciliationRunStats{}, err
+		}
+		return reconciliationRunStats(s), nil
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -21,16 +22,28 @@ type memState struct {
 	contacts    map[uuid.UUID][]Contact
 	addresses   map[uuid.UUID]Address
 	obligations map[uuid.UUID]bool
-	audits      []audit.Entry
-	events      []outbox.Event
-	updates     int
-	lastFilter  ListFilter
-	page        Page
+	// pendingBilling marca clientes com faturamento ainda por acontecer;
+	// pendingAskedAt é o instante recebido na última consulta.
+	pendingBilling map[uuid.UUID]bool
+	pendingAskedAt time.Time
+	// Dados fora do cadastro removidos pela anonimização.
+	providerRefs    map[uuid.UUID][]ProviderRef
+	portalLinks     map[uuid.UUID]int
+	notifications   map[uuid.UUID]int
+	webhookPayloads map[uuid.UUID]int
+	erasedAt        time.Time
+	audits          []audit.Entry
+	events          []outbox.Event
+	updates         int
+	lastFilter      ListFilter
+	page            Page
 }
 
 func newMemState() *memState {
 	return &memState{customers: map[uuid.UUID]Customer{}, contacts: map[uuid.UUID][]Contact{},
-		addresses: map[uuid.UUID]Address{}, obligations: map[uuid.UUID]bool{}}
+		addresses: map[uuid.UUID]Address{}, obligations: map[uuid.UUID]bool{}, pendingBilling: map[uuid.UUID]bool{},
+		providerRefs: map[uuid.UUID][]ProviderRef{},
+		portalLinks:  map[uuid.UUID]int{}, notifications: map[uuid.UUID]int{}, webhookPayloads: map[uuid.UUID]int{}}
 }
 
 func (m *memState) clone() *memState {
@@ -42,6 +55,11 @@ func (m *memState) clone() *memState {
 	}
 	c.addresses = maps.Clone(m.addresses)
 	c.obligations = maps.Clone(m.obligations)
+	c.pendingBilling = maps.Clone(m.pendingBilling)
+	c.providerRefs = maps.Clone(m.providerRefs)
+	c.portalLinks = maps.Clone(m.portalLinks)
+	c.notifications = maps.Clone(m.notifications)
+	c.webhookPayloads = maps.Clone(m.webhookPayloads)
 	c.audits = slices.Clone(m.audits)
 	c.events = slices.Clone(m.events)
 	return &c
@@ -185,6 +203,67 @@ func (t *memTx) HasOpenObligations(_ context.Context, customerID uuid.UUID) (boo
 		return false, err
 	}
 	return t.st.obligations[customerID], nil
+}
+
+func (t *memTx) HasPendingBilling(_ context.Context, customerID uuid.UUID, now time.Time) (bool, error) {
+	if err := t.s.hit("HasPendingBilling"); err != nil {
+		return false, err
+	}
+	t.st.pendingAskedAt = now
+	return t.st.pendingBilling[customerID], nil
+}
+
+// touchedAt é o instante que o banco grava em updated_at a cada alteração
+// (gatilho customers_touch), diferente do relógio do caso de uso.
+var touchedAt = testNow.Add(90 * time.Second)
+
+func (t *memTx) Anonymize(_ context.Context, c Customer) (Customer, error) {
+	if err := t.s.hit("Anonymize"); err != nil {
+		return Customer{}, err
+	}
+	cur, ok := t.st.customers[c.ID]
+	if !ok {
+		return Customer{}, notFound()
+	}
+	if cur.Anonymized() {
+		return Customer{}, apperr.Conflict("customer_anonymized", "O cliente já foi anonimizado.")
+	}
+	c.Version, c.UpdatedAt = cur.Version+1, touchedAt
+	t.st.customers[c.ID] = c
+	return c, nil
+}
+
+// AnonymizationProviderRefs relê os identificadores da auditoria, como o
+// adaptador real.
+func (t *memTx) AnonymizationProviderRefs(_ context.Context, customerID uuid.UUID) ([]ProviderRef, error) {
+	if err := t.s.hit("AnonymizationProviderRefs"); err != nil {
+		return nil, err
+	}
+	for _, a := range slices.Backward(t.st.audits) {
+		if a.Action == "customer.anonymized" && a.ResourceID == customerID.String() {
+			refs, _ := a.Details[AuditProviderCustomers].([]ProviderRef)
+			return slices.Clone(refs), nil
+		}
+	}
+	return nil, nil
+}
+
+func (t *memTx) ErasePersonalData(_ context.Context, customerID uuid.UUID, at time.Time) (Erasure, error) {
+	if err := t.s.hit("ErasePersonalData"); err != nil {
+		return Erasure{}, err
+	}
+	_, hadAddress := t.st.addresses[customerID]
+	out := Erasure{Contacts: len(t.st.contacts[customerID]), Address: hadAddress, ProviderRefs: t.st.providerRefs[customerID],
+		PortalLinksRevoked: t.st.portalLinks[customerID], Notifications: t.st.notifications[customerID],
+		ProviderWebhookPayloads: t.st.webhookPayloads[customerID]}
+	delete(t.st.contacts, customerID)
+	delete(t.st.addresses, customerID)
+	delete(t.st.providerRefs, customerID)
+	delete(t.st.portalLinks, customerID)
+	delete(t.st.notifications, customerID)
+	delete(t.st.webhookPayloads, customerID)
+	t.st.erasedAt = at
+	return out, nil
 }
 
 func (t *memTx) Audit(_ context.Context, e audit.Entry) error {
