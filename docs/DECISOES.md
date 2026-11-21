@@ -1068,3 +1068,147 @@ toda rota com permissão não delegável; o teste de contrato confere o esquema 
 integração exercitam cada rota afetada com uma credencial real pela pilha Bearer (autoria nula e
 auditoria com ator `api_credential` e, nas dead letters, com a justificativa; ou 403 sem efeito) e
 as leituras que continuam disponíveis à credencial.
+
+## ADR-065 Alertmanager no perfil de observabilidade, com receptores resolvidos na partida
+**Status:** aceita.
+**Contexto:** os alertas do Prometheus (ADR-053) só apareciam na interface dele e no Grafana: sem
+encaminhamento, um alerta crítico dependia de alguém estar olhando. O encaminhamento precisa de
+endereços e credenciais (SMTP, webhook), que não podem ficar na imagem nem em arquivos do
+repositório, e o compose não usa bind mounts (ADR-020). O Alertmanager não expande variáveis de
+ambiente no arquivo de configuração.
+**Decisão:**
+1. Alertmanager `prom/alertmanager:v0.35.0` no perfil `observability`, em imagem própria
+   (`deploy/observability/alertmanager`), com o roteamento, os modelos das notificações e o script
+   de partida copiados por `COPY`. O Prometheus envia os alertas a `alertmanager:9093` e coleta as
+   métricas dele.
+2. O roteamento é fixo na imagem (`alertmanager.yml`): por severidade (`critical` para
+   `recorvia-critical`, com espera de 10 s e repetição a cada hora; `warning` e alertas sem
+   severidade conhecida para `recorvia-warning`, com 30 s e 12 horas), agrupamento por nome do
+   alerta, área e severidade, e uma regra de inibição em que o crítico inibe o aviso de mesmo nome e
+   mesmos rótulos de agregação. A lista `equal` reúne os rótulos usados nas agregações das regras
+   (rótulos ausentes nos dois alertas contam como iguais), e um teste falha se uma regra agregar
+   por um rótulo fora dela: comparar só o nome faria o crítico de um consumidor silenciar o aviso
+   de outro.
+3. Os receptores (e-mail e webhook genérico) e as definições de SMTP são gerados na partida do
+   container pelo `entrypoint.sh`, a partir das variáveis `ALERTMANAGER_*`, e acrescentados ao
+   roteamento. Senha do SMTP, URL e token do webhook são gravados em arquivos de acesso restrito e
+   referenciados pela configuração (`smtp_auth_password_file`, `url_file`, `credentials_file`): não
+   aparecem na configuração exposta pela API nem nos logs. O script valida os valores (sem quebras
+   de linha, que alterariam o YAML; sem ações de modelo nos destinatários), recusa combinações
+   incoerentes e executa `amtool check-config` antes de iniciar; sem receptores, o Alertmanager
+   inicia e registra o aviso. No compose local, os e-mails vão para o Mailpit. Entre as
+   combinações recusadas estão usuário do SMTP sem senha (a configuração seria válida e todo
+   envio falharia) e senha com `ALERTMANAGER_SMTP_REQUIRE_TLS=false`: sem TLS exigido, o
+   Alertmanager não negocia STARTTLS e a senha trafegaria em claro. Sem TLS, só é aceito o envio
+   sem autenticação, que é o caso do Mailpit.
+4. Link do runbook em cada notificação: as regras mantêm a anotação `runbook` (caminho no
+   repositório, conferido contra as seções existentes) e a imagem do Prometheus acrescenta, na
+   construção, a anotação `runbook_url` com o endereço completo (`RUNBOOK_BASE_URL`). O e-mail usa
+   modelos próprios em português com o link, e o webhook, que mantém o formato padrão do
+   Alertmanager (versão 4) esperado pelas integrações existentes, recebe a anotação na carga.
+5. `RecorviaWatchdog`, um alerta sempre ativo com rota própria (e-mail, repetição diária), prova o
+   caminho inteiro. O `stack-check` da CI confere a regra disparando, o alerta no Alertmanager e o
+   e-mail no Mailpit com o link do runbook; os mesmos passos são exercitados com Testcontainers
+   (`TestAlertPipelineFromPrometheusRuleToEmail`), assim como o roteamento, a inibição e o webhook
+   (`TestAlertmanagerRoutesBySeverityInhibitsAndNotifiesWebhook`).
+6. No compose local, o estado do Alertmanager (registro de notificações e silêncios, no diretório
+   de `--storage.path`) fica em `tmpfs` e dura o mesmo que a caixa do Mailpit, que não tem volume.
+   Num volume mantido pelo `make down`, o registro indicaria o grupo do `RecorviaWatchdog` como já
+   notificado e, na subida seguinte, o e-mail só sairia depois do intervalo de repetição (24
+   horas), com o Mailpit vazio e o `make obs-stack-check` reprovado. O `tmpfs` é explícito porque
+   a imagem declara `VOLUME` para o diretório e o compose reaproveita volumes anônimos ao recriar
+   o container.
+**Alternativas descartadas:** receptores no arquivo da imagem (segredo na imagem e um build por
+ambiente); bind mount de um arquivo de configuração (ADR-020); endereço completo do runbook
+escrito em cada regra (prende as regras a um endereço e quebraria a conferência das seções pelo
+caminho); carga personalizada do webhook para incluir o link (o próprio Alertmanager a trata como
+opção avançada sem suporte, e a carga deixaria de ser a que as integrações esperam); alerta de
+teste injetado pela API do Alertmanager no `stack-check` (não provaria a avaliação da regra nem o
+envio pelo Prometheus); volume também para o Mailpit, para igualar as durações pelo lado
+persistente (o `stack-check` aceitaria um e-mail de uma execução anterior e a contagem de
+notificações do Alertmanager continuaria zerada depois da partida); variável de exceção para
+autenticar no SMTP sem TLS (nenhum ambiente previsto precisa dela, e a senha ficaria exposta na
+rede).
+**Consequências:** no compose local, recriar o container do Alertmanager repete as notificações
+dos alertas ativos e descarta os silêncios; quem implanta a imagem com `/alertmanager` persistente
+mantém os silêncios e só recebe de novo um alerta já notificado depois do intervalo de repetição.
+Autenticação no SMTP exige TLS. Alterar um receptor exige recriar o container do Alertmanager;
+alterar o roteamento ou o endereço dos runbooks exige reconstruir a imagem. O Alertmanager roda em
+instância única. A notificação diária do `RecorviaWatchdog` não substitui um serviço externo que
+alerte pela ausência do sinal. O `make up-obs` passa a publicar a porta `ALERTMANAGER_PORT` (9093)
+em `127.0.0.1`.
+
+## ADR-066 Métricas globais de fila por funções agregadas com o relógio da aplicação
+**Status:** aceita. Substitui a consequência da ADR-053 que deixava as dead letters abertas sem
+métrica global.
+**Contexto:** as dead letters abertas, as notificações e as entregas de webhooks ficam em tabelas
+com RLS por tenant: o worker não consegue contá-las sem percorrer os tenants, e os contadores
+existentes só mostram o que aconteceu desde a partida de cada processo. Uma dead letter aberta há
+dias, uma fila de e-mails parada sem nenhuma falha de envio ou entregas de webhooks devidas e não
+tentadas não tinham série que as mostrasse.
+**Decisão:**
+1. Migration 00015 com três funções `SECURITY DEFINER` no padrão das `app_*_stats` existentes
+   (`search_path` fixo, `EXECUTE` revogado de `PUBLIC` e concedido ao papel da aplicação), que
+   devolvem apenas agregados, sem identificar tenants: `app_dead_letter_stats` (por consumidor,
+   inclusive os registros sem tenant), `app_notification_backlog_stats` (por situação) e
+   `app_webhook_delivery_backlog_stats` (por situação). Todas recebem o instante de referência, que
+   o worker lê do relógio injetado: a idade não depende do relógio do banco e os testes usam um
+   relógio controlado.
+2. Séries, coletadas pela tarefa `metrics.collect` e com rótulos de conjunto fechado:
+   `recorvia_dead_letters_open` e `recorvia_dead_letters_oldest_open_seconds` por `consumer` (os
+   consumidores do worker, com zero quando não há, e `other` para nomes que só existem no banco);
+   `recorvia_notifications_backlog` e `recorvia_notifications_backlog_oldest_seconds` por `state`
+   (`due`, `sending`, `failed`); `recorvia_webhook_deliveries_backlog` e
+   `recorvia_webhook_deliveries_backlog_oldest_due_seconds` por `state` (`pending`, `retrying`).
+3. A idade mede o que indica falha da plataforma, e não a espera prevista. Nas notificações, `due`
+   conta somente as agendadas com o horário de envio vencido, e a idade é o atraso em relação a
+   esse horário (lembretes futuros e novas tentativas em espera ficam de fora); `sending` mede o
+   tempo desde a reivindicação. Nas entregas de webhooks, o total inclui as que esperam o backoff,
+   mas o atraso considera apenas as com o horário da tentativa vencido, a partir desse horário: a
+   idade desde a criação cresceria por horas com o destino de um único tenant fora do ar, e um
+   reenvio manual de uma entrega antiga pareceria atraso.
+4. `failed` é uma situação final das notificações; o medidor conta as falhas definitivas das
+   últimas 24 horas, janela que mantém a consulta proporcional ao trabalho recente e dá um valor
+   que volta a zero.
+5. Índices parciais (`dead_letters_open_idx`, `notifications_failed_idx`) mantêm as consultas,
+   executadas a cada 15 s, proporcionais ao que está em aberto; as demais usam os índices parciais
+   de trabalho devido já existentes.
+**Alternativas descartadas:** contar pelos tenants com o contexto de cada um, como em
+`recorvia_payment_operations_exhausted` (uma consulta por tenant a cada 15 s, e os registros sem
+tenant ficariam invisíveis); usar o relógio do banco, como `app_outbox_stats` (testes dependentes
+do relógio real); manter totais em tabela própria atualizada por gatilhos (escrita extra em toda
+transição e mais um ponto de divergência).
+**Consequências:** como as demais contagens globais, os medidores são gravados pela instância do
+worker que executou a tarefa e os alertas usam `max`. A função das dead letters conta registros de
+todos os tenants e os sem tenant, mas não permite ao papel da aplicação lê-los: o detalhe continua
+restrito à API de cada tenant e à operação. A migration cria dois índices sem `CONCURRENTLY` (as
+migrations rodam em transação): em bases grandes, a criação bloqueia escritas nas duas tabelas
+durante a aplicação.
+
+## ADR-067 Alertas de fila com duas severidades e alertas do próprio caminho de alertas
+**Status:** aceita.
+**Contexto:** com as métricas da ADR-066 e o encaminhamento da ADR-065, faltava decidir o que
+alerta e com que urgência, sem notificar duas vezes o mesmo problema.
+**Decisão:**
+1. `RecorviaDeadLettersOpen`, `RecorviaNotificationsBacklog` e `RecorviaWebhookDeliveriesBacklog`
+   têm, cada um, duas regras com o mesmo nome e os mesmos rótulos, uma de aviso e uma crítica
+   (dead letters: abertas por 30 minutos e mais antiga aberta há mais de 24 horas; filas: atraso
+   acima de 15 minutos e acima de uma hora). A condição crítica implica a de aviso, e a inibição da
+   ADR-065 faz com que só a crítica seja notificada enquanto durar.
+2. Os alertas de fila usam a idade, não o total: envios e entregas rodam a cada 15 s e 10 s, e
+   minutos de atraso indicam tarefa parada ou volume acima da vazão em qualquer escala; um total
+   depende da carteira de cada instalação. `failed` (notificações) e o total em `retrying`
+   (webhooks) têm só painel: a falha definitiva já alerta por `RecorviaNotificationsFailed` e a
+   espera do backoff é o comportamento previsto.
+3. `RecorviaDeadLettersOpen` complementa `RecorviaMessagesDeadLettered` (contador por processo, que
+   avisa a entrada na DLQ): o medidor vem do banco, cobre todos os tenants, permanece até a triagem
+   e não zera quando o worker reinicia.
+4. O caminho de alertas tem alertas próprios: `RecorviaAlertDeliveryFailing` (Prometheus sem
+   conseguir enviar ao Alertmanager), `RecorviaAlertNotificationsFailing` (falha de uma integração
+   do Alertmanager) e a coleta do Alertmanager em `RecorviaTargetDown`, todos críticos, além de
+   `RecorviaWatchdog` com a severidade `info`, reservada a ele.
+**Consequências:** os limites são pontos de partida a calibrar com volume real. Com o caminho de
+alertas interrompido, os alertas dele só aparecem no Prometheus e no Grafana (ou pela integração
+que continuar funcionando); a ausência da notificação do `RecorviaWatchdog` é o sinal para quem
+recebe. Runbooks: `docs/operacao/runbooks/alertas.md`, `filas-e-dlq.md` (dead letters abertas) e
+`notificacoes-e-webhooks.md` (filas acumuladas).
