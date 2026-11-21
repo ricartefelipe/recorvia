@@ -48,6 +48,8 @@ const (
 	PermCustomersRead  Permission = "customers.read"
 	PermCustomersWrite Permission = "customers.write"
 	PermPortalLinks    Permission = "customers.portal_links"
+	// PermCustomersAnonymize permite anonimizar um cliente (irreversível).
+	PermCustomersAnonymize Permission = "customers.anonymize"
 
 	PermCatalogRead  Permission = "catalog.read"
 	PermCatalogWrite Permission = "catalog.write"
@@ -103,7 +105,7 @@ var rolePermissions = map[Role][]Permission{
 	RoleOwner: nil, // todas
 	RoleAdmin: append(slices.Clone(readAll),
 		PermOrganizationUpdate, PermMembersManage,
-		PermCustomersWrite, PermPortalLinks, PermCatalogWrite, PermSubscriptionsWrite, PermSubscriptionsCancel,
+		PermCustomersWrite, PermPortalLinks, PermCustomersAnonymize, PermCatalogWrite, PermSubscriptionsWrite, PermSubscriptionsCancel,
 		PermUsageWrite, PermInvoicesWrite, PermInvoicesVoid, PermInvoicesExport, PermBillingRun, PermCreditsWrite,
 		PermPaymentsCharge, PermPaymentsRefund, PermPaymentsManual,
 		PermReconciliationRun, PermReconciliationResolve, PermCollectionsWrite,
@@ -124,7 +126,7 @@ var rolePermissions = map[Role][]Permission{
 func AllPermissions() []Permission {
 	all := append(slices.Clone(readAll),
 		PermOrganizationUpdate, PermMembersManage, PermPlatformManage,
-		PermCustomersWrite, PermPortalLinks, PermCatalogWrite, PermSubscriptionsWrite, PermSubscriptionsCancel,
+		PermCustomersWrite, PermPortalLinks, PermCustomersAnonymize, PermCatalogWrite, PermSubscriptionsWrite, PermSubscriptionsCancel,
 		PermUsageWrite, PermInvoicesWrite, PermInvoicesVoid, PermInvoicesExport, PermBillingRun, PermCreditsWrite,
 		PermPaymentsCharge, PermPaymentsRefund, PermPaymentsManual,
 		PermReconciliationRun, PermReconciliationResolve, PermCollectionsWrite,

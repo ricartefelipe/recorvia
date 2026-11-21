@@ -21,6 +21,7 @@ const (
 	msgPropertiesNUL   = "properties não pode conter o caractere NUL (\\u0000)."
 	msgBilledNoMetric  = "Período já faturado sem consumo desta métrica."
 	msgInvalidTextTail = " contém caractere inválido (NUL ou UTF-8 inválido)."
+	msgAnonymized      = "Cliente anonimizado: consumo não é mais aceito."
 )
 
 // --- Ingest: external_id repetido no mesmo lote ---
@@ -90,6 +91,7 @@ func TestIngestRetransmissionIgnoresLaterStateChanges(t *testing.T) {
 			ended := occurredAt.Add(-time.Hour)
 			e.editSub(func(s *subscriptions.Subscription) { s.Status, s.EndedAt = subscriptions.Canceled, &ended })
 		}},
+		{"cliente anonimizado", func(e *env) { e.st().anonymized[e.sub.CustomerID] = true }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -369,4 +371,81 @@ func TestCurrentUsageReadsSubscriptionWithoutLock(t *testing.T) {
 	if e.store.calls["Subscription"] != 1 || e.store.calls["SubscriptionForShare"] != 0 {
 		t.Fatalf("a consulta não deve bloquear a assinatura: %v", e.store.calls)
 	}
+}
+
+// --- Ingest: cliente anonimizado ---
+
+// Depois da anonimização nenhum consumo novo é gravado para o cliente: nem no
+// período aberto, nem como consumo atrasado dentro da tolerância da métrica
+// (que geraria correção e fatura para um cliente anonimizado).
+func TestIngestRejectsUsageForAnonymizedCustomer(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*env, *EventInput)
+		want  Outcome
+	}{
+		{"período aberto", nil, OutcomeAccepted},
+		{"consumo atrasado dentro da tolerância, assinatura cancelada", func(e *env, in *EventInput) {
+			ended := p2Start.Add(-time.Hour)
+			e.editSub(func(s *subscriptions.Subscription) { s.Status, s.EndedAt = subscriptions.Canceled, &ended })
+			e.closePeriod(p1Start)
+			e.clock.Set(ended.Add(24 * time.Hour))
+			in.OccurredAt = lateAt
+		}, OutcomeLate},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Sem a anonimização o evento é aceito: a rejeição vem dela.
+			control := newEnv()
+			in := control.input()
+			if tc.setup != nil {
+				tc.setup(control, &in)
+			}
+			assertOutcome(t, control.ingest(t, in)[0], tc.want)
+
+			e := newEnv()
+			in = e.input()
+			in.Properties = map[string]any{"origem": "integração"}
+			if tc.setup != nil {
+				tc.setup(e, &in)
+			}
+			e.st().anonymized[e.sub.CustomerID] = true
+			r := e.ingest(t, in)[0]
+			assertOutcome(t, r, OutcomeRejected)
+			if r.Error != msgAnonymized {
+				t.Fatalf("mensagem = %q, esperava %q", r.Error, msgAnonymized)
+			}
+			if len(e.st().events) != 0 || e.store.calls["InsertEvent"] != 0 {
+				t.Fatalf("consumo gravado para cliente anonimizado: %d eventos", len(e.st().events))
+			}
+		})
+	}
+	t.Run("não afeta outro cliente do lote e lê cada cliente uma vez", func(t *testing.T) {
+		e := newEnv()
+		other := e.sub
+		other.ID, other.CustomerID = uuid.New(), uuid.New()
+		e.st().subs[other.ID] = other
+		e.st().anonymized[e.sub.CustomerID] = true
+		batch := make([]EventInput, 0, 4)
+		for i, subID := range []uuid.UUID{e.sub.ID, other.ID, e.sub.ID, other.ID} {
+			in := e.input()
+			in.ExternalID, in.SubscriptionID = fmt.Sprintf("evt-%d", i), subID
+			batch = append(batch, in)
+		}
+		res := e.ingest(t, batch...)
+		for i, want := range []Outcome{OutcomeRejected, OutcomeAccepted, OutcomeRejected, OutcomeAccepted} {
+			assertOutcome(t, res[i], want)
+		}
+		if res[0].Error != msgAnonymized || res[2].Error != msgAnonymized {
+			t.Fatalf("mensagens: %q e %q", res[0].Error, res[2].Error)
+		}
+		for _, ev := range e.st().events {
+			if ev.CustomerID == e.sub.CustomerID {
+				t.Fatalf("evento gravado para o cliente anonimizado: %+v", ev)
+			}
+		}
+		if n := e.store.calls["CustomerAnonymized"]; n != 2 {
+			t.Fatalf("leituras do cliente = %d, esperava uma por cliente (2)", n)
+		}
+	})
 }

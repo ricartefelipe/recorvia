@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -45,9 +47,89 @@ type Customer struct {
 	ExternalID       string
 	Status           Status
 	PaymentTermsDays *int
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	Version          int
+	// AnonymizedAt indica que os dados pessoais foram substituídos de forma
+	// irreversível (ver Anonymize).
+	AnonymizedAt *time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	Version      int
+}
+
+// AnonymizedName é o nome gravado no lugar do nome do cliente anonimizado.
+const AnonymizedName = "Cliente anonimizado"
+
+// anonymizedDocument é o documento neutro gravado no lugar do CPF ou CNPJ: a
+// coluna é obrigatória e os zeros não identificam ninguém (não passam na
+// validação de dígitos verificadores).
+func anonymizedDocument(k brdoc.Kind) string {
+	if k == brdoc.CPF {
+		return strings.Repeat("0", 11)
+	}
+	return strings.Repeat("0", 14)
+}
+
+// Anonymized informa se o cliente foi anonimizado.
+func (c Customer) Anonymized() bool { return c.AnonymizedAt != nil }
+
+// Anonymize substitui os dados pessoais do cadastro por valores neutros,
+// arquiva o cliente e registra o instante. O tipo (pessoa física ou jurídica)
+// e o prazo de pagamento, que não identificam ninguém, são mantidos. Devolve
+// os nomes dos campos que tinham valor (para o histórico, sem os valores).
+func (c *Customer) Anonymize(now time.Time) []string {
+	fields := []string{"name", "document_number"}
+	clear := func(name string, v *string) {
+		if *v != "" {
+			fields = append(fields, name)
+			*v = ""
+		}
+	}
+	c.Name = AnonymizedName
+	c.DocumentNumber = anonymizedDocument(c.DocumentType)
+	clear("legal_name", &c.LegalName)
+	clear("email", &c.Email)
+	clear("phone", &c.Phone)
+	clear("external_id", &c.ExternalID)
+	c.Status = Archived
+	c.AnonymizedAt = &now
+	return fields
+}
+
+// Limites da justificativa da anonimização.
+const (
+	MinAnonymizationReason = 10
+	MaxAnonymizationReason = 500
+)
+
+var nonDigits = regexp.MustCompile(`[^0-9A-Za-z]`)
+
+// ValidateAnonymizationReason normaliza a justificativa e recusa texto que
+// contenha dados pessoais do próprio cliente: a justificativa fica na trilha
+// de auditoria, que é imutável, e deve trazer apenas a referência do pedido
+// (protocolo, chamado) e o motivo.
+func ValidateAnonymizationReason(reason string, c Customer) (string, error) {
+	reason = strings.Join(strings.Fields(reason), " ")
+	invalid := func(msg string) error {
+		return apperr.Invalid("invalid_anonymization", "Justificativa da anonimização inválida.", apperr.FieldError{Field: "reason", Message: msg})
+	}
+	if n := len([]rune(reason)); n < MinAnonymizationReason || n > MaxAnonymizationReason {
+		return "", invalid("Informe a justificativa com 10 a 500 caracteres.")
+	}
+	// Caracteres de controle (inclusive NUL, que o JSONB da auditoria não
+	// aceita) e texto que não é UTF-8 válido são recusados.
+	if !utf8.ValidString(reason) || strings.ContainsFunc(reason, unicode.IsControl) {
+		return "", invalid("A justificativa contém caracteres inválidos.")
+	}
+	lower := strings.ToLower(reason)
+	compact := strings.ToLower(nonDigits.ReplaceAllString(reason, ""))
+	leaks := (len([]rune(c.Name)) >= 5 && strings.Contains(lower, strings.ToLower(c.Name))) ||
+		(len([]rune(c.LegalName)) >= 5 && strings.Contains(lower, strings.ToLower(c.LegalName))) ||
+		(c.Email != "" && strings.Contains(lower, strings.ToLower(c.Email))) ||
+		(c.DocumentNumber != "" && strings.Contains(compact, strings.ToLower(c.DocumentNumber))) ||
+		(len(c.Phone) >= 8 && strings.Contains(compact, strings.TrimPrefix(c.Phone, "+")))
+	if leaks {
+		return "", invalid("A justificativa não pode conter dados pessoais do cliente (nome, documento, e-mail ou telefone): informe o protocolo do pedido e o motivo.")
+	}
+	return reason, nil
 }
 
 // Contact é um contato do cliente.

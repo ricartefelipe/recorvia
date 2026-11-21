@@ -203,6 +203,7 @@ func TestInitSeriesStartAtZero(t *testing.T) {
 	m.InitChargeFailures([]string{"simulator"})
 	m.InitProviderWebhooks([]string{"simulator", "asaas"})
 	m.InitDispatchResults()
+	m.InitRetention()
 	got := gather(t, m)
 	for _, outcome := range ConsumerOutcomes {
 		if v := value(t, got["recorvia_consumer_messages_total"], map[string]string{"consumer": "payments.webhooks", "outcome": outcome}); v != 0 {
@@ -251,6 +252,15 @@ func TestInitSeriesStartAtZero(t *testing.T) {
 	for _, a := range CollectionActionKinds {
 		if v := value(t, got["recorvia_collection_actions_total"], map[string]string{"action": a}); v != 0 {
 			t.Errorf("régua %s: %v", a, v)
+		}
+	}
+	// Expurgo por retenção: removidos, falhas e execuções incompletas por tipo.
+	for _, name := range []string{"recorvia_retention_purged_total", "recorvia_retention_purge_failures_total",
+		"recorvia_retention_purge_incomplete_total"} {
+		for _, k := range RetentionKinds {
+			if v := value(t, got[name], map[string]string{"kind": k}); v != 0 {
+				t.Errorf("%s{kind=%q}: %v", name, k, v)
+			}
 		}
 	}
 }
@@ -447,7 +457,8 @@ func TestAlertRulesAndDashboardsUseDeclaredMetrics(t *testing.T) {
 		"recorvia_reconciliation_open_discrepancies", "recorvia_db_pool_connections", "recorvia_db_server_connections",
 		"recorvia_consumer_in_flight", "recorvia_job_interval_seconds", "recorvia_job_last_success_timestamp_seconds",
 		"recorvia_notifications_dispatched_total", "recorvia_webhook_deliveries_total", "recorvia_collection_actions_total",
-		"recorvia_provider_webhooks_total", "recorvia_dependency_up"} {
+		"recorvia_provider_webhooks_total", "recorvia_dependency_up", "recorvia_retention_purged_total",
+		"recorvia_retention_purge_incomplete_total"} {
 		if !used[required] {
 			t.Errorf("métrica %s sem alerta ou painel", required)
 		}
@@ -485,18 +496,21 @@ func TestMetricsCatalogDocumentsEveryMetricAndLabelValue(t *testing.T) {
 		}
 	}
 	values := map[string][]string{
-		"recorvia_consumer_messages_total":        ConsumerOutcomes,
-		"recorvia_charge_failures_total":          ChargeFailureKinds,
-		"recorvia_provider_webhooks_total":        append(slices.Clone(ProviderWebhookOutcomes), OtherProvider),
-		"recorvia_notifications_dispatched_total": NotificationOutcomes,
-		"recorvia_webhook_deliveries_total":       WebhookDeliveryOutcomes,
-		"recorvia_collection_actions_total":       CollectionActionKinds,
-		"recorvia_payment_operations":             {"pending", "in_flight", "unknown"},
-		"recorvia_payment_operations_exhausted":   {"pending", "in_flight", "unknown"},
-		"recorvia_http_requests_total":            {"_OTHER"},
-		"recorvia_dependency_up":                  {"postgres", "redis", "rabbitmq"},
-		"recorvia_refunds_total":                  {"succeeded", "failed"},
-		"recorvia_refunds_in_progress":            {"requested", "unknown"},
+		"recorvia_consumer_messages_total":          ConsumerOutcomes,
+		"recorvia_charge_failures_total":            ChargeFailureKinds,
+		"recorvia_provider_webhooks_total":          append(slices.Clone(ProviderWebhookOutcomes), OtherProvider),
+		"recorvia_notifications_dispatched_total":   NotificationOutcomes,
+		"recorvia_webhook_deliveries_total":         WebhookDeliveryOutcomes,
+		"recorvia_collection_actions_total":         CollectionActionKinds,
+		"recorvia_payment_operations":               {"pending", "in_flight", "unknown"},
+		"recorvia_payment_operations_exhausted":     {"pending", "in_flight", "unknown"},
+		"recorvia_http_requests_total":              {"_OTHER"},
+		"recorvia_dependency_up":                    {"postgres", "redis", "rabbitmq"},
+		"recorvia_refunds_total":                    {"succeeded", "failed"},
+		"recorvia_refunds_in_progress":              {"requested", "unknown"},
+		"recorvia_retention_purged_total":           RetentionKinds,
+		"recorvia_retention_purge_failures_total":   RetentionKinds,
+		"recorvia_retention_purge_incomplete_total": RetentionKinds,
 	}
 	for name, want := range values {
 		for _, v := range want {

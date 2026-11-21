@@ -173,7 +173,8 @@ func TestCredentialStateIssuerAndPrefix(t *testing.T) {
 }
 
 func TestDelegationRules(t *testing.T) {
-	for _, p := range []tenancy.Permission{tenancy.PermMembersManage, tenancy.PermPlatformManage, tenancy.PermAPICredentials} {
+	for _, p := range []tenancy.Permission{tenancy.PermMembersManage, tenancy.PermPlatformManage, tenancy.PermAPICredentials,
+		tenancy.PermCustomersAnonymize} {
 		if Delegable(p) || !slices.Contains(NonDelegable(), p) {
 			t.Fatalf("%s não deveria ser delegável", p)
 		}

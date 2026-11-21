@@ -121,6 +121,12 @@ func TestRoleMatrix(t *testing.T) {
 		{RoleOperator, PermMembersManage, false},
 		{RoleOperator, PermLedgerRead, false},
 		{RoleOperator, PermAuditRead, false},
+		// a anonimização de clientes (irreversível) fica com proprietário e administrador.
+		{RoleOwner, PermCustomersAnonymize, true},
+		{RoleAdmin, PermCustomersAnonymize, true},
+		{RoleFinance, PermCustomersAnonymize, false},
+		{RoleOperator, PermCustomersAnonymize, false},
+		{RoleAuditor, PermCustomersAnonymize, false},
 		// auditor apenas lê.
 		{RoleAuditor, PermCustomersWrite, false},
 		{RoleAuditor, PermOperationsReprocess, false},

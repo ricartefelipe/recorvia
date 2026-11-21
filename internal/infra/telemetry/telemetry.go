@@ -70,6 +70,16 @@ type Metrics struct {
 	// (reminder_scheduled, invoice_overdue, subscription_suspended,
 	// subscription_reactivated).
 	CollectionActions *prometheus.CounterVec
+	// RetentionPurged conta os registros removidos (ou esvaziados) pelo
+	// expurgo por idade, por tipo de dado (RetentionKinds).
+	RetentionPurged *prometheus.CounterVec
+	// RetentionPurgeFailures conta as execuções em que o expurgo de um tipo
+	// falhou em algum tenant ou na descoberta.
+	RetentionPurgeFailures *prometheus.CounterVec
+	// RetentionPurgeIncomplete conta as execuções interrompidas pelo
+	// orçamento de tempo ou pelo limite de lotes com registros vencidos
+	// restantes do tipo.
+	RetentionPurgeIncomplete *prometheus.CounterVec
 }
 
 // NewMetrics registra os coletores.
@@ -132,12 +142,22 @@ func NewMetrics(service string) *Metrics {
 		CollectionActions: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "recorvia_collection_actions_total",
 			Help: "Ações da régua de cobrança (reminder_scheduled, invoice_overdue, subscription_suspended, subscription_reactivated).", ConstLabels: cl},
 			[]string{"action"}),
+		RetentionPurged: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "recorvia_retention_purged_total",
+			Help: "Registros removidos ou esvaziados pelo expurgo por idade, por tipo de dado.", ConstLabels: cl},
+			[]string{"kind"}),
+		RetentionPurgeFailures: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "recorvia_retention_purge_failures_total",
+			Help: "Execuções do expurgo por idade com falha, por tipo de dado.", ConstLabels: cl},
+			[]string{"kind"}),
+		RetentionPurgeIncomplete: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "recorvia_retention_purge_incomplete_total",
+			Help: "Execuções do expurgo por idade interrompidas com registros vencidos restantes, por tipo de dado.", ConstLabels: cl},
+			[]string{"kind"}),
 	}
 	reg.MustRegister(m.HTTPRequests, m.HTTPDuration, m.ConsumerProcessed, m.ConsumerDuration, m.ConsumerInFlight, m.ConsumerConcurrency,
 		m.OutboxPublished, m.OutboxPublishFailed, m.OutboxPending, m.OutboxOldestSeconds, m.JobRuns, m.JobDuration, m.JobLastSuccess,
 		m.JobInterval, m.ChargeFailures, m.PaymentOperations, m.PaymentOperationsExhausted, m.Discrepancies, m.Refunds, m.RefundsInProgress,
 		m.WebhooksReceived, m.InvoicesIssued, m.DependencyUp, m.DBServerConnections, m.DBServerMaxConns,
-		m.NotificationsDispatched, m.WebhookDeliveries, m.CollectionActions)
+		m.NotificationsDispatched, m.WebhookDeliveries, m.CollectionActions,
+		m.RetentionPurged, m.RetentionPurgeFailures, m.RetentionPurgeIncomplete)
 	return m
 }
 
@@ -400,6 +420,22 @@ func (m *Metrics) InitDispatchResults() {
 	}
 	for _, a := range CollectionActionKinds {
 		m.CollectionActions.WithLabelValues(a)
+	}
+}
+
+// RetentionKinds são os tipos de dado do expurgo por idade (rótulo kind de
+// recorvia_retention_purged_total, recorvia_retention_purge_failures_total e
+// recorvia_retention_purge_incomplete_total), os mesmos de
+// internal/retention.
+var RetentionKinds = []string{"inbox_messages", "dead_letters", "webhook_deliveries", "webhook_events", "webhook_endpoint_secrets",
+	"provider_webhook_payloads", "notification_contents", "notifications", "portal_links", "usage_events", "invitations"}
+
+// InitRetention cria com zero as séries do expurgo por idade.
+func (m *Metrics) InitRetention() {
+	for _, k := range RetentionKinds {
+		m.RetentionPurged.WithLabelValues(k)
+		m.RetentionPurgeFailures.WithLabelValues(k)
+		m.RetentionPurgeIncomplete.WithLabelValues(k)
 	}
 }
 
