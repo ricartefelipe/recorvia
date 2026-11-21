@@ -1720,3 +1720,127 @@ há estorno da baixa nem operação para o recebimento de valor já baixado como
 `invoice.bad_debt_recovered` das faturas), que exige decisão do financeiro sobre o lançamento compensatório;
 o recebimento da baixa entra direto no disponível liquidado, sem conciliação com extrato bancário; disputas
 perdidas antes da ADR-070 continuam sem valor a recuperar (o crédito permaneceu com o cliente).
+
+## ADR-077 Limites do plano da plataforma serializados na assinatura e implantação assistida atendida pela equipe
+**Status:** aceita (RF-16).
+**Contexto:** uma auditoria de RF-16 encontrou três furos nos limites do plano da plataforma e um serviço
+adicional que nunca era cobrado. (1) A troca de plano contava só os membros ativos e o aceite de convite não
+conferia o limite: descer de plano com convites pendentes e aceitá-los depois passava do limite de usuários.
+(2) Assinaturas suspensas não contam como contratos ativos e a reativação não conferia o limite: suspender,
+criar novas e reativar passava do limite de contratos. (3) Convites e criações de assinatura liam plano e
+contagem sem bloqueio, em READ COMMITTED: requisições simultâneas contavam o mesmo consumo e passavam do
+limite. Por fim, o pedido de implantação assistida (`POST /api/v1/platform/addon-orders`) ficava para sempre
+`requested`: ninguém o atendia, e o demonstrativo só somava pedidos `completed`.
+**Decisão:**
+- **Serialização.** Toda checagem de limite lê o plano com `LockPlatformPlan`, que bloqueia (`FOR UPDATE`) a
+  linha de `tenant_platform_subscriptions` do tenant até o fim da transação: convite, aceite de convite,
+  criação e reativação de assinatura. A troca de plano e o fechamento do demonstrativo já liam a mesma linha
+  com bloqueio. Assim, quem conta o consumo espera quem está gravando, como as credenciais de API (que
+  bloqueiam a linha do tenant). A ordem de bloqueio é sempre a assinatura da plataforma antes dos demais
+  registros da operação, exceto na reativação, que bloqueia a assinatura do cliente (passo comum das
+  mutações) e depois a da plataforma; nenhum caminho bloqueia na ordem inversa.
+- **Usuários.** Convites pendentes (não aceitos, não revogados e não expirados) reservam vagas:
+  `Usage.PendingInvitations` entra no convite (`CheckUserLimit`), na troca de plano (`CanChangeTo`, código
+  `platform_downgrade_users`) e na visão geral (`usage.pending_invitations`). O aceite confere de novo, só com
+  os membros ativos (`CheckJoinLimit`, 403 `platform_user_limit`): a vaga reservada pelo próprio convite deixa
+  de ser pendente, e o plano pode ter mudado por outro caminho depois do convite. Membro removido que volta
+  por convite também ocupa vaga.
+- **Contratos.** Suspensas continuam fora da contagem de contratos ativos (o plano limita contratos em
+  vigor); a reativação manual (`subscriptions.Reactivate`) ocupa uma vaga e confere o limite, como a criação.
+  A reativação automática pela régua de cobrança (pagamento regularizado, ADR-041) não é bloqueada: só
+  acontece para suspensão da própria régua, que o tenant não provoca à vontade, e bloqueá-la manteria
+  suspenso um cliente que pagou.
+- **Atendimento pela equipe da plataforma.** Rotas `PlatformStaff` (como `GET /api/v1/admin/tenants`):
+  `GET /api/v1/admin/addon-orders` (paginada por cursor; em aberto por padrão, do mais antigo para o mais
+  recente; agendados pela data do atendimento; concluídos e cancelados do encerramento mais recente para o
+  mais antigo; o cursor vale só para o mesmo filtro) e
+  `POST /api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/schedule|complete|cancel`. Agendar exige instante
+  futuro em até um ano (reagendar é permitido); concluir vale com ou sem agendamento; cancelar exige
+  justificativa (3 a 500 caracteres). Concluído e cancelado são finais. Cada transição ocorre na transação do
+  tenant do pedido (o tenant do caminho delimita o pedido: outro tenant responde 404) e grava auditoria na
+  trilha do tenant (`platform.addon_scheduled`, `platform.addon_completed`, `platform.addon_canceled`, ator
+  usuário com `platform_staff: true`). A lista usa as funções `SECURITY DEFINER` `app_platform_addon_orders`
+  e `app_platform_tenant_names`, sem dados dos clientes dos tenants. Tela "Atendimento de serviços"
+  (`/admin/servicos`) para a equipe, fora da organização ativa: quem é da equipe e não tem organização é
+  levado a ela (e não ao onboarding). A auditoria do tenant identifica o autor como "equipe da plataforma
+  Recorvia", já que ele não é membro da organização.
+- **Equipe no ambiente local.** O realm embutido tem o usuário de demonstração `equipe@recorvia.test` (ID
+  fixo, sem organização). O `migrate up`, que já roda como dono das tabelas, inclui esse usuário em
+  `platform_staff` quando `RECORVIA_DEMO_STAFF_SUBJECT` está definido (serviço `migrate` do `compose.yaml`);
+  a variável é recusada em produção, e a equipe real é mantida pelo runbook
+  `docs/operacao/runbooks/equipe-da-plataforma.md` (o papel da aplicação só lê `platform_staff`).
+- **Cobrança.** Migration `00021`: colunas `scheduled_for`, `completed_at`, `canceled_at`, `cancel_reason`,
+  `handled_by`, `statement_id` e `version`, constraints de coerência por situação e o gatilho
+  `platform_addon_orders_guard`, que impede reabrir pedido encerrado, mudar organização, serviço, preço ou
+  autor e desfazer ou refazer o vínculo com o demonstrativo. O fechamento soma os pedidos concluídos antes do
+  fim do período e ainda sem demonstrativo e, ao gravar o demonstrativo, vincula esses pedidos a ele
+  (`statement_id`), na mesma transação. O pedido entra, portanto, no demonstrativo do período em que a
+  conclusão ocorreu; concluído depois do fim de um período ainda não fechado, entra no do período seguinte.
+  A conclusão bloqueia a assinatura da plataforma antes do pedido, na ordem do fechamento: conclusão e
+  fechamento não se cruzam, e uma conclusão confirmada depois do fechamento do seu período (por exemplo,
+  com o relógio da API atrás do worker) entra no demonstrativo seguinte, sem ser perdida nem cobrada duas
+  vezes. A avaliação do plano não isenta o serviço adicional.
+- **Pedidos anteriores à migration.** O fechamento antigo somava os pedidos concluídos com `updated_at`
+  dentro do período. A `00021` vincula cada pedido concluído ao demonstrativo existente do tenant cujo
+  período contém o `updated_at` (o que o cobrou), antes de criar o gatilho; sem isso, o fechamento novo
+  cobraria esses pedidos de novo. O Down faz o inverso para o código anterior: os pedidos já cobrados passam
+  a ter `updated_at` no início do período do demonstrativo que os cobrou (não são cobrados de novo e são
+  revinculados por um Up seguinte), e os concluídos ainda não cobrados, no período corrente da assinatura.
+- **Assinatura da plataforma cancelada.** O fechamento não roda para assinaturas canceladas: a conclusão
+  de um pedido nessa situação é recusada com 409 `platform_subscription_canceled`, e o pedido deve ser
+  cancelado. Nenhum pedido fica concluído sem cobrança possível.
+**Alternativas:** contar as suspensas como contratos ativos fecharia o furo da reativação sem checagem nova,
+mas mudaria o significado do limite e bloquearia criações por contratos parados. `SERIALIZABLE` nas
+transações de limite exigiria retentativa em todos os casos de uso; o bloqueio da linha da assinatura da
+plataforma é pontual e já era usado pela troca de plano. Somar os pedidos pelo instante da conclusão dentro do
+período, sem vínculo, perderia a cobrança de conclusões confirmadas depois do fechamento.
+**Consequências:** convites, aceites e criações de assinatura de um mesmo tenant passam a se serializar (no
+volume esperado por tenant, imperceptível); planos já rebaixados acima do limite pelo comportamento anterior
+não perdem membros nem contratos, mas não aceitam novos até voltarem ao limite. Limitações: não há estorno
+de pedido concluído nem reabertura de pedido cancelado (um novo pedido é registrado); o tenant acompanha o
+agendamento pela tela da plataforma, sem notificação por e-mail.
+
+## ADR-078 Logout sem tokens no navegador e revogação das sessões
+**Status:** aceita (RF-14; complementa a ADR-012).
+**Contexto:** o logout devolvia ao navegador, em `redirect_url`, o ID token como `id_token_hint`, contrariando
+a regra de que os tokens do provedor ficam no servidor. A revogação em massa (`RevokeAll`/`DeleteAllForUser`)
+existia sem uso: não havia "encerrar todas as minhas sessões", o membro removido mantinha a sessão com a
+organização ativa (o acesso era negado a cada requisição, mas a sessão seguia válida) e o usuário desativado
+só perdia a sessão da requisição em que era detectado.
+**Decisão:**
+- **Logout.** `POST /auth/logout` remove a sessão do Redis, revoga pelo servidor o refresh token da sessão no
+  endpoint de revogação do provedor (RFC 7009, cliente confidencial, quando anunciado na descoberta) e devolve
+  o endereço de encerramento com `client_id` e `post_logout_redirect_uri`, sem `id_token_hint`. Sem a dica, o
+  Keycloak pede confirmação antes de encerrar a sessão do navegador. A falha na revogação no provedor é
+  registrada em log e não impede o logout local: o token expira sozinho.
+- **Encerrar todas as sessões.** `POST /auth/logout-all` (sessão de usuário, CSRF) remove todas as sessões do
+  usuário pelo índice por usuário do Redis e revoga no provedor o refresh token de cada uma; o navegador atual
+  segue para o encerramento no provedor como no logout. Menu do usuário: "Encerrar todas as sessões".
+- **Membro removido.** Depois de confirmada a remoção, as sessões do usuário com aquela organização ativa
+  são encerradas (`RevokeTenantSessions`); as demais continuam (ele pode participar de outras organizações).
+  Se o Redis falhar nesse passo, a remoção vale e o acesso continua negado em toda requisição
+  (`ResolveAccess`).
+- **Usuário desativado.** A primeira requisição que encontra o usuário desativado encerra todas as sessões
+  dele, não só a da requisição.
+- O `SessionStore` ganha `ListForUser`, que lê as sessões pelo índice por usuário e descarta do índice as
+  entradas de sessões já expiradas.
+- **Gerações de sessão.** Uma requisição em voo que lê a sessão antes de "encerrar todas as sessões" e a
+  regrava depois (toque, renovação de tokens, troca de organização) ressuscitaria a sessão. Por isso cada
+  sessão guarda a geração do usuário (e a do usuário no tenant ativo) em que foi criada. Encerrar todas as
+  sessões incrementa a geração do usuário e remove as sessões do índice e o índice num único script Lua
+  (nenhuma gravação se intercala entre a leitura do índice e a remoção); remover o membro incrementa a
+  geração do usuário naquele tenant. A gravação é condicional e atômica (script Lua): `Create` só grava se as
+  gerações informadas são as correntes, e `Save` exige ainda que a chave exista. A leitura recusa sessão de
+  geração antiga. O login usa a geração corrente; a troca de organização herda a da sessão anterior (se as
+  sessões foram encerradas no meio da troca, a nova não é gravada e o usuário entra de novo). As gerações
+  duram 48 horas, renovadas a cada sessão criada e a cada revogação: mais que a sessão mais longa.
+- **Revogação no provedor em paralelo.** "Encerrar todas as sessões" revoga os refresh tokens distintos em
+  paralelo, com prazo total de 5 segundos (`Policy.RevokeTimeout`): com o provedor fora do ar, a resposta não
+  soma o prazo de cada sessão.
+**Alternativas:** encerrar a sessão no Keycloak pelo endpoint de logout com o refresh token é específico do
+Keycloak e usa a URL pública anunciada na descoberta, inacessível ao backend no ambiente local
+(`KC_HOSTNAME_BACKCHANNEL_DYNAMIC` só torna internos os endpoints de canal de retorno, como o de revogação).
+Manter o `id_token_hint` evitaria a confirmação no Keycloak ao custo de expor o ID token ao navegador.
+**Consequências:** o logout passa por uma confirmação do Keycloak; "encerrar todas as sessões" não encerra
+sessões do navegador no provedor em outros dispositivos além do que a revogação dos refresh tokens provoca no
+Keycloak; quem ainda tiver sessão no provedor entra de novo sem senha, com sessão nova no Recorvia.
