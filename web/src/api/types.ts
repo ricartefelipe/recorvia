@@ -23,6 +23,7 @@ export type PlatformStatement = S['PlatformStatement'];
 export type CustomerInput = S['CustomerInput'];
 export type Customer = S['Customer'];
 export type CustomerDetails = S['CustomerDetails'];
+export type CustomerAnonymization = S['CustomerAnonymization'];
 export type CustomerPage = S['CustomerPage'];
 export type ContactInput = S['ContactInput'];
 export type Contact = S['Contact'];

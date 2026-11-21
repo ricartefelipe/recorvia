@@ -1,5 +1,5 @@
-import { Anchor, Badge, Breadcrumbs, Button, Group, Modal, Paper, SimpleGrid, Stack, Tabs, Text } from '@mantine/core';
-import { IconArchive, IconLink, IconPencil } from '@tabler/icons-react';
+import { Alert, Anchor, Badge, Breadcrumbs, Button, Group, Modal, Paper, SimpleGrid, Stack, Tabs, Text } from '@mantine/core';
+import { IconArchive, IconInfoCircle, IconLink, IconPencil, IconUserOff } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Link, useParams } from 'react-router';
@@ -14,6 +14,7 @@ import { useApiMutation, useUrlFilters } from '../../lib/hooks';
 import { customerKindLabels, customerStatusLabels, labelOf } from '../../lib/labels';
 import { Can, useTenant } from '../../session/SessionContext';
 import { AddressPanel } from './AddressPanel';
+import { AnonymizeCustomerDialogs } from './AnonymizeCustomer';
 import { customersApi } from './api';
 import { ContactsPanel } from './ContactsPanel';
 import { CreditsPanel } from './CreditsPanel';
@@ -63,7 +64,16 @@ function PortalLinkAction({ customer }: { customer: CustomerDetails }) {
   );
 }
 
-function CustomerHeader({ customer, onEdit }: { customer: CustomerDetails; onEdit: () => void }) {
+function CustomerHeader({
+  customer,
+  onEdit,
+  onAnonymize,
+}: {
+  customer: CustomerDetails;
+  onEdit: () => void;
+  onAnonymize: () => void;
+}) {
+  const { timeZone } = useTenant();
   const archive = useApiMutation<void, CustomerDetails>({
     mutationFn: () => customersApi.archive(customer.id),
     invalidate: ['customers'],
@@ -79,18 +89,28 @@ function CustomerHeader({ customer, onEdit }: { customer: CustomerDetails; onEdi
     if (ok) archive.mutate();
   };
   const active = customer.status === 'active';
+  const anonymized = !!customer.anonymized_at;
   return (
     <PageHeader
       title={customer.name}
       badge={
         <Group gap={6}>
           <StatusBadge status={customer.status} labels={customerStatusLabels} />
+          {anonymized && (
+            <Badge variant="light" color="red">
+              Anonimizado
+            </Badge>
+          )}
           <Badge variant="outline" color="gray">
             {labelOf(customerKindLabels, customer.kind)}
           </Badge>
         </Group>
       }
-      description={`${customer.document_type.toUpperCase()} ${formatDocument(customer.document_number, customer.document_type)}`}
+      description={
+        customer.anonymized_at
+          ? `Dados pessoais removidos em ${formatDateTime(customer.anonymized_at, timeZone)}`
+          : `${customer.document_type.toUpperCase()} ${formatDocument(customer.document_number, customer.document_type)}`
+      }
       actions={
         <>
           <Can permission="customers.portal_links">{active && <PortalLinkAction customer={customer} />}</Can>
@@ -104,6 +124,13 @@ function CustomerHeader({ customer, onEdit }: { customer: CustomerDetails; onEdi
                   Arquivar
                 </Button>
               </>
+            )}
+          </Can>
+          <Can permission="customers.anonymize">
+            {!anonymized && (
+              <Button color="red" variant="subtle" leftSection={<IconUserOff size={16} />} onClick={onAnonymize}>
+                Anonimizar
+              </Button>
             )}
           </Can>
         </>
@@ -145,6 +172,8 @@ export function CustomerDetailPage() {
   const { id = '' } = useParams();
   const { keys } = useTenant();
   const [editing, setEditing] = useState(false);
+  // Cliente cujo formulário de anonimização está aberto (o da rota em que foi aberto).
+  const [anonymizingId, setAnonymizingId] = useState<string | null>(null);
   const [filters, setFilters] = useUrlFilters(['aba'] as const);
   const tab = (TABS as readonly string[]).includes(filters.aba) ? filters.aba : 'dados';
   const query = useQuery({
@@ -163,7 +192,17 @@ export function CustomerDetailPage() {
       <QueryContent query={query} loading={<LoadingState variant="detail" />}>
         {(customer) => (
           <>
-            <CustomerHeader customer={customer} onEdit={() => setEditing(true)} />
+            <CustomerHeader customer={customer} onEdit={() => setEditing(true)} onAnonymize={() => setAnonymizingId(customer.id)} />
+            {customer.anonymized_at && (
+              <Alert variant="light" color="gray" icon={<IconInfoCircle />}>
+                Os identificadores que este cliente tinha no provedor de pagamento saíram do cadastro e ficam registrados no
+                evento de anonimização, na aba{' '}
+                <Anchor component="button" type="button" size="sm" onClick={() => setFilters({ aba: 'historico' })}>
+                  Histórico
+                </Anchor>
+                . O cadastro no provedor não é alterado pelo Recorvia.
+              </Alert>
+            )}
             <Tabs value={tab} onChange={(v) => setFilters({ aba: v === 'dados' ? null : v })} keepMounted={false}>
               <Tabs.List mb="md">
                 <Tabs.Tab value="dados">Dados</Tabs.Tab>
@@ -198,6 +237,19 @@ export function CustomerDetailPage() {
           </>
         )}
       </QueryContent>
+      {/*
+        Fora do QueryContent: a recarga da ficha (inclusive a que falha e troca a ficha pela tela de erro)
+        não pode desmontar o formulário nem o diálogo com os identificadores do provedor.
+      */}
+      <Can permission="customers.anonymize">
+        <AnonymizeCustomerDialogs
+          key={id}
+          customerId={id}
+          customer={query.data}
+          opened={anonymizingId === id}
+          onClose={() => setAnonymizingId(null)}
+        />
+      </Can>
     </Stack>
   );
 }
