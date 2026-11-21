@@ -80,7 +80,31 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /**
+         * Encerra a sessão atual
+         * @description Remove a sessão do servidor, revoga no provedor de identidade, pelo servidor, o refresh token da sessão e devolve o endereço de encerramento da sessão do navegador no provedor, com `client_id` e `post_logout_redirect_uri`. Nenhum token do provedor (nem o ID token) é devolvido ao navegador.
+         */
         post: operations["authLogout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/logout-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Encerra todas as sessões do usuário
+         * @description Remove todas as sessões do usuário no servidor (em qualquer navegador), revoga no provedor de identidade o refresh token de cada uma e devolve o endereço de encerramento da sessão do navegador atual no provedor, sem tokens.
+         */
+        post: operations["authLogoutAll"];
         delete?: never;
         options?: never;
         head?: never;
@@ -145,6 +169,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /**
+         * Aceita um convite com o usuário da sessão
+         * @description O convite é de uso único, expira e exige o mesmo e-mail do usuário. Convite inválido, expirado, revogado ou já usado responde 422 `invitation_invalid`; e-mail divergente, 403 `invitation_email_mismatch`; quem já participa da organização, 409 `already_member`; organização no limite de usuários do plano da plataforma (inclusive depois de um rebaixamento de plano), 403 `platform_user_limit`.
+         */
         post: operations["acceptInvitation"];
         delete?: never;
         options?: never;
@@ -360,6 +388,92 @@ export interface paths {
         get: operations["adminListTenants"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/addon-orders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pedidos de serviços adicionais de todas as organizações (equipe da plataforma)
+         * @description Paginada por cursor. Sem `status`, lista os pedidos em aberto (solicitados e agendados), do mais antigo para o mais recente; `requested`, pela solicitação; `scheduled`, pela data do atendimento; `completed` e `canceled`, do encerramento mais recente para o mais antigo. O cursor vale somente para o mesmo filtro (`invalid_cursor`).
+         */
+        get: operations["adminListAddonOrders"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/schedule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organização do pedido (equipe da plataforma) */
+                tenant_id: components["parameters"]["AdminTenantID"];
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Agenda (ou reagenda) o atendimento do pedido */
+        post: operations["adminScheduleAddonOrder"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organização do pedido (equipe da plataforma) */
+                tenant_id: components["parameters"]["AdminTenantID"];
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Conclui o atendimento; o valor entra no próximo demonstrativo da plataforma
+         * @description O valor entra no demonstrativo do período em que a conclusão ocorreu (ou no seguinte, se esse já estiver fechado). Com a assinatura da plataforma da organização cancelada, responde 409 `platform_subscription_canceled`: o pedido deve ser cancelado.
+         */
+        post: operations["adminCompleteAddonOrder"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organização do pedido (equipe da plataforma) */
+                tenant_id: components["parameters"]["AdminTenantID"];
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancela o pedido em aberto, sem cobrança */
+        post: operations["adminCancelAddonOrder"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2036,6 +2150,8 @@ export interface components {
             };
             usage: {
                 active_users: number;
+                /** @description Convites pendentes; reservam vagas de usuário do plano */
+                pending_invitations: number;
                 active_subscriptions: number;
             };
         };
@@ -2060,6 +2176,26 @@ export interface components {
             currency: string;
             /** Format: date-time */
             created_at: string;
+            /**
+             * Format: date-time
+             * @description Instante combinado para o atendimento
+             */
+            scheduled_for: string | null;
+            /** Format: date-time */
+            completed_at: string | null;
+            /** Format: date-time */
+            canceled_at: string | null;
+            cancel_reason: string | null;
+            /** @description O pedido concluído já entrou em um demonstrativo da plataforma */
+            billed: boolean;
+            version: number;
+        };
+        StaffAddonOrder: components["schemas"]["AddonOrder"] & {
+            /** Format: uuid */
+            tenant_id: string;
+            tenant_name: string;
+            tenant_slug: string;
+            addon_name: string;
         };
         PlatformStatement: {
             /** Format: uuid */
@@ -3315,6 +3451,18 @@ export interface components {
                 "application/problem+json": components["schemas"]["Problem"];
             };
         };
+        /** @description Sessão encerrada */
+        LogoutRedirect: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    /** @description Encerramento no provedor (client_id e post_logout_redirect_uri), sem tokens */
+                    redirect_url: string;
+                };
+            };
+        };
         /** @description Acesso negado (RFC 9457). A operação exige a sessão de um usuário: credenciais de API recebem o código `user_session_required`, mesmo com escopos; outros códigos indicam permissão insuficiente. */
         UserSessionRequired: {
             headers: {
@@ -3350,6 +3498,8 @@ export interface components {
         /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
         IdempotencyKey: string;
         ID: string;
+        /** @description Organização do pedido (equipe da plataforma) */
+        AdminTenantID: string;
         Limit: number;
         Cursor: string;
     };
@@ -3438,17 +3588,23 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Sessão encerrada */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        redirect_url: string;
-                    };
-                };
+            200: components["responses"]["LogoutRedirect"];
+            403: components["responses"]["UserSessionRequired"];
+        };
+    };
+    authLogoutAll: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
+                "X-CSRF-Token"?: components["parameters"]["CSRF"];
             };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["LogoutRedirect"];
             403: components["responses"]["UserSessionRequired"];
         };
     };
@@ -3567,6 +3723,7 @@ export interface operations {
                 };
             };
             403: components["responses"]["UserSessionRequired"];
+            409: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
         };
     };
@@ -4034,6 +4191,143 @@ export interface operations {
                 };
             };
             403: components["responses"]["Problem"];
+        };
+    };
+    adminListAddonOrders: {
+        parameters: {
+            query?: {
+                status?: "requested" | "scheduled" | "completed" | "canceled";
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Pedidos */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["StaffAddonOrder"][];
+                        next_cursor: string | null;
+                    };
+                };
+            };
+            403: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+        };
+    };
+    adminScheduleAddonOrder: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
+                "X-CSRF-Token"?: components["parameters"]["CSRF"];
+            };
+            path: {
+                /** @description Organização do pedido (equipe da plataforma) */
+                tenant_id: components["parameters"]["AdminTenantID"];
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /**
+                     * Format: date-time
+                     * @description Instante futuro, em até um ano
+                     */
+                    scheduled_for: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Pedido agendado */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddonOrder"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+        };
+    };
+    adminCompleteAddonOrder: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
+                "X-CSRF-Token"?: components["parameters"]["CSRF"];
+            };
+            path: {
+                /** @description Organização do pedido (equipe da plataforma) */
+                tenant_id: components["parameters"]["AdminTenantID"];
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Pedido concluído */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddonOrder"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+        };
+    };
+    adminCancelAddonOrder: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
+                "X-CSRF-Token"?: components["parameters"]["CSRF"];
+            };
+            path: {
+                /** @description Organização do pedido (equipe da plataforma) */
+                tenant_id: components["parameters"]["AdminTenantID"];
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    reason: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Pedido cancelado */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddonOrder"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
         };
     };
     listCustomers: {
