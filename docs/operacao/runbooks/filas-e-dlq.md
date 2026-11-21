@@ -96,8 +96,9 @@ fica abaixo de alguns segundos.
 - Nenhuma métrica do worker ou da API; filas sem consumidores; `/readyz` com 503.
 
 ### Métricas e alertas
-- `RecorviaTargetDown` (crítico): coleta falhando para `recorvia-api`, `recorvia-worker` ou
-  `rabbitmq`.
+- `RecorviaTargetDown` (crítico): coleta falhando para `recorvia-api`, `recorvia-worker`,
+  `rabbitmq` ou `alertmanager` (para o Alertmanager, ver também
+  [encaminhamento de alertas](alertas.md#alertas-nao-chegam-aos-destinatarios)).
 - `RecorviaQueueWithoutConsumer` (crítico): fila principal sem consumidor por 5 minutos.
 - `RecorviaDependencyUnavailable` (crítico): `recorvia_dependency_up == 0` por 2 minutos (RabbitMQ
   no worker, a cada `metrics.collect`; PostgreSQL e Redis na API, verificados em paralelo a cada
@@ -147,6 +148,8 @@ principais e `/readyz` com 200.
 - `RecorviaMessagesDeadLettered`: mensagens enviadas à DLQ por um consumidor nos últimos
   15 minutos (o contador começa em zero na partida do worker, então a primeira ocorrência alerta).
 - `recorvia_consumer_messages_total{outcome="dead_letter"}`.
+- Depois do registro em `dead_letters`, o acompanhamento passa a `RecorviaDeadLettersOpen`
+  ([Dead letters abertas](#dead-letters-abertas)), que permanece até a triagem.
 
 ### Diagnóstico
 ```sql
@@ -173,6 +176,58 @@ SELECT consumer, event_type, tenant_id IS NULL AS sem_tenant, count(*), max(fail
 ### Verificação
 A dead letter passa a `replayed` (ou `discarded`), o efeito esperado aparece (por exemplo, fatura
 paga) e `increase(recorvia_consumer_messages_total{outcome="dead_letter"}[15m])` volta a zero.
+
+<a id="dead-letters-abertas"></a>
+
+## Dead letters abertas
+
+### Sintomas
+- Registros com situação `open` em *Operações* na interface, de um ou mais tenants, sem
+  reprocessamento nem descarte: o efeito de cada evento (cobrança criada, pagamento aplicado,
+  e-mail agendado, webhook distribuído) continua pendente.
+
+### Métricas e alertas
+- `RecorviaDeadLettersOpen` (aviso): dead letters abertas de um consumidor por 30 minutos.
+- `RecorviaDeadLettersOpen` (crítico): a mais antiga do consumidor está aberta há mais de
+  24 horas. Enquanto o crítico dura, o Alertmanager inibe o aviso do mesmo consumidor.
+- `recorvia_dead_letters_open{consumer}` e `recorvia_dead_letters_oldest_open_seconds{consumer}`
+  (dashboard *mensageria*, painéis "Dead letters abertas por consumidor" e "Idade da dead letter
+  aberta mais antiga"; indicador "Dead letters abertas" na *visão geral*). São medidores globais,
+  lidos do banco pela tarefa `metrics.collect` a cada 15 s: somam todos os tenants e as dead
+  letters sem tenant, sem identificá-los, e não zeram quando o worker reinicia. O consumidor
+  `other` reúne registros de consumidores que o worker não tem mais (removidos ou renomeados).
+
+### Diagnóstico
+```sql
+-- Dead letters abertas por consumidor e tenant, da mais antiga para a mais recente (superusuário).
+SELECT consumer, tenant_id, count(*) AS abertas, min(failed_at) AS mais_antiga, max(failed_at) AS mais_recente,
+       left(max(error), 200) AS erro
+  FROM dead_letters WHERE status = 'open' GROUP BY 1, 2 ORDER BY 4;
+-- O que a métrica exporta (função agregada usada pelo worker; sem dados de tenant).
+SELECT consumer, open_total, round(oldest_open_seconds) AS idade_s FROM app_dead_letter_stats(now()) ORDER BY 3 DESC;
+```
+- Muitas dead letters recentes do mesmo consumidor e erro: falha em andamento; tratar a causa
+  por [Mensagens na DLQ](#mensagens-na-dlq) antes de reprocessar.
+- Poucas e antigas: triagem esquecida. Cada tenant vê as suas em
+  `GET /api/v1/dead-letters?status=open` (permissão `operations.read`).
+- `tenant_id` nulo: mensagem sem tenant válido, visível apenas para a operação.
+- Consumidor `other` na métrica: o nome em `dead_letters.consumer` não corresponde a um
+  consumidor atual; o reprocessamento pela API publica na fila do consumidor original, que pode
+  não existir mais.
+
+### Ações
+1. Com a causa corrigida, cada dead letter é reprocessada ou descartada pela API, com a
+   permissão `operations.reprocess` e justificativa (`POST /api/v1/dead-letters/{id}/replay` ou
+   `/discard`; ações auditadas, ADR-024). A resolução é feita na sessão do tenant dono do
+   registro.
+2. Dead letters sem tenant ou de consumidor removido não têm ação pela API: registrar no
+   incidente a análise do evento (`event_type`, `headers`, `error`) e a decisão; a alteração da
+   situação é uma correção revisada por duas pessoas (convenções em [README](README.md)).
+3. Não apague registros de `dead_letters`: são o histórico das falhas e da resolução.
+
+### Verificação
+`recorvia_dead_letters_open` volta a zero para o consumidor (até 15 s depois da resolução) e o
+alerta se resolve; no crítico, `recorvia_dead_letters_oldest_open_seconds` cai abaixo de 24 horas.
 
 <a id="dlq-nao-esvaziada"></a>
 

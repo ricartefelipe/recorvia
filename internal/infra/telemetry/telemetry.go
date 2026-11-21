@@ -2,8 +2,8 @@
 // OpenTelemetry. Rótulos de métricas nunca incluem identificadores de
 // tenant, cliente, fatura ou usuário (cardinalidade controlada): somente
 // rota, método, classe de status, consumidor, tarefa, provedor, tipo,
-// situação e resultado. O catálogo das métricas e os alertas que as usam
-// estão em docs/operacao/observabilidade.md.
+// situação, estado da fila e resultado. O catálogo das métricas e os alertas
+// que as usam estão em docs/operacao/observabilidade.md.
 package telemetry
 
 import (
@@ -79,6 +79,21 @@ type Metrics struct {
 	// (reminder_scheduled, invoice_overdue, subscription_suspended,
 	// subscription_reactivated).
 	CollectionActions *prometheus.CounterVec
+	// DeadLettersOpen e DeadLettersOldestOpenSeconds são as dead letters
+	// registradas e ainda não resolvidas por consumidor, em todos os tenants
+	// (inclusive as sem tenant), e a idade da mais antiga. O rótulo consumer
+	// tem conjunto fechado: os consumidores do worker e OtherConsumer.
+	DeadLettersOpen              *prometheus.GaugeVec
+	DeadLettersOldestOpenSeconds *prometheus.GaugeVec
+	// NotificationsBacklog e NotificationsBacklogOldestSeconds medem a fila
+	// de notificações por situação (NotificationBacklogStates).
+	NotificationsBacklog              *prometheus.GaugeVec
+	NotificationsBacklogOldestSeconds *prometheus.GaugeVec
+	// WebhookDeliveriesBacklog e WebhookDeliveriesBacklogOldestDueSeconds
+	// medem a fila de entregas de webhooks enviados por situação
+	// (WebhookBacklogStates).
+	WebhookDeliveriesBacklog                 *prometheus.GaugeVec
+	WebhookDeliveriesBacklogOldestDueSeconds *prometheus.GaugeVec
 }
 
 // NewMetrics registra os coletores.
@@ -145,13 +160,33 @@ func NewMetrics(service string) *Metrics {
 		CollectionActions: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "recorvia_collection_actions_total",
 			Help: "Ações da régua de cobrança (reminder_scheduled, invoice_overdue, subscription_suspended, subscription_reactivated).", ConstLabels: cl},
 			[]string{"action"}),
+		DeadLettersOpen: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_dead_letters_open",
+			Help: "Dead letters registradas e ainda não resolvidas por consumidor (todos os tenants).", ConstLabels: cl},
+			[]string{"consumer"}),
+		DeadLettersOldestOpenSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_dead_letters_oldest_open_seconds",
+			Help: "Idade da dead letter aberta mais antiga por consumidor (zero sem dead letters abertas).", ConstLabels: cl},
+			[]string{"consumer"}),
+		NotificationsBacklog: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_notifications_backlog",
+			Help: "Fila de notificações por situação: due (agendadas vencidas), sending (em envio) e failed (falha definitiva nas últimas 24 horas).", ConstLabels: cl},
+			[]string{"state"}),
+		NotificationsBacklogOldestSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_notifications_backlog_oldest_seconds",
+			Help: "Idade da notificação mais antiga por situação: atraso do envio (due), tempo desde a reivindicação (sending) ou desde a falha (failed).", ConstLabels: cl},
+			[]string{"state"}),
+		WebhookDeliveriesBacklog: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_webhook_deliveries_backlog",
+			Help: "Fila de entregas de webhooks enviados por situação (pending, retrying).", ConstLabels: cl},
+			[]string{"state"}),
+		WebhookDeliveriesBacklogOldestDueSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_webhook_deliveries_backlog_oldest_due_seconds",
+			Help: "Atraso da entrega de webhook devida mais antiga por situação (zero sem entregas devidas).", ConstLabels: cl},
+			[]string{"state"}),
 	}
 	reg.MustRegister(m.HTTPRequests, m.HTTPDuration, m.ConsumerProcessed, m.ConsumerDuration, m.ConsumerInFlight, m.ConsumerConcurrency,
 		m.OutboxPublished, m.OutboxPublishFailed, m.OutboxPending, m.OutboxOldestSeconds, m.JobRuns, m.JobDuration, m.JobLastSuccess,
 		m.JobInterval, m.ChargeFailures, m.PaymentOperations, m.PaymentOperationsExhausted, m.Discrepancies, m.ReconciliationRuns,
 		m.ReconciliationOldestWaiting, m.Refunds, m.RefundsInProgress,
 		m.WebhooksReceived, m.InvoicesIssued, m.DependencyUp, m.DBServerConnections, m.DBServerMaxConns,
-		m.NotificationsDispatched, m.WebhookDeliveries, m.CollectionActions)
+		m.NotificationsDispatched, m.WebhookDeliveries, m.CollectionActions,
+		m.DeadLettersOpen, m.DeadLettersOldestOpenSeconds, m.NotificationsBacklog, m.NotificationsBacklogOldestSeconds,
+		m.WebhookDeliveriesBacklog, m.WebhookDeliveriesBacklogOldestDueSeconds)
 	return m
 }
 
@@ -471,6 +506,49 @@ var (
 	WebhookDeliveryOutcomes = []string{"succeeded", "retrying", "exhausted", "lost_lease", "deferred"}
 	CollectionActionKinds   = []string{"reminder_scheduled", "invoice_overdue", "subscription_suspended", "subscription_reactivated"}
 )
+
+// Situações das filas medidas pela tarefa metrics.collect (rótulo state de
+// recorvia_notifications_backlog e recorvia_webhook_deliveries_backlog, e
+// das respectivas idades).
+var (
+	NotificationBacklogStates = []string{"due", "sending", "failed"}
+	WebhookBacklogStates      = []string{"pending", "retrying"}
+)
+
+// OtherConsumer reúne, no rótulo consumer das dead letters abertas, os
+// registros de consumidores que o worker não conhece mais (removidos ou
+// renomeados): o nome vem do banco e não pode criar séries novas.
+const OtherConsumer = "other"
+
+// QueueGauge é o par de medidores de uma fila: tamanho e idade do item mais
+// antigo, com o mesmo rótulo.
+type QueueGauge struct {
+	Total, OldestSeconds *prometheus.GaugeVec
+}
+
+// Set grava o tamanho e a idade da fila identificada pelo valor do rótulo.
+func (g QueueGauge) Set(label string, total int64, oldestSeconds float64) {
+	g.Total.WithLabelValues(label).Set(float64(total))
+	g.OldestSeconds.WithLabelValues(label).Set(oldestSeconds)
+}
+
+// DeadLetters devolve os medidores das dead letters abertas (rótulo
+// consumer).
+func (m *Metrics) DeadLetters() QueueGauge {
+	return QueueGauge{Total: m.DeadLettersOpen, OldestSeconds: m.DeadLettersOldestOpenSeconds}
+}
+
+// NotificationQueue devolve os medidores da fila de notificações (rótulo
+// state).
+func (m *Metrics) NotificationQueue() QueueGauge {
+	return QueueGauge{Total: m.NotificationsBacklog, OldestSeconds: m.NotificationsBacklogOldestSeconds}
+}
+
+// WebhookDeliveryQueue devolve os medidores da fila de entregas de webhooks
+// enviados (rótulo state).
+func (m *Metrics) WebhookDeliveryQueue() QueueGauge {
+	return QueueGauge{Total: m.WebhookDeliveriesBacklog, OldestSeconds: m.WebhookDeliveriesBacklogOldestDueSeconds}
+}
 
 // InitDispatchResults cria com zero as séries de resultados do envio de
 // notificações, das entregas de webhooks e das ações da régua.
