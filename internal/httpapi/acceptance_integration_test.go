@@ -141,7 +141,7 @@ func TestAcceptanceNewPriceVersionKeepsExistingContracts(t *testing.T) {
 
 	// Assinatura criada depois da nova versão usa a versão 2.
 	newer, _ := c.expect(http.StatusCreated, http.MethodPost, "/api/v1/subscriptions", map[string]any{"customer_id": a.env.NewCustomer(t, tn).ID,
-		"plan_id": plan.ID, "trial_days": 0})
+		"plan_id": plan.ID, "trial_days": 0}, "Idempotency-Key", idemKey())
 	if newer["price_version_id"] != v2 {
 		t.Fatalf("assinatura nova deveria usar a versão 2: %v", newer)
 	}

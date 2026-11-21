@@ -48,13 +48,13 @@ func TestAdminAddonOrdersOverHTTP(t *testing.T) {
 	tn, other := a.env.NewTenant(t, "admin-implantacao"), a.env.NewTenant(t, "admin-outra")
 	owner := a.login(tn.Owner, &tn.ID)
 	status, created, _ := owner.do(http.MethodPost, "/api/v1/platform/addon-orders", map[string]any{"addon_code": "implantacao_assistida",
-		"notes": "Migrar contratos da planilha"})
+		"notes": "Migrar contratos da planilha"}, "Idempotency-Key", idemKey())
 	if status != http.StatusCreated || created["status"] != "requested" || created["billed"] != false {
 		t.Fatalf("pedido do tenant: %d %v", status, created)
 	}
 	orderID := created["id"].(string)
 	status, second, _ := a.login(other.Owner, &other.ID).do(http.MethodPost, "/api/v1/platform/addon-orders",
-		map[string]any{"addon_code": "implantacao_assistida"})
+		map[string]any{"addon_code": "implantacao_assistida"}, "Idempotency-Key", idemKey())
 	if status != http.StatusCreated {
 		t.Fatalf("segundo pedido: %d %v", status, second)
 	}
@@ -125,7 +125,7 @@ func TestAdminAddonOrdersOverHTTP(t *testing.T) {
 	// Assinatura da plataforma cancelada: não há demonstrativo para cobrar, e
 	// a conclusão é recusada.
 	status, third, _ := a.login(other.Owner, &other.ID).do(http.MethodPost, "/api/v1/platform/addon-orders",
-		map[string]any{"addon_code": "implantacao_assistida"})
+		map[string]any{"addon_code": "implantacao_assistida"}, "Idempotency-Key", idemKey())
 	if status != http.StatusCreated {
 		t.Fatalf("terceiro pedido: %d %v", status, third)
 	}
