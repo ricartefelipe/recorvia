@@ -45,9 +45,12 @@ paginadas pelo ID do tenant, com rodízio entre execuções), `app_tenants_due_r
 elegíveis à conciliação agendada), `app_claimable_reconciliation_runs` (execuções de conciliação que
 um worker pode assumir, de todos os tenants: somente os IDs do tenant e da execução) e as contagens
 agregadas para métricas (`app_payment_operation_stats`, `app_open_discrepancy_stats`,
-`app_refund_stats` e `app_reconciliation_run_stats`, que conta as execuções de conciliação em
-andamento por estado, sem identificar tenants). O processamento ocorre depois, dentro da transação de
-cada tenant.
+`app_refund_stats`, `app_reconciliation_run_stats`, que conta as execuções de conciliação em
+andamento por estado, sem identificar tenants, e as três das filas: `app_dead_letter_stats` (dead
+letters abertas por consumidor), `app_notification_backlog_stats` (notificações vencidas, em envio e
+com falha) e `app_webhook_delivery_backlog_stats` (entregas de webhooks pendentes e em retentativa),
+todas devolvendo somente totais e a idade do item mais antigo). O processamento ocorre depois, dentro
+da transação de cada tenant.
 
 Completam o inventário: `app_tenant_slug_available` (disponibilidade de um slug no onboarding;
 responde só sim ou não), `app_tenants_due_platform_statement` (tenants com extrato da plataforma a
