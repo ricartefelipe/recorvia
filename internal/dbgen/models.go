@@ -596,15 +596,22 @@ type PlatformAddon struct {
 }
 
 type PlatformAddonOrder struct {
-	ID          uuid.UUID
-	TenantID    uuid.UUID
-	AddonCode   string
-	Status      string
-	Notes       string
-	PriceAmount int64
-	RequestedBy uuid.UUID
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID           uuid.UUID
+	TenantID     uuid.UUID
+	AddonCode    string
+	Status       string
+	Notes        string
+	PriceAmount  int64
+	RequestedBy  uuid.UUID
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	ScheduledFor *time.Time
+	CompletedAt  *time.Time
+	CanceledAt   *time.Time
+	CancelReason *string
+	HandledBy    *uuid.UUID
+	StatementID  *uuid.UUID
+	Version      int32
 }
 
 type PlatformPlan struct {
