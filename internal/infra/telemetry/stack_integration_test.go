@@ -268,7 +268,8 @@ func TestPrometheusLoadsAlertRulesAndScrapeTargets(t *testing.T) {
 	for _, required := range []string{"RecorviaOutboxStalled", "RecorviaQueueLag", "RecorviaMessagesDeadLettered", "RecorviaChargesDeclined",
 		"RecorviaPaymentOperationsUnknown", "RecorviaReconciliationDiscrepanciesOpen", "RecorviaDBServerConnectionsHigh", "RecorviaWorkerSaturated",
 		"RecorviaBillingCycleStale", "RecorviaScheduledTaskStale", "RecorviaPaymentOperationsExhausted", "RecorviaEmailDeliveryStalled",
-		"RecorviaWebhookDeliveriesFailing", "RecorviaRefundsUnknown"} {
+		"RecorviaWebhookDeliveriesFailing", "RecorviaRefundsUnknown", "RecorviaDeadLettersOpen", "RecorviaNotificationsBacklog",
+		"RecorviaWebhookDeliveriesBacklog", "RecorviaWatchdog", "RecorviaAlertDeliveryFailing", "RecorviaAlertNotificationsFailing"} {
 		if !slices.Contains(alerts, required) {
 			t.Errorf("alerta %s não carregado", required)
 		}
@@ -289,9 +290,9 @@ func TestPrometheusLoadsAlertRulesAndScrapeTargets(t *testing.T) {
 		for _, tg := range targets.Data.ActiveTargets {
 			jobs[tg.Labels["job"]] = true
 		}
-		return len(jobs) >= 6
+		return len(jobs) >= 7
 	})
-	for _, job := range []string{"recorvia-api", "recorvia-worker", "rabbitmq", "rabbitmq-queues", "otel-collector", "prometheus"} {
+	for _, job := range []string{"recorvia-api", "recorvia-worker", "rabbitmq", "rabbitmq-queues", "otel-collector", "alertmanager", "prometheus"} {
 		if !jobs[job] {
 			t.Errorf("alvo de coleta %s ausente: %v", job, jobs)
 		}

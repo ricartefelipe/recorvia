@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -408,12 +409,79 @@ func (w *Worker) collectMetrics(ctx context.Context) error {
 	for _, s := range []payments.RefundStatus{payments.RefundRequested, payments.RefundUnknown} {
 		w.Metrics.RefundsInProgress.WithLabelValues(string(s)).Set(float64(refunds[string(s)]))
 	}
+	if err := w.collectQueueMetrics(ctx); err != nil {
+		return err
+	}
 	up := 0.0
 	if w.Conn.Connected() {
 		up = 1
 	}
 	w.Metrics.DependencyUp.WithLabelValues("rabbitmq").Set(up)
 	return nil
+}
+
+// notificationFailedWindow é a janela das falhas definitivas contadas em
+// recorvia_notifications_backlog{state="failed"}: a situação é final e, sem
+// janela, o medidor só cresceria.
+const notificationFailedWindow = 24 * time.Hour
+
+// collectQueueMetrics atualiza as filas medidas no banco (ADR-066): dead
+// letters abertas por consumidor, notificações e entregas de webhooks. O
+// instante de referência é o do relógio da aplicação.
+func (w *Worker) collectQueueMetrics(ctx context.Context) error {
+	now := w.Core.Clock.Now()
+	dead, err := w.Core.Store.DeadLetterStats(ctx, now)
+	if err != nil {
+		return err
+	}
+	recordDeadLetters(w.Metrics, consumerNames(), dead)
+	queued, err := w.Core.Store.NotificationBacklogStats(ctx, now, now.Add(-notificationFailedWindow))
+	if err != nil {
+		return err
+	}
+	recordQueue(w.Metrics.NotificationQueue(), telemetry.NotificationBacklogStates, queued)
+	deliveries, err := w.Core.Store.WebhookDeliveryBacklogStats(ctx, now)
+	if err != nil {
+		return err
+	}
+	recordQueue(w.Metrics.WebhookDeliveryQueue(), telemetry.WebhookBacklogStates, deliveries)
+	return nil
+}
+
+// consumerNames são os consumidores do worker (rótulo consumer).
+func consumerNames() []string {
+	names := make([]string, 0, len(consumerSpecs))
+	for _, spec := range consumerSpecs {
+		names = append(names, spec.Name)
+	}
+	return names
+}
+
+// recordDeadLetters grava as dead letters abertas de cada consumidor
+// conhecido (zero quando não há) e reúne em telemetry.OtherConsumer as de
+// consumidores que o worker não tem mais: o nome vem do banco e não cria
+// séries novas.
+func recordDeadLetters(m *telemetry.Metrics, consumers []string, stats map[string]pgstore.BacklogStat) {
+	var other pgstore.BacklogStat
+	for name, s := range stats {
+		if !slices.Contains(consumers, name) {
+			other.Total += s.Total
+			other.OldestSeconds = max(other.OldestSeconds, s.OldestSeconds)
+		}
+	}
+	g := m.DeadLetters()
+	for _, name := range consumers {
+		g.Set(name, stats[name].Total, stats[name].OldestSeconds)
+	}
+	g.Set(telemetry.OtherConsumer, other.Total, other.OldestSeconds)
+}
+
+// recordQueue grava o tamanho e a idade de cada situação declarada da fila;
+// as ausentes da leitura valem zero e as não declaradas são ignoradas.
+func recordQueue(g telemetry.QueueGauge, states []string, stats map[string]pgstore.BacklogStat) {
+	for _, state := range states {
+		g.Set(state, stats[state].Total, stats[state].OldestSeconds)
+	}
 }
 
 // initMetrics cria com zero as séries das tarefas (execuções e intervalo) e

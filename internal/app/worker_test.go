@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/notifications"
 	"github.com/ricartefelipe/recorvia/internal/outbox"
 	"github.com/ricartefelipe/recorvia/internal/payments"
+	"github.com/ricartefelipe/recorvia/internal/pgstore"
 	"github.com/ricartefelipe/recorvia/internal/webhooks"
 )
 
@@ -317,5 +319,114 @@ func TestRecoveryFeedsExhaustedOperations(t *testing.T) {
 				t.Errorf("%s: %s = %v, esperado %v", st.name, s, got, want)
 			}
 		}
+	}
+}
+
+// As dead letters abertas são gravadas para todos os consumidores do worker
+// (zero quando não há) e as de consumidores desconhecidos, cujo nome vem do
+// banco, são reunidas em "other" sem criar séries novas. Uma leitura
+// posterior sem dead letters zera os medidores.
+func TestDeadLetterStatsFeedGaugesWithClosedConsumerSet(t *testing.T) {
+	m := telemetry.NewMetrics("teste")
+	consumers := consumerNames()
+	if len(consumers) != len(consumerSpecs) || !slices.Contains(consumers, payments.ConsumerWebhooks) {
+		t.Fatalf("consumidores: %v", consumers)
+	}
+	open := func(consumer string) float64 { return testutil.ToFloat64(m.DeadLettersOpen.WithLabelValues(consumer)) }
+	oldest := func(consumer string) float64 {
+		return testutil.ToFloat64(m.DeadLettersOldestOpenSeconds.WithLabelValues(consumer))
+	}
+	steps := []struct {
+		name       string
+		stats      map[string]pgstore.BacklogStat
+		wantOpen   map[string]float64
+		wantOldest map[string]float64
+	}{
+		{"consumidores conhecidos e removidos", map[string]pgstore.BacklogStat{
+			payments.ConsumerWebhooks: {Total: 3, OldestSeconds: 7200},
+			webhooks.ConsumerFanout:   {Total: 1, OldestSeconds: 30},
+			"payments.consumidor_v0":  {Total: 2, OldestSeconds: 90000},
+			"consumidor-desconhecido": {Total: 5, OldestSeconds: 600},
+			"6f1c2c0e-tenant-no-nome": {Total: 1, OldestSeconds: 10},
+		},
+			map[string]float64{payments.ConsumerWebhooks: 3, webhooks.ConsumerFanout: 1, payments.ConsumerInvoiceIssued: 0, telemetry.OtherConsumer: 8},
+			map[string]float64{payments.ConsumerWebhooks: 7200, webhooks.ConsumerFanout: 30, payments.ConsumerInvoiceIssued: 0, telemetry.OtherConsumer: 90000}},
+		{"todas resolvidas", map[string]pgstore.BacklogStat{},
+			map[string]float64{payments.ConsumerWebhooks: 0, webhooks.ConsumerFanout: 0, telemetry.OtherConsumer: 0},
+			map[string]float64{payments.ConsumerWebhooks: 0, webhooks.ConsumerFanout: 0, telemetry.OtherConsumer: 0}},
+	}
+	for _, st := range steps {
+		recordDeadLetters(m, consumers, st.stats)
+		for c, want := range st.wantOpen {
+			if got := open(c); got != want {
+				t.Errorf("%s: abertas de %s = %v, esperado %v", st.name, c, got, want)
+			}
+		}
+		for c, want := range st.wantOldest {
+			if got := oldest(c); got != want {
+				t.Errorf("%s: idade de %s = %v, esperado %v", st.name, c, got, want)
+			}
+		}
+		for _, vec := range []*prometheus.GaugeVec{m.DeadLettersOpen, m.DeadLettersOldestOpenSeconds} {
+			if got := testutil.CollectAndCount(vec); got != len(consumers)+1 {
+				t.Fatalf("%s: %d séries; esperado uma por consumidor e \"other\" (%d)", st.name, got, len(consumers)+1)
+			}
+		}
+	}
+}
+
+// As filas de notificações e de entregas de webhooks gravam exatamente as
+// situações declaradas (e documentadas no catálogo): as ausentes da leitura
+// valem zero e uma situação desconhecida não cria série.
+func TestQueueStatsFeedGaugesWithDeclaredStates(t *testing.T) {
+	m := telemetry.NewMetrics("teste")
+	recordQueue(m.NotificationQueue(), telemetry.NotificationBacklogStates, map[string]pgstore.BacklogStat{
+		pgstore.NotificationBacklogDue:    {Total: 12, OldestSeconds: 1500},
+		pgstore.NotificationBacklogFailed: {Total: 4, OldestSeconds: 3600},
+		"canceled":                        {Total: 99, OldestSeconds: 99},
+	})
+	recordQueue(m.WebhookDeliveryQueue(), telemetry.WebhookBacklogStates, map[string]pgstore.BacklogStat{
+		string(webhooks.Retrying):  {Total: 7, OldestSeconds: 45},
+		string(webhooks.Exhausted): {Total: 99},
+	})
+	cases := []struct {
+		name          string
+		total, oldest *prometheus.GaugeVec
+		state         string
+		wantTotal     float64
+		wantOldest    float64
+	}{
+		{"notificações vencidas", m.NotificationsBacklog, m.NotificationsBacklogOldestSeconds, pgstore.NotificationBacklogDue, 12, 1500},
+		{"notificações em envio", m.NotificationsBacklog, m.NotificationsBacklogOldestSeconds, pgstore.NotificationBacklogSending, 0, 0},
+		{"notificações com falha", m.NotificationsBacklog, m.NotificationsBacklogOldestSeconds, pgstore.NotificationBacklogFailed, 4, 3600},
+		{"entregas pendentes", m.WebhookDeliveriesBacklog, m.WebhookDeliveriesBacklogOldestDueSeconds, string(webhooks.Pending), 0, 0},
+		{"entregas em retentativa", m.WebhookDeliveriesBacklog, m.WebhookDeliveriesBacklogOldestDueSeconds, string(webhooks.Retrying), 7, 45},
+	}
+	for _, c := range cases {
+		if got := testutil.ToFloat64(c.total.WithLabelValues(c.state)); got != c.wantTotal {
+			t.Errorf("%s: total %v, esperado %v", c.name, got, c.wantTotal)
+		}
+		if got := testutil.ToFloat64(c.oldest.WithLabelValues(c.state)); got != c.wantOldest {
+			t.Errorf("%s: idade %v, esperado %v", c.name, got, c.wantOldest)
+		}
+	}
+	for vec, want := range map[*prometheus.GaugeVec]int{
+		m.NotificationsBacklog: len(telemetry.NotificationBacklogStates), m.NotificationsBacklogOldestSeconds: len(telemetry.NotificationBacklogStates),
+		m.WebhookDeliveriesBacklog: len(telemetry.WebhookBacklogStates), m.WebhookDeliveriesBacklogOldestDueSeconds: len(telemetry.WebhookBacklogStates),
+	} {
+		if got := testutil.CollectAndCount(vec); got != want {
+			t.Errorf("séries criadas: %d, situações declaradas: %d", got, want)
+		}
+	}
+	// As situações declaradas são as do banco e do domínio.
+	if !slices.Equal(telemetry.NotificationBacklogStates, []string{pgstore.NotificationBacklogDue, pgstore.NotificationBacklogSending,
+		pgstore.NotificationBacklogFailed}) {
+		t.Errorf("situações da fila de notificações: %v", telemetry.NotificationBacklogStates)
+	}
+	if !slices.Equal(telemetry.WebhookBacklogStates, []string{string(webhooks.Pending), string(webhooks.Retrying)}) {
+		t.Errorf("situações da fila de entregas: %v", telemetry.WebhookBacklogStates)
+	}
+	if notificationFailedWindow != 24*time.Hour {
+		t.Errorf("janela de falhas diferente da documentada no catálogo (24 horas): %v", notificationFailedWindow)
 	}
 }
