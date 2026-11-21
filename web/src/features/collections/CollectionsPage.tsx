@@ -174,7 +174,10 @@ function PolicyModal({ policy, opened, onClose }: { policy: CollectionPolicy | n
     fieldMap: { reminder_offsets_days: 'offsets' },
     onSuccess: onClose,
   });
+  // Erros da lista inteira (máximo, repetidos) chegam em root, como no
+  // resolver do zod para arrays; mensagens do servidor, em message.
   const offsetsError = form.formState.errors.offsets;
+  const offsetsMessage = offsetsError?.message ?? offsetsError?.root?.message;
   return (
     <Modal opened={opened} onClose={onClose} title={policy ? 'Editar política de cobrança' : 'Nova política de cobrança'} size="lg">
       <form onSubmit={form.handleSubmit((v) => mutation.mutate(v))} noValidate>
@@ -214,9 +217,9 @@ function PolicyModal({ policy, opened, onClose }: { policy: CollectionPolicy | n
                 </ActionIcon>
               </Group>
             ))}
-            {offsetsError?.message && (
+            {offsetsMessage && (
               <Text size="xs" c="red" role="alert">
-                {offsetsError.message}
+                {offsetsMessage}
               </Text>
             )}
             <Button
