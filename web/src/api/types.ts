@@ -18,6 +18,8 @@ export type PlatformPlan = S['PlatformPlan'];
 export type PlatformOverview = S['PlatformOverview'];
 export type PlatformAddon = S['PlatformAddon'];
 export type AddonOrder = S['AddonOrder'];
+export type StaffAddonOrder = S['StaffAddonOrder'];
+export type AdminTenant = S['AdminTenant'];
 export type PlatformStatement = S['PlatformStatement'];
 
 export type CustomerInput = S['CustomerInput'];

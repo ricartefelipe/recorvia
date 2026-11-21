@@ -119,7 +119,8 @@ func TestRandomToken(t *testing.T) {
 
 func TestDefaultPolicy(t *testing.T) {
 	p := DefaultPolicy()
-	want := Policy{Absolute: 12 * time.Hour, Idle: 2 * time.Hour, LoginFlowTTL: 10 * time.Minute, TouchInterval: time.Minute, RequireVerifiedEmail: true}
+	want := Policy{Absolute: 12 * time.Hour, Idle: 2 * time.Hour, LoginFlowTTL: 10 * time.Minute, TouchInterval: time.Minute, RequireVerifiedEmail: true,
+		RevokeTimeout: 5 * time.Second}
 	if p != want {
 		t.Fatalf("DefaultPolicy = %+v, esperado %+v", p, want)
 	}

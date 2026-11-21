@@ -72,11 +72,18 @@ type Subscription struct {
 	Version     int
 }
 
-// Usage é o consumo atual dos limites.
+// Usage é o consumo atual dos limites. Convites pendentes (não aceitos, não
+// revogados e não expirados) reservam vagas de usuário: quem os aceita entra
+// sem nova checagem de convite.
 type Usage struct {
 	ActiveUsers         int
+	PendingInvitations  int
 	ActiveSubscriptions int
 }
+
+// ReservedUsers são as vagas de usuário ocupadas: membros ativos e convites
+// pendentes.
+func (u Usage) ReservedUsers() int { return u.ActiveUsers + u.PendingInvitations }
 
 // NewSubscription inicia a assinatura da plataforma. Sem avaliação, os ciclos
 // mensais são ancorados na data local de início. Com avaliação, o primeiro
@@ -105,16 +112,30 @@ func NewSubscription(tenantID uuid.UUID, plan Plan, now time.Time, loc *time.Loc
 	return s, nil
 }
 
-// CheckUserLimit falha quando adicionar mais um usuário excederia o plano.
+// CheckUserLimit falha quando mais um convite excederia o plano: membros
+// ativos e convites pendentes ocupam vagas.
 func CheckUserLimit(p Plan, u Usage) error {
-	if p.MaxUsers != nil && u.ActiveUsers+1 > *p.MaxUsers {
+	if p.MaxUsers != nil && u.ReservedUsers()+1 > *p.MaxUsers {
 		return apperr.LimitExceeded("platform_user_limit",
 			"O plano da plataforma atingiu o limite de usuários. Altere o plano para convidar mais membros.")
 	}
 	return nil
 }
 
-// CheckSubscriptionLimit falha quando criar mais um contrato ativo excederia o plano.
+// CheckJoinLimit falha quando a entrada de mais um membro ativo excederia o
+// plano. Vale no aceite do convite: a vaga reservada pelo próprio convite
+// deixa de contar como pendente, e só os membros ativos são comparados (o
+// plano pode ter sido rebaixado depois do convite).
+func CheckJoinLimit(p Plan, u Usage) error {
+	if p.MaxUsers != nil && u.ActiveUsers+1 > *p.MaxUsers {
+		return apperr.LimitExceeded("platform_user_limit",
+			"O plano da plataforma atingiu o limite de usuários. Peça a um proprietário para alterar o plano antes de aceitar o convite.")
+	}
+	return nil
+}
+
+// CheckSubscriptionLimit falha quando mais um contrato ativo (criação ou
+// reativação de assinatura suspensa) excederia o plano.
 func CheckSubscriptionLimit(p Plan, u Usage) error {
 	if p.MaxActiveSubscriptions != nil && u.ActiveSubscriptions+1 > *p.MaxActiveSubscriptions {
 		return apperr.LimitExceeded("platform_subscription_limit",
@@ -133,12 +154,15 @@ func RequireFeature(p Plan, f Feature) error {
 }
 
 // CanChangeTo verifica se o consumo atual cabe nos limites do novo plano.
+// Convites pendentes contam como usuários: aceitos depois da troca, levariam
+// a organização além do limite.
 func CanChangeTo(target Plan, u Usage) error {
 	if !target.Active {
 		return apperr.Invalid("platform_plan_inactive", "O plano escolhido não está disponível.")
 	}
-	if target.MaxUsers != nil && u.ActiveUsers > *target.MaxUsers {
-		return apperr.Conflict("platform_downgrade_users", "A organização tem mais usuários ativos do que o plano escolhido permite.")
+	if target.MaxUsers != nil && u.ReservedUsers() > *target.MaxUsers {
+		return apperr.Conflict("platform_downgrade_users",
+			"A organização tem mais usuários ativos e convites pendentes do que o plano escolhido permite. Revogue convites ou remova membros antes de trocar.")
 	}
 	if target.MaxActiveSubscriptions != nil && u.ActiveSubscriptions > *target.MaxActiveSubscriptions {
 		return apperr.Conflict("platform_downgrade_subscriptions", "A organização tem mais contratos ativos do que o plano escolhido permite.")

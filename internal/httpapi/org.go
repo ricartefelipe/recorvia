@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -232,6 +233,12 @@ func (a *API) removeMember(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	// As sessões do membro removido com esta organização ativa são
+	// encerradas. A remoção já foi confirmada: se o armazenamento de sessões
+	// falhar, o acesso continua negado em toda requisição (ResolveAccess).
+	if _, err := a.Identity.RevokeTenantSessions(r.Context(), target, p.TenantID); err != nil {
+		a.log.WarnContext(r.Context(), "sessões do membro removido não encerradas", slog.String("error", err.Error()))
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -323,7 +330,8 @@ func overviewDTO(o platformbilling.Overview) map[string]any {
 		"plan": platformPlanDTOFrom(o.Plan),
 		"subscription": map[string]any{"plan_code": o.Subscription.PlanCode, "status": o.Subscription.Status, "trial_ends_at": o.Subscription.TrialEndsAt,
 			"current_period_start": o.Subscription.PeriodStart, "current_period_end": o.Subscription.PeriodEnd},
-		"usage": map[string]any{"active_users": o.Usage.ActiveUsers, "active_subscriptions": o.Usage.ActiveSubscriptions},
+		"usage": map[string]any{"active_users": o.Usage.ActiveUsers, "pending_invitations": o.Usage.PendingInvitations,
+			"active_subscriptions": o.Usage.ActiveSubscriptions},
 	}
 }
 
@@ -381,7 +389,8 @@ func (a *API) platformAddons(w http.ResponseWriter, r *http.Request) {
 
 func addonOrderDTO(o platformbilling.AddonOrder) map[string]any {
 	return map[string]any{"id": o.ID, "addon_code": o.AddonCode, "status": o.Status, "notes": o.Notes, "price": o.Price.Amount(),
-		"currency": o.Price.Currency().Code(), "created_at": o.CreatedAt}
+		"currency": o.Price.Currency().Code(), "created_at": o.CreatedAt, "scheduled_for": o.ScheduledFor, "completed_at": o.CompletedAt,
+		"canceled_at": o.CanceledAt, "cancel_reason": nullable(o.CancelReason), "billed": o.StatementID != nil, "version": o.Version}
 }
 
 func (a *API) listAddonOrders(w http.ResponseWriter, r *http.Request) {

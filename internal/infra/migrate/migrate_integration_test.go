@@ -225,6 +225,93 @@ func TestQueueMetricsMigrationDownAndUp(t *testing.T) {
 	}
 }
 
+// A migration do atendimento dos serviços adicionais é reversível: o Down
+// remove colunas, constraints, índices, o gatilho de proteção e as funções da
+// equipe da plataforma, sem tocar na tabela de pedidos; o Up seguinte recria
+// tudo, com a execução das funções restrita ao papel da aplicação.
+func TestAddonOrderHandlingMigrationDownAndUp(t *testing.T) {
+	ctx := context.Background()
+	env := pgtest.Start(t)
+	pool := pgtest.OwnerPool(t)
+	const name = "00021_atendimento_de_servicos_adicionais.sql"
+	const objects = `(SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'platform_addon_orders'
+			AND column_name IN ('scheduled_for', 'completed_at', 'canceled_at', 'cancel_reason', 'handled_by', 'statement_id', 'version'))
+		+ (SELECT count(*) FROM pg_constraint WHERE conname IN ('platform_addon_orders_statement_fk', 'platform_addon_orders_scheduled',
+			'platform_addon_orders_completion', 'platform_addon_orders_cancellation', 'platform_addon_orders_billed_when_completed'))
+		+ (SELECT count(*) FROM pg_indexes WHERE indexname IN ('platform_addon_orders_unbilled_idx', 'platform_addon_orders_status_idx'))
+		+ (SELECT count(*) FROM pg_trigger WHERE tgname = 'platform_addon_orders_guard')
+		+ (SELECT count(*) FROM pg_proc WHERE proname IN ('app_platform_addon_orders_guard', 'app_platform_addon_orders', 'app_platform_tenant_names'))`
+	present := []string{
+		`SELECT ` + objects + ` = 18`,
+		`SELECT has_function_privilege('recorvia_app', 'app_platform_addon_orders(text, timestamptz, uuid, integer)', 'EXECUTE')
+		    AND has_function_privilege('recorvia_app', 'app_platform_tenant_names(uuid[])', 'EXECUTE')
+		    AND NOT has_function_privilege('public', 'app_platform_addon_orders(text, timestamptz, uuid, integer)', 'EXECUTE')
+		    AND NOT has_function_privilege('public', 'app_platform_tenant_names(uuid[])', 'EXECUTE')`,
+	}
+	for _, q := range present {
+		if !exists(t, pool, q) {
+			t.Fatalf("esquema antes do Down: %s", q)
+		}
+	}
+	reverted, err := migrate.DownTo(ctx, env.OwnerURL, 20)
+	if err != nil || len(reverted) == 0 || reverted[len(reverted)-1] != name {
+		t.Fatalf("reversão: %v %v", reverted, err)
+	}
+	for _, q := range []string{
+		`SELECT ` + objects + ` = 0`,
+		`SELECT to_regclass('public.platform_addon_orders') IS NOT NULL AND to_regprocedure('app_platform_tenant_catalog()') IS NOT NULL`,
+	} {
+		if !exists(t, pool, q) {
+			t.Fatalf("esquema após o Down: %s", q)
+		}
+	}
+	applied, err := migrate.Up(ctx, env.OwnerURL)
+	if err != nil || len(applied) != len(reverted) || applied[0] != name {
+		t.Fatalf("reaplicação: %v %v", applied, err)
+	}
+	for _, q := range present {
+		if !exists(t, pool, q) {
+			t.Fatalf("esquema após o Up: %s", q)
+		}
+	}
+}
+
+// O usuário de demonstração da equipe da plataforma é incluído pelo dono das
+// tabelas de forma idempotente, antes ou depois do primeiro login dele.
+func TestEnsureDemoStaff(t *testing.T) {
+	ctx := context.Background()
+	env := pgtest.Start(t)
+	pool := pgtest.OwnerPool(t)
+	now := time.Now().UTC()
+	fresh := migrate.DemoStaff{Issuer: "https://idp.test/realms/x", Subject: uuid.New(), Email: "equipe@recorvia.test", Name: "Equipe"}
+	for range 2 {
+		if err := migrate.EnsureDemoStaff(ctx, env.OwnerURL, fresh, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !exists(t, pool, `SELECT count(*) = 1 FROM platform_staff s JOIN users u ON u.id = s.user_id
+		WHERE u.id = '`+fresh.Subject.String()+`' AND u.oidc_subject = '`+fresh.Subject.String()+`' AND u.email = 'equipe@recorvia.test'`) {
+		t.Fatal("usuário novo incluído na equipe uma única vez")
+	}
+	// Usuário que já entrou (ID próprio): a equipe aponta para ele.
+	logged := migrate.DemoStaff{Issuer: fresh.Issuer, Subject: uuid.New(), Email: "outra@recorvia.test", Name: "Outra"}
+	existing := uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO users (id, oidc_issuer, oidc_subject, email, display_name) VALUES ($1, $2, $3, $4, 'Outra')`,
+		existing, logged.Issuer, logged.Subject.String(), logged.Email); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate.EnsureDemoStaff(ctx, env.OwnerURL, logged, now); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(t, pool, `SELECT EXISTS (SELECT 1 FROM platform_staff WHERE user_id = '`+existing.String()+`')
+		AND NOT EXISTS (SELECT 1 FROM users WHERE id = '`+logged.Subject.String()+`')`) {
+		t.Fatal("a equipe deve apontar para o usuário existente")
+	}
+	if err := migrate.EnsureDemoStaff(ctx, env.OwnerURL, migrate.DemoStaff{Issuer: fresh.Issuer, Subject: uuid.New(), Email: "invalido"}, now); err == nil {
+		t.Fatal("dados inválidos deveriam ser recusados")
+	}
+}
+
 // A migration 00019 é reversível: o Down devolve o gatilho e a constraint de
 // saldo da 00006, remove os dados do emitente e o índice da listagem, e
 // devolve o saldo das faturas canceladas à conta antiga; o Up seguinte volta a

@@ -62,8 +62,11 @@ Regras adicionais aplicadas nos casos de uso:
 - Somente proprietários convidam, promovem, rebaixam ou removem proprietários.
 - A organização mantém ao menos um proprietário ativo.
 - O plano da plataforma (`platform_billing.manage`) é exclusivo do proprietário.
-- A equipe da plataforma (`platform_staff`) vê apenas o catálogo de organizações, sem dados
-  financeiros; acesso a dados de um tenant exige convite do próprio tenant e fica auditado.
+- A equipe da plataforma (`platform_staff`) vê o catálogo de organizações, sem dados financeiros
+  dos clientes dos tenants, e atende os pedidos de serviços adicionais (agendar, concluir e
+  cancelar, com auditoria na trilha da organização; ADR-077). As rotas `/api/v1/admin/...` exigem a
+  sessão de um integrante da equipe. Acesso aos demais dados de um tenant exige convite do próprio
+  tenant e fica auditado.
 - Credenciais de API recebem como escopos somente permissões de quem as emite; os escopos
   efetivos acompanham o papel atual dessa pessoa.
   Não são delegáveis: `members.manage`, `platform_billing.manage`, `api_credentials.manage`, `customers.anonymize`.
@@ -82,6 +85,7 @@ aceitam credenciais pelos escopos.
 | Rota | Contexto | Permissão |
 |---|---|---|
 | `POST /auth/logout` | conta e sessão | — |
+| `POST /auth/logout-all` | conta e sessão | — |
 | `GET /api/v1/session` | conta e sessão | — |
 | `PUT /api/v1/session/tenant` | conta e sessão | — |
 | `POST /api/v1/organizations` | conta e sessão | — |

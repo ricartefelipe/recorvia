@@ -197,11 +197,17 @@ func NewRouter(d Deps) (*API, http.Handler) {
 
 func (a *API) registerAuthenticated(r chi.Router) {
 	a.handle(r, http.MethodPost, "/auth/logout", Authenticated, "", a.authLogout)
+	a.handle(r, http.MethodPost, "/auth/logout-all", Authenticated, "", a.authLogoutAll)
 	a.handle(r, http.MethodGet, "/api/v1/session", Authenticated, "", a.getSession)
 	a.handle(r, http.MethodPut, "/api/v1/session/tenant", Authenticated, "", a.switchTenant)
 	a.handle(r, http.MethodPost, "/api/v1/organizations", Authenticated, "", a.createOrganization)
 	a.handle(r, http.MethodPost, "/api/v1/invitations/accept", Authenticated, "", a.acceptInvitation)
 	a.handle(r, http.MethodGet, "/api/v1/admin/tenants", PlatformStaff, "", a.adminTenants)
+	// Atendimento dos serviços adicionais pela equipe da plataforma (ADR-077).
+	a.handle(r, http.MethodGet, "/api/v1/admin/addon-orders", PlatformStaff, "", a.adminAddonOrders)
+	a.handle(r, http.MethodPost, "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/schedule", PlatformStaff, "", a.adminScheduleAddonOrder)
+	a.handle(r, http.MethodPost, "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/complete", PlatformStaff, "", a.adminCompleteAddonOrder)
+	a.handle(r, http.MethodPost, "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/cancel", PlatformStaff, "", a.adminCancelAddonOrder)
 }
 
 var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{8,64}$`)

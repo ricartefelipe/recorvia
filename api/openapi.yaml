@@ -101,18 +101,32 @@ paths:
     post:
       tags: [auth]
       operationId: authLogout
+      summary: Encerra a sessão atual
+      description: >-
+        Remove a sessão do servidor, revoga no provedor de identidade, pelo
+        servidor, o refresh token da sessão e devolve o endereço de
+        encerramento da sessão do navegador no provedor, com `client_id` e
+        `post_logout_redirect_uri`. Nenhum token do provedor (nem o ID token)
+        é devolvido ao navegador.
       security: [ { session: [] } ]
       parameters: [ { $ref: "#/components/parameters/CSRF" } ]
       responses:
-        "200":
-          description: Sessão encerrada
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [redirect_url]
-                properties:
-                  redirect_url: { type: string }
+        "200": { $ref: "#/components/responses/LogoutRedirect" }
+        "403": { $ref: "#/components/responses/UserSessionRequired" }
+  /auth/logout-all:
+    post:
+      tags: [auth]
+      operationId: authLogoutAll
+      summary: Encerra todas as sessões do usuário
+      description: >-
+        Remove todas as sessões do usuário no servidor (em qualquer navegador),
+        revoga no provedor de identidade o refresh token de cada uma e devolve
+        o endereço de encerramento da sessão do navegador atual no provedor,
+        sem tokens.
+      security: [ { session: [] } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      responses:
+        "200": { $ref: "#/components/responses/LogoutRedirect" }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
 
   /api/v1/session:
@@ -161,6 +175,14 @@ paths:
     post:
       tags: [organizations]
       operationId: acceptInvitation
+      summary: Aceita um convite com o usuário da sessão
+      description: >-
+        O convite é de uso único, expira e exige o mesmo e-mail do usuário.
+        Convite inválido, expirado, revogado ou já usado responde 422
+        `invitation_invalid`; e-mail divergente, 403 `invitation_email_mismatch`;
+        quem já participa da organização, 409 `already_member`; organização no
+        limite de usuários do plano da plataforma (inclusive depois de um
+        rebaixamento de plano), 403 `platform_user_limit`.
       security: [ { session: [] } ]
       parameters: [ { $ref: "#/components/parameters/CSRF" } ]
       requestBody:
@@ -184,6 +206,7 @@ paths:
                   tenant_id: { type: string, format: uuid }
                   role: { $ref: "#/components/schemas/Role" }
         "403": { $ref: "#/components/responses/UserSessionRequired" }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
 
   /api/v1/organization:
@@ -355,6 +378,99 @@ paths:
       responses:
         "200": { description: Organizações, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AdminTenant" } } } } } } }
         "403": { $ref: "#/components/responses/Problem" }
+  /api/v1/admin/addon-orders:
+    get:
+      tags: [platform]
+      operationId: adminListAddonOrders
+      summary: Pedidos de serviços adicionais de todas as organizações (equipe da plataforma)
+      description: >-
+        Paginada por cursor. Sem `status`, lista os pedidos em aberto
+        (solicitados e agendados), do mais antigo para o mais recente;
+        `requested`, pela solicitação; `scheduled`, pela data do atendimento;
+        `completed` e `canceled`, do encerramento mais recente para o mais
+        antigo. O cursor vale somente para o mesmo filtro (`invalid_cursor`).
+      security: [ { session: [] } ]
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [requested, scheduled, completed, canceled] } }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200":
+          description: Pedidos
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor]
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/StaffAddonOrder" } }
+                  next_cursor: { type: string, nullable: true }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/schedule:
+    parameters: [ { $ref: "#/components/parameters/AdminTenantID" }, { $ref: "#/components/parameters/ID" } ]
+    post:
+      tags: [platform]
+      operationId: adminScheduleAddonOrder
+      summary: Agenda (ou reagenda) o atendimento do pedido
+      security: [ { session: [] } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scheduled_for]
+              properties:
+                scheduled_for: { type: string, format: date-time, description: "Instante futuro, em até um ano" }
+      responses:
+        "200": { description: Pedido agendado, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/complete:
+    parameters: [ { $ref: "#/components/parameters/AdminTenantID" }, { $ref: "#/components/parameters/ID" } ]
+    post:
+      tags: [platform]
+      operationId: adminCompleteAddonOrder
+      summary: Conclui o atendimento; o valor entra no próximo demonstrativo da plataforma
+      description: >-
+        O valor entra no demonstrativo do período em que a conclusão ocorreu
+        (ou no seguinte, se esse já estiver fechado). Com a assinatura da
+        plataforma da organização cancelada, responde 409
+        `platform_subscription_canceled`: o pedido deve ser cancelado.
+      security: [ { session: [] } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      responses:
+        "200": { description: Pedido concluído, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/cancel:
+    parameters: [ { $ref: "#/components/parameters/AdminTenantID" }, { $ref: "#/components/parameters/ID" } ]
+    post:
+      tags: [platform]
+      operationId: adminCancelAddonOrder
+      summary: Cancela o pedido em aberto, sem cobrança
+      security: [ { session: [] } ]
+      parameters: [ { $ref: "#/components/parameters/CSRF" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 3, maxLength: 500 }
+      responses:
+        "200": { description: Pedido cancelado, content: { application/json: { schema: { $ref: "#/components/schemas/AddonOrder" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
 
   /api/v1/customers:
     get:
@@ -1754,6 +1870,12 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    AdminTenantID:
+      name: tenant_id
+      in: path
+      required: true
+      description: Organização do pedido (equipe da plataforma)
+      schema: { type: string, format: uuid }
     Limit:
       name: limit
       in: query
@@ -1769,6 +1891,15 @@ components:
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
+    LogoutRedirect:
+      description: Sessão encerrada
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [redirect_url]
+            properties:
+              redirect_url: { type: string, description: "Encerramento no provedor (client_id e post_logout_redirect_uri), sem tokens" }
     UserSessionRequired:
       description: >-
         Acesso negado (RFC 9457). A operação exige a sessão de um usuário:
@@ -1950,9 +2081,10 @@ components:
             current_period_end: { type: string, format: date-time }
         usage:
           type: object
-          required: [active_users, active_subscriptions]
+          required: [active_users, pending_invitations, active_subscriptions]
           properties:
             active_users: { type: integer }
+            pending_invitations: { type: integer, description: Convites pendentes; reservam vagas de usuário do plano }
             active_subscriptions: { type: integer }
     PlatformAddon:
       type: object
@@ -1966,7 +2098,7 @@ components:
         kind: { type: string }
     AddonOrder:
       type: object
-      required: [id, addon_code, status, notes, price, currency, created_at]
+      required: [id, addon_code, status, notes, price, currency, created_at, scheduled_for, completed_at, canceled_at, cancel_reason, billed, version]
       properties:
         id: { type: string, format: uuid }
         addon_code: { type: string }
@@ -1975,6 +2107,22 @@ components:
         price: { type: integer, format: int64 }
         currency: { type: string }
         created_at: { type: string, format: date-time }
+        scheduled_for: { type: string, format: date-time, nullable: true, description: Instante combinado para o atendimento }
+        completed_at: { type: string, format: date-time, nullable: true }
+        canceled_at: { type: string, format: date-time, nullable: true }
+        cancel_reason: { type: string, nullable: true }
+        billed: { type: boolean, description: O pedido concluído já entrou em um demonstrativo da plataforma }
+        version: { type: integer }
+    StaffAddonOrder:
+      allOf:
+        - { $ref: "#/components/schemas/AddonOrder" }
+        - type: object
+          required: [tenant_id, tenant_name, tenant_slug, addon_name]
+          properties:
+            tenant_id: { type: string, format: uuid }
+            tenant_name: { type: string }
+            tenant_slug: { type: string }
+            addon_name: { type: string }
     PlatformStatement:
       type: object
       required: [id, period_start, period_end, plan_code, subscription_amount, addons_amount, total, currency, status]
