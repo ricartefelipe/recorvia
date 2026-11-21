@@ -594,14 +594,6 @@ func referencedMetrics(t *testing.T, path string) []string {
 	return out
 }
 
-// pendingStageMetrics são métricas referenciadas por regras e pelo catálogo
-// que chegam com a etapa 5 (recebíveis e conciliação), ainda não integrada.
-// Na integração, a declaração em NewMetrics torna a entrada desnecessária.
-var pendingStageMetrics = map[string]string{
-	"recorvia_refunds_total":       "etapa 5",
-	"recorvia_refunds_in_progress": "etapa 5",
-}
-
 func TestAlertRulesAndDashboardsUseDeclaredMetrics(t *testing.T) {
 	known := declared(t)
 	files, err := filepath.Glob(filepath.Join(observabilityDir, "prometheus", "rules", "*.yml"))
@@ -619,13 +611,8 @@ func TestAlertRulesAndDashboardsUseDeclaredMetrics(t *testing.T) {
 	for _, f := range append(files, dashboards...) {
 		for _, ref := range referencedMetrics(t, f) {
 			used[ref] = true
-			_, ok := known[ref]
-			_, pending := pendingStageMetrics[ref]
-			if !ok && !pending {
+			if _, ok := known[ref]; !ok {
 				t.Errorf("%s referencia a métrica inexistente %s", filepath.Base(f), ref)
-			}
-			if pending && strings.HasSuffix(f, ".json") {
-				t.Errorf("%s: painel com a métrica %s da %s, ainda não integrada", filepath.Base(f), ref, pendingStageMetrics[ref])
 			}
 		}
 	}
@@ -670,11 +657,6 @@ func TestMetricsCatalogDocumentsEveryMetricAndLabelValue(t *testing.T) {
 	for name := range declared(t) {
 		if _, ok := rows[name]; !ok {
 			t.Errorf("métrica %s ausente do catálogo (tabela de métricas)", name)
-		}
-	}
-	for name := range pendingStageMetrics {
-		if _, ok := rows[name]; !ok {
-			t.Errorf("métrica %s (%s) ausente do catálogo", name, pendingStageMetrics[name])
 		}
 	}
 	values := map[string][]string{

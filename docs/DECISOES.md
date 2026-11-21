@@ -779,7 +779,7 @@ do worker) precisam de séries existentes, sem rótulos de tenant, cliente ou fa
 7. Métricas da régua de cobrança, das notificações e dos webhooks enviados (etapa 6): alertas só
    para falhas da plataforma (SMTP sem nenhum envio aceito, falhas definitivas em volume, nenhuma
    entrega de webhook bem-sucedida); a régua tem só painel. As regras de reembolso usam as
-   métricas da etapa 5, ainda sem dados nesta branch.
+   métricas de recebíveis (ADR-039).
 **Consequências:** a contagem de dead letters abertas por tenant continua visível apenas pela API
 (`GET /api/v1/dead-letters`); um gauge global exigiria nova função `SECURITY DEFINER` (migration),
 fora do escopo. Os limites dos alertas são pontos de partida a calibrar com volume real. A falha

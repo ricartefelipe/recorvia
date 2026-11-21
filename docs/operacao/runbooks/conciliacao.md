@@ -5,8 +5,7 @@ operações que esgotaram as tentativas automáticas, os reembolsos sem conclus�
 entre o Recorvia e o provedor de pagamento (RF-12). As execuções e divergências
 de conciliação seguem o contrato `api/openapi.yaml` (tag `reconciliation`); a situação de cada
 funcionalidade está em `docs/STATUS.md`. A métrica `recorvia_reconciliation_open_discrepancies`
-(por `kind`) é exposta pelo worker junto com a funcionalidade de conciliação (etapa 5, recebíveis
-e conciliação); enquanto ela não tiver séries, os alertas de divergência não disparam.
+(por `kind`) é exposta pelo worker, na tarefa `metrics.collect`.
 
 Princípios (válidos em qualquer ação abaixo):
 - dinheiro recebido nunca é descartado (ADR-030);
@@ -128,7 +127,7 @@ anulada, `canceled`).
 ## Reembolsos sem confirmação
 
 As métricas desta seção (`recorvia_refunds_in_progress` e `recorvia_refunds_total`) são exportadas
-pela etapa 5 (recebíveis e conciliação); até a integração, os alertas não têm dados.
+pelo worker, na tarefa `metrics.collect`, a partir dos totais do banco.
 
 ### Sintomas
 - Reembolso solicitado (`POST /api/v1/charges/{id}/refunds`) sem conclusão, ou recusado pelo
