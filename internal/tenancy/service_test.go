@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ricartefelipe/recorvia/internal/audit"
+	"github.com/ricartefelipe/recorvia/internal/kernel/address"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
 	"github.com/ricartefelipe/recorvia/internal/kernel/money"
@@ -241,6 +242,103 @@ func TestUpdateOrganization(t *testing.T) {
 	if e.d().tenant.Name != "Acme Brasil" {
 		t.Fatal("versão divergente não pode alterar a organização")
 	}
+}
+
+func orgAddress() address.Address {
+	return address.Address{Street: " Av. Paulista ", Number: "1000", Complement: "10º andar", District: "Bela Vista", City: "São Paulo",
+		State: "sp", PostalCode: "01310-100"}
+}
+
+// O endereço da organização é gravado com o perfil, normalizado como o de
+// cobrança do cliente, e a auditoria informa só os nomes dos campos
+// alterados e se o endereço foi cadastrado agora. Sem endereço no pedido, o
+// atual é mantido; sem mudança, nada é gravado nem auditado como alteração
+// do endereço.
+func TestUpdateOrganizationAddress(t *testing.T) {
+	e := newEnv(t)
+	actor := audit.User(e.owner.ID, "dona")
+	ctx := context.Background()
+	a := orgAddress()
+	tn, err := e.svc.UpdateOrganization(ctx, e.tenantID, actor, TenantInput{Name: "Acme", Address: &a}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := address.Address{Street: "Av. Paulista", Number: "1000", Complement: "10º andar", District: "Bela Vista", City: "São Paulo",
+		State: "SP", PostalCode: "01310100", Country: "BR"}
+	if tn.Address == nil || *tn.Address != want || tn.Version != 2 {
+		t.Fatalf("organização devolvida: %+v %+v", tn, tn.Address)
+	}
+	if stored := e.d().tenant.Address; stored == nil || *stored != want || e.store.calls["UpsertTenantAddress"] != 1 {
+		t.Fatalf("endereço gravado: %+v (gravações: %d)", stored, e.store.calls["UpsertTenantAddress"])
+	}
+	created := e.lastAudit(t)
+	if created.Action != "organization.address_updated" || created.ResourceType != "organization" || created.Actor != actor ||
+		created.Details["created"] != true || len(created.Details["fields"].([]string)) != 8 {
+		t.Fatalf("auditoria do cadastro do endereço: %+v", created)
+	}
+
+	// Sem endereço no pedido, o atual fica; nenhuma auditoria de endereço.
+	audits := len(e.d().audits)
+	if tn, err = e.svc.UpdateOrganization(ctx, e.tenantID, actor, TenantInput{Name: "Acme Brasil"}, 2); err != nil || tn.Address == nil || *tn.Address != want {
+		t.Fatalf("sem endereço no pedido: %+v %v", tn.Address, err)
+	}
+	if got := e.d().audits[audits:]; len(got) != 1 || got[0].Action != "organization.updated" || e.store.calls["UpsertTenantAddress"] != 1 {
+		t.Fatalf("auditorias sem mudança de endereço: %+v", got)
+	}
+
+	// O mesmo endereço, só com outra grafia, também não é alteração.
+	same := want
+	same.State, same.PostalCode = "sp", "01310-100"
+	audits = len(e.d().audits)
+	if _, err = e.svc.UpdateOrganization(ctx, e.tenantID, actor, TenantInput{Name: "Acme Brasil", Address: &same}, 3); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.d().audits[audits:]; len(got) != 1 || e.store.calls["UpsertTenantAddress"] != 1 {
+		t.Fatalf("endereço igual não deveria ser regravado: %+v", got)
+	}
+
+	// Mudança: somente os nomes dos campos, nunca os valores.
+	moved := want
+	moved.Number, moved.PostalCode = "2000", "01311000"
+	if tn, err = e.svc.UpdateOrganization(ctx, e.tenantID, actor, TenantInput{Name: "Acme Brasil", Address: &moved}, 4); err != nil {
+		t.Fatal(err)
+	}
+	updated := e.lastAudit(t)
+	if updated.Action != "organization.address_updated" || updated.Details["created"] != false ||
+		fmt.Sprint(updated.Details["fields"]) != "[number postal_code]" || strings.Contains(fmt.Sprint(updated.Details), "01311000") {
+		t.Fatalf("auditoria da alteração do endereço: %+v", updated)
+	}
+	if *e.d().tenant.Address != moved || tn.Version != 5 {
+		t.Fatalf("endereço alterado: %+v (versão %d)", e.d().tenant.Address, tn.Version)
+	}
+}
+
+func TestUpdateOrganizationAddressRejected(t *testing.T) {
+	t.Run("endereço inválido", func(t *testing.T) {
+		e := newEnv(t)
+		bad := orgAddress()
+		bad.State, bad.PostalCode = "São Paulo", "123"
+		_, err := e.svc.UpdateOrganization(context.Background(), e.tenantID, audit.System("t"), TenantInput{Name: "Acme", Address: &bad}, 1)
+		fields := assertAppErr(t, err, apperr.KindInvalid, "invalid_organization")
+		if fmt.Sprint(fields) != "[address.state address.postal_code]" {
+			t.Fatalf("campos: %v", fields)
+		}
+		if e.d().tenant.Address != nil || len(e.d().audits) != 0 || e.d().tenant.Version != 1 {
+			t.Fatal("nada deveria ser gravado")
+		}
+	})
+	t.Run("falha ao gravar o endereço desfaz o perfil", func(t *testing.T) {
+		e := newEnv(t)
+		e.store.fail["UpsertTenantAddress"] = errBoom
+		a := orgAddress()
+		_, err := e.svc.UpdateOrganization(context.Background(), e.tenantID, audit.System("t"), TenantInput{Name: "Acme 2", Address: &a}, 1)
+		if !errors.Is(err, errBoom) {
+			t.Fatalf("esperado erro propagado, obtido %v", err)
+		}
+		if d := e.d(); d.tenant.Name != "Acme" || d.tenant.Address != nil || len(d.audits) != 0 {
+			t.Fatalf("a alteração deveria ser desfeita: %+v", d.tenant)
+		}
+	})
 }
 
 func TestUpdateOrganizationRejected(t *testing.T) {

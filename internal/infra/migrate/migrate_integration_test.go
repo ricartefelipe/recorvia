@@ -408,3 +408,39 @@ func TestInvoiceGuardMigrationDownAndUp(t *testing.T) {
 		t.Fatalf("após o Up, o esquema da 00019 deveria voltar (saldo da cancelada %d)", due())
 	}
 }
+
+// A migration do endereço da organização é reversível: o Up cria a tabela
+// com RLS por tenant, a chave para a organização e os privilégios do papel da
+// aplicação (sem DELETE: o endereço é substituído, não removido); o Down a
+// remove sem tocar na tabela de organizações; o Up seguinte recria tudo.
+func TestTenantAddressMigrationDownAndUp(t *testing.T) {
+	ctx := context.Background()
+	env := pgtest.Start(t)
+	pool := pgtest.OwnerPool(t)
+	const name = "00024_endereco_da_organizacao.sql"
+	const present = `SELECT to_regclass('public.tenant_addresses') IS NOT NULL
+		AND (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.tenant_addresses'::regclass)
+		AND EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'tenant_addresses' AND policyname = 'tenant_isolation')
+		AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tenant_addresses_tenant_fk' AND confrelid = 'public.tenants'::regclass)
+		AND has_table_privilege('recorvia_app', 'public.tenant_addresses', 'SELECT')
+		AND has_table_privilege('recorvia_app', 'public.tenant_addresses', 'INSERT')
+		AND has_table_privilege('recorvia_app', 'public.tenant_addresses', 'UPDATE')
+		AND NOT has_table_privilege('recorvia_app', 'public.tenant_addresses', 'DELETE')`
+	if !exists(t, pool, present) {
+		t.Fatal("tabela do endereço da organização ausente ou incompleta antes do Down")
+	}
+	reverted, err := migrate.DownTo(ctx, env.OwnerURL, 23)
+	if err != nil || len(reverted) == 0 || reverted[len(reverted)-1] != name {
+		t.Fatalf("reversão: %v %v", reverted, err)
+	}
+	if !exists(t, pool, `SELECT to_regclass('public.tenant_addresses') IS NULL AND to_regclass('public.tenants') IS NOT NULL`) {
+		t.Fatal("esquema após o Down")
+	}
+	applied, err := migrate.Up(ctx, env.OwnerURL)
+	if err != nil || len(applied) != len(reverted) || applied[0] != name {
+		t.Fatalf("reaplicação: %v %v", applied, err)
+	}
+	if !exists(t, pool, present) {
+		t.Fatal("tabela do endereço da organização ausente ou incompleta após o Up")
+	}
+}

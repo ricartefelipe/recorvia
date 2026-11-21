@@ -330,6 +330,28 @@ func (q *Queries) GetTenant(ctx context.Context) (Tenant, error) {
 	return i, err
 }
 
+const getTenantAddress = `-- name: GetTenantAddress :one
+SELECT tenant_id, street, number, complement, district, city, state, postal_code, country, updated_at FROM tenant_addresses WHERE tenant_id = $1
+`
+
+func (q *Queries) GetTenantAddress(ctx context.Context, tenantID uuid.UUID) (TenantAddress, error) {
+	row := q.db.QueryRow(ctx, getTenantAddress, tenantID)
+	var i TenantAddress
+	err := row.Scan(
+		&i.TenantID,
+		&i.Street,
+		&i.Number,
+		&i.Complement,
+		&i.District,
+		&i.City,
+		&i.State,
+		&i.PostalCode,
+		&i.Country,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getTenantPlatformSubscription = `-- name: GetTenantPlatformSubscription :one
 SELECT tenant_id, plan_code, status, trial_ends_at, anchor_date, current_period_start, current_period_end, created_at, updated_at, version FROM tenant_platform_subscriptions WHERE tenant_id = $1
 `
@@ -1231,6 +1253,44 @@ func (q *Queries) UpdateTenantPlatformSubscription(ctx context.Context, arg Upda
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const upsertTenantAddress = `-- name: UpsertTenantAddress :exec
+INSERT INTO tenant_addresses (tenant_id, street, number, complement, district, city, state, postal_code, country, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (tenant_id) DO UPDATE
+   SET street = EXCLUDED.street, number = EXCLUDED.number, complement = EXCLUDED.complement, district = EXCLUDED.district,
+       city = EXCLUDED.city, state = EXCLUDED.state, postal_code = EXCLUDED.postal_code, country = EXCLUDED.country,
+       updated_at = EXCLUDED.updated_at
+`
+
+type UpsertTenantAddressParams struct {
+	TenantID   uuid.UUID
+	Street     string
+	Number     string
+	Complement string
+	District   string
+	City       string
+	State      string
+	PostalCode string
+	Country    string
+	UpdatedAt  time.Time
+}
+
+func (q *Queries) UpsertTenantAddress(ctx context.Context, arg UpsertTenantAddressParams) error {
+	_, err := q.db.Exec(ctx, upsertTenantAddress,
+		arg.TenantID,
+		arg.Street,
+		arg.Number,
+		arg.Complement,
+		arg.District,
+		arg.City,
+		arg.State,
+		arg.PostalCode,
+		arg.Country,
+		arg.UpdatedAt,
+	)
+	return err
 }
 
 const userMemberships = `-- name: UserMemberships :many

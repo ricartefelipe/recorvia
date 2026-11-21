@@ -33,6 +33,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/reporting"
 	"github.com/ricartefelipe/recorvia/internal/subscriptions"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
+	"github.com/ricartefelipe/recorvia/internal/testsupport/contract"
 	"github.com/ricartefelipe/recorvia/internal/testsupport/fixture"
 )
 
@@ -58,7 +59,9 @@ func invAPIWithExportLimit(t *testing.T, maxRows int) (full, limited *apiEnv) {
 		Terms:       subscriptions.NewTermsService(env.Store.Subscriptions(), env.Clock),
 		Metering:    metering.NewService(env.Store.Metering(), env.Clock),
 		Reporting:   reporting.NewService(env.Store.Reporting(), env.Clock), InvoiceExportMaxRows: maxRows})
-	srv := httptest.NewServer(router)
+	// A exportação cortada e os headers X-Recorvia-Export-* também são
+	// conferidos contra o contrato.
+	srv := httptest.NewServer(contract.Wrap(t, router))
 	t.Cleanup(srv.Close)
 	l := *a
 	l.srv = srv
@@ -231,6 +234,86 @@ func TestInvoiceDocumentTotalsCloseOverHTTP(t *testing.T) {
 	}
 	want["Valor baixado"], want["Saldo"] = "-R$ 85,00", "R$ 0,00"
 	check("baixada", want, "Incobrável")
+}
+
+// Endereço do emitente (RF-06, ADR-084): a organização cadastra o endereço
+// pelo perfil (PATCH /organization), com auditoria dos campos alterados; a
+// fatura emitida depois grava o endereço no emitente, e a mudança posterior
+// do endereço não altera o documento dela. A fatura emitida antes do
+// cadastro continua sem endereço do emitente, sem quebrar o documento.
+func TestInvoiceDocumentKeepsIssuerAddressOverHTTP(t *testing.T) {
+	a := newAdvancedAPI(t)
+	tn := invIssuerTenant(t, a.env, "endereco-emitente")
+	c := a.login(tn.Owner, &tn.ID)
+	const label = "<strong>Endereço do emitente:</strong> "
+	doc := func(inv billing.Invoice) string {
+		t.Helper()
+		r := invGetText(c, "/api/v1/invoices/"+inv.ID.String()+"/document")
+		if r.status != http.StatusOK || !strings.Contains(r.text, invFiscalNotice) || !strings.Contains(r.text, "</html>") {
+			t.Fatalf("documento da fatura %s: %d\n%s", inv.Number, r.status, r.text)
+		}
+		return r.text
+	}
+	setAddress := func(addr map[string]any) map[string]any {
+		t.Helper()
+		org, h := c.expect(http.StatusOK, http.MethodGet, "/api/v1/organization", nil)
+		got, _ := c.expect(http.StatusOK, http.MethodPatch, "/api/v1/organization", map[string]any{"name": org["name"],
+			"legal_name": org["legal_name"], "document_number": org["document_number"], "timezone": org["timezone"],
+			"invoice_prefix": org["invoice_prefix"], "address": addr}, "If-Match", h.Get("ETag"))
+		return got
+	}
+
+	// Antes do cadastro: a organização não tem endereço e a fatura sai sem ele.
+	if org, _ := c.expect(http.StatusOK, http.MethodGet, "/api/v1/organization", nil); org["address"] != nil {
+		t.Fatalf("organização sem endereço cadastrado: %v", org["address"])
+	}
+	before := issueInvoice(t, a, tn, a.env.NewCustomer(t, tn).ID, 10000)
+	if text := doc(before); strings.Contains(text, label) {
+		t.Fatalf("fatura sem endereço cadastrado não deveria ter endereço do emitente:\n%s", text)
+	}
+
+	// Cadastro pelo perfil, normalizado como o endereço de cobrança.
+	got := setAddress(map[string]any{"street": " Av. Paulista ", "number": "1000", "complement": "10º andar", "district": "Bela Vista",
+		"city": "São Paulo", "state": "sp", "postal_code": "01310-100"})
+	if addr, _ := got["address"].(map[string]any); addr["street"] != "Av. Paulista" || addr["state"] != "SP" || addr["postal_code"] != "01310100" ||
+		addr["country"] != "BR" {
+		t.Fatalf("endereço gravado: %v", got["address"])
+	}
+	c.expectProblem(http.StatusUnprocessableEntity, "invalid_organization", http.MethodPatch, "/api/v1/organization",
+		map[string]any{"name": got["name"], "invoice_prefix": got["invoice_prefix"], "address": map[string]any{"street": "Rua", "number": "1",
+			"district": "Centro", "city": "São Paulo", "state": "São Paulo", "postal_code": "123"}}, "If-Match", `"`+strconv.Itoa(int(got["version"].(float64)))+`"`)
+
+	issued := issueInvoice(t, a, tn, a.env.NewCustomer(t, tn).ID, 12000)
+	const issuedAddress = label + "Av. Paulista, 1000, 10º andar - Bela Vista - São Paulo/SP - CEP 01310-100"
+	if text := doc(issued); !strings.Contains(text, issuedAddress) {
+		t.Fatalf("documento sem o endereço do emitente da emissão:\n%s", text)
+	}
+
+	// Mudança do endereço: as faturas emitidas mantêm o emitente gravado.
+	setAddress(map[string]any{"street": "Rua Nova", "number": "55", "district": "Centro", "city": "Campinas", "state": "SP",
+		"postal_code": "13010000"})
+	if text := doc(issued); !strings.Contains(text, issuedAddress) || strings.Contains(text, "Rua Nova") {
+		t.Fatalf("documento emitido passou a usar o endereço atual:\n%s", text)
+	}
+	if text := doc(before); strings.Contains(text, label) {
+		t.Fatalf("fatura anterior ao cadastro ganhou endereço do emitente:\n%s", text)
+	}
+	after := issueInvoice(t, a, tn, a.env.NewCustomer(t, tn).ID, 13000)
+	if text := doc(after); !strings.Contains(text, label+"Rua Nova, 55 - Centro - Campinas/SP - CEP 13010-000") {
+		t.Fatalf("fatura emitida depois da mudança sem o endereço novo:\n%s", text)
+	}
+
+	// Auditoria: cadastro e alteração do endereço, só com os nomes dos campos.
+	events, _ := c.expect(http.StatusOK, http.MethodGet, "/api/v1/audit-events?action=organization.address_updated", nil)
+	list := jsonArray(t, events["data"])
+	if len(list) != 2 {
+		t.Fatalf("auditoria do endereço: %v", list)
+	}
+	latest, first := list[0].(map[string]any), list[1].(map[string]any)
+	if latest["resource_type"] != "organization" || fmt.Sprint(latest["details"]) != "map[created:false fields:[street number complement district city postal_code]]" ||
+		fmt.Sprint(first["details"]) != "map[created:true fields:[street number complement district city state postal_code country]]" {
+		t.Fatalf("auditoria do endereço: %v / %v", latest, first)
+	}
 }
 
 func invParseCSV(t *testing.T, text string) [][]string {

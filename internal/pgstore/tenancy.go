@@ -9,6 +9,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/dbgen"
 	"github.com/ricartefelipe/recorvia/internal/identity"
 	"github.com/ricartefelipe/recorvia/internal/infra/postgres"
+	"github.com/ricartefelipe/recorvia/internal/kernel/address"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/platformbilling"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
@@ -85,7 +86,31 @@ func (tx tenancyTx) Tenant(ctx context.Context) (tenancy.Tenant, error) {
 	if err != nil {
 		return tenancy.Tenant{}, notFound(err, "organization_not_found", "Organização não encontrada.")
 	}
-	return tenantFromRow(r), nil
+	t := tenantFromRow(r)
+	if t.Address, err = tx.tenantAddress(ctx); err != nil {
+		return tenancy.Tenant{}, err
+	}
+	return t, nil
+}
+
+// tenantAddress devolve o endereço da organização corrente (nil sem
+// cadastro).
+func (b base) tenantAddress(ctx context.Context) (*address.Address, error) {
+	r, err := b.q.GetTenantAddress(ctx, b.tenantID)
+	if postgres.IsNoRows(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &address.Address{Street: r.Street, Number: r.Number, Complement: r.Complement, District: r.District, City: r.City,
+		State: r.State, PostalCode: r.PostalCode, Country: r.Country}, nil
+}
+
+func (tx tenancyTx) UpsertTenantAddress(ctx context.Context, a address.Address, at time.Time) error {
+	return tx.q.UpsertTenantAddress(ctx, dbgen.UpsertTenantAddressParams{TenantID: tx.tenantID, Street: a.Street, Number: a.Number,
+		Complement: a.Complement, District: a.District, City: a.City, State: a.State, PostalCode: a.PostalCode, Country: a.Country,
+		UpdatedAt: at})
 }
 
 func (tx tenancyTx) InsertTenant(ctx context.Context, t tenancy.Tenant) error {

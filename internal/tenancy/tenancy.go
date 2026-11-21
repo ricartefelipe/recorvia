@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ricartefelipe/recorvia/internal/kernel/address"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
 	"github.com/ricartefelipe/recorvia/internal/kernel/brdoc"
 )
@@ -40,10 +41,13 @@ type Tenant struct {
 	Currency         string
 	InvoicePrefix    string
 	PaymentTermsDays int
-	Status           TenantStatus
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	Version          int
+	// Address é o endereço da organização (nil enquanto não cadastrado),
+	// copiado para o emitente de cada fatura emitida.
+	Address   *address.Address
+	Status    TenantStatus
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Version   int
 }
 
 // Location retorna o fuso IANA da organização.
@@ -58,6 +62,10 @@ type TenantInput struct {
 	Timezone         string
 	InvoicePrefix    string
 	PaymentTermsDays *int
+	// Address, quando informado, substitui o endereço da organização; nil
+	// mantém o atual. O endereço não é removido, como o de cobrança do
+	// cliente.
+	Address *address.Address
 }
 
 var (
@@ -102,6 +110,13 @@ func validateTenantInput(in TenantInput, requireSlug bool) (TenantInput, error) 
 	if in.PaymentTermsDays != nil && (*in.PaymentTermsDays < 0 || *in.PaymentTermsDays > 120) {
 		fields = append(fields, apperr.FieldError{Field: "payment_terms_days", Message: "O prazo deve ficar entre 0 e 120 dias."})
 	}
+	if in.Address != nil {
+		a, invalid := address.Normalize(*in.Address)
+		for _, f := range invalid {
+			fields = append(fields, apperr.FieldError{Field: "address." + f.Field, Message: f.Message})
+		}
+		in.Address = &a
+	}
 	if len(fields) > 0 {
 		return in, apperr.Invalid("invalid_organization", "Dados da organização inválidos.", fields...)
 	}
@@ -135,6 +150,9 @@ func (t *Tenant) ApplyUpdate(in TenantInput) error {
 	t.Timezone, t.InvoicePrefix = in.Timezone, in.InvoicePrefix
 	if in.PaymentTermsDays != nil {
 		t.PaymentTermsDays = *in.PaymentTermsDays
+	}
+	if in.Address != nil {
+		t.Address = in.Address
 	}
 	return nil
 }
