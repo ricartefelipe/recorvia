@@ -13,7 +13,10 @@ SELECT * FROM payment_provider_accounts WHERE tenant_id = @tenant_id AND provide
 SELECT * FROM payment_provider_accounts WHERE tenant_id = @tenant_id ORDER BY provider;
 
 -- name: ClearDefaultProviderAccount :exec
-UPDATE payment_provider_accounts SET is_default = false WHERE tenant_id = @tenant_id AND is_default AND id <> @keep_id;
+-- A conta que deixa de ser a padrão muda de representação e ganha versão nova:
+-- um If-Match lido antes da troca passa a receber 412 (ADR-083).
+UPDATE payment_provider_accounts SET is_default = false, version = version + 1
+ WHERE tenant_id = @tenant_id AND is_default AND id <> @keep_id;
 
 -- name: InsertProviderAccount :execrows
 -- Primeira configuração do provedor (versão esperada 0): nenhuma linha se

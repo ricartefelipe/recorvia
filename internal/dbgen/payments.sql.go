@@ -14,7 +14,8 @@ import (
 )
 
 const clearDefaultProviderAccount = `-- name: ClearDefaultProviderAccount :exec
-UPDATE payment_provider_accounts SET is_default = false WHERE tenant_id = $1 AND is_default AND id <> $2
+UPDATE payment_provider_accounts SET is_default = false, version = version + 1
+ WHERE tenant_id = $1 AND is_default AND id <> $2
 `
 
 type ClearDefaultProviderAccountParams struct {
@@ -22,6 +23,8 @@ type ClearDefaultProviderAccountParams struct {
 	KeepID   uuid.UUID
 }
 
+// A conta que deixa de ser a padrão muda de representação e ganha versão nova:
+// um If-Match lido antes da troca passa a receber 412 (ADR-083).
 func (q *Queries) ClearDefaultProviderAccount(ctx context.Context, arg ClearDefaultProviderAccountParams) error {
 	_, err := q.db.Exec(ctx, clearDefaultProviderAccount, arg.TenantID, arg.KeepID)
 	return err

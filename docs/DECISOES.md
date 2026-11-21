@@ -2374,6 +2374,14 @@ API), e `sort` fora da allowlist só era recusado na listagem de clientes; nas d
 - **Casos de uso em duas fases.** A resolução de divergência e a configuração do provedor consultam o provedor fora
   da transação: a versão é conferida antes da chamada (recusa antecipada, sem chamar o provedor) e a condição da
   gravação decide. Uma nova detecção da divergência durante a consulta gera outra versão e a resolução é recusada.
+- **Efeitos sobre outro registro versionado.** Tornar uma conta de provedor a padrão tira o padrão da outra conta, e
+  isso dá à outra conta uma versão nova, como já acontecia com as políticas de cobrança: quem a leu antes da troca
+  recebe 412 ao gravá-la, em vez de desfazer em silêncio a escolha feita por outra pessoa.
+- **412 na interface.** O aviso de alteração concorrente oferece "Recarregar dados". Os modais de edição que guardam o
+  recurso aberto (produto, política, template, endpoint, rotação de segredo e provedor) fecham nessa escolha, e a
+  alteração é refeita sobre a versão recarregada. A versão do formulário aberto nunca é trocada por uma recarga
+  automática, que anularia a proteção. Uma página da lista depois da primeira que fica vazia, por exemplo depois de
+  uma ação que tira da lista filtrada os seus últimos itens, volta à página anterior.
 - **Paginação por keyset.** As oito listagens aceitam `limit` (1 a 100, padrão 25) e `cursor` e devolvem
   `next_cursor` (nulo na última página), ordenadas por colunas que não mudam depois da gravação, com desempate pelo
   identificador: disputas por `(opened_at, id)`, divergências e operações por `(created_at, id)` (as operações
