@@ -205,7 +205,10 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    stop_grace_period: 2m
+    # Drenagem no SIGTERM (ADR-082): confirmação do cancelamento do consumo
+    # (até 5 s), mensagem em andamento (HandlerTimeout de 2 min) e
+    # encerramento do servidor de saúde (até 5 s), com folga.
+    stop_grace_period: 2m30s
 
   # Interface web: SPA estática e proxy para a API (mesma origem, cookies de
   # sessão sem CORS).

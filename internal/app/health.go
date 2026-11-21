@@ -43,6 +43,9 @@ type WorkerProbes struct {
 	Database func(context.Context) error
 	// Broker informa se há conexão ativa com o RabbitMQ.
 	Broker func() bool
+	// ShuttingDown informa se o encerramento começou (opcional): durante a
+	// drenagem, o worker não está pronto.
+	ShuttingDown func() bool
 }
 
 // WorkerHealthMux expõe as rotas operacionais do worker na porta de
@@ -52,7 +55,8 @@ type WorkerProbes struct {
 //     dependências, para que uma indisponibilidade do banco ou do broker não
 //     provoque reinícios em cascata (o worker reconecta sozinho).
 //   - /readyz responde 200 somente com PostgreSQL e RabbitMQ acessíveis e 503
-//     caso contrário, com o estado de cada verificação no corpo.
+//     caso contrário, com o estado de cada verificação no corpo. Durante o
+//     encerramento responde 503 com worker=shutting_down.
 //   - /metrics publica as métricas Prometheus.
 func WorkerHealthMux(metrics http.Handler, p WorkerProbes) *http.ServeMux {
 	mux := http.NewServeMux()
@@ -64,6 +68,9 @@ func WorkerHealthMux(metrics http.Handler, p WorkerProbes) *http.ServeMux {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 		checks := map[string]string{"postgres": "ok", "rabbitmq": "ok"}
+		if p.ShuttingDown != nil && p.ShuttingDown() {
+			checks["worker"] = "shutting_down"
+		}
 		if p.Database == nil || p.Database(ctx) != nil {
 			checks["postgres"] = "unavailable"
 		}
