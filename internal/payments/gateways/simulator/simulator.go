@@ -78,6 +78,8 @@ func MapStatus(status, chargeback string) payments.ProviderStatus {
 	switch status {
 	case "pending":
 		return payments.ProviderPending
+	case "confirmed":
+		return payments.ProviderConfirmed
 	case "paid":
 		if chargeback == "won" {
 			return payments.ProviderChargebackReversed

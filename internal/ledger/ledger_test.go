@@ -189,18 +189,21 @@ func constructorCases() []constructorCase {
 		{"emissão de fatura coberta integralmente por crédito", func() (Transaction, bool, error) {
 			return InvoiceIssued(txID, tenantID, refID, "FAT-1", brl(5000), brl(5000), instant)
 		}, "invoice.issued", "invoice.issued:", "invoice", map[AccountCode]int64{BilledRevenue: -5000, CustomerCredits: 5000}},
-		{"pagamento no provedor com taxa", func() (Transaction, bool, error) {
+		{"pagamento confirmado no provedor", func() (Transaction, bool, error) {
+			return ProviderPaymentConfirmed(txID, tenantID, refID, brl(10000), instant)
+		}, "payment.confirmed", "payment.confirmed:", "payment", map[AccountCode]int64{ProviderConfirmed: 10000, AccountsReceivable: -10000}},
+		{"pagamento recebido pelo provedor com taxa", func() (Transaction, bool, error) {
 			return ProviderPaymentReceived(txID, tenantID, refID, brl(10000), brl(199), instant)
-		}, "payment.confirmed", "payment.confirmed:", "payment", map[AccountCode]int64{ProviderClearing: 9801, AccountsReceivable: -10000, ProviderFees: 199}},
-		{"pagamento no provedor sem taxa", func() (Transaction, bool, error) {
+		}, "payment.received", "payment.received:", "payment", map[AccountCode]int64{ProviderClearing: 9801, ProviderConfirmed: -10000, ProviderFees: 199}},
+		{"pagamento recebido pelo provedor sem taxa", func() (Transaction, bool, error) {
 			return ProviderPaymentReceived(txID, tenantID, refID, brl(10000), brl(0), instant)
-		}, "payment.confirmed", "payment.confirmed:", "payment", map[AccountCode]int64{ProviderClearing: 10000, AccountsReceivable: -10000}},
+		}, "payment.received", "payment.received:", "payment", map[AccountCode]int64{ProviderClearing: 10000, ProviderConfirmed: -10000}},
 		{"pagamento manual", func() (Transaction, bool, error) {
 			return ManualPaymentReceived(txID, tenantID, refID, brl(4200), instant)
 		}, "payment.manual", "payment.manual:", "payment", map[AccountCode]int64{Cash: 4200, AccountsReceivable: -4200}},
 		{"excedente recebido no provedor", func() (Transaction, bool, error) {
 			return Overpayment(txID, tenantID, refID, brl(500), true, instant)
-		}, "payment.overpayment", "payment.overpayment:", "payment", map[AccountCode]int64{ProviderClearing: 500, CustomerCredits: -500}},
+		}, "payment.overpayment", "payment.overpayment:", "payment", map[AccountCode]int64{ProviderConfirmed: 500, CustomerCredits: -500}},
 		{"excedente recebido manualmente", func() (Transaction, bool, error) {
 			return Overpayment(txID, tenantID, refID, brl(500), false, instant)
 		}, "payment.overpayment", "payment.overpayment:", "payment", map[AccountCode]int64{Cash: 500, CustomerCredits: -500}},
@@ -243,9 +246,6 @@ func constructorCases() []constructorCase {
 		{"recuperação de valor baixado como incobrável", func() (Transaction, bool, error) {
 			return BadDebtRecovered(txID, tenantID, refID, brl(900), instant)
 		}, "invoice.bad_debt_recovered", "invoice.bad_debt_recovered:", "payment", map[AccountCode]int64{AccountsReceivable: 900, BadDebt: -900}},
-		{"taxa do provedor sem saldo de fatura", func() (Transaction, bool, error) {
-			return ProviderFeeCharged(txID, tenantID, refID, brl(199), instant)
-		}, "payment.provider_fee", "payment.provider_fee:", "payment", map[AccountCode]int64{ProviderFees: 199, ProviderClearing: -199}},
 		{"baixa como incobrável", func() (Transaction, bool, error) {
 			return InvoiceWrittenOff(txID, tenantID, refID, brl(6000), instant)
 		}, "invoice.uncollectible", "invoice.uncollectible:", "invoice", map[AccountCode]int64{BadDebt: 6000, AccountsReceivable: -6000}},
@@ -255,9 +255,6 @@ func constructorCases() []constructorCase {
 		{"crédito concedido ao cliente", func() (Transaction, bool, error) {
 			return CustomerCreditGranted(txID, tenantID, refID, brl(2500), instant)
 		}, "customer_credit.granted", "customer_credit.granted:", "customer_credit", map[AccountCode]int64{RevenueAdjustments: 2500, CustomerCredits: -2500}},
-		{"liquidação recebida", func() (Transaction, bool, error) {
-			return SettlementReceived(txID, tenantID, refID, brl(9801), instant)
-		}, "settlement.received", "settlement.received:", "settlement", map[AccountCode]int64{Cash: 9801, ProviderClearing: -9801}},
 		{"ajuste de conciliação positivo", func() (Transaction, bool, error) {
 			return ReconciliationAdjustment(txID, tenantID, refID, brl(35), instant)
 		}, "reconciliation.adjustment", "reconciliation.adjustment:", "reconciliation_discrepancy", map[AccountCode]int64{ReconciliationAdjustments: 35, ProviderClearing: -35}},
@@ -319,7 +316,10 @@ func TestConstructorsWithZeroAmountsProduceNothing(t *testing.T) {
 	z := brl(0)
 	cases := map[string]func() (Transaction, bool, error){
 		"emissão": func() (Transaction, bool, error) { return InvoiceIssued(txID, tenantID, refID, "F", z, z, instant) },
-		"pagamento no provedor": func() (Transaction, bool, error) {
+		"pagamento confirmado": func() (Transaction, bool, error) {
+			return ProviderPaymentConfirmed(txID, tenantID, refID, z, instant)
+		},
+		"pagamento recebido": func() (Transaction, bool, error) {
 			return ProviderPaymentReceived(txID, tenantID, refID, z, z, instant)
 		},
 		"pagamento manual":  func() (Transaction, bool, error) { return ManualPaymentReceived(txID, tenantID, refID, z, instant) },
@@ -339,7 +339,6 @@ func TestConstructorsWithZeroAmountsProduceNothing(t *testing.T) {
 		},
 		"nota de crédito":   func() (Transaction, bool, error) { return CreditNoteIssued(txID, tenantID, refID, z, instant) },
 		"crédito concedido": func() (Transaction, bool, error) { return CustomerCreditGranted(txID, tenantID, refID, z, instant) },
-		"liquidação":        func() (Transaction, bool, error) { return SettlementReceived(txID, tenantID, refID, z, instant) },
 		"ajuste de conciliação": func() (Transaction, bool, error) {
 			return ReconciliationAdjustment(txID, tenantID, refID, z, instant)
 		},
@@ -516,7 +515,9 @@ func FuzzLedgerBalanced(f *testing.F) {
 			"CustomerCreditGranted": func() (Transaction, bool, error) {
 				return CustomerCreditGranted(txID, tenantID, refID, brl(a), instant)
 			},
-			"SettlementReceived": func() (Transaction, bool, error) { return SettlementReceived(txID, tenantID, refID, brl(a), instant) },
+			"ProviderPaymentConfirmed": func() (Transaction, bool, error) {
+				return ProviderPaymentConfirmed(txID, tenantID, refID, brl(a), instant)
+			},
 			"ReconciliationAdjustment": func() (Transaction, bool, error) {
 				v := a
 				if flag {
@@ -543,6 +544,130 @@ func FuzzLedgerBalanced(f *testing.F) {
 			}
 			assertBalanced(t, tx)
 			assertBalanced(t, tx.Reversal(refID, instant, "estorno"))
+			assertSettledClearing(t, tx)
 		}
 	})
+}
+
+// assertSettledClearing verifica que a liquidação de tx, quando existe, é
+// balanceada e zera o efeito de tx nos valores em liquidação.
+func assertSettledClearing(t *testing.T, tx Transaction) {
+	t.Helper()
+	st, ok, err := Settlement(txID, tx)
+	if err != nil {
+		t.Fatalf("liquidação de %s: %v", tx.Kind, err)
+	}
+	net := netByAccount(t, tx)
+	if !ok {
+		if net[ProviderClearing] != 0 {
+			t.Fatalf("%s movimenta valores em liquidação (%d) sem liquidação", tx.Kind, net[ProviderClearing])
+		}
+		return
+	}
+	assertBalanced(t, st)
+	for acc, v := range netByAccount(t, st) {
+		net[acc] += v
+	}
+	if net[ProviderClearing] != 0 {
+		t.Fatalf("%s: valores em liquidação com %d após a liquidação", tx.Kind, net[ProviderClearing])
+	}
+}
+
+func TestSettlementMovesClearingEffectToCash(t *testing.T) {
+	received, _, _ := ProviderPaymentReceived(txID, tenantID, refID, brl(10000), brl(199), instant)
+	refund, _, _ := RefundSucceeded(txID, tenantID, refID, brl(1500), brl(400), instant)
+	opened, _, _ := ChargebackOpened(txID, tenantID, refID, brl(800), instant)
+	released, _, _ := ChargebackHoldReleased(txID, tenantID, refID, brl(300), instant)
+	adjust, _, _ := ReconciliationAdjustment(txID, tenantID, refID, brl(35), instant)
+	adjustBack, _, _ := ReconciliationAdjustment(txID, tenantID, refID, brl(-35), instant)
+	cases := []struct {
+		name string
+		from Transaction
+		kind string
+		cash int64
+	}{
+		{"recebimento: líquido creditado no disponível", received, "settlement.received", 9801},
+		{"reembolso: debitado do disponível", refund, "settlement.debited", -1500},
+		{"chargeback aberto: retido do disponível", opened, "settlement.debited", -800},
+		{"retenção liberada: devolvida ao disponível", released, "settlement.received", 300},
+		{"estorno do chargeback: devolvido ao disponível", opened.Reversal(refID, instant, "disputa ganha"), "settlement.received", 800},
+		{"ajuste contra: debitado do disponível", adjust, "settlement.debited", -35},
+		{"ajuste a favor: creditado no disponível", adjustBack, "settlement.received", 35},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			st, ok, err := Settlement(txID, c.from)
+			if err != nil || !ok {
+				t.Fatalf("ok=%v err=%v", ok, err)
+			}
+			assertBalanced(t, st)
+			if st.Kind != c.kind || st.IdempotencyKey != "settlement:"+c.from.IdempotencyKey {
+				t.Fatalf("tipo/chave: %q %q", st.Kind, st.IdempotencyKey)
+			}
+			if st.ReferenceType != c.from.ReferenceType || st.ReferenceID != c.from.ReferenceID || !st.OccurredAt.Equal(c.from.OccurredAt) {
+				t.Fatalf("referência/instante: %+v", st)
+			}
+			net := netByAccount(t, st)
+			if net[Cash] != c.cash || net[ProviderClearing] != -c.cash || len(net) != 2 {
+				t.Fatalf("partidas da liquidação: %v", net)
+			}
+			assertSettledClearing(t, c.from)
+		})
+	}
+}
+
+func TestSettlementOfTransactionWithoutClearingProducesNothing(t *testing.T) {
+	confirmed, _, _ := ProviderPaymentConfirmed(txID, tenantID, refID, brl(10000), instant)
+	credit, _, _ := ChargebackCreditReversed(txID, tenantID, "dispute", refID, brl(500), brl(200), instant)
+	manual, _, _ := ManualPaymentReceived(txID, tenantID, refID, brl(4200), instant)
+	balanced := validTx(Entry{ProviderClearing, Debit, brl(100)}, Entry{ProviderClearing, Credit, brl(100)})
+	for name, tx := range map[string]Transaction{"confirmação": confirmed, "crédito estornado": credit, "manual": manual, "passagem nula": balanced} {
+		t.Run(name, func(t *testing.T) {
+			if st, ok, err := Settlement(txID, tx); err != nil || ok || len(st.Entries) != 0 {
+				t.Fatalf("sem efeito nos valores em liquidação não há liquidação: ok=%v err=%v %+v", ok, err, st)
+			}
+		})
+	}
+}
+
+func TestSettlementRejectsMixedCurrencies(t *testing.T) {
+	tx := validTx(Entry{ProviderClearing, Debit, brl(100)}, Entry{ProviderClearing, Credit, money.New(100, money.Currency{})})
+	if _, _, err := Settlement(txID, tx); !errors.Is(err, ErrInvalidEntry) {
+		t.Fatalf("moedas diferentes nos valores em liquidação devem falhar: %v", err)
+	}
+}
+
+// O ciclo completo do pagamento pelo provedor deixa o valor bruto nas contas
+// certas a cada etapa: confirmado (a receber do provedor), recebido (taxa
+// reconhecida) e liquidado (líquido no disponível).
+func TestProviderPaymentCycleStages(t *testing.T) {
+	balances := map[AccountCode]int64{}
+	add := func(tx Transaction) {
+		t.Helper()
+		assertBalanced(t, tx)
+		for acc, v := range netByAccount(t, tx) {
+			balances[acc] += v
+		}
+	}
+	confirmed, _, _ := ProviderPaymentConfirmed(txID, tenantID, refID, brl(10000), instant)
+	excess, _, _ := Overpayment(txID, tenantID, refID, brl(500), true, instant)
+	add(confirmed)
+	add(excess)
+	if balances[ProviderConfirmed] != 10500 || balances[AccountsReceivable] != -10000 || balances[CustomerCredits] != -500 ||
+		balances[ProviderClearing] != 0 || balances[Cash] != 0 || balances[ProviderFees] != 0 {
+		t.Fatalf("confirmado: %v", balances)
+	}
+	received, _, _ := ProviderPaymentReceived(txID, tenantID, refID, brl(10500), brl(199), instant)
+	add(received)
+	if balances[ProviderConfirmed] != 0 || balances[ProviderClearing] != 10301 || balances[ProviderFees] != 199 {
+		t.Fatalf("recebido: %v", balances)
+	}
+	st, ok, err := Settlement(txID, received)
+	if err != nil || !ok {
+		t.Fatalf("liquidação: ok=%v err=%v", ok, err)
+	}
+	add(st)
+	if balances[ProviderClearing] != 0 || balances[Cash] != 10301 || balances[ProviderFees] != 199 || balances[ProviderConfirmed] != 0 {
+		t.Fatalf("liquidado: %v", balances)
+	}
 }

@@ -21,7 +21,7 @@ func paidFixture(t *testing.T) (*payFixture, billing.Invoice, Charge) {
 	t.Helper()
 	f := newPayFixture(t)
 	inv, c := awaitingCharge(t, f)
-	f.process(t, f.storeWebhook(t, confirmedWebhook("evt_paid", c.ProviderChargeID, 10000, 199)))
+	f.process(t, f.storeWebhook(t, receivedWebhook("evt_paid", c.ProviderChargeID, 10000, 199)))
 	c = f.store.charges[c.ID]
 	if c.Status != ChargePaid {
 		t.Fatalf("cobrança não paga: %s", c.Status)
@@ -78,6 +78,11 @@ func TestRequestRefundSucceedsAtProvider(t *testing.T) {
 	net := ledgerNet(postedByKind(f.store.posted, "refund.succeeded"))
 	if net[ledger.Refunds] != 3000 || net[ledger.ProviderClearing] != -3000 || len(net) != 2 {
 		t.Fatalf("ledger: %v", net)
+	}
+	// O provedor debita o reembolso do disponível (liquidação do reembolso).
+	if st := postedByKind(f.store.posted, "settlement.debited"); len(st) != 1 || ledgerNet(st)[ledger.Cash] != -3000 ||
+		st[0].IdempotencyKey != "settlement:refund.succeeded:"+r.ID.String() || st[0].ReferenceID != r.ID {
+		t.Fatalf("liquidação do reembolso: %+v", st)
 	}
 	if f.invoice(inv.ID).Status != billing.Paid {
 		t.Fatal("o reembolso não reabre a fatura")
