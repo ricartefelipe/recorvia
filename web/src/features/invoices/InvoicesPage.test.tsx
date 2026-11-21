@@ -100,3 +100,24 @@ describe('exportação de faturas', () => {
     }
   });
 });
+
+describe('filtros da lista de faturas', () => {
+  it('saldo em aberto pela URL (link do painel) consulta open_balance e mostra o filtro ligado', async () => {
+    const queries: URLSearchParams[] = [];
+    server.use(
+      http.get('/api/v1/invoices', ({ request }) => {
+        queries.push(new URL(request.url).searchParams);
+        return HttpResponse.json({ data: [], next_cursor: null });
+      }),
+    );
+    const { user } = renderPage(<InvoicesPage />, { path: '/faturas', route: '/faturas?open_balance=true' });
+    const toggle = await screen.findByRole('switch', { name: 'Somente com saldo em aberto' });
+    expect(toggle).toBeChecked();
+    await waitFor(() => expect(queries.at(-1)?.get('open_balance')).toBe('true'));
+    expect(queries.at(-1)?.has('status')).toBe(false);
+    expect(await screen.findByText('Nenhuma fatura encontrada')).toBeInTheDocument();
+
+    await user.click(toggle);
+    await waitFor(() => expect(queries.at(-1)?.has('open_balance')).toBe(false));
+  });
+});

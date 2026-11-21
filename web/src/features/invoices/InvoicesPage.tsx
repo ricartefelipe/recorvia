@@ -88,7 +88,7 @@ function partLimit(n: number | undefined): string {
 
 export function InvoicesPage() {
   const { keys, timeZone } = useTenant();
-  const [filters, setFilters] = useUrlFilters(['status', 'cliente', 'de', 'ate', 'overdue'] as const);
+  const [filters, setFilters] = useUrlFilters(['status', 'cliente', 'de', 'ate', 'overdue', 'open_balance'] as const);
   const [exporting, setExporting] = useState(false);
   const [nextPart, setNextPart] = useState<ExportPart | null>(null);
   const params: InvoiceListParams = {
@@ -97,6 +97,7 @@ export function InvoicesPage() {
     issued_from: filters.de || undefined,
     issued_to: filters.ate || undefined,
     overdue: filters.overdue === 'true' ? true : undefined,
+    open_balance: filters.open_balance === 'true' ? true : undefined,
     limit: 25,
   };
   const pagination = useCursorPagination(stableStringify(params));
@@ -203,6 +204,12 @@ export function InvoicesPage() {
           label="Somente vencidas"
           checked={filters.overdue === 'true'}
           onChange={(e) => setFilters({ overdue: e.currentTarget.checked ? 'true' : null })}
+          mb={8}
+        />
+        <Switch
+          label="Somente com saldo em aberto"
+          checked={filters.open_balance === 'true'}
+          onChange={(e) => setFilters({ open_balance: e.currentTarget.checked ? 'true' : null })}
           mb={8}
         />
       </Group>
