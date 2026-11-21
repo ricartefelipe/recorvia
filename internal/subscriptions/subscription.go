@@ -95,9 +95,15 @@ type Subscription struct {
 	// unidade (até money.MaxDecimalScale casas).
 	PriceOverride             *big.Rat
 	PriceOverrideAdjustmentID *uuid.UUID
-	CreatedAt                 time.Time
-	UpdatedAt                 time.Time
-	Version                   int
+	// RequestKey é a chave de negócio do pedido de criação (derivada do
+	// Idempotency-Key) e RequestFingerprint a impressão dos campos do pedido
+	// (RequestFingerprint); vazias quando a assinatura foi criada sem pedido
+	// idempotente.
+	RequestKey         string
+	RequestFingerprint []byte
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	Version            int
 
 	pending []HistoryEvent
 }

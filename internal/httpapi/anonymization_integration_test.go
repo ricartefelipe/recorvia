@@ -357,7 +357,7 @@ func TestCustomerAnonymizationOverHTTP(t *testing.T) {
 	owner.expectProblem(http.StatusConflict, "customer_anonymized", http.MethodPut, "/api/v1/customers/"+custID+"/billing-address",
 		map[string]any{"street": "Rua A", "number": "1", "district": "Centro", "city": "Recife", "state": "PE", "postal_code": "50000000"})
 	owner.expectProblem(http.StatusConflict, "customer_archived", http.MethodPost, "/api/v1/subscriptions",
-		map[string]any{"customer_id": custID, "plan_id": plan.ID})
+		map[string]any{"customer_id": custID, "plan_id": plan.ID}, "Idempotency-Key", idemKey())
 	// No banco, nem o dono das tabelas altera o cliente anonimizado, e uma
 	// assinatura gravada diretamente é recusada.
 	if _, err := ownerPool.Exec(ctx, `UPDATE customers SET name = $2, anonymized_at = NULL WHERE id = $1`, custID, name); !postgres.IsRaisedException(err) {
