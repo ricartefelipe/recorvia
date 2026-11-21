@@ -159,6 +159,10 @@ backup: ## Backup lógico do PostgreSQL do ambiente (pg_dump no container) em ba
 restore-check: ## Restaura o último backup (ou DUMP=arquivo) num banco novo e confere o manifesto
 	bash deploy/backup/restore-check.sh $(DUMP)
 
+.PHONY: dr-check
+dr-check: ## Exercício de recuperação de desastre de ponta a ponta num projeto isolado do compose (relatório em backups/dr-check)
+	bash deploy/backup/dr-check.sh
+
 ## ---------- Imagens ----------
 GO_IMAGES := api worker migrate seed paysim
 IMAGES    := $(addprefix recorvia-,$(GO_IMAGES)) recorvia-web recorvia-keycloak

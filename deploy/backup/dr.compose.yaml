@@ -1,0 +1,106 @@
+# Ambiente isolado do exercício de recuperação de desastre (make dr-check,
+# deploy/backup/dr-check.sh). Usado sempre junto com o compose.yaml e com um
+# nome de projeto próprio:
+#   docker compose -p recorvia-drcheck -f compose.yaml -f deploy/backup/dr.compose.yaml ...
+#
+# Diferenças em relação ao ambiente local:
+# - PostgreSQL, Redis e RabbitMQ não publicam portas no host;
+# - os serviços consultados pelo exercício publicam uma porta livre escolhida
+#   pelo Docker, somente em 127.0.0.1 (lida com "docker compose port");
+# - as imagens construídas levam outra etiqueta, para não substituir as
+#   imagens "local" do ambiente de desenvolvimento;
+# - o receptor de webhooks (tools/hooksink) faz o papel do sistema do tenant;
+# - containers e volumes levam o rótulo recorvia.dr-check: antes de derrubar o
+#   projeto com os volumes, o roteiro confere que tudo o que existe nele foi
+#   criado pelo exercício (deploy/backup/dr-lib.sh, require_own_project).
+# Exige Docker Compose 2.24 ou superior (marcadores !reset e !override).
+x-dr-labels: &dr-labels
+  recorvia.dr-check: "1"
+
+services:
+  postgres:
+    labels: *dr-labels
+    ports: !reset []
+
+  redis:
+    labels: *dr-labels
+    ports: !reset []
+
+  rabbitmq:
+    labels: *dr-labels
+    ports: !reset []
+
+  migrate-bootstrap:
+    labels: *dr-labels
+    image: recorvia-migrate:${RECORVIA_DR_IMAGE_TAG:-dr}
+
+  migrate:
+    labels: *dr-labels
+    image: recorvia-migrate:${RECORVIA_DR_IMAGE_TAG:-dr}
+
+  keycloak:
+    labels: *dr-labels
+    image: recorvia-keycloak:${RECORVIA_DR_IMAGE_TAG:-dr}
+    ports: !override
+      - "127.0.0.1::8080"
+
+  mailpit:
+    labels: *dr-labels
+    ports: !override
+      - "127.0.0.1::8025"
+
+  paysim:
+    labels: *dr-labels
+    image: recorvia-paysim:${RECORVIA_DR_IMAGE_TAG:-dr}
+    ports: !override
+      - "127.0.0.1::8090"
+
+  api:
+    labels: *dr-labels
+    image: recorvia-api:${RECORVIA_DR_IMAGE_TAG:-dr}
+    ports: !override
+      - "127.0.0.1::8081"
+
+  worker:
+    labels: *dr-labels
+    image: recorvia-worker:${RECORVIA_DR_IMAGE_TAG:-dr}
+    # Porta de métricas e de prontidão (/readyz) do worker.
+    ports:
+      - "127.0.0.1::9091"
+
+  seed:
+    labels: *dr-labels
+    image: recorvia-seed:${RECORVIA_DR_IMAGE_TAG:-dr}
+
+  hooksink:
+    labels: *dr-labels
+    image: recorvia-hooksink:${RECORVIA_DR_IMAGE_TAG:-dr}
+    build:
+      context: .
+      dockerfile: deploy/docker/go.Dockerfile
+      args:
+        CMD: hooksink
+        PKG: ./tools/hooksink
+    environment:
+      HOOKSINK_ADDR: ":8099"
+    ports:
+      - "127.0.0.1::8099"
+    healthcheck:
+      test: ["CMD", "/app", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # A interface web não participa do exercício; sem porta fixa no host caso
+  # seja iniciada por engano.
+  web:
+    labels: *dr-labels
+    ports: !reset []
+
+volumes:
+  postgres-data:
+    labels: *dr-labels
+  rabbitmq-data:
+    labels: *dr-labels
+  paysim-data:
+    labels: *dr-labels
