@@ -20,6 +20,11 @@ info:
     - Operações financeiras de criação exigem `Idempotency-Key`.
     - Navegador: sessão por cookie HttpOnly, header `X-CSRF-Token` em métodos
       que alteram estado e `X-Recorvia-Tenant` igual à organização ativa.
+    - CORS (somente para as origens de `RECORVIA_ALLOWED_ORIGINS`): a resposta
+      expõe ao navegador os cabeçalhos `ETag`, `Location`, `X-Request-ID`,
+      `Idempotent-Replayed`, `X-Recorvia-Export-Limit`,
+      `X-Recorvia-Export-Truncated`, `X-Recorvia-Export-Next-Cursor` e
+      `X-Recorvia-Export-Next-Part` (`Access-Control-Expose-Headers`).
     - Integrações: `Authorization: Bearer rcv_...` (credencial com escopos e
       vinculada a uma organização). A autoria das ações feitas por credencial
       fica na auditoria (ator `api_credential`). Operações que exigem uma pessoa
@@ -474,6 +479,29 @@ paths:
         "201": { description: Contato adicionado, content: { application/json: { schema: { $ref: "#/components/schemas/Contact" } } } }
         "409": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/contacts/{contact_id}:
+    patch:
+      tags: [customers]
+      operationId: updateCustomerContact
+      description: >-
+        Altera os campos informados do contato; campo omitido mantém o valor atual (inclusive
+        `receives_billing_email`, que o próprio cliente pode ter alterado pelo portal). `phone` vazio remove o
+        telefone. Sem mudança, nada é gravado. O histórico do cliente registra
+        `customer.contact_updated` com os nomes dos campos alterados, nunca os valores. Responde 404
+        `contact_not_found` para contato inexistente ou de outro cliente e 409 `customer_anonymized` para
+        cliente anonimizado.
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/CSRF" }
+        - { $ref: "#/components/parameters/ID" }
+        - { name: contact_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ContactPatch" } } }
+      responses:
+        "200": { description: Contato alterado, content: { application/json: { schema: { $ref: "#/components/schemas/Contact" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
     delete:
       tags: [customers]
       operationId: removeCustomerContact
@@ -489,8 +517,10 @@ paths:
       tags: [customers]
       operationId: setCustomerAddress
       description: >-
-        Grava o endereço de cobrança do cliente. Responde 409 `customer_anonymized` para cliente anonimizado,
-        que não volta a receber dados pessoais.
+        Grava o endereço de cobrança do cliente. Sem mudança, nada é gravado. O histórico do cliente registra
+        `customer.address_updated` com os nomes dos campos alterados (`fields`) e se o endereço foi
+        cadastrado agora (`created`), nunca os valores. Responde 409 `customer_anonymized` para cliente
+        anonimizado, que não volta a receber dados pessoais.
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
       requestBody:
         required: true
@@ -503,9 +533,18 @@ paths:
     get:
       tags: [customers]
       operationId: getCustomerHistory
-      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
+      description: >-
+        Histórico do cliente (auditoria), do evento mais recente para o mais antigo, em páginas por cursor:
+        `next_cursor` pede a página seguinte e é nulo na última.
+      parameters:
+        - { $ref: "#/components/parameters/Tenant" }
+        - { $ref: "#/components/parameters/ID" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
       responses:
-        "200": { description: Histórico do cliente (auditoria), content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AuditEvent" } } } } } } }
+        "200": { description: Histórico do cliente (auditoria), content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: array, items: { $ref: "#/components/schemas/AuditEvent" } }, next_cursor: { type: string, nullable: true } } } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/credits:
     get:
       tags: [customers]
@@ -942,13 +981,38 @@ paths:
     get:
       tags: [invoices]
       operationId: exportInvoices
+      description: >-
+        Gera o CSV das faturas sob demanda (não é armazenado), separado por ponto e vírgula, das mais recentes
+        para as mais antigas. Colunas: numero, cliente, situacao, emissao, vencimento, periodo_inicio e
+        periodo_fim (primeiro e último dia incluídos no período de faturamento), subtotal, desconto, total,
+        creditos_aplicados, valor_creditado (notas de crédito), pago, valor_baixado, saldo e moeda. Valores
+        em reais com ponto decimal; datas no fuso da organização. Textos que começam com =, +, -, @,
+        tabulação ou retorno de carro recebem um apóstrofo na frente (neutralização de fórmulas). Cada
+        arquivo tem no máximo `X-Recorvia-Export-Limit` faturas (50.000); quando há mais,
+        `X-Recorvia-Export-Truncated` é `true`, `X-Recorvia-Export-Next-Cursor` traz o cursor da parte
+        seguinte e `X-Recorvia-Export-Next-Part` o número dela; a parte seguinte é pedida com os mesmos filtros,
+        `cursor` e `part`, e o arquivo de cada parte se chama `faturas-parte-N.csv`. As partes são consultas
+        independentes, sem uma fotografia única: uma fatura alterada entre partes de modo a entrar ou sair do
+        filtro (por exemplo, de situação) pode faltar ou aparecer numa parte, mas nenhuma fatura que continua no
+        filtro se repete nem é pulada. Fatura cancelada sai com saldo zero. Cada exportação fica na auditoria
+        (`invoices.exported`).
       parameters:
         - { $ref: "#/components/parameters/Tenant" }
         - { name: status, in: query, schema: { $ref: "#/components/schemas/InvoiceStatus" } }
         - { name: issued_from, in: query, schema: { type: string, format: date } }
         - { name: issued_to, in: query, schema: { type: string, format: date } }
+        - { name: cursor, in: query, description: "Cursor da parte seguinte (X-Recorvia-Export-Next-Cursor da parte anterior)", schema: { type: string, maxLength: 200 } }
+        - { name: part, in: query, description: "Número da parte (X-Recorvia-Export-Next-Part da parte anterior), usado no nome do arquivo e na auditoria", schema: { type: integer, minimum: 1, maximum: 100000, default: 1 } }
       responses:
-        "200": { description: CSV gerado sob demanda (não é armazenado), content: { text/csv: { schema: { type: string } } } }
+        "200":
+          description: CSV gerado sob demanda (não é armazenado)
+          headers:
+            X-Recorvia-Export-Limit: { description: Máximo de faturas por arquivo, schema: { type: integer } }
+            X-Recorvia-Export-Truncated: { description: "true quando há faturas além deste arquivo", schema: { type: string, enum: ["true", "false"] } }
+            X-Recorvia-Export-Next-Cursor: { description: Cursor da parte seguinte (somente quando o arquivo foi cortado), schema: { type: string } }
+            X-Recorvia-Export-Next-Part: { description: Número da parte seguinte (somente quando o arquivo foi cortado), schema: { type: integer } }
+          content: { text/csv: { schema: { type: string } } }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/invoices/{id}:
     get:
       tags: [invoices]
@@ -961,6 +1025,15 @@ paths:
     get:
       tags: [invoices]
       operationId: getInvoiceDocument
+      description: >-
+        Documento comercial da fatura emitida, em HTML imprimível sem scripts. Traz o aviso de que a fatura
+        comercial não é documento fiscal, o emitente (nome, razão social e CNPJ da organização gravados na
+        emissão; faturas emitidas antes da migration 00019 usam os dados atuais), o cliente com
+        documento e endereço de cobrança copiados na emissão, emissão, vencimento, condições de pagamento,
+        período de faturamento, itens com período, e o quadro de totais que fecha com o saldo: subtotal,
+        descontos, total, créditos aplicados, notas de crédito, pago, valor baixado e saldo. Na fatura cancelada,
+        o documento informa o cancelamento e o quadro mostra o crédito devolvido ao cliente e o valor cancelado,
+        com saldo zero.
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/ID" } ]
       responses:
         "200": { description: Documento comercial imprimível (não é documento fiscal), content: { text/html: { schema: { type: string } } } }
@@ -2019,6 +2092,15 @@ components:
         phone: { type: string }
         role: { type: string, maxLength: 100 }
         receives_billing_email: { type: boolean, default: true }
+    ContactPatch:
+      type: object
+      description: Alteração parcial do contato; campo omitido mantém o valor atual.
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        email: { type: string, maxLength: 320 }
+        phone: { type: string }
+        role: { type: string, maxLength: 100 }
+        receives_billing_email: { type: boolean }
     Contact:
       type: object
       required: [id, name, email, role, receives_billing_email, created_at]
@@ -2432,7 +2514,7 @@ components:
         amount_paid: { type: integer, format: int64 }
         amount_credited: { type: integer, format: int64 }
         amount_written_off: { type: integer, format: int64 }
-        amount_due: { type: integer, format: int64 }
+        amount_due: { type: integer, format: int64, description: "Saldo devedor; zero na fatura cancelada (o crédito aplicado volta ao cliente)." }
         overdue: { type: boolean }
         paid_at: { type: string, format: date-time, nullable: true }
         voided_at: { type: string, format: date-time, nullable: true }

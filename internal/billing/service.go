@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"bytes"
 	"context"
 	"time"
 
@@ -52,6 +53,9 @@ type Tx interface {
 	Invoice(ctx context.Context, id uuid.UUID, forUpdate bool) (Invoice, error)
 	UpdateInvoiceProgress(ctx context.Context, inv *Invoice) error
 	List(ctx context.Context, f ListFilter) (Page, error)
+	// ListCutoff devolve o corte da listagem de f depois de maxRows faturas
+	// (maxRows >= 1), ou nil quando ela não passa de maxRows faturas.
+	ListCutoff(ctx context.Context, f ListFilter, maxRows int) (*Cutoff, error)
 	StatusHistory(ctx context.Context, invoiceID uuid.UUID) ([]HistoryEntry, error)
 	InsertStatusHistory(ctx context.Context, invoiceID uuid.UUID, actor audit.Actor, changes []StatusChange) error
 	ReverseLedger(ctx context.Context, originalKey string, description string, at time.Time) error
@@ -111,13 +115,8 @@ func (s *Service) Get(ctx context.Context, tenantID, id uuid.UUID) (Details, err
 
 // List lista faturas.
 func (s *Service) List(ctx context.Context, tenantID uuid.UUID, f ListFilter) (Page, error) {
-	if f.Status != "" {
-		if _, ok := transitions[f.Status]; !ok {
-			return Page{}, apperr.Invalid("invalid_filter", "Filtro de situação inválido.", apperr.FieldError{Field: "status", Message: "Situação desconhecida."})
-		}
-	}
-	if f.IssuedFrom != nil && f.IssuedTo != nil && f.IssuedTo.Before(*f.IssuedFrom) {
-		return Page{}, apperr.Invalid("invalid_filter", "Intervalo de datas inválido.", apperr.FieldError{Field: "issued_to", Message: "A data final deve ser posterior à inicial."})
+	if err := validateListFilter(f); err != nil {
+		return Page{}, err
 	}
 	f.Now = s.clock.Now()
 	var p Page
@@ -127,6 +126,60 @@ func (s *Service) List(ctx context.Context, tenantID uuid.UUID, f ListFilter) (P
 		return err
 	})
 	return p, err
+}
+
+func validateListFilter(f ListFilter) error {
+	if f.Status != "" {
+		if _, ok := transitions[f.Status]; !ok {
+			return apperr.Invalid("invalid_filter", "Filtro de situação inválido.", apperr.FieldError{Field: "status", Message: "Situação desconhecida."})
+		}
+	}
+	if f.IssuedFrom != nil && f.IssuedTo != nil && f.IssuedTo.Before(*f.IssuedFrom) {
+		return apperr.Invalid("invalid_filter", "Intervalo de datas inválido.", apperr.FieldError{Field: "issued_to", Message: "A data final deve ser posterior à inicial."})
+	}
+	return nil
+}
+
+// Cutoff é o ponto em que uma listagem longa é cortada: a última fatura
+// incluída (pela chave de ordenação da listagem, criação e identificador,
+// decrescentes) e o cursor que continua a listagem logo depois dela.
+type Cutoff struct {
+	CreatedAt  time.Time
+	ID         uuid.UUID
+	NextCursor string
+}
+
+// Includes informa se a fatura vem antes do corte ou é a própria fatura do
+// corte, na ordem da listagem.
+func (c *Cutoff) Includes(inv Invoice) bool {
+	if c == nil {
+		return true
+	}
+	if !inv.CreatedAt.Equal(c.CreatedAt) {
+		return inv.CreatedAt.After(c.CreatedAt)
+	}
+	return bytes.Compare(inv.ID[:], c.ID[:]) >= 0
+}
+
+// ListCutoff localiza o corte da listagem de f (os mesmos filtros e cursor de
+// List) depois de maxRows faturas. Devolve nil quando a listagem não passa de
+// maxRows faturas. A exportação usa o corte para limitar o arquivo e indicar
+// onde começa a parte seguinte, em vez de truncar em silêncio.
+func (s *Service) ListCutoff(ctx context.Context, tenantID uuid.UUID, f ListFilter, maxRows int) (*Cutoff, error) {
+	if err := validateListFilter(f); err != nil {
+		return nil, err
+	}
+	if maxRows < 1 {
+		return nil, apperr.Invalid("invalid_limit", "Limite de linhas inválido.")
+	}
+	f.Now = s.clock.Now()
+	var c *Cutoff
+	err := s.store.InTenant(ctx, tenantID, func(tx Tx) error {
+		var err error
+		c, err = tx.ListCutoff(ctx, f, maxRows)
+		return err
+	})
+	return c, err
 }
 
 // Location retorna o fuso do tenant.

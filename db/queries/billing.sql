@@ -42,10 +42,11 @@ SELECT p.id, p.subscription_id, p.period_start, p.period_end, p.effective_at, p.
 -- name: InsertInvoice :exec
 INSERT INTO invoices (id, tenant_id, customer_id, subscription_id, number, status, kind, currency, billing_period_start, billing_period_end,
                       issued_at, due_at, subtotal, discount_total, total, credit_applied, amount_paid, amount_credited, amount_written_off,
-                      amount_due, customer_snapshot, memo, paid_at, created_at, updated_at, version)
+                      amount_due, customer_snapshot, issuer_snapshot, memo, paid_at, created_at, updated_at, version)
 VALUES (@id, @tenant_id, @customer_id, sqlc.narg(subscription_id), sqlc.narg(number), @status, @kind, @currency,
         sqlc.narg(billing_period_start), sqlc.narg(billing_period_end), sqlc.narg(issued_at), sqlc.narg(due_at), @subtotal, @discount_total,
-        @total, @credit_applied, @amount_paid, @amount_credited, @amount_written_off, @amount_due, @customer_snapshot, @memo,
+        @total, @credit_applied, @amount_paid, @amount_credited, @amount_written_off, @amount_due, @customer_snapshot,
+        sqlc.narg(issuer_snapshot), @memo,
         sqlc.narg(paid_at), @created_at, @created_at, 1);
 
 -- name: InsertInvoiceItem :exec
@@ -86,6 +87,23 @@ SELECT i.*, c.name AS customer_name
    AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (i.created_at, i.id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
  ORDER BY i.created_at DESC, i.id DESC
  LIMIT @row_limit;
+
+-- name: InvoiceListPosition :many
+-- Chave de ordenação da fatura na posição row_offset (base zero) da mesma
+-- listagem de ListInvoices, e da seguinte, se houver: usada para limitar a
+-- exportação e informar onde começa a parte seguinte.
+SELECT i.created_at, i.id
+  FROM invoices i
+ WHERE i.tenant_id = @tenant_id
+   AND (sqlc.narg(status)::text IS NULL OR i.status = sqlc.narg(status))
+   AND (sqlc.narg(customer_id)::uuid IS NULL OR i.customer_id = sqlc.narg(customer_id))
+   AND (sqlc.narg(subscription_id)::uuid IS NULL OR i.subscription_id = sqlc.narg(subscription_id))
+   AND (sqlc.narg(issued_from)::timestamptz IS NULL OR i.issued_at >= sqlc.narg(issued_from))
+   AND (sqlc.narg(issued_to)::timestamptz IS NULL OR i.issued_at < sqlc.narg(issued_to))
+   AND (NOT @only_overdue::boolean OR (i.status IN ('open', 'partially_paid') AND i.due_at <= @now))
+   AND (sqlc.narg(cursor_ts)::timestamptz IS NULL OR (i.created_at, i.id) < (sqlc.narg(cursor_ts)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ ORDER BY i.created_at DESC, i.id DESC
+ OFFSET @row_offset LIMIT 2;
 
 -- name: InsertInvoiceHistory :exec
 INSERT INTO invoice_status_history (id, tenant_id, invoice_id, from_status, to_status, occurred_at, actor_type, actor_id, reason, details)

@@ -1720,3 +1720,86 @@ há estorno da baixa nem operação para o recebimento de valor já baixado como
 `invoice.bad_debt_recovered` das faturas), que exige decisão do financeiro sobre o lançamento compensatório;
 o recebimento da baixa entra direto no disponível liquidado, sem conciliação com extrato bancário; disputas
 perdidas antes da ADR-070 continuam sem valor a recuperar (o crédito permaneceu com o cliente).
+
+## ADR-079 Fatura comercial completa, emissão congelada, cancelada sem saldo e exportação CSV em partes
+**Status:** aceita.
+**Contexto:** a auditoria de RF-03 a RF-06 encontrou lacunas na fatura comercial. O quadro de totais do
+documento HTML omitia o total, as notas de crédito e o valor baixado: com nota de crédito ou baixa, a conta
+exibida não fechava com o saldo. O gatilho `app_invoice_guard` (00006) não congelava a observação (`memo`)
+da fatura emitida, e o documento usava os dados atuais da organização como emitente, de modo que mudar a
+razão social alterava documentos já emitidos. A fatura cancelada mantinha saldo devedor (o total menos o
+crédito aplicado), embora o cancelamento devolva esse crédito ao cliente: o documento, visível no portal,
+e o CSV mostravam um saldo que ninguém deve. A exportação CSV parava em 50 mil linhas sem avisar, e as
+colunas não traziam desconto, créditos, notas de crédito, baixa nem período.
+**Decisão:**
+- **Documento.** O quadro de totais segue a ordem da conta: subtotal, descontos, total, créditos aplicados,
+  notas de crédito, pago, valor baixado e saldo; os abatimentos aparecem com sinal negativo e a soma fecha com
+  `amount_due`. O teste confere o fechamento em sequências reais de operações do domínio (emissão com
+  desconto e crédito, pagamentos, notas, baixa e sua recuperação, cancelamento), fixas e pseudoaleatórias com
+  semente fixa, e pela API com desconto, crédito, nota de crédito, pagamento parcial e baixa. No portal, a
+  baixa aparece como "Saldo encerrado pela organização", coerente com a situação "Encerrada". O documento
+  traz o aviso "Este documento é uma fatura comercial e não é documento fiscal. Não substitui a nota
+  fiscal." (o mesmo texto aparece na tela de detalhe da fatura), o emitente, o documento e o endereço de
+  cobrança do cliente copiados na emissão, o período de faturamento e o de cada item (primeiro e último dia
+  incluídos), o vencimento e as condições de pagamento calculadas das datas gravadas na emissão (não do prazo
+  atual da organização, que pode mudar), e a observação, quando houver.
+- **Emitente gravado na emissão.** A emissão (motor, prorrata e correção de consumo, todas por `issueDraft`)
+  grava em `invoices.issuer_snapshot` o nome, a razão social e o CNPJ da organização naquele momento, e o
+  gatilho recusa alterá-los ou removê-los depois. O documento do painel e o do portal usam esses dados.
+  Faturas emitidas antes da migration `00019` ficam com `issuer_snapshot` nulo e continuam usando os dados
+  atuais da organização (não há como reconstituir os dados da época).
+- **Observação congelada.** A migration `00019` recria `app_invoice_guard` para recusar, em fatura emitida, a
+  alteração de `memo`, `issuer_snapshot`, `tenant_id` e `created_at`, além dos campos que já eram congelados.
+  O teste do gatilho roda como dono das tabelas (que tem todos os privilégios e não está sujeito ao RLS) e
+  confere a mensagem do próprio gatilho, inclusive no ramo de exclusão; o papel da aplicação continua sem
+  privilégio de `DELETE`.
+- **Cancelada sem saldo.** `Invoice.Void` zera `amount_due`; `credit_applied` continua registrando o crédito
+  aplicado na emissão e devolvido no cancelamento (`Service.Void`). A constraint `invoices_due_consistency`
+  passa a exigir saldo zero na fatura cancelada e a conta antiga nas demais; a `00019` corrige as faturas já
+  canceladas. Os consumidores de `amount_due` (painel, régua de cobrança, portal, notificações, cobranças e
+  conciliação) já filtram por fatura em aberto ou tratam a cancelada à parte, e não mudam. O documento da
+  cancelada informa o cancelamento (com o motivo somente no painel), e o quadro mostra o crédito devolvido ao
+  cliente e o valor cancelado, fechando com saldo zero; o CSV exporta saldo zero.
+- **Exportação em partes.** Cada arquivo tem no máximo 50 mil faturas. Antes do primeiro byte, a API localiza
+  o corte com a mesma ordenação e os mesmos filtros da listagem (`InvoiceListPosition`, `OFFSET` sobre o
+  índice novo `invoices_tenant_created_idx (tenant_id, created_at DESC, id DESC)`, que também atende a
+  listagem) e informa nos cabeçalhos `X-Recorvia-Export-Limit`, `X-Recorvia-Export-Truncated` e, quando há
+  corte, `X-Recorvia-Export-Next-Cursor` e `X-Recorvia-Export-Next-Part`; a parte seguinte é pedida com os
+  mesmos filtros, `cursor` e `part`, e o arquivo de cada parte se chama `faturas-parte-N.csv`. O streaming para
+  na última fatura incluída (pela chave de ordenação, não pela contagem), e a parte seguinte começa
+  exatamente depois dela: nenhuma fatura que continua no filtro se repete nem é pulada entre partes, mesmo com
+  faturas novas emitidas durante a exportação (elas entram no início da listagem, fora das partes seguintes).
+  As partes são consultas independentes, sem uma fotografia única do conjunto: uma fatura alterada entre uma
+  parte e outra de modo a entrar ou sair do filtro (por exemplo, de situação ou de vencida) pode faltar ou
+  aparecer numa parte, e os valores de cada linha são os do momento em que a parte foi gerada. A interface
+  avisa o corte e oferece a próxima parte. A auditoria `invoices.exported` registra o filtro de situação, a
+  parte, se é continuação e se houve corte. Novas colunas: `periodo_inicio`, `periodo_fim`, `subtotal`,
+  `desconto`, `creditos_aplicados`, `valor_creditado` e `valor_baixado`.
+- **CORS.** Para as origens de `RECORVIA_ALLOWED_ORIGINS`, a resposta expõe ao navegador
+  (`Access-Control-Expose-Headers`) `ETag`, `Location`, `X-Request-ID`, `Idempotent-Replayed` e os cabeçalhos da exportação;
+  sem isso, o `fetch` de outra origem lê esses cabeçalhos como nulos e o corte voltaria a ser silencioso.
+- **Clientes.** O histórico do cliente (`GET /customers/{id}/history`) passa a ser paginado por cursor
+  (`limit` e `cursor`, padrão de 25 eventos), em vez de cortar em 100. `customer.address_updated` informa os
+  nomes dos campos alterados (`fields`) e se o endereço foi cadastrado agora (`created`), nunca os valores
+  (ADR-061); regravar o mesmo endereço não gera evento. Contatos ganham edição
+  (`PATCH /customers/{id}/contacts/{contact_id}`, auditada como `customer.contact_updated` com os nomes dos
+  campos) com semântica de alteração parcial: campo omitido mantém o valor atual, de modo que a preferência
+  de e-mail de cobrança desligada pelo cliente no portal não volta ao padrão em silêncio.
+
+**Alternativas:** contar as faturas do filtro antes da exportação informaria o corte, mas não daria o ponto
+exato de continuação; acrescentar ao fim do CSV uma linha de aviso misturaria texto com dados; trailers HTTP
+não são lidos pelo `fetch` do navegador; uma fotografia única (transação longa ou tabela temporária entre
+partes) foi descartada por segurar recursos do banco entre requisições. Guardar o arquivo para download
+posterior foi descartado: a exportação continua sob demanda e sem arquivos armazenados (multitenancy). Na
+fatura cancelada, manter o saldo e só escondê-lo na apresentação deixaria o dado da API e do CSV errado;
+zerar `credit_applied` foi descartado porque é campo de emissão congelado e registra o crédito que existiu.
+Versionar contatos para concorrência otimista exigiria coluna nova e mudaria a inclusão e a exclusão; a edição
+bloqueia o cliente na transação, como a inclusão, e vale a última gravação.
+**Consequências:** migration `00019` (função do gatilho, coluna `issuer_snapshot`, constraint de saldo,
+correção das canceladas e índice; o Down devolve o esquema da 00006 e o saldo antigo das canceladas e remove
+os emitentes gravados); consulta `InvoiceListPosition` e método `ListCutoff` no faturamento;
+`Deps.InvoiceExportMaxRows` permite reduzir o limite em testes. `amount_due` da fatura cancelada passa a ser
+zero na API. A resposta de `GET /customers/{id}/history` ganha `next_cursor` e passa a devolver 25 eventos por
+padrão (clientes que liam somente a primeira resposta precisam seguir o cursor). Limitações: o `OFFSET` do
+corte percorre até 50 mil entradas do índice por parte; o CSV não traz itens nem notas de crédito
+individualmente; faturas anteriores à `00019` mostram o emitente atual.

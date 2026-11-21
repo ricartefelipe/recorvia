@@ -1,5 +1,5 @@
-import { ActionIcon, Anchor, Breadcrumbs, Button, Collapse, Grid, Paper, SimpleGrid, Stack, Table, Text, Title } from '@mantine/core';
-import { IconBook, IconChevronDown, IconChevronRight } from '@tabler/icons-react';
+import { ActionIcon, Alert, Anchor, Breadcrumbs, Button, Collapse, Grid, Paper, SimpleGrid, Stack, Table, Text, Title } from '@mantine/core';
+import { IconBook, IconChevronDown, IconChevronRight, IconInfoCircle } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
 import { Fragment, useState } from 'react';
 import { Link, useParams } from 'react-router';
@@ -14,6 +14,9 @@ import { ChargesTable } from '../payments/ChargesTable';
 import { invoicesApi } from './api';
 import { InvoiceActions } from './InvoiceActions';
 import { InvoiceStatusBadges } from './InvoicesTable';
+
+/** Aviso do documento comercial (o mesmo texto do documento HTML): a fatura não substitui a nota fiscal. */
+const FISCAL_NOTICE = 'Este documento é uma fatura comercial e não é documento fiscal. Não substitui a nota fiscal.';
 
 export function InvoiceTotals({ invoice }: { invoice: InvoiceDetails }) {
   const c = invoice.currency;
@@ -214,6 +217,9 @@ export function InvoiceDetailView({ invoice }: { invoice: InvoiceDetails }) {
           </>
         }
       />
+      <Alert variant="light" icon={<IconInfoCircle />} p="xs" role="note" aria-label="Aviso fiscal">
+        {FISCAL_NOTICE}
+      </Alert>
       <Grid>
         <Grid.Col span={{ base: 12, md: 8 }}>
           <Paper withBorder p="md" radius="md" h="100%">

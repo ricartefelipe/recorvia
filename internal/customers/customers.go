@@ -323,6 +323,79 @@ func NewContact(id, customerID uuid.UUID, in ContactInput, now time.Time) (Conta
 		ReceivesBillingEmail: in.ReceivesBillingEmail, CreatedAt: now}, nil
 }
 
+// ContactPatch é a alteração parcial de um contato: campo nil mantém o valor
+// atual (por exemplo, a preferência de e-mail de cobrança que o cliente
+// alterou pelo portal não volta ao padrão quando omitida).
+type ContactPatch struct {
+	Name                 *string
+	Email                *string
+	Phone                *string
+	Role                 *string
+	ReceivesBillingEmail *bool
+}
+
+// Merge devolve os dados do contato com a alteração aplicada.
+func (p ContactPatch) Merge(c Contact) ContactInput {
+	in := ContactInput{Name: c.Name, Email: c.Email, Phone: c.Phone, Role: c.Role, ReceivesBillingEmail: c.ReceivesBillingEmail}
+	for _, f := range []struct {
+		dst *string
+		v   *string
+	}{{&in.Name, p.Name}, {&in.Email, p.Email}, {&in.Phone, p.Phone}, {&in.Role, p.Role}} {
+		if f.v != nil {
+			*f.dst = *f.v
+		}
+	}
+	if p.ReceivesBillingEmail != nil {
+		in.ReceivesBillingEmail = *p.ReceivesBillingEmail
+	}
+	return in
+}
+
+// Apply valida os novos dados do contato, aplica-os e retorna os nomes dos
+// campos modificados (para o histórico, sem valores pessoais).
+func (c *Contact) Apply(in ContactInput) ([]string, error) {
+	n, err := NewContact(c.ID, c.CustomerID, in, c.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	var changed []string
+	for _, f := range []struct {
+		name     string
+		old, new string
+	}{{"name", c.Name, n.Name}, {"email", c.Email, n.Email}, {"phone", c.Phone, n.Phone}, {"role", c.Role, n.Role}} {
+		if f.old != f.new {
+			changed = append(changed, f.name)
+		}
+	}
+	if c.ReceivesBillingEmail != n.ReceivesBillingEmail {
+		changed = append(changed, "receives_billing_email")
+	}
+	*c = n
+	return changed, nil
+}
+
+// ChangedFields devolve os nomes dos campos do endereço que diferem de prev
+// (todos os preenchidos, quando não havia endereço). Somente nomes, nunca
+// valores (ADR-061).
+func (a Address) ChangedFields(prev *Address) []string {
+	var old Address
+	if prev != nil {
+		old = *prev
+	}
+	var changed []string
+	for _, f := range []struct {
+		name     string
+		old, new string
+	}{{"street", old.Street, a.Street}, {"number", old.Number, a.Number}, {"complement", old.Complement, a.Complement},
+		{"district", old.District, a.District}, {"city", old.City, a.City}, {"state", old.State, a.State},
+		{"postal_code", old.PostalCode, a.PostalCode}, {"country", old.Country, a.Country}} {
+		if f.old != f.new {
+			changed = append(changed, f.name)
+		}
+	}
+	return changed
+}
+
 // ValidateAddress normaliza e valida o endereço de cobrança.
 func ValidateAddress(a Address) (Address, error) {
 	var f []apperr.FieldError

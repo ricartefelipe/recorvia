@@ -68,10 +68,29 @@ function BillingRunButton() {
   );
 }
 
+type ExportFilters = Pick<InvoiceListParams, 'status' | 'issued_from' | 'issued_to'>;
+
+/** Parte da exportação a baixar: número, filtros da primeira parte e cursor. */
+interface ExportPart {
+  number: number;
+  filters: ExportFilters;
+  cursor?: string;
+  limit?: number;
+}
+
+function exportFilters(params: InvoiceListParams): ExportFilters {
+  return { status: params.status, issued_from: params.issued_from, issued_to: params.issued_to };
+}
+
+function partLimit(n: number | undefined): string {
+  return n === undefined ? 'um número limitado de faturas' : `no máximo ${n.toLocaleString('pt-BR')} faturas`;
+}
+
 export function InvoicesPage() {
   const { keys, timeZone } = useTenant();
   const [filters, setFilters] = useUrlFilters(['status', 'cliente', 'de', 'ate', 'overdue'] as const);
   const [exporting, setExporting] = useState(false);
+  const [nextPart, setNextPart] = useState<ExportPart | null>(null);
   const params: InvoiceListParams = {
     status: (filters.status || undefined) as InvoiceStatus | undefined,
     customer_id: filters.cliente || undefined,
@@ -88,12 +107,23 @@ export function InvoicesPage() {
   });
   const filtered = Object.entries(params).some(([k, v]) => k !== 'limit' && v !== undefined);
 
-  const exportCsv = async () => {
+  // A exportação tem limite de faturas por arquivo: quando a API informa o
+  // corte, a parte seguinte é pedida com os mesmos filtros e o cursor
+  // devolvido, nunca em silêncio.
+  const exportCsv = async (part: ExportPart = { number: 1, filters: exportFilters(params) }) => {
     setExporting(true);
     try {
-      const csv = await invoicesApi.exportCsv({ status: params.status, issued_from: params.issued_from, issued_to: params.issued_to });
-      downloadText(csv, `faturas-${todayInTimeZone(timeZone)}.csv`, 'text/csv;charset=utf-8');
-      notifySuccess('Arquivo CSV gerado.');
+      const result = await invoicesApi.exportCsv({ ...part.filters, cursor: part.cursor, part: part.cursor ? part.number : undefined });
+      const multipart = part.number > 1 || result.truncated;
+      const suffix = multipart ? `-parte-${part.number}` : '';
+      downloadText(result.csv, `faturas-${todayInTimeZone(timeZone)}${suffix}.csv`, 'text/csv;charset=utf-8');
+      if (result.truncated && result.nextCursor) {
+        setNextPart({ number: part.number + 1, filters: part.filters, cursor: result.nextCursor, limit: result.limit });
+        notifySuccess(`Parte ${part.number} do CSV gerada.`);
+      } else {
+        setNextPart(null);
+        notifySuccess(multipart ? `Parte ${part.number} do CSV gerada. Exportação concluída.` : 'Arquivo CSV gerado.');
+      }
     } catch (error) {
       handleMutationError(error);
     } finally {
@@ -110,7 +140,7 @@ export function InvoicesPage() {
           <>
             <Can permission="invoices.export">
               <Tooltip label="Exporta conforme situação e período de emissão filtrados">
-                <Button variant="default" leftSection={<IconFileExport size={16} />} onClick={() => void exportCsv()} loading={exporting}>
+                <Button variant="default" leftSection={<IconFileExport size={16} />} onClick={() => void exportCsv()} loading={exporting && !nextPart}>
                   Exportar CSV
                 </Button>
               </Tooltip>
@@ -121,6 +151,26 @@ export function InvoicesPage() {
           </>
         }
       />
+      <Modal opened={!!nextPart} onClose={() => setNextPart(null)} title="Exportação em partes">
+        {nextPart && (
+          <Stack>
+            <Text>
+              Cada arquivo tem {partLimit(nextPart.limit)} e ainda há faturas a exportar com os filtros aplicados. O arquivo baixado é a parte {nextPart.number - 1}, com as faturas mais recentes.
+            </Text>
+            <Text size="sm" c="dimmed">
+              Baixe a parte {nextPart.number} para continuar de onde a anterior parou, sem repetir faturas.
+            </Text>
+            <Group justify="flex-end">
+              <Button variant="default" onClick={() => setNextPart(null)}>
+                Fechar
+              </Button>
+              <Button leftSection={<IconFileExport size={16} />} onClick={() => void exportCsv(nextPart)} loading={exporting}>
+                Baixar parte {nextPart.number}
+              </Button>
+            </Group>
+          </Stack>
+        )}
+      </Modal>
       <Group mb="md" align="flex-end" wrap="wrap">
         <Select
           label="Situação"
