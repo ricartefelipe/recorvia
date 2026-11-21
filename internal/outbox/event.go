@@ -28,6 +28,7 @@ const (
 	EventRefundFailed           = "refund.failed"
 	EventDisputeOpened          = "dispute.opened"
 	EventDisputeClosed          = "dispute.closed"
+	EventDisputeRecoverySettled = "dispute.recovery_settled"
 	EventSubscriptionCreated    = "subscription.created"
 	EventSubscriptionUpdated    = "subscription.updated"
 	EventSubscriptionCanceled   = "subscription.canceled"

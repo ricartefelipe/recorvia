@@ -106,7 +106,7 @@ arquivar ou anonimizar clientes:
 
 | Categoria | Tabelas | Proteção |
 |---|---|---|
-| Registros financeiros imutáveis | `ledger_transactions`, `ledger_entries`, `payments`, `invoice_items`, `invoice_status_history`, `credit_notes`, `customer_credit_entries`, `subscription_prorations`, `dispute_events` | gatilho `app_reject_mutation`: `UPDATE` e `DELETE` são rejeitados para qualquer papel (ADR-014); correções por lançamento compensatório |
+| Registros financeiros imutáveis | `ledger_transactions`, `ledger_entries`, `payments`, `invoice_items`, `invoice_status_history`, `credit_notes`, `customer_credit_entries`, `subscription_prorations`, `dispute_events`, `dispute_recovery_settlements` | gatilho `app_reject_mutation`: `UPDATE` e `DELETE` são rejeitados para qualquer papel (ADR-014); correções por lançamento compensatório |
 | Faturas | `invoices` (inclui `customer_snapshot`, a cópia do cadastro do cliente na emissão) | gatilho `app_invoice_guard`: a fatura emitida não é excluída nem reescrita |
 | Trilha de auditoria | `audit_log` | gatilho `app_reject_mutation`; os detalhes guardam identificadores, nomes de campos e justificativas, não valores pessoais |
 | Histórico de assinaturas e preços | `subscription_history`, `plan_price_versions` | gatilho `app_reject_mutation` |

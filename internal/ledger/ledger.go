@@ -37,7 +37,8 @@ const (
 	ReconciliationAdjustments AccountCode = "reconciliation_adjustments"
 	// CustomerRecoverables reúne os valores a recuperar de clientes: crédito
 	// de pagamento excedente já usado quando o pagamento que o gerou foi
-	// estornado por chargeback.
+	// estornado por chargeback. Sai da conta pela baixa: recebida (disponível
+	// liquidado) ou perdida (perdas com inadimplência).
 	CustomerRecoverables AccountCode = "customer_recoverables"
 )
 
@@ -295,6 +296,26 @@ func ChargebackCreditReversed(id, tenant uuid.UUID, refType string, refID uuid.U
 	entries = append(entries, pair(CustomerRecoverables, Chargebacks, recovery)...)
 	return build(id, tenant, "dispute.credit_reversed", "Chargeback de pagamento excedente: crédito do cliente estornado", at, refType, refID,
 		"dispute.credit_reversed:"+refType+":"+refID.String(), entries)
+}
+
+// RecoverySettlementReference é o tipo de referência dos lançamentos de baixa
+// do valor a recuperar de cliente (um lançamento por baixa).
+const RecoverySettlementReference = "dispute_recovery_settlement"
+
+// RecoveryReceived: baixa do valor a recuperar de cliente recebido fora do
+// provedor (transferência, acerto comercial). O valor entra no disponível
+// liquidado, como o recebimento manual, e sai dos valores a recuperar.
+func RecoveryReceived(id, tenant, settlementID uuid.UUID, amount money.Money, at time.Time) (Transaction, bool, error) {
+	return build(id, tenant, "dispute.recovery_received", "Valor a recuperar de cliente recebido", at, RecoverySettlementReference, settlementID,
+		"dispute.recovery_received:"+settlementID.String(), pair(Cash, CustomerRecoverables, amount))
+}
+
+// RecoveryWrittenOff: baixa do valor a recuperar de cliente de que o tenant
+// desistiu. O valor é reconhecido como perda, na mesma conta das faturas
+// incobráveis, e sai dos valores a recuperar.
+func RecoveryWrittenOff(id, tenant, settlementID uuid.UUID, amount money.Money, at time.Time) (Transaction, bool, error) {
+	return build(id, tenant, "dispute.recovery_written_off", "Valor a recuperar de cliente baixado como perda", at, RecoverySettlementReference,
+		settlementID, "dispute.recovery_written_off:"+settlementID.String(), pair(BadDebt, CustomerRecoverables, amount))
 }
 
 // InvoiceWrittenOff: saldo considerado incobrável.

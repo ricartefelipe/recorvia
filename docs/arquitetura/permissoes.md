@@ -40,6 +40,7 @@ o identificador de tenant recebido nunca é aceito isoladamente.
 | `payments.read` | ✔ | ✔ | ✔ | ✔ | ✔ |
 | `payments.record_manual` | ✔ | ✔ | ✔ | — | — |
 | `payments.refund` | ✔ | ✔ | ✔ | — | — |
+| `payments.settle_recovery` | ✔ | ✔ | ✔ | — | — |
 | `platform_billing.manage` | ✔ | — | — | — | — |
 | `platform_billing.read` | ✔ | ✔ | ✔ | — | ✔ |
 | `reconciliation.read` | ✔ | ✔ | ✔ | — | ✔ |

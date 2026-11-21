@@ -44,6 +44,15 @@ type DisputeTx interface {
 	InsertDispute(ctx context.Context, d Dispute) error
 	UpdateDispute(ctx context.Context, d *Dispute) error
 	InsertDisputeEvent(ctx context.Context, e DisputeEvent) error
+	// Dispute lê a disputa; forUpdate a bloqueia até o fim da transação
+	// (serializa as baixas do valor a recuperar).
+	Dispute(ctx context.Context, id uuid.UUID, forUpdate bool) (Dispute, error)
+	// InsertRecoverySettlement grava a baixa do valor a recuperar; o banco
+	// acumula o total na disputa e recusa a baixa acima do saldo
+	// (recovery_exceeds_outstanding).
+	InsertRecoverySettlement(ctx context.Context, s RecoverySettlement) error
+	RecoverySettlementByRequestKey(ctx context.Context, key string) (RecoverySettlement, error)
+	RecoverySettlements(ctx context.Context, disputeID uuid.UUID) ([]RecoverySettlement, error)
 	// ReverseLedger estorna o lançamento identificado pela chave original.
 	ReverseLedger(ctx context.Context, originalKey, description string, at time.Time) error
 }

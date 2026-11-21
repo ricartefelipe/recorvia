@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const chargeChargebackCreditAmount = `-- name: ChargeChargebackCreditAmount :one
@@ -269,8 +270,78 @@ func (q *Queries) GetDiscrepancyForUpdate(ctx context.Context, arg GetDiscrepanc
 	return i, err
 }
 
+const getDispute = `-- name: GetDispute :one
+SELECT id, tenant_id, charge_id, provider, status, amount, currency, provider_status, opened_at, closed_at, created_at, updated_at, version, credit_amount, recovery_amount, recovery_received_amount, recovery_written_off_amount FROM disputes WHERE tenant_id = $1 AND id = $2
+`
+
+type GetDisputeParams struct {
+	TenantID uuid.UUID
+	ID       uuid.UUID
+}
+
+func (q *Queries) GetDispute(ctx context.Context, arg GetDisputeParams) (Dispute, error) {
+	row := q.db.QueryRow(ctx, getDispute, arg.TenantID, arg.ID)
+	var i Dispute
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.ChargeID,
+		&i.Provider,
+		&i.Status,
+		&i.Amount,
+		&i.Currency,
+		&i.ProviderStatus,
+		&i.OpenedAt,
+		&i.ClosedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Version,
+		&i.CreditAmount,
+		&i.RecoveryAmount,
+		&i.RecoveryReceivedAmount,
+		&i.RecoveryWrittenOffAmount,
+	)
+	return i, err
+}
+
+const getDisputeForUpdate = `-- name: GetDisputeForUpdate :one
+SELECT id, tenant_id, charge_id, provider, status, amount, currency, provider_status, opened_at, closed_at, created_at, updated_at, version, credit_amount, recovery_amount, recovery_received_amount, recovery_written_off_amount FROM disputes WHERE tenant_id = $1 AND id = $2 FOR UPDATE
+`
+
+type GetDisputeForUpdateParams struct {
+	TenantID uuid.UUID
+	ID       uuid.UUID
+}
+
+// Bloqueia a disputa até o fim da transação: serializa as baixas do valor a
+// recuperar e a repetição do pedido com a mesma chave.
+func (q *Queries) GetDisputeForUpdate(ctx context.Context, arg GetDisputeForUpdateParams) (Dispute, error) {
+	row := q.db.QueryRow(ctx, getDisputeForUpdate, arg.TenantID, arg.ID)
+	var i Dispute
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.ChargeID,
+		&i.Provider,
+		&i.Status,
+		&i.Amount,
+		&i.Currency,
+		&i.ProviderStatus,
+		&i.OpenedAt,
+		&i.ClosedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Version,
+		&i.CreditAmount,
+		&i.RecoveryAmount,
+		&i.RecoveryReceivedAmount,
+		&i.RecoveryWrittenOffAmount,
+	)
+	return i, err
+}
+
 const getLatestDisputeForCharge = `-- name: GetLatestDisputeForCharge :one
-SELECT id, tenant_id, charge_id, provider, status, amount, currency, provider_status, opened_at, closed_at, created_at, updated_at, version, credit_amount, recovery_amount FROM disputes WHERE tenant_id = $1 AND charge_id = $2 ORDER BY opened_at DESC, id DESC LIMIT 1
+SELECT id, tenant_id, charge_id, provider, status, amount, currency, provider_status, opened_at, closed_at, created_at, updated_at, version, credit_amount, recovery_amount, recovery_received_amount, recovery_written_off_amount FROM disputes WHERE tenant_id = $1 AND charge_id = $2 ORDER BY opened_at DESC, id DESC LIMIT 1
 `
 
 type GetLatestDisputeForChargeParams struct {
@@ -297,6 +368,8 @@ func (q *Queries) GetLatestDisputeForCharge(ctx context.Context, arg GetLatestDi
 		&i.Version,
 		&i.CreditAmount,
 		&i.RecoveryAmount,
+		&i.RecoveryReceivedAmount,
+		&i.RecoveryWrittenOffAmount,
 	)
 	return i, err
 }
@@ -402,6 +475,35 @@ func (q *Queries) GetReconciliationRunForUpdate(ctx context.Context, arg GetReco
 		&i.FinishedAt,
 		&i.UpdatedAt,
 		&i.Attempts,
+	)
+	return i, err
+}
+
+const getRecoverySettlementByRequestKey = `-- name: GetRecoverySettlementByRequestKey :one
+SELECT id, tenant_id, dispute_id, outcome, amount, currency, effective_date, justification, settled_by, request_key, ledger_transaction_id, created_at FROM dispute_recovery_settlements WHERE tenant_id = $1 AND request_key = $2
+`
+
+type GetRecoverySettlementByRequestKeyParams struct {
+	TenantID   uuid.UUID
+	RequestKey *string
+}
+
+func (q *Queries) GetRecoverySettlementByRequestKey(ctx context.Context, arg GetRecoverySettlementByRequestKeyParams) (DisputeRecoverySettlement, error) {
+	row := q.db.QueryRow(ctx, getRecoverySettlementByRequestKey, arg.TenantID, arg.RequestKey)
+	var i DisputeRecoverySettlement
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.DisputeID,
+		&i.Outcome,
+		&i.Amount,
+		&i.Currency,
+		&i.EffectiveDate,
+		&i.Justification,
+		&i.SettledBy,
+		&i.RequestKey,
+		&i.LedgerTransactionID,
+		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -705,6 +807,49 @@ func (q *Queries) InsertReconciliationRun(ctx context.Context, arg InsertReconci
 		arg.LeaseUntil,
 		arg.Attempts,
 		arg.StartedAt,
+	)
+	return err
+}
+
+const insertRecoverySettlement = `-- name: InsertRecoverySettlement :exec
+INSERT INTO dispute_recovery_settlements (id, tenant_id, dispute_id, outcome, amount, currency, effective_date, justification, settled_by,
+                                          request_key, ledger_transaction_id, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+        $10, $11, $12)
+`
+
+type InsertRecoverySettlementParams struct {
+	ID                  uuid.UUID
+	TenantID            uuid.UUID
+	DisputeID           uuid.UUID
+	Outcome             string
+	Amount              int64
+	Currency            string
+	EffectiveDate       pgtype.Date
+	Justification       string
+	SettledBy           *uuid.UUID
+	RequestKey          *string
+	LedgerTransactionID uuid.UUID
+	CreatedAt           time.Time
+}
+
+// O gatilho dispute_recovery_settlements_apply acumula a baixa nos totais da
+// disputa; a constraint disputes_recovery_settled_within recusa a baixa
+// acima do valor a recuperar.
+func (q *Queries) InsertRecoverySettlement(ctx context.Context, arg InsertRecoverySettlementParams) error {
+	_, err := q.db.Exec(ctx, insertRecoverySettlement,
+		arg.ID,
+		arg.TenantID,
+		arg.DisputeID,
+		arg.Outcome,
+		arg.Amount,
+		arg.Currency,
+		arg.EffectiveDate,
+		arg.Justification,
+		arg.SettledBy,
+		arg.RequestKey,
+		arg.LedgerTransactionID,
+		arg.CreatedAt,
 	)
 	return err
 }
@@ -1122,8 +1267,50 @@ func (q *Queries) ListDisputeEvents(ctx context.Context, arg ListDisputeEventsPa
 	return items, nil
 }
 
+const listDisputeRecoverySettlements = `-- name: ListDisputeRecoverySettlements :many
+SELECT id, tenant_id, dispute_id, outcome, amount, currency, effective_date, justification, settled_by, request_key, ledger_transaction_id, created_at FROM dispute_recovery_settlements WHERE tenant_id = $1 AND dispute_id = $2 ORDER BY created_at, id
+`
+
+type ListDisputeRecoverySettlementsParams struct {
+	TenantID  uuid.UUID
+	DisputeID uuid.UUID
+}
+
+func (q *Queries) ListDisputeRecoverySettlements(ctx context.Context, arg ListDisputeRecoverySettlementsParams) ([]DisputeRecoverySettlement, error) {
+	rows, err := q.db.Query(ctx, listDisputeRecoverySettlements, arg.TenantID, arg.DisputeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DisputeRecoverySettlement
+	for rows.Next() {
+		var i DisputeRecoverySettlement
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.DisputeID,
+			&i.Outcome,
+			&i.Amount,
+			&i.Currency,
+			&i.EffectiveDate,
+			&i.Justification,
+			&i.SettledBy,
+			&i.RequestKey,
+			&i.LedgerTransactionID,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDisputes = `-- name: ListDisputes :many
-SELECT id, tenant_id, charge_id, provider, status, amount, currency, provider_status, opened_at, closed_at, created_at, updated_at, version, credit_amount, recovery_amount FROM disputes
+SELECT id, tenant_id, charge_id, provider, status, amount, currency, provider_status, opened_at, closed_at, created_at, updated_at, version, credit_amount, recovery_amount, recovery_received_amount, recovery_written_off_amount FROM disputes
  WHERE tenant_id = $1
    AND ($2::uuid IS NULL OR charge_id = $2)
  ORDER BY opened_at DESC, id DESC
@@ -1161,6 +1348,8 @@ func (q *Queries) ListDisputes(ctx context.Context, arg ListDisputesParams) ([]D
 			&i.Version,
 			&i.CreditAmount,
 			&i.RecoveryAmount,
+			&i.RecoveryReceivedAmount,
+			&i.RecoveryWrittenOffAmount,
 		); err != nil {
 			return nil, err
 		}

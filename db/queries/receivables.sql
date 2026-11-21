@@ -93,6 +93,29 @@ UPDATE disputes
        recovery_amount = @recovery_amount, version = version + 1
  WHERE tenant_id = @tenant_id AND id = @id AND version = @version;
 
+-- name: GetDispute :one
+SELECT * FROM disputes WHERE tenant_id = @tenant_id AND id = @id;
+
+-- name: GetDisputeForUpdate :one
+-- Bloqueia a disputa até o fim da transação: serializa as baixas do valor a
+-- recuperar e a repetição do pedido com a mesma chave.
+SELECT * FROM disputes WHERE tenant_id = @tenant_id AND id = @id FOR UPDATE;
+
+-- name: InsertRecoverySettlement :exec
+-- O gatilho dispute_recovery_settlements_apply acumula a baixa nos totais da
+-- disputa; a constraint disputes_recovery_settled_within recusa a baixa
+-- acima do valor a recuperar.
+INSERT INTO dispute_recovery_settlements (id, tenant_id, dispute_id, outcome, amount, currency, effective_date, justification, settled_by,
+                                          request_key, ledger_transaction_id, created_at)
+VALUES (@id, @tenant_id, @dispute_id, @outcome, @amount, @currency, @effective_date, @justification, sqlc.narg(settled_by),
+        sqlc.narg(request_key), @ledger_transaction_id, @created_at);
+
+-- name: GetRecoverySettlementByRequestKey :one
+SELECT * FROM dispute_recovery_settlements WHERE tenant_id = @tenant_id AND request_key = @request_key;
+
+-- name: ListDisputeRecoverySettlements :many
+SELECT * FROM dispute_recovery_settlements WHERE tenant_id = @tenant_id AND dispute_id = @dispute_id ORDER BY created_at, id;
+
 -- name: InsertDisputeEvent :exec
 INSERT INTO dispute_events (id, tenant_id, dispute_id, from_status, to_status, provider_status, occurred_at, recorded_at, details)
 VALUES (@id, @tenant_id, @dispute_id, sqlc.narg(from_status), @to_status, sqlc.narg(provider_status), @occurred_at, @recorded_at, @details);

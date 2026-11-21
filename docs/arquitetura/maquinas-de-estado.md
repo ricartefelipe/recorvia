@@ -165,6 +165,20 @@ consumido (`disputes.credit_amount`) e o que o cliente já usou vira valor a rec
 `chargebacks` registra o valor estornado menos o excedente, isto é, a receita efetivamente perdida
 (ADR-070). A disputa ganha não mexe no crédito.
 
+A disputa perdida com valor a recuperar não muda de situação com a baixa (ADR-073): continua `lost`, e o
+saldo a recuperar diminui a cada baixa, recebida (`recovery_received_amount`) ou perdida
+(`recovery_written_off_amount`), até zero. Baixas parciais são permitidas; a soma nunca passa de
+`recovery_amount`. O saldo pode voltar a crescer se um reembolso reservado for recusado depois da perda
+(`dispute.chargeback_increased`).
+
+```mermaid
+stateDiagram-v2
+  [*] --> a_recuperar: disputa perdida com recovery_amount > 0
+  a_recuperar --> a_recuperar: baixa parcial (recebida ou perdida)
+  a_recuperar --> baixado: baixa do saldo restante
+  baixado --> a_recuperar: reembolso reservado recusado depois da perda aumenta o valor a recuperar
+```
+
 Cada transição gera uma entrada imutável em `dispute_events`. Há no máximo uma disputa aberta por
 cobrança.
 

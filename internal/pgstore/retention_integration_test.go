@@ -712,7 +712,8 @@ func TestFinancialAndAuditRecordsAreNeverPurged(t *testing.T) {
 	_, invoiceID := issuedInvoice(t, env, tn, "")
 
 	immutable := []string{"ledger_transactions", "ledger_entries", "payments", "invoice_items", "invoice_status_history", "credit_notes",
-		"customer_credit_entries", "subscription_history", "subscription_prorations", "audit_log", "plan_price_versions", "dispute_events"}
+		"customer_credit_entries", "subscription_history", "subscription_prorations", "audit_log", "plan_price_versions", "dispute_events",
+		"dispute_recovery_settlements"}
 	for _, table := range immutable {
 		// O gatilho da tabela é o de imutabilidade sem exceção.
 		if n := s.count(`SELECT count(*) FROM pg_trigger tg JOIN pg_proc p ON p.oid = tg.tgfoid

@@ -45,12 +45,18 @@ type Dispute struct {
 	// quando o pagamento foi estornado: valor a recuperar do cliente, em vez
 	// de saldo de crédito negativo.
 	RecoveryAmount money.Money
-	ProviderStatus string
-	OpenedAt       time.Time
-	ClosedAt       *time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	Version        int
+	// RecoveryReceived e RecoveryWrittenOff são os totais das baixas do valor
+	// a recuperar (ADR-073): recebido do cliente fora do provedor e baixado
+	// como perda. Mantidos pelo banco na gravação de cada baixa; a soma nunca
+	// passa de RecoveryAmount.
+	RecoveryReceived   money.Money
+	RecoveryWrittenOff money.Money
+	ProviderStatus     string
+	OpenedAt           time.Time
+	ClosedAt           *time.Time
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	Version            int
 }
 
 // Open informa se a disputa ainda não foi decidida.

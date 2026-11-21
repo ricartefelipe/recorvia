@@ -73,6 +73,8 @@ export type ChargePage = S['ChargePage'];
 export type Refund = S['Refund'];
 export type Payment = S['Payment'];
 export type Dispute = S['Dispute'];
+export type RecoverySettlement = S['RecoverySettlement'];
+export type RecoverySettlementInput = S['RecoverySettlementInput'];
 export type PaymentOperation = S['PaymentOperation'];
 
 export type ProviderAccountInput = S['ProviderAccountInput'];

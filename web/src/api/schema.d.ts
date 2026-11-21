@@ -1218,6 +1218,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/disputes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Consulta uma disputa
+         * @description Devolve a disputa com o valor a recuperar do cliente, as baixas já feitas e o saldo que ainda falta recuperar.
+         */
+        get: operations["getDispute"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/disputes/{id}/recovery-settlements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Lista as baixas do valor a recuperar da disputa
+         * @description Baixas recebidas e perdidas do valor a recuperar do cliente, em ordem de registro.
+         */
+        get: operations["listRecoverySettlements"];
+        put?: never;
+        /**
+         * Dá baixa no valor a recuperar do cliente
+         * @description Registra a baixa, total ou parcial, do valor a recuperar de uma disputa perdida (ADR-073). `received`: o cliente pagou fora do provedor; o ledger debita o disponível liquidado (`cash`). `written_off`: o tenant desistiu de cobrar; o ledger debita as perdas com inadimplência (`bad_debt`). Nos dois casos o crédito é em `customer_recoverables`. A soma das baixas nunca passa do valor a recuperar, inclusive com pedidos concorrentes. A repetição com a mesma `Idempotency-Key` devolve a mesma baixa. Com credencial de API, `settled_by` fica nulo e a autoria vai para a auditoria.
+         */
+        post: operations["settleRecovery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/payment-operations": {
         parameters: {
             query?: never;
@@ -2767,11 +2811,70 @@ export interface components {
              * @description Valor a recuperar do cliente: a parte desse excedente que o cliente já havia usado quando o pagamento foi estornado. O saldo de crédito nunca fica negativo; o valor é lançado no ledger na conta customer_recoverables.
              */
             recovery_amount: number;
+            /**
+             * Format: int64
+             * @description Total das baixas do valor a recuperar recebidas do cliente fora do provedor.
+             */
+            recovery_received_amount: number;
+            /**
+             * Format: int64
+             * @description Total das baixas do valor a recuperar reconhecidas como perda.
+             */
+            recovery_written_off_amount: number;
+            /**
+             * Format: int64
+             * @description Quanto ainda falta recuperar do cliente: recovery_amount menos as baixas recebidas e perdidas. Zero quando não há valor a recuperar ou quando tudo foi baixado.
+             */
+            recovery_outstanding_amount: number;
             currency: string;
             /** Format: date-time */
             opened_at: string;
             /** Format: date-time */
             closed_at?: string | null;
+        };
+        RecoverySettlementInput: {
+            /**
+             * @description `received`: recebido do cliente fora do provedor. `written_off`: perdido (o tenant desistiu de cobrar).
+             * @enum {string}
+             */
+            outcome: "received" | "written_off";
+            /**
+             * Format: int64
+             * @description Valor da baixa em centavos; no máximo o saldo a recuperar.
+             */
+            amount: number;
+            /**
+             * Format: date
+             * @description Data do recebimento ou da decisão, no fuso da organização (AAAA-MM-DD). Padrão: hoje. Não pode estar no futuro nem antes do encerramento da disputa.
+             */
+            effective_date?: string;
+            justification: string;
+        };
+        RecoverySettlement: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            dispute_id: string;
+            /** @enum {string} */
+            outcome: "received" | "written_off";
+            /** Format: int64 */
+            amount: number;
+            currency: string;
+            /** Format: date */
+            effective_date: string;
+            justification: string;
+            /**
+             * Format: uuid
+             * @description Usuário que registrou a baixa; nulo quando feita por credencial de API (autoria na auditoria).
+             */
+            settled_by: string | null;
+            /**
+             * Format: uuid
+             * @description Lançamento da baixa no ledger.
+             */
+            ledger_transaction_id: string;
+            /** Format: date-time */
+            created_at: string;
         };
         PaymentOperation: {
             /** Format: uuid */
@@ -3114,9 +3217,14 @@ export interface components {
             refunds: number;
             /**
              * Format: int64
-             * @description Movimento líquido da conta de chargebacks no mês (débitos menos créditos). A retenção liberada, a disputa ganha e a parte do chargeback que corresponde a pagamento excedente (crédito do cliente consumido ou valor a recuperar) reduzem o mês em que ocorrem; negativo quando a disputa aberta em mês anterior é ganha.
+             * @description Movimento líquido da conta de chargebacks no mês (débitos menos créditos). A retenção liberada, a disputa ganha e a parte do chargeback que corresponde a pagamento excedente (crédito do cliente consumido ou valor a recuperar) reduzem o mês em que ocorrem; negativo quando a disputa aberta em mês anterior é ganha. A baixa do valor a recuperar não altera este indicador.
              */
             chargebacks: number;
+            /**
+             * Format: int64
+             * @description Saldo atual dos valores a recuperar de clientes (conta customer_recoverables): crédito de pagamento excedente já usado e estornado por chargeback, menos as baixas recebidas e perdidas. Não depende do mês consultado.
+             */
+            open_recoverables: number;
             open_discrepancies?: number;
             unknown_operations?: number;
             definitions: {
@@ -5811,6 +5919,104 @@ export interface operations {
                     };
                 };
             };
+        };
+    };
+    getDispute: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Disputa */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dispute"];
+                };
+            };
+            404: components["responses"]["Problem"];
+        };
+    };
+    listRecoverySettlements: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Baixas da disputa */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["RecoverySettlement"][];
+                    };
+                };
+            };
+            404: components["responses"]["Problem"];
+        };
+    };
+    settleRecovery: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+                /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
+                "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecoverySettlementInput"];
+            };
+        };
+        responses: {
+            /** @description Baixa registrada */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoverySettlement"];
+                };
+            };
+            404: components["responses"]["Problem"];
+            /** @description A disputa não tem valor a recuperar (`dispute_without_recovery`), o saldo já foi baixado por completo (`recovery_already_settled`), o valor passa do saldo (`recovery_exceeds_outstanding`) ou a chave já foi usada em outra baixa (`request_key_reused`). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            422: components["responses"]["Problem"];
         };
     };
     listPaymentOperations: {

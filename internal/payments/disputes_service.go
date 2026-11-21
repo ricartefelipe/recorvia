@@ -262,7 +262,8 @@ func (s *Service) openDispute(ctx context.Context, tx Tx, c *Charge, pc Provider
 	}
 	zero := money.Zero(amount.Currency())
 	d := Dispute{ID: ids.New(), TenantID: c.TenantID, ChargeID: c.ID, Provider: c.Provider, Status: DisputeOpened, Amount: amount,
-		CreditAmount: zero, RecoveryAmount: zero, ProviderStatus: pc.RawStatus, OpenedAt: occurred, CreatedAt: now, UpdatedAt: now, Version: 1}
+		CreditAmount: zero, RecoveryAmount: zero, RecoveryReceived: zero, RecoveryWrittenOff: zero, ProviderStatus: pc.RawStatus,
+		OpenedAt: occurred, CreatedAt: now, UpdatedAt: now, Version: 1}
 	if err := tx.InsertDispute(ctx, d); err != nil {
 		return Dispute{}, false, err
 	}

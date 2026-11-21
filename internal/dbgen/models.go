@@ -243,21 +243,23 @@ type DeadLetter struct {
 }
 
 type Dispute struct {
-	ID             uuid.UUID
-	TenantID       uuid.UUID
-	ChargeID       uuid.UUID
-	Provider       string
-	Status         string
-	Amount         int64
-	Currency       string
-	ProviderStatus *string
-	OpenedAt       time.Time
-	ClosedAt       *time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	Version        int32
-	CreditAmount   int64
-	RecoveryAmount int64
+	ID                       uuid.UUID
+	TenantID                 uuid.UUID
+	ChargeID                 uuid.UUID
+	Provider                 string
+	Status                   string
+	Amount                   int64
+	Currency                 string
+	ProviderStatus           *string
+	OpenedAt                 time.Time
+	ClosedAt                 *time.Time
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+	Version                  int32
+	CreditAmount             int64
+	RecoveryAmount           int64
+	RecoveryReceivedAmount   int64
+	RecoveryWrittenOffAmount int64
 }
 
 type DisputeEvent struct {
@@ -270,6 +272,21 @@ type DisputeEvent struct {
 	OccurredAt     time.Time
 	RecordedAt     time.Time
 	Details        []byte
+}
+
+type DisputeRecoverySettlement struct {
+	ID                  uuid.UUID
+	TenantID            uuid.UUID
+	DisputeID           uuid.UUID
+	Outcome             string
+	Amount              int64
+	Currency            string
+	EffectiveDate       pgtype.Date
+	Justification       string
+	SettledBy           *uuid.UUID
+	RequestKey          *string
+	LedgerTransactionID uuid.UUID
+	CreatedAt           time.Time
 }
 
 type IdempotencyKey struct {

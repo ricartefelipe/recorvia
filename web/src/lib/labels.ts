@@ -160,6 +160,11 @@ export const disputeStatusLabels: Labels = {
   lost: 'Perdida',
 };
 
+export const recoveryOutcomeLabels: Labels = {
+  received: 'Recebido',
+  written_off: 'Perdido',
+};
+
 export const paymentOperationStatusLabels: Labels = {
   pending: 'Pendente',
   in_flight: 'Em andamento',
@@ -201,6 +206,7 @@ export const ledgerReferenceLabels: Labels = {
   payment: 'Pagamento',
   refund: 'Reembolso',
   dispute: 'Disputa',
+  dispute_recovery_settlement: 'Baixa de valor a recuperar',
   credit_note: 'Nota de crédito',
   customer_credit: 'Crédito de cliente',
   settlement: 'Liquidação',
@@ -325,6 +331,8 @@ const statusColors: Record<string, string> = {
   under_review: 'yellow',
   won: 'green',
   lost: 'red',
+  received: 'green',
+  written_off: 'red',
   in_flight: 'blue',
   resolved: 'green',
   dismissed: 'gray',

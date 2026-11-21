@@ -1,5 +1,17 @@
 import { api } from '../../api/client';
-import type { Charge, ChargePage, ChargeStatus, CursorPage, DataList, Dispute, Payment, PaymentOperation, Refund } from '../../api/types';
+import type {
+  Charge,
+  ChargePage,
+  ChargeStatus,
+  CursorPage,
+  DataList,
+  Dispute,
+  Payment,
+  PaymentOperation,
+  RecoverySettlement,
+  RecoverySettlementInput,
+  Refund,
+} from '../../api/types';
 
 const enc = encodeURIComponent;
 
@@ -16,6 +28,11 @@ export const paymentsApi = {
   listPayments: (params: { invoice_id?: string; cursor?: string; limit?: number }, signal?: AbortSignal) =>
     api.get<CursorPage<Payment>>('/api/v1/payments', { query: { ...params }, signal }),
   listDisputes: (signal?: AbortSignal) => api.get<DataList<Dispute>>('/api/v1/disputes', { signal }),
+  getDispute: (id: string, signal?: AbortSignal) => api.get<Dispute>(`/api/v1/disputes/${enc(id)}`, { signal }),
+  listRecoverySettlements: (disputeId: string, signal?: AbortSignal) =>
+    api.get<DataList<RecoverySettlement>>(`/api/v1/disputes/${enc(disputeId)}/recovery-settlements`, { signal }),
+  settleRecovery: (disputeId: string, input: RecoverySettlementInput, idempotencyKey: string) =>
+    api.post<RecoverySettlement>(`/api/v1/disputes/${enc(disputeId)}/recovery-settlements`, input, { idempotencyKey }),
   listOperations: (status: PaymentOperationStatus | undefined, signal?: AbortSignal) =>
     api.get<DataList<PaymentOperation>>('/api/v1/payment-operations', { query: { status }, signal }),
   retryOperation: (id: string) => api.post<PaymentOperation>(`/api/v1/payment-operations/${enc(id)}/retry`),
