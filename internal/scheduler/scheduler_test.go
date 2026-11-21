@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/ricartefelipe/recorvia/internal/infra/logging"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
 )
 
@@ -490,5 +492,45 @@ func TestRunReturnsEnsureError(t *testing.T) {
 	}
 	if claims, _ := store.snapshot(); len(claims) != 0 {
 		t.Fatal("não deve reivindicar sem registrar as tarefas")
+	}
+}
+
+// RNF-07: os logs emitidos durante a execução de uma tarefa (pelo caso de
+// uso, com o contexto recebido) e o log de falha levam o nome da tarefa no
+// atributo job; o log do agendador fora da execução não leva.
+func TestRunOncePutsJobNameInLogContext(t *testing.T) {
+	var buf strings.Builder
+	log := logging.New(&buf, "debug", "worker")
+	store := newFakeStore("faturamento", "conciliacao")
+	jobs := []Job{
+		{Name: "faturamento", Interval: time.Minute, Run: func(ctx context.Context) error {
+			log.InfoContext(ctx, "ciclo executado")
+			return nil
+		}},
+		{Name: "conciliacao", Interval: time.Hour, Run: func(context.Context) error { return errors.New("provedor fora do ar") }},
+	}
+	s, err := New(store, "worker-1", time.Second, clock.NewManual(baseTime), log, &fakeObserver{}, jobs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if ran, err := s.RunOnce(context.Background()); !ran || err != nil {
+			t.Fatalf("ran=%v err=%v", ran, err)
+		}
+	}
+	lines := map[string]map[string]any{}
+	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatalf("log não é JSON: %v (%s)", err, l)
+		}
+		lines[m["msg"].(string)] = m
+	}
+	if got := lines["ciclo executado"]["job"]; got != "faturamento" {
+		t.Fatalf("log da execução com job=%v: %v", got, lines)
+	}
+	failed := lines["tarefa falhou"]
+	if failed["job"] != "conciliacao" || failed["component"] != "scheduler" || failed["error"] != "provedor fora do ar" {
+		t.Fatalf("log de falha: %v", failed)
 	}
 }

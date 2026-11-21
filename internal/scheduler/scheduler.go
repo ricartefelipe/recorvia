@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/ricartefelipe/recorvia/internal/infra/logging"
 )
 
 // Store persiste o estado das tarefas.
@@ -76,7 +78,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		for ctx.Err() == nil {
 			ran, err := s.RunOnce(ctx)
 			if err != nil {
-				s.log.Warn("reivindicação de tarefa falhou", slog.String("error", err.Error()))
+				s.log.WarnContext(ctx, "reivindicação de tarefa falhou", slog.String("error", err.Error()))
 				break
 			}
 			if !ran {
@@ -108,12 +110,15 @@ func (s *Scheduler) RunOnce(ctx context.Context) (bool, error) {
 		return true, s.store.CompleteJob(ctx, s.worker, name, s.clock.Now().Add(time.Minute), errors.New("tarefa desconhecida nesta versão"))
 	}
 	start := time.Now()
+	// O nome da tarefa entra no contexto: todos os logs emitidos durante a
+	// execução (inclusive pelos casos de uso) levam o atributo job.
+	ctx = logging.WithAttrs(ctx, slog.String("job", name))
 	jctx, cancel := context.WithTimeout(ctx, job.Timeout)
 	runErr := safeRun(jctx, job)
 	cancel()
 	s.obs.JobFinished(name, time.Since(start), runErr)
 	if runErr != nil {
-		s.log.Error("tarefa falhou", slog.String("job", name), slog.String("error", runErr.Error()))
+		s.log.ErrorContext(ctx, "tarefa falhou", slog.String("error", runErr.Error()))
 	}
 	next := s.clock.Now().Add(job.Interval)
 	return true, s.store.CompleteJob(context.WithoutCancel(ctx), s.worker, name, next, runErr)
