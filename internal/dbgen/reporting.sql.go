@@ -68,9 +68,10 @@ type DashboardContraRevenueRow struct {
 
 // Movimento líquido (débitos menos créditos) das contas de reembolsos e de
 // chargebacks no período. Os créditos em chargebacks são a retenção liberada
-// na disputa perdida (dispute.hold_released) e o estorno da disputa ganha:
-// somar só os débitos contaria duas vezes o valor reembolsado ao pagador e o
-// valor de disputa ganha.
+// na disputa perdida (dispute.hold_released), o estorno da disputa ganha e a
+// parte do chargeback que era pagamento excedente (dispute.credit_reversed):
+// somar só os débitos contaria duas vezes o valor reembolsado ao pagador, o
+// valor de disputa ganha e o crédito do cliente estornado.
 func (q *Queries) DashboardContraRevenue(ctx context.Context, arg DashboardContraRevenueParams) (DashboardContraRevenueRow, error) {
 	row := q.db.QueryRow(ctx, dashboardContraRevenue, arg.TenantID, arg.FromTs, arg.ToTs)
 	var i DashboardContraRevenueRow

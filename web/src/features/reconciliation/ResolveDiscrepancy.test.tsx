@@ -161,71 +161,117 @@ describe('responsável pela resolução', () => {
 });
 
 describe('execuções de conciliação', () => {
+  const RUN_ID = '0195f1a0-0000-7000-8000-0000000e0001';
   const run = (overrides: Partial<ReconciliationRun> = {}): ReconciliationRun => ({
-    id: '0195f1a0-0000-7000-8000-0000000e0001',
+    id: RUN_ID,
     provider: 'simulator',
+    trigger: 'manual',
     status: 'completed',
     window_start: '2026-10-18T12:00:00Z',
     window_end: '2026-11-17T12:00:00Z',
     checked_count: 4,
     discrepancy_count: 1,
     error: '',
+    attempts: 1,
     started_at: '2026-11-17T12:00:00Z',
     finished_at: '2026-11-17T12:00:05Z',
     ...overrides,
   });
+  const queued = (overrides: Partial<ReconciliationRun> = {}): ReconciliationRun =>
+    run({ status: 'running', checked_count: 0, discrepancy_count: 0, attempts: 0, finished_at: null, ...overrides });
 
-  async function execute(response: ReconciliationRun) {
-    const keys: (string | null)[] = [];
-    server.use(
-      http.get('/api/v1/reconciliation/runs', () => HttpResponse.json({ data: [] })),
-      http.post('/api/v1/reconciliation/runs', ({ request }) => {
-        keys.push(request.headers.get('Idempotency-Key'));
-        return HttpResponse.json(response);
-      }),
-    );
-    const { user } = renderPage(<RunsTab />);
+  /** Intervalo curto de acompanhamento, para os testes não esperarem 2 s. */
+  const POLL_MS = 20;
+
+  async function confirmRun(user: ReturnType<typeof renderPage>['user']) {
     await user.click(await screen.findByRole('button', { name: 'Executar conciliação agora' }));
     const dialog = (await screen.findByText(/Compara as cobranças/)).closest('[role="dialog"]') as HTMLElement;
     await user.click(within(dialog).getByRole('button', { name: 'Executar conciliação' }));
-    await waitFor(() => expect(keys).toHaveLength(1));
-    expect(keys[0]).toBeTruthy();
   }
 
-  it('execução concluída informa verificadas e divergências', async () => {
-    await execute(run());
-    expect(await screen.findByText('Conciliação concluída: 4 cobrança(s) verificada(s), 1 divergência(s).')).toBeInTheDocument();
-  });
+  /**
+   * API falsa da conciliação assíncrona: o POST registra a execução e responde
+   * 202 com ela em andamento; as consultas seguintes devolvem `states` em
+   * ordem (a última se repete), como o worker avançando a execução.
+   */
+  function asyncApi(states: ReconciliationRun[]) {
+    const calls = { post: [] as (string | null)[], get: 0, list: 0 };
+    let current: ReconciliationRun | null = null;
+    server.use(
+      http.get('/api/v1/reconciliation/runs', () => {
+        calls.list += 1;
+        return HttpResponse.json({ data: current ? [current] : [] });
+      }),
+      http.post('/api/v1/reconciliation/runs', ({ request }) => {
+        calls.post.push(request.headers.get('Idempotency-Key'));
+        current = queued();
+        return HttpResponse.json(current, { status: 202, headers: { Location: `/api/v1/reconciliation/runs/${RUN_ID}` } });
+      }),
+      http.get('/api/v1/reconciliation/runs/:id', () => {
+        current = states[Math.min(calls.get, states.length - 1)];
+        calls.get += 1;
+        return HttpResponse.json(current);
+      }),
+    );
+    return calls;
+  }
+
+  it('registra a execução, acompanha até terminar e informa verificadas e divergências', async () => {
+    const calls = asyncApi([queued(), queued({ attempts: 1 }), run()]);
+    const { user } = renderPage(<RunsTab pollIntervalMs={POLL_MS} />);
+    await confirmRun(user);
+    // O pedido é aceito de imediato: a tela mostra a execução em andamento.
+    expect(await screen.findByRole('status')).toHaveTextContent('Conciliação em andamento');
+    const table = await screen.findByRole('table', { name: 'Execuções de conciliação' });
+    expect(within(table).getAllByRole('row')[1]).toHaveTextContent('Em execução');
+    expect(await screen.findByText('Conciliação concluída: 4 cobrança(s) verificada(s), 1 divergência(s).', {}, { timeout: 5_000 })).toBeInTheDocument();
+    // Um único pedido; o acompanhamento é por consulta, sem repetir o POST.
+    expect(calls.post).toHaveLength(1);
+    expect(calls.post[0]).toBeTruthy();
+    expect(calls.get).toBeGreaterThanOrEqual(3);
+    await waitFor(() => expect(within(screen.getByRole('table', { name: 'Execuções de conciliação' })).getAllByRole('row')[1]).toHaveTextContent('Concluída'));
+    await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
+    // Depois de encerrada, o acompanhamento para.
+    const polls = calls.get;
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS * 5));
+    expect(calls.get).toBe(polls);
+  }, 30_000);
+
+  it('a chave de idempotência vale só para o pedido: a execução seguinte usa outra', async () => {
+    const calls = asyncApi([run()]);
+    const { user } = renderPage(<RunsTab pollIntervalMs={POLL_MS} />);
+    await confirmRun(user);
+    await screen.findByText('Conciliação concluída: 4 cobrança(s) verificada(s), 1 divergência(s).', {}, { timeout: 5_000 });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Executar conciliação agora' })).toBeEnabled());
+    await confirmRun(user);
+    await waitFor(() => expect(calls.post).toHaveLength(2));
+    expect(calls.post[1]).toBeTruthy();
+    expect(calls.post[1]).not.toBe(calls.post[0]);
+    // Os dois envios com confirmação são lentos sob carga.
+  }, 30_000);
 
   it('recusa por outra execução em andamento não prende a chave do próximo clique', async () => {
-    // Como o middleware de idempotência: o resultado fica registrado na chave.
-    const stored = new Map<string, { status: number; body: Record<string, unknown> }>();
+    // Como a API: a recusa 409 com Retry-After não fica registrada na chave.
     const keys: string[] = [];
     let running = true;
     server.use(
       http.get('/api/v1/reconciliation/runs', () => HttpResponse.json({ data: [] })),
+      http.get('/api/v1/reconciliation/runs/:id', () => HttpResponse.json(run())),
       http.post('/api/v1/reconciliation/runs', ({ request }) => {
-        const key = request.headers.get('Idempotency-Key') ?? '';
-        keys.push(key);
-        const previous = stored.get(key);
-        if (previous) return HttpResponse.json(previous.body, { status: previous.status });
-        const result = running
-          ? { status: 409, body: { status: 409, code: 'reconciliation_running', title: 'Conflito', detail: 'Já há uma conciliação em andamento.' } }
-          : { status: 200, body: { ...run() } };
-        stored.set(key, result);
-        return HttpResponse.json(result.body, { status: result.status });
+        keys.push(request.headers.get('Idempotency-Key') ?? '');
+        return running
+          ? HttpResponse.json(
+              { status: 409, code: 'reconciliation_running', title: 'Conflito', detail: 'Já há uma conciliação em andamento.' },
+              { status: 409, headers: { 'Retry-After': '60' } },
+            )
+          : HttpResponse.json(queued(), { status: 202 });
       }),
     );
-    const { user } = renderPage(<RunsTab />);
-    const runOnce = async () => {
-      await user.click(await screen.findByRole('button', { name: 'Executar conciliação agora' }));
-      const dialog = (await screen.findByText(/Compara as cobranças/)).closest('[role="dialog"]') as HTMLElement;
-      await user.click(within(dialog).getByRole('button', { name: 'Executar conciliação' }));
-    };
-    await runOnce();
+    const { user } = renderPage(<RunsTab pollIntervalMs={POLL_MS} />);
+    await confirmRun(user);
     await waitFor(() => expect(screen.getByTestId('live-assertive')).toHaveTextContent('Já há uma conciliação em andamento.'));
     running = false;
-    await runOnce();
+    await confirmRun(user);
     await waitFor(() => expect(keys).toHaveLength(2));
     expect(keys[1]).not.toBe(keys[0]);
     expect(
@@ -235,9 +281,74 @@ describe('execuções de conciliação', () => {
   }, 30_000);
 
   it('execução que falhou no provedor informa a causa como erro', async () => {
-    await execute(run({ status: 'failed', checked_count: 0, discrepancy_count: 0, error: 'listagem do provedor: indisponível' }));
-    await waitFor(() =>
-      expect(screen.getByTestId('live-assertive')).toHaveTextContent('A conciliação não foi concluída: listagem do provedor: indisponível.'),
+    asyncApi([queued({ attempts: 1 }), run({ status: 'failed', checked_count: 0, discrepancy_count: 0, error: 'listagem do provedor: indisponível' })]);
+    const { user } = renderPage(<RunsTab pollIntervalMs={POLL_MS} />);
+    await confirmRun(user);
+    await waitFor(
+      () => expect(screen.getByTestId('live-assertive')).toHaveTextContent('A conciliação não foi concluída: listagem do provedor: indisponível.'),
+      { timeout: 5_000 },
     );
-  });
+  }, 30_000);
+
+  it('execução parcial informa o aviso com a causa', async () => {
+    const warning = 'Execução parcial (prazo da coleta esgotado): nem todas as cobranças e operações do escopo da execução foram verificadas.';
+    asyncApi([run({ error: warning })]);
+    const { user } = renderPage(<RunsTab pollIntervalMs={POLL_MS} />);
+    await confirmRun(user);
+    await waitFor(() => expect(screen.getByTestId('live-polite')).toHaveTextContent(`Conciliação concluída com aviso. 4 cobrança(s) verificada(s), 1 divergência(s). ${warning}`), {
+      timeout: 5_000,
+    });
+  }, 30_000);
+
+  it('repetição de pedido já encerrado (200) informa o resultado sem acompanhar', async () => {
+    let gets = 0;
+    server.use(
+      http.get('/api/v1/reconciliation/runs', () => HttpResponse.json({ data: [] })),
+      http.get('/api/v1/reconciliation/runs/:id', () => {
+        gets += 1;
+        return HttpResponse.json(run());
+      }),
+      http.post('/api/v1/reconciliation/runs', () => HttpResponse.json(run())),
+    );
+    const { user } = renderPage(<RunsTab pollIntervalMs={POLL_MS} />);
+    await confirmRun(user);
+    expect(await screen.findByText('Conciliação concluída: 4 cobrança(s) verificada(s), 1 divergência(s).')).toBeInTheDocument();
+    expect(gets).toBe(0);
+  }, 30_000);
+
+  it('acompanha a execução em andamento da lista (agendada ou pedida por outra pessoa) e mostra a origem', async () => {
+    let lists = 0;
+    server.use(
+      http.get('/api/v1/reconciliation/runs', () => {
+        lists += 1;
+        const current = lists < 3 ? queued({ trigger: 'scheduled', attempts: 2 }) : run({ trigger: 'scheduled', attempts: 2 });
+        return HttpResponse.json({ data: [current] });
+      }),
+    );
+    renderPage(<RunsTab pollIntervalMs={POLL_MS} />);
+    const table = await screen.findByRole('table', { name: 'Execuções de conciliação' });
+    const row = () => within(table).getAllByRole('row')[1];
+    expect(row()).toHaveTextContent('Agendada');
+    expect(row()).toHaveTextContent('Retomada depois de interrupção (tentativa 2)');
+    expect(screen.getByRole('status')).toHaveTextContent('Conciliação em andamento');
+    await waitFor(() => expect(row()).toHaveTextContent('Concluída'), { timeout: 5_000 });
+    await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
+    const settled = lists;
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS * 5));
+    expect(lists).toBe(settled);
+  }, 30_000);
+
+  it('consulta recusada encerra o acompanhamento com aviso', async () => {
+    server.use(
+      http.get('/api/v1/reconciliation/runs', () => HttpResponse.json({ data: [] })),
+      http.post('/api/v1/reconciliation/runs', () => HttpResponse.json(queued(), { status: 202 })),
+      http.get('/api/v1/reconciliation/runs/:id', () =>
+        HttpResponse.json({ status: 404, code: 'reconciliation_run_not_found', title: 'Não encontrado', detail: 'Execução de conciliação não encontrada.' }, { status: 404 }),
+      ),
+    );
+    const { user } = renderPage(<RunsTab pollIntervalMs={POLL_MS} />);
+    await confirmRun(user);
+    await waitFor(() => expect(screen.getByTestId('live-assertive')).toHaveTextContent('Não foi possível acompanhar a execução'), { timeout: 5_000 });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Executar conciliação agora' })).toBeEnabled());
+  }, 30_000);
 });

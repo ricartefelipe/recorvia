@@ -100,6 +100,8 @@ tabela abaixo, com os valores dos rótulos de conjunto fechado.
 | `recorvia_webhook_deliveries_total` | contador | `outcome` | worker, tarefa `webhooks.deliver`: `succeeded` (resposta 2xx), `retrying` (falha, nova tentativa agendada), `exhausted` (tentativas esgotadas ou destino bloqueado pela proteção SSRF), `lost_lease` e `deferred` (devolvida à fila sem consumir tentativa: orçamento da execução ou endpoint sem resposta) |
 | `recorvia_collection_actions_total` | contador | `action` | worker, tarefa `collections.run`: `reminder_scheduled`, `invoice_overdue`, `subscription_suspended` e `subscription_reactivated` |
 | `recorvia_reconciliation_open_discrepancies` | gauge | `kind` | declarada nesta etapa; alimentada pela tarefa `metrics.collect` da etapa 5 (recebíveis e conciliação) |
+| `recorvia_reconciliation_runs_in_progress` | gauge | `state` | worker (`metrics.collect`) e API (lida do banco a cada coleta do Prometheus, com prazo de 2 s; se a leitura falhar, mantém o último valor): execuções de conciliação em andamento, de todos os tenants: `queued` (registrada, aguardando um worker), `executing` (lease vigente) e `stalled` (lease expirado, aguardando a retomada) |
+| `recorvia_reconciliation_oldest_waiting_seconds` | gauge | — | worker (`metrics.collect`) e API (a cada coleta, como a métrica anterior): espera mais longa entre as execuções sem worker, desde o registro (`queued`) ou desde o fim do lease (`stalled`); zero quando não há nenhuma. A API a exporta porque registra os pedidos e continua em execução quando o worker para |
 | `recorvia_db_pool_connections` | gauge | `state` | API e worker, pool pgx lido a cada coleta (`acquired`, `idle`, `constructing`) |
 | `recorvia_db_pool_max_connections` | gauge | — | API e worker |
 | `recorvia_db_pool_acquires_total`, `recorvia_db_pool_empty_acquires_total`, `recorvia_db_pool_canceled_acquires_total`, `recorvia_db_pool_empty_acquire_wait_seconds_total` | contador | — | API e worker |
@@ -186,6 +188,7 @@ anotação `runbook` de cada regra aponta para uma seção existente (conferido 
 | `RecorviaWebhooksRejected` | mais de 5 webhooks recusados (`unauthenticated`, `unknown_endpoint`, `too_large` ou `error`) em 15 min | warning |
 | `RecorviaReconciliationDiscrepanciesOpen` | divergência aberta por 4 h | warning |
 | `RecorviaReconciliationDiscrepanciesHigh` | mais de 25 divergências abertas por 30 min | critical |
+| `RecorviaReconciliationRunsWaiting` | execução de conciliação sem worker (aguardando ou interrompida) há mais de 5 min, por 5 min; a métrica sai do worker e da API, e o alerta dispara mesmo sem nenhum worker em execução | warning |
 | `RecorviaRefundsUnknown` | reembolso com resultado desconhecido por 30 min (métrica da etapa 5) | warning |
 | `RecorviaRefundsFailed` | reembolso recusado pelo provedor na última hora (métrica da etapa 5) | warning |
 | `RecorviaBillingCycleStale` | `billing.run_cycle` sem sucesso há mais de 15 min, ou sem nenhum sucesso desde a partida do worker (há mais de 15 min) | critical |

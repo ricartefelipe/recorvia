@@ -29,6 +29,7 @@ type receivables struct {
 	creditBalance map[uuid.UUID]money.Money
 	dueTenants    []uuid.UUID
 	dueErr        error
+	claimableErr  error
 	// refundClaimLocks registra as cobranças com reivindicação de reembolso
 	// serializada.
 	refundClaimLocks []uuid.UUID
@@ -164,8 +165,8 @@ func (s *payStore) EnsureOperation(_ context.Context, op Operation) (bool, error
 	return true, nil
 }
 
-func (s *payStore) RefundCreditBase(_ context.Context, chargeID uuid.UUID) (money.Money, money.Money, error) {
-	if err := s.fail("RefundCreditBase"); err != nil {
+func (s *payStore) OverpaymentCreditBase(_ context.Context, chargeID uuid.UUID) (money.Money, money.Money, error) {
+	if err := s.fail("OverpaymentCreditBase"); err != nil {
 		return money.Money{}, money.Money{}, err
 	}
 	used := brl(0)
@@ -174,9 +175,32 @@ func (s *payStore) RefundCreditBase(_ context.Context, chargeID uuid.UUID) (mone
 			used, _ = used.Add(r.CreditAmount)
 		}
 	}
+	for _, d := range s.disputes {
+		if d.ChargeID == chargeID && d.Status == DisputeLost {
+			used, _ = used.Add(amountOrZero(d.CreditAmount, brl(0)))
+			used, _ = used.Add(amountOrZero(d.RecoveryAmount, brl(0)))
+		}
+	}
 	over, ok := s.overpaid[chargeID]
 	if !ok {
 		over = brl(0)
+	}
+	// Como na consulta real: o excedente é o lançamento payment.overpayment
+	// dos pagamentos da cobrança (s.overpaid acrescenta um valor fixo).
+	for _, p := range s.payments {
+		if p.ChargeID == nil || *p.ChargeID != chargeID {
+			continue
+		}
+		for _, t := range s.posted {
+			if t.IdempotencyKey != "payment.overpayment:"+p.ID.String() {
+				continue
+			}
+			for _, e := range t.Entries {
+				if e.Direction == ledger.Credit {
+					over, _ = over.Add(e.Amount)
+				}
+			}
+		}
 	}
 	return over, used, nil
 }
@@ -276,19 +300,30 @@ func (s *payStore) ReconciliationRunByRequestKey(_ context.Context, key string) 
 	return ReconciliationRun{}, apperr.NotFound("reconciliation_run_not_found", "Execução não encontrada.")
 }
 
-func (s *payStore) FailStaleReconciliationRuns(_ context.Context, accountID uuid.UUID, now time.Time) (int, error) {
-	if err := s.fail("FailStaleReconciliationRuns"); err != nil {
-		return 0, err
+func (s *payStore) UpdateReconciliationRunLease(_ context.Context, r ReconciliationRun) error {
+	if err := s.fail("UpdateReconciliationRunLease"); err != nil {
+		return err
 	}
-	n := 0
-	for id, r := range s.runs {
-		if r.ProviderAccountID == accountID && r.Status == RunRunning && r.LeaseUntil != nil && r.LeaseUntil.Before(now) {
-			r.Status, r.FinishedAt, r.LeaseUntil, r.Error = RunFailed, &now, nil, "interrompida"
-			s.runs[id] = r
-			n++
+	cur, ok := s.runs[r.ID]
+	if !ok || cur.Status != RunRunning {
+		return apperr.Conflict("reconciliation_run_interrupted", "A execução foi encerrada por outra instância.")
+	}
+	cur.LeaseUntil, cur.Attempts = r.LeaseUntil, r.Attempts
+	s.runs[r.ID] = cur
+	return nil
+}
+
+func (s *payStore) ClaimableReconciliationRuns(_ context.Context, now time.Time, limit int) ([]RunRef, error) {
+	if s.claimableErr != nil {
+		return nil, s.claimableErr
+	}
+	var out []RunRef
+	for _, id := range s.runOrder {
+		if r := s.runs[id]; r.Claimable(now) && len(out) < limit {
+			out = append(out, RunRef{TenantID: r.TenantID, RunID: r.ID})
 		}
 	}
-	return n, nil
+	return out, nil
 }
 
 func (s *payStore) InsertReconciliationRun(_ context.Context, r ReconciliationRun) error {

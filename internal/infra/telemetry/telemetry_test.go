@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -381,6 +382,142 @@ func TestDependencyChecksHaveIndependentDeadlines(t *testing.T) {
 	}
 }
 
+// A API lê as execuções de conciliação em andamento a cada coleta: a
+// execução registrada e não assumida aparece nas métricas do processo que
+// registra os pedidos, sem depender do worker (que as publica pela tarefa
+// metrics.collect). A leitura que falha mantém o último valor lido.
+func TestReconciliationRunsAreReadOnEachGather(t *testing.T) {
+	m := NewMetrics("api")
+	var (
+		mu        sync.Mutex
+		stats     ReconciliationRunStats
+		failure   error
+		deadlines []time.Duration
+	)
+	m.ObserveReconciliationRuns(2*time.Second, func(ctx context.Context) (ReconciliationRunStats, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if dl, ok := ctx.Deadline(); ok {
+			deadlines = append(deadlines, time.Until(dl))
+		}
+		return stats, failure
+	})
+	type series struct{ queued, executing, stalled, oldest float64 }
+	steps := []struct {
+		name    string
+		stats   ReconciliationRunStats
+		failure error
+		want    series
+	}{
+		{"nenhuma execução", ReconciliationRunStats{}, nil, series{}},
+		{"execução aguardando sem worker", ReconciliationRunStats{Queued: 1, OldestWaitingSeconds: 420}, nil, series{queued: 1, oldest: 420}},
+		{"leitura falhou: último valor", ReconciliationRunStats{}, errors.New("conexão recusada"), series{queued: 1, oldest: 420}},
+		{"execuções interrompidas e em curso", ReconciliationRunStats{Queued: 2, Executing: 1, Stalled: 3, OldestWaitingSeconds: 900.5}, nil,
+			series{queued: 2, executing: 1, stalled: 3, oldest: 900.5}},
+		{"todas assumidas e concluídas", ReconciliationRunStats{}, nil, series{}},
+	}
+	for _, st := range steps {
+		mu.Lock()
+		stats, failure = st.stats, st.failure
+		mu.Unlock()
+		got := gather(t, m)
+		for state, want := range map[string]float64{"queued": st.want.queued, "executing": st.want.executing, "stalled": st.want.stalled} {
+			if v := value(t, got["recorvia_reconciliation_runs_in_progress"], map[string]string{"state": state, "service": "api"}); v != want {
+				t.Errorf("%s: recorvia_reconciliation_runs_in_progress{state=%q} = %v, esperado %v", st.name, state, v, want)
+			}
+		}
+		if v := value(t, got["recorvia_reconciliation_oldest_waiting_seconds"], map[string]string{"service": "api"}); v != st.want.oldest {
+			t.Errorf("%s: recorvia_reconciliation_oldest_waiting_seconds = %v, esperado %v", st.name, v, st.want.oldest)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deadlines) != len(steps) {
+		t.Fatalf("uma leitura a cada coleta: %d", len(deadlines))
+	}
+	for _, d := range deadlines {
+		if d <= 0 || d > 2*time.Second {
+			t.Fatalf("a leitura tem prazo de 2 s: %v", d)
+		}
+	}
+}
+
+// A leitura lenta (pool do banco esgotado) ou que ignora o cancelamento não
+// trava a coleta das métricas: vencido o prazo, as séries saem com o último
+// valor lido.
+func TestReconciliationRunsReadDoesNotBlockGather(t *testing.T) {
+	const timeout = 500 * time.Millisecond
+	cases := []struct {
+		name string
+		slow func(ctx context.Context, release <-chan struct{}) (ReconciliationRunStats, error)
+	}{
+		{"leitura lenta até o prazo", func(ctx context.Context, _ <-chan struct{}) (ReconciliationRunStats, error) {
+			<-ctx.Done()
+			return ReconciliationRunStats{}, ctx.Err()
+		}},
+		{"leitura que ignora o cancelamento", func(_ context.Context, release <-chan struct{}) (ReconciliationRunStats, error) {
+			<-release
+			return ReconciliationRunStats{Queued: 9, OldestWaitingSeconds: 9}, nil
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			var calls atomic.Int32
+			m := NewMetrics("api")
+			m.ObserveReconciliationRuns(timeout, func(ctx context.Context) (ReconciliationRunStats, error) {
+				if calls.Add(1) == 1 {
+					return ReconciliationRunStats{Queued: 1, OldestWaitingSeconds: 600}, nil
+				}
+				return c.slow(ctx, release)
+			})
+			gather(t, m) // primeira leitura, concluída
+			var families []*dto.MetricFamily
+			done := make(chan error, 1)
+			go func() {
+				var err error
+				families, err = m.Registry.Gather()
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(10 * timeout):
+				t.Fatal("a coleta não respeitou o prazo da leitura")
+			}
+			got := map[string]*dto.MetricFamily{}
+			for _, f := range families {
+				got[f.GetName()] = f
+			}
+			if v := value(t, got["recorvia_reconciliation_oldest_waiting_seconds"], map[string]string{"service": "api"}); v != 600 {
+				t.Errorf("espera mais longa = %v, esperado o último valor lido (600)", v)
+			}
+			if v := value(t, got["recorvia_reconciliation_runs_in_progress"], map[string]string{"state": "queued", "service": "api"}); v != 1 {
+				t.Errorf("execuções aguardando = %v, esperado o último valor lido (1)", v)
+			}
+		})
+	}
+}
+
+// SetReconciliationRuns publica os três estados e a espera mais longa (modo
+// do worker, pela tarefa metrics.collect).
+func TestSetReconciliationRunsPublishesEveryState(t *testing.T) {
+	m := NewMetrics("worker")
+	m.SetReconciliationRuns(ReconciliationRunStats{Queued: 4, Executing: 2, Stalled: 1, OldestWaitingSeconds: 37.5})
+	got := gather(t, m)
+	for state, want := range map[string]float64{"queued": 4, "executing": 2, "stalled": 1} {
+		if v := value(t, got["recorvia_reconciliation_runs_in_progress"], map[string]string{"state": state, "service": "worker"}); v != want {
+			t.Errorf("recorvia_reconciliation_runs_in_progress{state=%q} = %v, esperado %v", state, v, want)
+		}
+	}
+	if v := value(t, got["recorvia_reconciliation_oldest_waiting_seconds"], map[string]string{"service": "worker"}); v != 37.5 {
+		t.Errorf("recorvia_reconciliation_oldest_waiting_seconds = %v", v)
+	}
+}
+
 // Arquivos de observabilidade versionados no repositório.
 const observabilityDir = "../../../deploy/observability"
 
@@ -444,7 +581,8 @@ func TestAlertRulesAndDashboardsUseDeclaredMetrics(t *testing.T) {
 	// Métricas de alerta exigidas pela operação precisam estar cobertas.
 	for _, required := range []string{"recorvia_outbox_pending", "recorvia_outbox_oldest_pending_seconds", "recorvia_consumer_messages_total",
 		"recorvia_charge_failures_total", "recorvia_payment_operations", "recorvia_payment_operations_exhausted",
-		"recorvia_reconciliation_open_discrepancies", "recorvia_db_pool_connections", "recorvia_db_server_connections",
+		"recorvia_reconciliation_open_discrepancies", "recorvia_reconciliation_oldest_waiting_seconds", "recorvia_db_pool_connections",
+		"recorvia_db_server_connections",
 		"recorvia_consumer_in_flight", "recorvia_job_interval_seconds", "recorvia_job_last_success_timestamp_seconds",
 		"recorvia_notifications_dispatched_total", "recorvia_webhook_deliveries_total", "recorvia_collection_actions_total",
 		"recorvia_provider_webhooks_total", "recorvia_dependency_up"} {
@@ -701,12 +839,16 @@ func TestTotalsCounterIsMonotonic(t *testing.T) {
 	m.Refunds.Set("failed", 2)
 	m.Refunds.Set("succeeded", 3) // leitura menor é ignorada
 	m.Discrepancies.WithLabelValues("fee_mismatch").Set(4)
+	m.ReconciliationRuns.WithLabelValues("queued").Set(2)
+	m.ReconciliationOldestWaiting.Set(90)
 	out := exposition(t, m)
 	for _, want := range []string{
 		"# TYPE recorvia_refunds_total counter",
 		`recorvia_refunds_total{outcome="failed",service="worker"} 2`,
 		`recorvia_refunds_total{outcome="succeeded",service="worker"} 5`,
 		`recorvia_reconciliation_open_discrepancies{kind="fee_mismatch",service="worker"} 4`,
+		`recorvia_reconciliation_runs_in_progress{service="worker",state="queued"} 2`,
+		`recorvia_reconciliation_oldest_waiting_seconds{service="worker"} 90`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("exposição sem %q:\n%s", want, out)
