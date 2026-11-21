@@ -18,6 +18,7 @@ o identificador de tenant recebido nunca é aceito isoladamente.
 | `collections.read` | ✔ | ✔ | ✔ | ✔ | ✔ |
 | `collections.write` | ✔ | ✔ | ✔ | — | — |
 | `credits.write` | ✔ | ✔ | ✔ | — | — |
+| `customers.anonymize` | ✔ | ✔ | — | — | — |
 | `customers.portal_links` | ✔ | ✔ | ✔ | ✔ | — |
 | `customers.read` | ✔ | ✔ | ✔ | ✔ | ✔ |
 | `customers.write` | ✔ | ✔ | — | ✔ | — |
@@ -64,7 +65,7 @@ Regras adicionais aplicadas nos casos de uso:
   financeiros; acesso a dados de um tenant exige convite do próprio tenant e fica auditado.
 - Credenciais de API recebem como escopos somente permissões de quem as emite; os escopos
   efetivos acompanham o papel atual dessa pessoa.
-  Não são delegáveis: `members.manage`, `platform_billing.manage`, `api_credentials.manage`.
+  Não são delegáveis: `members.manage`, `platform_billing.manage`, `api_credentials.manage`, `customers.anonymize`.
 - Rotas de conta e de sessão e as rotas que exigem permissão não delegável aceitam apenas a
   sessão de um usuário (credenciais recebem 403 `user_session_required`); nas demais, as ações
   por credencial têm autoria nula nas tabelas e o ator `api_credential` na auditoria (ADR-059).
@@ -90,6 +91,7 @@ aceitam credenciais pelos escopos.
 | `DELETE /api/v1/invitations/{id}` | organização ativa | `members.manage` |
 | `PUT /api/v1/platform/plan` | organização ativa | `platform_billing.manage` |
 | `POST /api/v1/platform/addon-orders` | organização ativa | `platform_billing.manage` |
+| `POST /api/v1/customers/{id}/anonymize` | organização ativa | `customers.anonymize` |
 | `GET /api/v1/api-credentials` | organização ativa | `api_credentials.manage` |
 | `POST /api/v1/api-credentials` | organização ativa | `api_credentials.manage` |
 | `POST /api/v1/api-credentials/{id}/rotate` | organização ativa | `api_credentials.manage` |

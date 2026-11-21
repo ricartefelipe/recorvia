@@ -97,6 +97,67 @@ type Config struct {
 	RateLimitPerMinute int
 	// APICredentialRateLimitPerMinute limita requisições por credencial de API.
 	APICredentialRateLimitPerMinute int
+
+	// Retention são os prazos do expurgo automático executado pelo worker.
+	Retention Retention
+}
+
+// Retention reúne os prazos de retenção dos dados técnicos, em dias contados
+// do instante em que o registro deixou de ser necessário, e o tamanho do
+// lote do expurgo. Registros financeiros e de auditoria não têm prazo: não
+// são expurgados.
+type Retention struct {
+	// InboxDays: registros de deduplicação dos consumidores.
+	InboxDays int
+	// DeadLettersDays: mensagens não processadas já tratadas.
+	DeadLettersDays int
+	// WebhooksDays: entregas concluídas, eventos e segredos vencidos dos
+	// webhooks enviados.
+	WebhooksDays int
+	// ProviderWebhookPayloadsDays: corpo dos webhooks recebidos dos provedores.
+	ProviderWebhookPayloadsDays int
+	// NotificationContentDays: conteúdo cifrado das notificações encerradas.
+	NotificationContentDays int
+	// NotificationsDays: notificações encerradas e o histórico de envio.
+	NotificationsDays int
+	// PortalLinksDays: links do portal com a validade encerrada.
+	PortalLinksDays int
+	// UsageEventsDays: eventos de consumo de períodos faturados.
+	UsageEventsDays int
+	// InvitationsDays: convites não aceitos com a validade encerrada.
+	InvitationsDays int
+	// BatchSize: registros removidos por transação.
+	BatchSize int
+}
+
+// retentionLimit descreve os limites aceitos de uma variável de retenção.
+type retentionLimit struct {
+	env      string
+	value    int
+	min, max int
+}
+
+// Limites das variáveis de retenção. Os mínimos são os de
+// internal/retention (Minimum), conferidos por teste em internal/app.
+const (
+	maxRetentionDays      = 3650
+	minRetentionBatchSize = 10
+	maxRetentionBatchSize = 5000
+)
+
+func (r Retention) limits() []retentionLimit {
+	return []retentionLimit{
+		{"RECORVIA_RETENTION_INBOX_DAYS", r.InboxDays, 14, maxRetentionDays},
+		{"RECORVIA_RETENTION_DEAD_LETTERS_DAYS", r.DeadLettersDays, 30, maxRetentionDays},
+		{"RECORVIA_RETENTION_WEBHOOKS_DAYS", r.WebhooksDays, 7, maxRetentionDays},
+		{"RECORVIA_RETENTION_PROVIDER_WEBHOOK_PAYLOADS_DAYS", r.ProviderWebhookPayloadsDays, 7, maxRetentionDays},
+		{"RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS", r.NotificationContentDays, 7, maxRetentionDays},
+		{"RECORVIA_RETENTION_NOTIFICATIONS_DAYS", r.NotificationsDays, 30, maxRetentionDays},
+		{"RECORVIA_RETENTION_PORTAL_LINKS_DAYS", r.PortalLinksDays, 1, maxRetentionDays},
+		{"RECORVIA_RETENTION_USAGE_EVENTS_DAYS", r.UsageEventsDays, 30, maxRetentionDays},
+		{"RECORVIA_RETENTION_INVITATIONS_DAYS", r.InvitationsDays, 7, maxRetentionDays},
+		{"RECORVIA_RETENTION_BATCH_SIZE", r.BatchSize, minRetentionBatchSize, maxRetentionBatchSize},
+	}
 }
 
 // KeyringCheckMode é o modo da conferência do keyring na inicialização
@@ -221,6 +282,19 @@ func Load(get Getenv) (*Config, error) {
 		PortalSessionIdleTTL: l.dur("RECORVIA_PORTAL_SESSION_IDLE_TTL", 30*time.Minute),
 
 		APICredentialRateLimitPerMinute: l.intv("RECORVIA_API_CREDENTIAL_RATE_LIMIT_PER_MINUTE", 600),
+
+		Retention: Retention{
+			InboxDays:                   l.intv("RECORVIA_RETENTION_INBOX_DAYS", 90),
+			DeadLettersDays:             l.intv("RECORVIA_RETENTION_DEAD_LETTERS_DAYS", 180),
+			WebhooksDays:                l.intv("RECORVIA_RETENTION_WEBHOOKS_DAYS", 90),
+			ProviderWebhookPayloadsDays: l.intv("RECORVIA_RETENTION_PROVIDER_WEBHOOK_PAYLOADS_DAYS", 90),
+			NotificationContentDays:     l.intv("RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS", 90),
+			NotificationsDays:           l.intv("RECORVIA_RETENTION_NOTIFICATIONS_DAYS", 365),
+			PortalLinksDays:             l.intv("RECORVIA_RETENTION_PORTAL_LINKS_DAYS", 90),
+			UsageEventsDays:             l.intv("RECORVIA_RETENTION_USAGE_EVENTS_DAYS", 400),
+			InvitationsDays:             l.intv("RECORVIA_RETENTION_INVITATIONS_DAYS", 90),
+			BatchSize:                   l.intv("RECORVIA_RETENTION_BATCH_SIZE", 500),
+		},
 	}
 	// Sem configuração explícita, o cookie do portal segue o prefixo do
 	// cookie de sessão (__Host- quando seguro).
@@ -354,7 +428,7 @@ func (c *Config) validateCommon() []error {
 			errs = append(errs, errors.New("em produção destinos privados de webhook não são permitidos"))
 		}
 	}
-	return errs
+	return append(errs, c.validateRetention()...)
 }
 
 // ValidateStore valida o que os comandos que usam somente o banco e o
@@ -429,6 +503,29 @@ func (c *Config) ValidateWorker() error {
 		errs = append(errs, errors.New("em produção o SMTP deve usar TLS"))
 	}
 	return errors.Join(errs...)
+}
+
+// validateRetention confere os prazos do expurgo automático: nenhum
+// executável sobe com um prazo abaixo do mínimo (que removeria dados ainda
+// úteis à operação) nem acima do máximo. O expurgo é executado pelo worker; a
+// API valida os mesmos valores porque monta os mesmos serviços.
+func (c *Config) validateRetention() []error {
+	var errs []error
+	r := c.Retention
+	for _, l := range r.limits() {
+		if l.value < l.min || l.value > l.max {
+			errs = append(errs, fmt.Errorf("%s deve ficar entre %d e %d", l.env, l.min, l.max))
+		}
+	}
+	if r.NotificationsDays < r.NotificationContentDays {
+		errs = append(errs, errors.New("RECORVIA_RETENTION_NOTIFICATIONS_DAYS não pode ser menor que RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS"))
+	}
+	// A sessão do portal é conferida contra o link que a originou enquanto
+	// durar: o link não pode ser expurgado antes do fim da sessão.
+	if time.Duration(r.PortalLinksDays)*24*time.Hour < c.PortalSessionTTL {
+		errs = append(errs, errors.New("RECORVIA_RETENTION_PORTAL_LINKS_DAYS não pode ser menor que RECORVIA_PORTAL_SESSION_TTL"))
+	}
+	return errs
 }
 
 // ValidateMigrations valida o executável de migrations.

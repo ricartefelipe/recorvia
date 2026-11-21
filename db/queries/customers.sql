@@ -68,6 +68,31 @@ SELECT (EXISTS (SELECT 1 FROM subscriptions s WHERE s.tenant_id = @tenant_id AND
      OR EXISTS (SELECT 1 FROM invoices i WHERE i.tenant_id = @tenant_id AND i.customer_id = @customer_id
                  AND i.status IN ('open', 'partially_paid')))::boolean;
 
+-- name: CustomerHasPendingBilling :one
+-- Faturamento do cliente que ainda vai gerar fatura, crédito ou item, mesmo
+-- sem assinatura ativa nem fatura em aberto: assinatura com fechamento
+-- agendado (inclusive o consumo final de uma assinatura cancelada), item
+-- pendente ainda sem fatura, consumo atrasado ou sem agregado ainda por
+-- corrigir e período fechado dentro da tolerância de atraso da métrica (até
+-- lá a ingestão aceita consumo atrasado, que corrige o faturamento). O fim
+-- do período é limitado pelo encerramento da assinatura, como na ingestão.
+SELECT (EXISTS (SELECT 1 FROM subscriptions s WHERE s.tenant_id = @tenant_id AND s.customer_id = @customer_id
+                 AND s.next_billing_at IS NOT NULL)
+     OR EXISTS (SELECT 1 FROM subscriptions s
+                  JOIN pending_invoice_items p ON p.tenant_id = s.tenant_id AND p.subscription_id = s.id
+                 WHERE s.tenant_id = @tenant_id AND s.customer_id = @customer_id AND p.invoice_id IS NULL)
+     OR EXISTS (SELECT 1 FROM subscriptions s
+                  JOIN usage_events e ON e.tenant_id = s.tenant_id AND e.subscription_id = s.id
+                 WHERE s.tenant_id = @tenant_id AND s.customer_id = @customer_id AND e.status = 'late' AND e.corrected_at IS NULL)
+     OR EXISTS (SELECT 1 FROM subscriptions s
+                  JOIN usage_aggregates a ON a.tenant_id = s.tenant_id AND a.subscription_id = s.id
+                  JOIN billable_metrics bm ON bm.tenant_id = a.tenant_id AND bm.id = a.metric_id
+                 WHERE s.tenant_id = @tenant_id AND s.customer_id = @customer_id
+                   AND (LEAST(a.period_end, COALESCE(s.ended_at, a.period_end)) + make_interval(hours => bm.late_grace_hours) >= @now::timestamptz
+                        OR EXISTS (SELECT 1 FROM usage_events e
+                                    WHERE e.tenant_id = a.tenant_id AND e.subscription_id = a.subscription_id AND e.metric_id = a.metric_id
+                                      AND e.period_start = a.period_start AND e.status = 'accepted' AND e.aggregate_id IS NULL))))::boolean;
+
 -- name: GetProviderCustomerRef :one
 SELECT provider_customer_id FROM customer_provider_refs WHERE tenant_id = @tenant_id AND customer_id = @customer_id AND provider = @provider;
 
@@ -90,3 +115,50 @@ ON CONFLICT (tenant_id, request_key) DO NOTHING;
 
 -- name: ListCreditEntries :many
 SELECT * FROM customer_credit_entries WHERE tenant_id = @tenant_id AND customer_id = @customer_id ORDER BY created_at DESC, id DESC LIMIT 200;
+
+-- name: AnonymizeCustomer :one
+-- Substitui os dados pessoais por valores neutros, arquiva e marca a
+-- anonimização. O gatilho customers_anonymized_guard impede alterações
+-- posteriores. Devolve a versão e o instante de atualização gravados (o
+-- gatilho customers_touch define updated_at).
+UPDATE customers
+   SET name = @name, legal_name = NULL, document_number = @document_number, email = NULL, phone = NULL, external_id = NULL,
+       status = 'archived', anonymized_at = @anonymized_at, version = version + 1
+ WHERE tenant_id = @tenant_id AND id = @id AND anonymized_at IS NULL
+RETURNING version, updated_at;
+
+-- name: CustomerAnonymizationDetails :one
+-- Detalhes registrados na auditoria da anonimização do cliente, na mesma
+-- transação: é de onde a repetição do pedido relê os identificadores do
+-- cliente nos provedores, já excluídos do cadastro.
+SELECT details FROM audit_log
+ WHERE tenant_id = @tenant_id AND resource_type = 'customer' AND resource_id = @resource_id AND action = 'customer.anonymized'
+ ORDER BY occurred_at DESC, id DESC
+ LIMIT 1;
+
+-- name: DeleteCustomerContacts :execrows
+DELETE FROM customer_contacts WHERE tenant_id = @tenant_id AND customer_id = @customer_id;
+
+-- name: DeleteCustomerAddress :execrows
+DELETE FROM customer_billing_addresses WHERE tenant_id = @tenant_id AND customer_id = @customer_id;
+
+-- name: DeleteCustomerProviderRefs :many
+DELETE FROM customer_provider_refs WHERE tenant_id = @tenant_id AND customer_id = @customer_id
+RETURNING provider, provider_customer_id;
+
+-- name: RevokeCustomerPortalLinks :execrows
+UPDATE customer_portal_links SET revoked_at = @revoked_at, revoke_reason = 'revoked'
+ WHERE tenant_id = @tenant_id AND customer_id = @customer_id AND revoked_at IS NULL;
+
+-- name: DeleteCustomerNotifications :one
+SELECT app_customer_delete_notifications(@tenant_id, @customer_id)::int AS deleted;
+
+-- name: PurgeCustomerProviderWebhookPayloads :execrows
+-- Esvazia o corpo dos webhooks já processados das cobranças do cliente (o
+-- corpo recebido do provedor pode trazer dados do pagador).
+UPDATE provider_webhook_events w
+   SET payload = '{}'::jsonb, payload_purged_at = @now
+  FROM charges c
+ WHERE w.tenant_id = @tenant_id AND c.tenant_id = w.tenant_id AND c.customer_id = @customer_id
+   AND c.provider = w.provider AND c.provider_charge_id = w.provider_charge_id
+   AND w.status IN ('processed', 'ignored') AND w.payload_purged_at IS NULL;

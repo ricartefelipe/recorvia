@@ -85,7 +85,7 @@ func (q *Queries) GetLedgerTransactionByKey(ctx context.Context, arg GetLedgerTr
 }
 
 const getUsageAggregate = `-- name: GetUsageAggregate :one
-SELECT id, tenant_id, subscription_id, metric_id, period_start, period_end, aggregation, quantity, event_count, invoice_item_id, closed_at, price_version_id, corrected_quantity, corrected_amount FROM usage_aggregates WHERE tenant_id = $1 AND subscription_id = $2 AND metric_id = $3 AND period_start = $4
+SELECT id, tenant_id, subscription_id, metric_id, period_start, period_end, aggregation, quantity, event_count, invoice_item_id, closed_at, price_version_id, corrected_quantity, corrected_amount, events_purged_at FROM usage_aggregates WHERE tenant_id = $1 AND subscription_id = $2 AND metric_id = $3 AND period_start = $4
 `
 
 type GetUsageAggregateParams struct {
@@ -118,6 +118,7 @@ func (q *Queries) GetUsageAggregate(ctx context.Context, arg GetUsageAggregatePa
 		&i.PriceVersionID,
 		&i.CorrectedQuantity,
 		&i.CorrectedAmount,
+		&i.EventsPurgedAt,
 	)
 	return i, err
 }

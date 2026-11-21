@@ -24,8 +24,8 @@ info:
       vinculada a uma organização). A autoria das ações feitas por credencial
       fica na auditoria (ator `api_credential`). Operações que exigem uma pessoa
       identificada (conta e sessão, gestão de membros, do plano da plataforma e
-      de credenciais) aceitam apenas `session` e respondem 403
-      `user_session_required` a credenciais.
+      de credenciais, e a anonimização de clientes) aceitam apenas `session` e
+      respondem 403 `user_session_required` a credenciais.
 servers:
   - url: /
 tags:
@@ -403,16 +403,76 @@ paths:
       responses:
         "200": { description: Arquivado, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerDetails" } } } }
         "409": { $ref: "#/components/responses/Problem" }
+  /api/v1/customers/{id}/anonymize:
+    post:
+      tags: [customers]
+      operationId: anonymizeCustomer
+      summary: Anonimiza um cliente (irreversível)
+      description: |
+        Substitui de forma irreversível os dados pessoais de um cliente sem assinatura ativa,
+        fatura em aberto nem faturamento pendente: nome, documento, razão social, e-mail, telefone
+        e identificador externo recebem valores neutros; contatos (com as preferências de e-mail),
+        endereço de cobrança,
+        identificadores do cliente nos provedores de pagamento e notificações (destinatários,
+        assunto, conteúdo e histórico de envio) são excluídos; os links do portal são revogados,
+        o que encerra as sessões abertas; o corpo dos webhooks recebidos das cobranças do
+        cliente é esvaziado. O cliente fica arquivado e não aceita novas alterações.
+
+        Registros financeiros e a trilha de auditoria não são alterados: as faturas emitidas
+        mantêm a cópia do cadastro do momento da emissão (`customer_snapshot`), e pagamentos,
+        cobranças, créditos e lançamentos continuam vinculados ao cliente pelo identificador.
+        O cadastro do cliente no provedor de pagamento não é alterado por esta operação:
+        `provider_customers` devolve os identificadores removidos do cadastro do Recorvia para
+        que sejam tratados no provedor. Eles ficam registrados na auditoria da anonimização
+        (`customer.anonymized`, em `details.provider_customers`), gravada na mesma transação, e
+        voltam também na repetição do pedido, de modo que não se perdem se a resposta não chegar.
+
+        Responde 409 `customer_has_obligations` enquanto o cliente tiver assinatura ativa (em
+        avaliação, ativa, inadimplente ou suspensa), fatura em aberto ou faturamento pendente:
+        assinatura com fechamento ainda por faturar (como o consumo final de uma assinatura
+        cancelada), item pendente sem fatura, consumo atrasado ainda por corrigir ou período de
+        consumo fechado dentro da tolerância de atraso da métrica. Depois da anonimização, a
+        ingestão rejeita consumo do cliente e nenhuma fatura nova é emitida para ele.
+
+        A operação é idempotente: para um cliente já anonimizado, devolve o estado atual com
+        `already_anonymized` verdadeiro, sem novo registro de auditoria. A justificativa é
+        obrigatória, fica na auditoria (`customer.anonymized`) e não pode conter dados pessoais
+        do cliente. Exige a permissão `customers.anonymize`, que não é delegável a credenciais.
+      security: [ { session: [] } ]
+      parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/IdempotencyKey" }, { $ref: "#/components/parameters/ID" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 10
+                  maxLength: 500
+                  description: Justificativa (protocolo do pedido e motivo), sem dados pessoais do cliente.
+      responses:
+        "200": { description: Cliente anonimizado, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerAnonymization" } } } }
+        "403": { $ref: "#/components/responses/UserSessionRequired" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/contacts:
     post:
       tags: [customers]
       operationId: addCustomerContact
+      description: >-
+        Adiciona um contato ao cliente. Responde 409 `customer_anonymized` para cliente anonimizado, que não
+        volta a receber dados pessoais, e 409 `contact_limit` quando o cliente já tem 20 contatos.
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/ContactInput" } } }
       responses:
         "201": { description: Contato adicionado, content: { application/json: { schema: { $ref: "#/components/schemas/Contact" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/contacts/{contact_id}:
     delete:
       tags: [customers]
@@ -428,12 +488,16 @@ paths:
     put:
       tags: [customers]
       operationId: setCustomerAddress
+      description: >-
+        Grava o endereço de cobrança do cliente. Responde 409 `customer_anonymized` para cliente anonimizado,
+        que não volta a receber dados pessoais.
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" }, { $ref: "#/components/parameters/ID" } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/Address" } } }
       responses:
         "200": { description: Endereço gravado, content: { application/json: { schema: { $ref: "#/components/schemas/Address" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
   /api/v1/customers/{id}/history:
     get:
@@ -836,6 +900,10 @@ paths:
       tags: [usage]
       operationId: ingestUsageEvents
       summary: Ingestão de eventos de consumo (deduplicados por external_id)
+      description: >-
+        Cada evento recebe um resultado próprio (`accepted`, `late`, `duplicate` ou `rejected`, com a mensagem).
+        Consumo de assinatura de cliente anonimizado é rejeitado; o reenvio de um evento já gravado continua
+        respondido como `duplicate`.
       parameters: [ { $ref: "#/components/parameters/Tenant" }, { $ref: "#/components/parameters/CSRF" } ]
       requestBody:
         required: true
@@ -1843,9 +1911,45 @@ components:
         external_id: { type: string }
         status: { type: string, enum: [active, archived] }
         payment_terms_days: { type: integer, nullable: true }
+        anonymized_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Instante da anonimização; nulo enquanto o cliente não foi anonimizado.
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         version: { type: integer }
+    CustomerAnonymization:
+      type: object
+      required: [customer, already_anonymized, provider_customers, removed]
+      properties:
+        customer: { $ref: "#/components/schemas/CustomerDetails" }
+        already_anonymized:
+          type: boolean
+          description: >-
+            Verdadeiro quando o cliente já estava anonimizado e nada foi alterado; `removed` vem então zerado e
+            `provider_customers` repete os identificadores registrados na anonimização.
+        provider_customers:
+          type: array
+          description: >-
+            Identificadores do cliente nos provedores de pagamento, removidos do cadastro do Recorvia e registrados
+            na auditoria da anonimização; a repetição do pedido devolve os mesmos. O cadastro no provedor precisa
+            ser tratado no próprio provedor.
+          items:
+            type: object
+            required: [provider, provider_customer_id]
+            properties:
+              provider: { type: string }
+              provider_customer_id: { type: string }
+        removed:
+          type: object
+          required: [contacts, billing_address, portal_links_revoked, notifications, provider_webhook_payloads]
+          properties:
+            contacts: { type: integer, description: Contatos excluídos. }
+            billing_address: { type: boolean, description: Indica se havia endereço de cobrança. }
+            portal_links_revoked: { type: integer, description: Links do portal revogados. }
+            notifications: { type: integer, description: "Notificações excluídas, com o histórico de envio." }
+            provider_webhook_payloads: { type: integer, description: Webhooks recebidos do provedor com o corpo esvaziado. }
     CustomerDetails:
       allOf:
         - { $ref: "#/components/schemas/Customer" }

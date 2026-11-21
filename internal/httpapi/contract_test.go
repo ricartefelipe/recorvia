@@ -122,3 +122,23 @@ func TestEveryRouteDeclaresAccess(t *testing.T) {
 		}
 	}
 }
+
+// As operações que regravariam dados pessoais num cliente anonimizado
+// respondem 409 customer_anonymized; o contrato declara a resposta e cita o
+// código, para que os tipos gerados e quem integra a conheçam.
+func TestAnonymizedCustomerConflictIsDeclared(t *testing.T) {
+	ops := specOperations(t)
+	for _, key := range []string{"POST /api/v1/customers/{id}/contacts", "PUT /api/v1/customers/{id}/billing-address"} {
+		op, ok := ops[key]
+		if !ok {
+			t.Errorf("operação ausente do contrato: %s", key)
+			continue
+		}
+		if r := op.Responses.Value("409"); r == nil || r.Ref != "#/components/responses/Problem" {
+			t.Errorf("%s: resposta 409 (Problem) não declarada no contrato", key)
+		}
+		if !strings.Contains(op.Description, "`customer_anonymized`") {
+			t.Errorf("%s: a descrição não cita o código customer_anonymized", key)
+		}
+	}
+}

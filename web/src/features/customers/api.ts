@@ -5,6 +5,7 @@ import type {
   Contact,
   ContactInput,
   CreditBalance,
+  CustomerAnonymization,
   CustomerDetails,
   CustomerInput,
   CustomerPage,
@@ -30,6 +31,8 @@ export const customersApi = {
   update: (id: string, version: number, input: CustomerInput) =>
     api.patch<CustomerDetails>(`/api/v1/customers/${enc(id)}`, input, { ifMatch: version }),
   archive: (id: string) => api.post<CustomerDetails>(`/api/v1/customers/${enc(id)}/archive`),
+  anonymize: (id: string, input: { reason: string }, idempotencyKey: string) =>
+    api.post<CustomerAnonymization>(`/api/v1/customers/${enc(id)}/anonymize`, input, { idempotencyKey }),
   addContact: (id: string, input: ContactInput) => api.post<Contact>(`/api/v1/customers/${enc(id)}/contacts`, input),
   removeContact: (id: string, contactId: string) =>
     api.delete(`/api/v1/customers/${enc(id)}/contacts/${enc(contactId)}`),

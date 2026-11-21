@@ -3,6 +3,10 @@ package pgstore
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -35,7 +39,7 @@ func customerFromRow(r dbgen.Customer) customers.Customer {
 	return customers.Customer{ID: r.ID, TenantID: r.TenantID, Kind: customers.Kind(r.Kind), Name: r.Name, LegalName: deref(r.LegalName),
 		DocumentType: brdoc.Kind(r.DocumentType), DocumentNumber: r.DocumentNumber, Email: deref(r.Email), Phone: deref(r.Phone),
 		ExternalID: deref(r.ExternalID), Status: customers.Status(r.Status), PaymentTermsDays: intFromPtr32(r.PaymentTermsDays),
-		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: int(r.Version)}
+		AnonymizedAt: r.AnonymizedAt, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: int(r.Version)}
 }
 
 func customerConflict(err error) error {
@@ -221,6 +225,97 @@ func (tx customersTx) UpsertAddress(ctx context.Context, customerID uuid.UUID, a
 
 func (tx customersTx) HasOpenObligations(ctx context.Context, customerID uuid.UUID) (bool, error) {
 	return tx.q.CustomerHasOpenObligations(ctx, dbgen.CustomerHasOpenObligationsParams{TenantID: tx.tenantID, CustomerID: customerID})
+}
+
+// HasPendingBilling informa se ainda há faturamento do cliente por acontecer
+// (ver a consulta CustomerHasPendingBilling).
+func (tx customersTx) HasPendingBilling(ctx context.Context, customerID uuid.UUID, now time.Time) (bool, error) {
+	return tx.q.CustomerHasPendingBilling(ctx, dbgen.CustomerHasPendingBillingParams{TenantID: tx.tenantID, CustomerID: customerID, Now: now})
+}
+
+// Anonymize grava o cadastro anonimizado e devolve o cliente com a versão e
+// o instante de atualização gravados. A linha já está bloqueada pela leitura
+// do caso de uso; nenhuma linha indica anonimização concorrente.
+func (tx customersTx) Anonymize(ctx context.Context, c customers.Customer) (customers.Customer, error) {
+	if c.AnonymizedAt == nil {
+		return customers.Customer{}, errors.New("pgstore: cliente sem instante de anonimização")
+	}
+	r, err := tx.q.AnonymizeCustomer(ctx, dbgen.AnonymizeCustomerParams{Name: c.Name, DocumentNumber: c.DocumentNumber,
+		AnonymizedAt: c.AnonymizedAt, TenantID: tx.tenantID, ID: c.ID})
+	if postgres.IsNoRows(err) {
+		return customers.Customer{}, apperr.Conflict("customer_anonymized", "O cliente já foi anonimizado.")
+	}
+	if err != nil {
+		return customers.Customer{}, err
+	}
+	c.Version, c.UpdatedAt = int(r.Version), r.UpdatedAt
+	return c, nil
+}
+
+// AnonymizationProviderRefs relê os identificadores do cliente nos
+// provedores registrados na auditoria da anonimização.
+func (tx customersTx) AnonymizationProviderRefs(ctx context.Context, customerID uuid.UUID) ([]customers.ProviderRef, error) {
+	resource := customerID.String()
+	raw, err := tx.q.CustomerAnonymizationDetails(ctx, dbgen.CustomerAnonymizationDetailsParams{TenantID: tx.tenantID, ResourceID: &resource})
+	if postgres.IsNoRows(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var details map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &details); err != nil {
+		return nil, fmt.Errorf("pgstore: detalhes da anonimização do cliente %s: %w", customerID, err)
+	}
+	var refs []customers.ProviderRef
+	if v, ok := details[customers.AuditProviderCustomers]; ok {
+		if err := json.Unmarshal(v, &refs); err != nil {
+			return nil, fmt.Errorf("pgstore: identificadores nos provedores do cliente %s: %w", customerID, err)
+		}
+	}
+	return refs, nil
+}
+
+// ErasePersonalData remove os dados pessoais guardados fora do cadastro do
+// cliente (já anonimizado na mesma transação): contatos, endereço,
+// identificadores nos provedores e notificações; revoga os links do portal e
+// esvazia o corpo dos webhooks recebidos das cobranças do cliente.
+func (tx customersTx) ErasePersonalData(ctx context.Context, customerID uuid.UUID, at time.Time) (customers.Erasure, error) {
+	var out customers.Erasure
+	contacts, err := tx.q.DeleteCustomerContacts(ctx, dbgen.DeleteCustomerContactsParams{TenantID: tx.tenantID, CustomerID: customerID})
+	if err != nil {
+		return out, err
+	}
+	address, err := tx.q.DeleteCustomerAddress(ctx, dbgen.DeleteCustomerAddressParams{TenantID: tx.tenantID, CustomerID: customerID})
+	if err != nil {
+		return out, err
+	}
+	refs, err := tx.q.DeleteCustomerProviderRefs(ctx, dbgen.DeleteCustomerProviderRefsParams{TenantID: tx.tenantID, CustomerID: customerID})
+	if err != nil {
+		return out, err
+	}
+	links, err := tx.q.RevokeCustomerPortalLinks(ctx, dbgen.RevokeCustomerPortalLinksParams{RevokedAt: &at, TenantID: tx.tenantID,
+		CustomerID: customerID})
+	if err != nil {
+		return out, err
+	}
+	notifications, err := tx.q.DeleteCustomerNotifications(ctx, dbgen.DeleteCustomerNotificationsParams{TenantID: tx.tenantID,
+		CustomerID: customerID})
+	if err != nil {
+		return out, err
+	}
+	payloads, err := tx.q.PurgeCustomerProviderWebhookPayloads(ctx, dbgen.PurgeCustomerProviderWebhookPayloadsParams{Now: &at,
+		TenantID: tx.tenantID, CustomerID: customerID})
+	if err != nil {
+		return out, err
+	}
+	out = customers.Erasure{Contacts: int(contacts), Address: address > 0, PortalLinksRevoked: int(links), Notifications: int(notifications),
+		ProviderWebhookPayloads: int(payloads)}
+	for _, r := range refs {
+		out.ProviderRefs = append(out.ProviderRefs, customers.ProviderRef{Provider: r.Provider, ProviderCustomerID: r.ProviderCustomerID})
+	}
+	slices.SortFunc(out.ProviderRefs, func(a, b customers.ProviderRef) int { return strings.Compare(a.Provider, b.Provider) })
+	return out, nil
 }
 
 // --- créditos do cliente (usados por faturamento e pagamentos) ---

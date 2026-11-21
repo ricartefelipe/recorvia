@@ -57,8 +57,12 @@ responde só sim ou não), `app_tenants_due_platform_statement` (tenants com ext
 emitir, somente IDs), `app_tenants_with_late_usage` (tenants com consumo a corrigir, somente IDs),
 as demais funções do publicador da outbox (`app_outbox_mark_published`, `app_outbox_release`,
 `app_outbox_purge` e a contagem agregada `app_outbox_stats`), `app_dead_letter_record_untenanted`
-(grava a mensagem sem tenant válido, visível apenas à operação) e `app_idempotency_purge_expired`
-(remove chaves de idempotência concluídas e expiradas). Toda função `SECURITY DEFINER` criada por
+(grava a mensagem sem tenant válido, visível apenas à operação), `app_idempotency_purge_expired`
+(remove chaves de idempotência concluídas e expiradas) e as três da retenção e da anonimização:
+`app_retention_tenants` (tenants com dados vencidos de um tipo, somente IDs), `app_retention_purge`
+(remove um lote vencido de um tipo e recusa a chamada fora da transação do próprio tenant) e
+`app_customer_delete_notifications` (exclui as notificações de um cliente na transação da
+anonimização). Toda função `SECURITY DEFINER` criada por
 migration precisa constar nesta seção: o teste `TestSecurityDefinerFunctionsAreDocumented`
 (`internal/infra/migrate`) compara as migrations com este documento.
 

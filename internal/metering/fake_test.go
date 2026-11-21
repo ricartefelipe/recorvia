@@ -42,17 +42,21 @@ type meterState struct {
 	suspensions map[uuid.UUID][]SuspensionChange
 	// changes é a mudança agendada pendente por assinatura.
 	changes map[uuid.UUID]*subscriptions.ScheduledChange
+	// anonymized marca os clientes anonimizados.
+	anonymized map[uuid.UUID]bool
 }
 
 func newMeterState() *meterState {
 	return &meterState{subs: map[uuid.UUID]subscriptions.Subscription{}, prices: map[uuid.UUID]catalog.PriceVersion{},
 		metrics: map[uuid.UUID]catalog.Metric{}, events: map[string]Event{}, closed: map[periodKey]bool{},
-		suspensions: map[uuid.UUID][]SuspensionChange{}, changes: map[uuid.UUID]*subscriptions.ScheduledChange{}}
+		suspensions: map[uuid.UUID][]SuspensionChange{}, changes: map[uuid.UUID]*subscriptions.ScheduledChange{},
+		anonymized: map[uuid.UUID]bool{}}
 }
 
 func (s *meterState) clone() *meterState {
 	return &meterState{subs: maps.Clone(s.subs), prices: maps.Clone(s.prices), metrics: maps.Clone(s.metrics),
-		events: maps.Clone(s.events), closed: maps.Clone(s.closed), suspensions: maps.Clone(s.suspensions), changes: maps.Clone(s.changes)}
+		events: maps.Clone(s.events), closed: maps.Clone(s.closed), suspensions: maps.Clone(s.suspensions), changes: maps.Clone(s.changes),
+		anonymized: maps.Clone(s.anonymized)}
 }
 
 // failure programa a falha de uma operação; call zero falha em todas as
@@ -154,6 +158,15 @@ func (t *meterTx) PendingChange(_ context.Context, subscriptionID uuid.UUID) (*s
 		return nil, err
 	}
 	return t.st.changes[subscriptionID], nil
+}
+
+// CustomerAnonymized é contada para que os testes verifiquem que a leitura
+// com bloqueio ocorre uma vez por cliente no lote.
+func (t *meterTx) CustomerAnonymized(_ context.Context, customerID uuid.UUID) (bool, error) {
+	if err := t.s.hit("CustomerAnonymized"); err != nil {
+		return false, err
+	}
+	return t.st.anonymized[customerID], nil
 }
 
 func (t *meterTx) PriceVersion(_ context.Context, id uuid.UUID) (catalog.PriceVersion, error) {

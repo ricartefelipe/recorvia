@@ -204,6 +204,7 @@ func TestInitSeriesStartAtZero(t *testing.T) {
 	m.InitChargeFailures([]string{"simulator"})
 	m.InitProviderWebhooks([]string{"simulator", "asaas"})
 	m.InitDispatchResults()
+	m.InitRetention()
 	got := gather(t, m)
 	for _, outcome := range ConsumerOutcomes {
 		if v := value(t, got["recorvia_consumer_messages_total"], map[string]string{"consumer": "payments.webhooks", "outcome": outcome}); v != 0 {
@@ -252,6 +253,15 @@ func TestInitSeriesStartAtZero(t *testing.T) {
 	for _, a := range CollectionActionKinds {
 		if v := value(t, got["recorvia_collection_actions_total"], map[string]string{"action": a}); v != 0 {
 			t.Errorf("régua %s: %v", a, v)
+		}
+	}
+	// Expurgo por retenção: removidos, falhas e execuções incompletas por tipo.
+	for _, name := range []string{"recorvia_retention_purged_total", "recorvia_retention_purge_failures_total",
+		"recorvia_retention_purge_incomplete_total"} {
+		for _, k := range RetentionKinds {
+			if v := value(t, got[name], map[string]string{"kind": k}); v != 0 {
+				t.Errorf("%s{kind=%q}: %v", name, k, v)
+			}
 		}
 	}
 }
@@ -629,7 +639,8 @@ func TestAlertRulesAndDashboardsUseDeclaredMetrics(t *testing.T) {
 		"recorvia_provider_webhooks_total", "recorvia_dependency_up",
 		"recorvia_dead_letters_open", "recorvia_dead_letters_oldest_open_seconds",
 		"recorvia_notifications_backlog", "recorvia_notifications_backlog_oldest_seconds",
-		"recorvia_webhook_deliveries_backlog", "recorvia_webhook_deliveries_backlog_oldest_due_seconds"} {
+		"recorvia_webhook_deliveries_backlog", "recorvia_webhook_deliveries_backlog_oldest_due_seconds",
+		"recorvia_retention_purged_total", "recorvia_retention_purge_incomplete_total"} {
 		if !used[required] {
 			t.Errorf("métrica %s sem alerta ou painel", required)
 		}
@@ -685,6 +696,9 @@ func TestMetricsCatalogDocumentsEveryMetricAndLabelValue(t *testing.T) {
 		"recorvia_notifications_backlog_oldest_seconds":          NotificationBacklogStates,
 		"recorvia_webhook_deliveries_backlog":                    WebhookBacklogStates,
 		"recorvia_webhook_deliveries_backlog_oldest_due_seconds": WebhookBacklogStates,
+		"recorvia_retention_purged_total":                        RetentionKinds,
+		"recorvia_retention_purge_failures_total":                RetentionKinds,
+		"recorvia_retention_purge_incomplete_total":              RetentionKinds,
 	}
 	for name, want := range values {
 		for _, v := range want {
