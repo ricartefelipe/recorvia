@@ -6,6 +6,10 @@
 // dados daquele cliente naquela organização. A cada requisição a sessão é
 // validada contra o link que a originou, o cliente e a organização: revogar
 // o link, arquivar o cliente ou desativar a organização encerra o acesso.
+//
+// A organização lista os links de um cliente e revoga um link de forma
+// explícita; a revogação também remove do armazenamento as sessões abertas
+// com ele.
 package portal
 
 import (
@@ -70,6 +74,18 @@ func (l Link) State(now time.Time) LinkState {
 		return LinkExpired
 	}
 	return LinkPending
+}
+
+// LinkSummary é o link como a organização o lista: sem o token (que só
+// existe na resposta da geração) e sem o hash (TokenHash fica vazio, a
+// listagem não o lê).
+type LinkSummary struct {
+	Link
+	// CreatorName é o nome do membro ou da credencial de API que gerou o
+	// link.
+	CreatorName string
+	// Current é a situação no instante da consulta.
+	Current LinkState
 }
 
 // Creator identifica quem gera o link: um membro ou uma credencial de API.

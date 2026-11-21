@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"time"
 
@@ -16,9 +17,6 @@ import (
 )
 
 const (
-	// MaxInvoices limita a listagem do portal às faturas emitidas mais
-	// recentes do cliente.
-	MaxInvoices = 100
 	// MaxContactPreferences é o máximo de contatos por alteração de
 	// preferências (o mesmo limite de contatos por cliente).
 	MaxContactPreferences = 20
@@ -115,19 +113,43 @@ func tenantLocation(ctx context.Context, tx Tx) (*time.Location, string, error) 
 	return loc, t.Name, nil
 }
 
+// InvoicePage é uma página das faturas do cliente no portal.
+type InvoicePage struct {
+	Items      []Invoice
+	NextCursor string
+}
+
 // Invoices lista as faturas emitidas do cliente da sessão, das mais recentes
-// para as mais antigas (no máximo MaxInvoices). Rascunhos nunca aparecem.
-func (s *Service) Invoices(ctx context.Context, sess Session) ([]Invoice, error) {
+// para as mais antigas, em páginas. Rascunhos nunca aparecem. A organização
+// e o cliente consultados vêm somente da sessão: o cursor guarda apenas a
+// posição (emissão e identificador da última fatura da página anterior), de
+// modo que faturas emitidas durante a navegação não deslocam as páginas
+// seguintes e um cursor obtido em outra sessão não alcança faturas alheias.
+func (s *Service) Invoices(ctx context.Context, sess Session, q PageQuery) (InvoicePage, error) {
+	after, err := parseCursor(cursorInvoices, q.Cursor)
+	if err != nil {
+		return InvoicePage{}, err
+	}
+	limit := pageLimit(q.Limit)
 	now := s.clock.Now()
-	out := []Invoice{}
-	err := s.store.InTenant(ctx, sess.TenantID, func(tx Tx) error {
+	var page InvoicePage
+	err = s.store.InTenant(ctx, sess.TenantID, func(tx Tx) error {
+		page = InvoicePage{Items: []Invoice{}}
 		loc, _, err := tenantLocation(ctx, tx)
 		if err != nil {
 			return err
 		}
-		invs, err := tx.Invoices(ctx, sess.CustomerID, MaxInvoices)
+		invs, err := tx.Invoices(ctx, sess.CustomerID, after, limit+1)
 		if err != nil {
 			return err
+		}
+		if len(invs) > limit {
+			invs = invs[:limit]
+			last := invs[limit-1]
+			if last.IssuedAt == nil {
+				return errors.New("portal: fatura listada sem data de emissão")
+			}
+			page.NextCursor = encodeCursor(cursorInvoices, Position{At: *last.IssuedAt, ID: last.ID})
 		}
 		ids := make([]uuid.UUID, 0, len(invs))
 		for _, inv := range invs {
@@ -139,15 +161,15 @@ func (s *Service) Invoices(ctx context.Context, sess Session) ([]Invoice, error)
 		}
 		for _, inv := range invs {
 			if visible(inv, sess) {
-				out = append(out, present(inv, loc, now, urls[inv.ID]))
+				page.Items = append(page.Items, present(inv, loc, now, urls[inv.ID]))
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return InvoicePage{}, err
 	}
-	return out, nil
+	return page, nil
 }
 
 // Invoice lê uma fatura emitida do cliente da sessão. Fatura de outro

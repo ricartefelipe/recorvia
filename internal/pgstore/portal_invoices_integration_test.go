@@ -94,7 +94,7 @@ func TestPortalInvoiceQueriesAreScopedToCustomer(t *testing.T) {
 	insertCharges(t, env, b, invB, "awaiting_payment")
 
 	err := env.Store.Portal().InTenant(ctx, a.ID, func(tx portal.Tx) error {
-		invs, err := tx.Invoices(ctx, cust.ID, portal.MaxInvoices)
+		invs, err := tx.Invoices(ctx, cust.ID, nil, portal.MaxPageSize)
 		if err != nil {
 			return err
 		}
@@ -127,7 +127,7 @@ func TestPortalInvoiceQueriesAreScopedToCustomer(t *testing.T) {
 	}
 	// No contexto de B, nada de A é visível, mesmo com o cliente de A.
 	err = env.Store.Portal().InTenant(ctx, b.ID, func(tx portal.Tx) error {
-		invs, err := tx.Invoices(ctx, cust.ID, portal.MaxInvoices)
+		invs, err := tx.Invoices(ctx, cust.ID, nil, portal.MaxPageSize)
 		if err != nil || len(invs) != 0 {
 			t.Fatalf("faturas de A no contexto de B: %v %v", invs, err)
 		}
