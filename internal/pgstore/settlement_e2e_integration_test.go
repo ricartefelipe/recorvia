@@ -187,6 +187,90 @@ func TestChargebackOfConfirmedPaymentWithSimulator(t *testing.T) {
 	}
 }
 
+// Reembolso e chargeback de pagamento confirmado e ainda não recebido no
+// provedor (o cartão no prazo de recebimento), pelo caminho completo do
+// Recorvia com o simulador, que aceita as duas movimentações nessa situação
+// como o provedor real. O pagamento é dado como recebido antes da
+// movimentação (ADR-080): o bruto sai de pagamentos confirmados para os
+// valores em liquidação, a taxa é reconhecida, o líquido vai ao disponível e
+// a movimentação é liquidada no disponível. No fim, pagamentos confirmados e
+// valores em liquidação ficam zerados e o disponível guarda o líquido menos a
+// movimentação.
+func TestMovementsOfConfirmedNotReceivedPaymentWithSimulator(t *testing.T) {
+	const amount, refunded = 10000, 3000
+	fee := paysim.Fee(amount)
+	net := int64(amount) - fee
+
+	t.Run("reembolso parcial", func(t *testing.T) {
+		h := newPayHarness(t, 2*time.Second)
+		inv, c := h.awaitingCharge(t, amount)
+		h.simApply(t, c.ProviderChargeID, paysim.Action{Name: "confirm"})
+		h.deliver(t)
+		h.cycle(t, "confirmado", amount, 0, 0, 0)
+
+		r, err := h.pay.RequestRefund(context.Background(), h.tn.ID, h.tn.Actor, &h.tn.Owner.ID, refundInput(c, refunded, "reembolso-confirmado"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.deliver(t) // charge.partially_refunded do simulador, já refletido
+		got, err := h.pay.Refund(context.Background(), h.tn.ID, r.ID)
+		if err != nil || got.Status != payments.RefundSucceeded {
+			t.Fatalf("reembolso da cobrança confirmada: %+v %v", got, err)
+		}
+		if ch := h.charge(t, inv.ID); ch.AmountRefunded.Amount() != refunded || !ch.AmountRefundPending.IsZero() {
+			t.Fatalf("cobrança: reembolsado=%v reservado=%v", ch.AmountRefunded, ch.AmountRefundPending)
+		}
+		view, err := h.sim.View(h.apiKey, c.ProviderChargeID)
+		if err != nil || view.Status != "partially_refunded" || view.RefundedAmount != refunded {
+			t.Fatalf("cobrança no simulador: %+v %v", view, err)
+		}
+
+		// Conta a conta: confirmado 10.000 - 10.000 = 0; em liquidação
+		// +10.000 - taxa - líquido - reembolso + reembolso = 0; disponível
+		// líquido - reembolso; taxas e reembolsos reconhecidos.
+		h.cycle(t, "reembolsado", 0, 0, net-refunded, fee)
+		if got := h.accountNet(t, "refunds"); got != refunded {
+			t.Fatalf("reembolsos = %d, esperado %d", got, refunded)
+		}
+		for kind, want := range map[string]int64{"payment.confirmed": 1, "payment.received": 1, "settlement.received": 1,
+			"refund.succeeded": 1, "settlement.debited": 1} {
+			if n := h.kinds(t, kind); n != want {
+				t.Fatalf("lançamentos %s = %d, esperado %d", kind, n, want)
+			}
+		}
+		if d := h.dashboard(t, "2026-03"); d.Received != amount || d.PendingProviderReceipt != 0 || d.Refunds != refunded {
+			t.Fatalf("painel: recebido=%d a receber do provedor=%d reembolsos=%d", d.Received, d.PendingProviderReceipt, d.Refunds)
+		}
+
+		// A reentrega dos eventos da cobrança não lança nada de novo.
+		h.simApply(t, c.ProviderChargeID, paysim.Action{Name: "replay"})
+		h.deliver(t)
+		h.cycle(t, "reentregue", 0, 0, net-refunded, fee)
+		if n := h.kinds(t, "refund.succeeded"); n != 1 {
+			t.Fatalf("reembolsos lançados depois da reentrega: %d", n)
+		}
+	})
+
+	t.Run("chargeback e disputa ganha", func(t *testing.T) {
+		h := newPayHarness(t, 2*time.Second)
+		_, c := h.awaitingCharge(t, amount)
+		h.simApply(t, c.ProviderChargeID, paysim.Action{Name: "confirm"})
+		h.deliver(t)
+		h.simApply(t, c.ProviderChargeID, paysim.Action{Name: "chargeback", Stage: "requested"})
+		h.deliver(t)
+		h.cycle(t, "chargeback aberto", 0, 0, net-amount, fee)
+		if h.accountNet(t, "chargebacks") != amount || h.kinds(t, "payment.received") != 1 {
+			t.Fatalf("chargeback: %d recebimentos=%d", h.accountNet(t, "chargebacks"), h.kinds(t, "payment.received"))
+		}
+		h.simApply(t, c.ProviderChargeID, paysim.Action{Name: "chargeback", Stage: "won"})
+		h.deliver(t)
+		h.cycle(t, "disputa ganha", 0, 0, net, fee)
+		if h.accountNet(t, "chargebacks") != 0 {
+			t.Fatalf("chargebacks depois da disputa ganha: %d", h.accountNet(t, "chargebacks"))
+		}
+	})
+}
+
 // Recebimento perdido com o simulador: a cobrança é confirmada e o crédito
 // acontece no provedor sem que o webhook de recebimento seja processado. A
 // conciliação aponta payment_not_reflected na direção provider_received, e a
