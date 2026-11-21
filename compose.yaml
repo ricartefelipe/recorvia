@@ -226,10 +226,10 @@ services:
     restart: "no"
 
   # Perfil observability (make up-obs): OpenTelemetry Collector, Jaeger,
-  # Prometheus e Grafana com configurações embutidas nas imagens (ADR-020,
-  # ADR-052). O make up-obs aponta OTEL_EXPORTER_OTLP_ENDPOINT da API e do
-  # worker para o Collector; sem o perfil, a exportação de rastros fica
-  # desligada.
+  # Prometheus, Alertmanager e Grafana com configurações embutidas nas
+  # imagens (ADR-020, ADR-052, ADR-065). O make up-obs aponta
+  # OTEL_EXPORTER_OTLP_ENDPOINT da API e do worker para o Collector; sem o
+  # perfil, a exportação de rastros fica desligada.
   otel-collector:
     image: recorvia-otel-collector:local
     profiles: ["observability"]
@@ -258,12 +258,59 @@ services:
     profiles: ["observability"]
     build:
       context: deploy/observability/prometheus
+      args:
+        # Endereço em que os runbooks são publicados (link das notificações).
+        RUNBOOK_BASE_URL: ${RUNBOOK_BASE_URL:-https://github.com/ricartefelipe/recorvia/blob/main/}
+    # Argumentos da imagem mais o endereço público do Prometheus, usado no
+    # link "Consulta" das notificações de alerta.
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.external-url=http://localhost:${PROMETHEUS_PORT:-9090}
     ports:
       - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - prometheus-data:/prometheus
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+
+  # Encaminhamento dos alertas do Prometheus (ADR-065). O roteamento fica na
+  # imagem; os receptores são gerados na partida do container a partir das
+  # variáveis abaixo. No ambiente local, os e-mails vão para o Mailpit
+  # (http://localhost:MAILPIT_UI_PORT) e o webhook fica desligado. O estado
+  # (registro de notificações e silêncios) fica em tmpfs e dura o mesmo que a
+  # caixa do Mailpit: num container novo, os alertas ativos são notificados
+  # de novo. Num volume, o RecorviaWatchdog só voltaria a ser enviado depois
+  # do intervalo de repetição (24 h), com o Mailpit já vazio.
+  alertmanager:
+    image: recorvia-alertmanager:local
+    profiles: ["observability"]
+    build:
+      context: deploy/observability/alertmanager
+    environment:
+      ALERTMANAGER_EXTERNAL_URL: http://localhost:${ALERTMANAGER_PORT:-9093}
+      ALERTMANAGER_SMTP_SMARTHOST: ${ALERTMANAGER_SMTP_SMARTHOST:-mailpit:1025}
+      ALERTMANAGER_SMTP_FROM: ${ALERTMANAGER_SMTP_FROM:-alertas@recorvia.local}
+      ALERTMANAGER_SMTP_REQUIRE_TLS: ${ALERTMANAGER_SMTP_REQUIRE_TLS:-false}
+      ALERTMANAGER_SMTP_USERNAME: ${ALERTMANAGER_SMTP_USERNAME:-}
+      ALERTMANAGER_SMTP_PASSWORD: ${ALERTMANAGER_SMTP_PASSWORD:-}
+      ALERTMANAGER_EMAIL_TO: ${ALERTMANAGER_EMAIL_TO:-plantao@recorvia.local}
+      ALERTMANAGER_EMAIL_TO_CRITICAL: ${ALERTMANAGER_EMAIL_TO_CRITICAL:-}
+      ALERTMANAGER_WEBHOOK_URL: ${ALERTMANAGER_WEBHOOK_URL:-}
+      ALERTMANAGER_WEBHOOK_BEARER_TOKEN: ${ALERTMANAGER_WEBHOOK_BEARER_TOKEN:-}
+    ports:
+      - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
+    # Diretório de --storage.path, do usuário da imagem (nobody, 65534).
+    tmpfs:
+      - /alertmanager:mode=700,uid=65534,gid=65534
+    depends_on:
+      mailpit: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9093/-/ready"]
       interval: 10s
       timeout: 3s
       retries: 20

@@ -7,8 +7,18 @@
 # volume real. Catálogo e justificativas: docs/operacao/observabilidade.md.
 #
 # Convenções: severity=critical exige ação imediata (perda de processamento
-# ou de dinheiro em risco); severity=warning exige análise no mesmo dia.
-# A anotação "runbook" aponta para o procedimento em docs/operacao/runbooks.
+# ou de dinheiro em risco); severity=warning exige análise no mesmo dia;
+# severity=info não pede ação (somente RecorviaWatchdog, a verificação do
+# caminho de alertas). O Alertmanager roteia por severidade
+# (deploy/observability/alertmanager, ADR-065).
+#
+# A anotação "runbook" aponta para o procedimento em docs/operacao/runbooks
+# (caminho no repositório); a imagem do Prometheus acrescenta a cada regra a
+# anotação "runbook_url", com o endereço completo usado nas notificações.
+#
+# Um alerta com duas severidades usa o mesmo nome e os mesmos rótulos nas
+# duas regras: enquanto a crítica dispara, o Alertmanager inibe a de aviso
+# (rótulos de agregação em "equal" da regra de inibição).
 #
 # Filas principais: recorvia.<consumidor>, sem os sufixos .retry.N e .dlq.
 
@@ -16,7 +26,7 @@ groups:
   - name: recorvia-alvos
     rules:
       - alert: RecorviaTargetDown
-        expr: up{job=~"recorvia-api|recorvia-worker|rabbitmq"} == 0
+        expr: up{job=~"recorvia-api|recorvia-worker|rabbitmq|alertmanager"} == 0
         for: 2m
         labels:
           severity: critical
@@ -107,6 +117,31 @@ groups:
           summary: "Mensagens enviadas à DLQ pelo consumidor {{ $labels.consumer }}"
           description: "Mensagens esgotaram as retentativas ou foram rejeitadas como inválidas e aguardam triagem."
           runbook: docs/operacao/runbooks/filas-e-dlq.md#mensagens-na-dlq
+      # Dead letters registradas em dead_letters e ainda sem triagem, em todos
+      # os tenants (medidor global da tarefa metrics.collect, que não zera na
+      # partida do worker como o contador acima). A regra crítica usa a idade
+      # da mais antiga; com ela ativa, a de aviso do mesmo consumidor é
+      # inibida no Alertmanager.
+      - alert: RecorviaDeadLettersOpen
+        expr: max by (consumer) (recorvia_dead_letters_open) > 0
+        for: 30m
+        labels:
+          severity: warning
+          area: mensageria
+        annotations:
+          summary: "{{ $value }} dead letters abertas do consumidor {{ $labels.consumer }}"
+          description: "Mensagens registradas em dead_letters aguardam reprocessamento ou descarte há mais de 30 minutos; o efeito do evento não foi aplicado."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#dead-letters-abertas
+      - alert: RecorviaDeadLettersOpen
+        expr: max by (consumer) (recorvia_dead_letters_oldest_open_seconds) > 86400
+        for: 15m
+        labels:
+          severity: critical
+          area: mensageria
+        annotations:
+          summary: "Dead letter do consumidor {{ $labels.consumer }} aberta há {{ $value | humanizeDuration }}"
+          description: "A dead letter mais antiga está sem triagem há mais de 24 horas: cobranças, pagamentos ou notificações desse evento continuam sem efeito."
+          runbook: docs/operacao/runbooks/filas-e-dlq.md#dead-letters-abertas
       - alert: RecorviaConsumerRetryRate
         expr: |
           sum by (consumer) (rate(recorvia_consumer_messages_total{outcome="retry"}[10m]))
@@ -355,6 +390,53 @@ groups:
           description: "Entregas de webhooks aos tenants falhando para todos os destinos: saída de rede, DNS ou proteção contra SSRF do worker."
           runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#webhooks-enviados-sem-sucesso
 
+      # Filas medidas no banco pela tarefa metrics.collect, em todos os
+      # tenants. A idade das notificações é o atraso em relação ao horário
+      # de envio (due) ou o tempo desde a reivindicação (sending); a das
+      # entregas é o atraso em relação ao horário da tentativa, sem a espera
+      # do backoff. Envios e entregas rodam a cada 15 s e 10 s: minutos de
+      # atraso indicam tarefa parada ou volume acima da vazão.
+      - alert: RecorviaNotificationsBacklog
+        expr: max by (state) (recorvia_notifications_backlog_oldest_seconds{state=~"due|sending"}) > 900
+        for: 10m
+        labels:
+          severity: warning
+          area: notificacoes
+        annotations:
+          summary: "Notificações em fila ({{ $labels.state }}) há {{ $value | humanizeDuration }}"
+          description: "Há notificações com o horário de envio vencido (due) ou presas em envio (sending) há mais de 15 minutos: a tarefa notifications.dispatch está parada ou não dá vazão."
+          runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#fila-de-notificacoes-acumulada
+      - alert: RecorviaNotificationsBacklog
+        expr: max by (state) (recorvia_notifications_backlog_oldest_seconds{state=~"due|sending"}) > 3600
+        for: 10m
+        labels:
+          severity: critical
+          area: notificacoes
+        annotations:
+          summary: "Notificações em fila ({{ $labels.state }}) há {{ $value | humanizeDuration }}"
+          description: "Faturas, lembretes e convites estão sem e-mail há mais de uma hora: a tarefa notifications.dispatch está parada ou não dá vazão."
+          runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#fila-de-notificacoes-acumulada
+      - alert: RecorviaWebhookDeliveriesBacklog
+        expr: max by (state) (recorvia_webhook_deliveries_backlog_oldest_due_seconds) > 900
+        for: 10m
+        labels:
+          severity: warning
+          area: notificacoes
+        annotations:
+          summary: "Entregas de webhooks ({{ $labels.state }}) atrasadas em {{ $value | humanizeDuration }}"
+          description: "Há entregas com o horário da tentativa vencido há mais de 15 minutos: a tarefa webhooks.deliver está parada ou não dá vazão."
+          runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#fila-de-entregas-de-webhooks-acumulada
+      - alert: RecorviaWebhookDeliveriesBacklog
+        expr: max by (state) (recorvia_webhook_deliveries_backlog_oldest_due_seconds) > 3600
+        for: 10m
+        labels:
+          severity: critical
+          area: notificacoes
+        annotations:
+          summary: "Entregas de webhooks ({{ $labels.state }}) atrasadas em {{ $value | humanizeDuration }}"
+          description: "As integrações dos tenants estão sem eventos há mais de uma hora: a tarefa webhooks.deliver está parada ou não dá vazão."
+          runbook: docs/operacao/runbooks/notificacoes-e-webhooks.md#fila-de-entregas-de-webhooks-acumulada
+
   - name: recorvia-banco
     rules:
       - alert: RecorviaDBPoolSaturated
@@ -414,3 +496,40 @@ groups:
           summary: "{{ $value | humanizePercentage }} das requisições com erro 5xx"
           description: "Taxa de erros internos acima de 5% por 10 minutos."
           runbook: docs/operacao/runbooks/faturamento.md#erros-internos-da-api
+
+  # Caminho dos alertas: Prometheus -> Alertmanager -> destinatários.
+  - name: recorvia-alertas
+    rules:
+      # Sempre ativo. A notificação periódica (rota própria no Alertmanager)
+      # prova o caminho inteiro; a ausência dela é o sinal de falha.
+      - alert: RecorviaWatchdog
+        expr: vector(1)
+        labels:
+          severity: info
+          area: alertas
+        annotations:
+          summary: "Verificação do caminho de alertas"
+          description: "Alerta sempre ativo: esta notificação confirma que o Prometheus avalia as regras, o Alertmanager recebe os alertas e o destinatário é alcançado. A ausência da notificação periódica indica falha no caminho."
+          runbook: docs/operacao/runbooks/alertas.md#verificacao-do-caminho-de-alertas
+      - alert: RecorviaAlertDeliveryFailing
+        expr: |
+          sum(increase(prometheus_notifications_errors_total[10m])) > 0
+            or sum(increase(prometheus_notifications_dropped_total[10m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+          area: alertas
+        annotations:
+          summary: "Prometheus não consegue enviar alertas ao Alertmanager"
+          description: "Envios de alertas ao Alertmanager falhando ou descartados há mais de 5 minutos: nenhuma notificação é encaminhada. Os alertas continuam visíveis no Prometheus e no Grafana."
+          runbook: docs/operacao/runbooks/alertas.md#alertas-nao-chegam-aos-destinatarios
+      - alert: RecorviaAlertNotificationsFailing
+        expr: sum by (integration) (increase(alertmanager_notifications_failed_total[15m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+          area: alertas
+        annotations:
+          summary: "Alertmanager não consegue notificar por {{ $labels.integration }}"
+          description: "Notificações de alerta falhando no receptor (servidor SMTP ou endpoint do webhook) há mais de 5 minutos: os destinatários desse canal não são avisados."
+          runbook: docs/operacao/runbooks/alertas.md#alertas-nao-chegam-aos-destinatarios
