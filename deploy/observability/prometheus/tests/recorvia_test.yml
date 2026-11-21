@@ -203,6 +203,81 @@ tests:
         alertname: RecorviaReconciliationDiscrepanciesHigh
         exp_alerts: []
 
+  # Conciliação registrada que nenhum worker assume (executores ocupados ou
+  # falhando): a espera cresce em todas as instâncias, do worker e da API
+  # (mesmo valor); a execução assumida logo depois do registro não alerta.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_reconciliation_oldest_waiting_seconds{service="worker", instance="worker-a:9091", job="recorvia-worker"}'
+        values: '0 60 120 180 240 300 360 420 480 540 600 660 720'
+      - series: 'recorvia_reconciliation_oldest_waiting_seconds{service="worker", instance="worker-b:9091", job="recorvia-worker"}'
+        values: '0 60 120 180 240 300 360 420 480 540 600 660 720'
+      - series: 'recorvia_reconciliation_oldest_waiting_seconds{service="api", instance="api:9090", job="recorvia-api"}'
+        values: '0 60 120 180 240 300 360 420 480 540 600 660 720'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: RecorviaReconciliationRunsWaiting
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: RecorviaReconciliationRunsWaiting
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: conciliacao
+            exp_annotations:
+              summary: "Execução de conciliação sem worker há mais de 5 minutos"
+              description: "Uma conciliação registrada aguarda ser assumida ou retomada por um worker; enquanto isso, a conta do provedor não aceita outra execução."
+              runbook: docs/operacao/runbooks/conciliacao.md#execucoes-paradas
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_reconciliation_oldest_waiting_seconds{service="worker", instance="worker-a:9091", job="recorvia-worker"}'
+        values: '0 2 0 0 1 0 0 2 0 0 0 0 0'
+      - series: 'recorvia_reconciliation_oldest_waiting_seconds{service="api", instance="api:9090", job="recorvia-api"}'
+        values: '0 2 0 0 1 0 0 2 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: RecorviaReconciliationRunsWaiting
+        exp_alerts: []
+  # Nenhum worker em execução: o único worker cai no minuto 2 (séries
+  # obsoletas, alvo fora do ar) e a conciliação pedida em seguida fica
+  # aguardando. A API, que registrou o pedido, continua exportando a espera,
+  # e o alerta dispara junto com o do alvo fora do ar.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_reconciliation_oldest_waiting_seconds{service="worker", instance="worker:9091", job="recorvia-worker"}'
+        values: '0 0 stale _x12'
+      - series: 'up{job="recorvia-worker", instance="worker:9091"}'
+        values: '1 1 0x13'
+      - series: 'recorvia_reconciliation_oldest_waiting_seconds{service="api", instance="api:9090", job="recorvia-api"}'
+        values: '0 0 0 60 120 180 240 300 360 420 480 540 600 660 720'
+      - series: 'up{job="recorvia-api", instance="api:9090"}'
+        values: '1x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: RecorviaReconciliationRunsWaiting
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: RecorviaReconciliationRunsWaiting
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: conciliacao
+            exp_annotations:
+              summary: "Execução de conciliação sem worker há mais de 5 minutos"
+              description: "Uma conciliação registrada aguarda ser assumida ou retomada por um worker; enquanto isso, a conta do provedor não aceita outra execução."
+              runbook: docs/operacao/runbooks/conciliacao.md#execucoes-paradas
+    promql_expr_test:
+      # Sem a série da API, a expressão não teria amostra e o alerta não
+      # dispararia com o worker fora do ar.
+      - expr: max(recorvia_reconciliation_oldest_waiting_seconds{service="worker"})
+        eval_time: 15m
+        exp_samples: []
+      - expr: max(recorvia_reconciliation_oldest_waiting_seconds)
+        eval_time: 15m
+        exp_samples:
+          - labels: '{}'
+            value: 720
+
   # Motor de faturamento parado: último sucesso fica para trás.
   - interval: 1m
     input_series:

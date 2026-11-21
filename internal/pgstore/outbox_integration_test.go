@@ -6,6 +6,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ricartefelipe/recorvia/internal/customers"
+	"github.com/ricartefelipe/recorvia/internal/infra/postgres"
 	"github.com/ricartefelipe/recorvia/internal/outbox"
 	"github.com/ricartefelipe/recorvia/internal/pgstore"
 	"github.com/ricartefelipe/recorvia/internal/testsupport/fixture"
@@ -214,11 +217,54 @@ func TestIdempotencyKeyConcurrentBegin(t *testing.T) {
 	if ok, err := env.Store.IdempotencyTakeOver(ctx, k, time.Minute); err != nil || ok {
 		t.Fatalf("assumiu chave com lease válido: %v %v", ok, err)
 	}
-	if err := env.Store.IdempotencyComplete(ctx, k, 200, []byte(`{"ok":true}`), "application/json"); err != nil {
+	if err := env.Store.IdempotencyComplete(ctx, k, 200, []byte(`{"ok":true}`), "application/json", ""); err != nil {
 		t.Fatal(err)
 	}
 	rec, won, err := env.Store.IdempotencyBegin(ctx, k, hash[:], time.Minute, time.Hour)
-	if err != nil || won || !rec.Completed || string(rec.ResponseBody) != `{"ok":true}` {
+	if err != nil || won || !rec.Completed || string(rec.ResponseBody) != `{"ok":true}` || rec.ResponseLocation != "" {
 		t.Fatalf("repetição deveria devolver o resultado registrado: %+v won=%v err=%v", rec, won, err)
+	}
+}
+
+// O resultado registrado guarda o header Location da resposta, que a
+// repetição reproduz; a resposta sem o header fica com o campo vazio, e um
+// endereço acima do limite da coluna não impede o registro do resultado.
+func TestIdempotencyKeyKeepsResponseLocation(t *testing.T) {
+	ctx := context.Background()
+	env := fixture.New(t, 4, now)
+	tn := env.NewTenant(t, "idem-loc")
+	hash := sha256.Sum256([]byte("corpo"))
+	cases := []struct {
+		name, location, want string
+	}{
+		{"com endereço", "/api/v1/reconciliation/runs/0195a3f0-0000-7000-8000-000000000001", "/api/v1/reconciliation/runs/0195a3f0-0000-7000-8000-000000000001"},
+		{"sem endereço", "", ""},
+		{"no limite", "/" + strings.Repeat("a", 2047), "/" + strings.Repeat("a", 2047)},
+		{"acima do limite", "/" + strings.Repeat("a", 2048), ""},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			k := pgstore.IdempotencyKey{TenantID: tn.ID, ClientID: "user:x", Operation: "POST /api/v1/reconciliation/runs",
+				Key: fmt.Sprintf("chave-location-%02d", i)}
+			if _, won, err := env.Store.IdempotencyBegin(ctx, k, hash[:], time.Minute, time.Hour); err != nil || !won {
+				t.Fatalf("registro da chave: won=%v err=%v", won, err)
+			}
+			if err := env.Store.IdempotencyComplete(ctx, k, 200, []byte(`{"ok":true}`), "application/json", tc.location); err != nil {
+				t.Fatal(err)
+			}
+			rec, won, err := env.Store.IdempotencyBegin(ctx, k, hash[:], time.Minute, time.Hour)
+			if err != nil || won || !rec.Completed || rec.ResponseStatus != 200 || rec.ResponseCT != "application/json" ||
+				string(rec.ResponseBody) != `{"ok":true}` || rec.ResponseLocation != tc.want {
+				t.Fatalf("resultado registrado: %+v won=%v err=%v", rec, won, err)
+			}
+		})
+	}
+	// O banco recusa o endereço vazio ou acima do limite, mesmo fora do caso de uso.
+	owner := envOwner(t)
+	for _, loc := range []string{"", strings.Repeat("a", 2049)} {
+		_, err := owner.Exec(ctx, `UPDATE idempotency_keys SET response_location = $2 WHERE tenant_id = $1`, tn.ID, loc)
+		if !postgres.IsNamedCheckViolation(err, "idempotency_keys_response_location_length") {
+			t.Fatalf("constraint do endereço (%d caracteres): %v", len(loc), err)
+		}
 	}
 }

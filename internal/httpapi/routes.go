@@ -140,6 +140,7 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 
 	t(get, "/api/v1/reconciliation/runs", tenancy.PermReconciliationRead, a.listReconciliationRuns)
 	t(post, "/api/v1/reconciliation/runs", tenancy.PermReconciliationRun, a.runReconciliation, idempotent())
+	t(get, "/api/v1/reconciliation/runs/{id}", tenancy.PermReconciliationRead, a.getReconciliationRun)
 	t(get, "/api/v1/reconciliation/discrepancies", tenancy.PermReconciliationRead, a.listDiscrepancies)
 	t(get, "/api/v1/reconciliation/discrepancies/{id}", tenancy.PermReconciliationRead, a.getDiscrepancy)
 	t(post, "/api/v1/reconciliation/discrepancies/{id}/resolve", tenancy.PermReconciliationResolve, a.resolveDiscrepancy)

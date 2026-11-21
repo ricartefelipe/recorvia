@@ -28,7 +28,7 @@ tenant, RabbitMQ para eventos, Redis para sessões, Keycloak para identidade. De
 - [Modelo comercial (hipóteses)](docs/negocio/modelo-comercial.md)
 - [Roteiro demonstrativo](docs/roteiro-demo.md)
 - [Contrato da API (OpenAPI)](api/openapi.yaml)
-- [Guia de desenvolvimento](CLAUDE.md) · [Contribuição (GitFlow)](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
+- [Guia de desenvolvimento](docs/DESENVOLVIMENTO.md) · [Contribuição (GitFlow)](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
 ## Executar localmente (a partir de um checkout limpo)
 

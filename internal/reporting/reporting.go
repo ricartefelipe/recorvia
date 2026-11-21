@@ -86,7 +86,8 @@ var Definitions = map[string]string{
 	"churn":       "Churn de contratos: assinaturas encerradas no mês ÷ assinaturas ativas (fora de trial) no início do mês.",
 	"refunds":     "Reembolsos: valor líquido lançado no ledger no mês na conta de reembolsos (reembolsos efetivados, pela data da confirmação).",
 	"chargebacks": "Chargebacks: valor líquido lançado no ledger no mês na conta de chargebacks (débitos menos créditos). A abertura da disputa " +
-		"retém o valor contestado; a disputa ganha estorna a retenção e a perdida libera a parte reembolsada ou reservada a reembolso, " +
+		"retém o valor contestado; a disputa ganha estorna a retenção e a perdida libera a parte reembolsada ou reservada a reembolso " +
+		"e a parte que era pagamento excedente (crédito do cliente consumido ou valor a recuperar dele), " +
 		"o que reduz o valor do mês em que ocorrem (negativo quando a disputa aberta em mês anterior é ganha). No acumulado " +
 		"dos meses, somado aos reembolsos, nunca passa do valor pago.",
 }

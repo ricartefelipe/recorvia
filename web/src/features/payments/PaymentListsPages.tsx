@@ -175,20 +175,25 @@ export function DisputesPage() {
   const query = useQuery({ queryKey: keys('disputes', 'list'), queryFn: ({ signal }) => paymentsApi.listDisputes(signal) });
   return (
     <Stack gap={0}>
-      <PageHeader title="Disputas e chargebacks" description="Contestações abertas pelo pagador junto ao provedor, inclusive as que chegam tardiamente." />
+      <PageHeader
+        title="Disputas e chargebacks"
+        description="Contestações abertas pelo pagador junto ao provedor, inclusive as que chegam tardiamente. Na disputa perdida de um pagamento com excedente, o crédito gerado pelo excedente é consumido; a parte que o cliente já usou fica como valor a recuperar."
+      />
       <QueryContent query={query}>
         {({ data }) =>
           data.length === 0 ? (
             <EmptyState title="Nenhuma disputa" description="Contestações informadas pelo provedor aparecem aqui." />
           ) : (
-            <Table.ScrollContainer minWidth={720}>
+            <Table.ScrollContainer minWidth={900}>
               <Table aria-label="Disputas">
                 <Table.Thead>
                   <Table.Tr>
                     <Table.Th>Aberta em</Table.Th>
                     <Table.Th>Cobrança</Table.Th>
-                    <Table.Th ta="right">Valor</Table.Th>
+                    <Table.Th ta="right">Valor contestado</Table.Th>
                     <Table.Th>Situação</Table.Th>
+                    <Table.Th ta="right">Crédito consumido</Table.Th>
+                    <Table.Th ta="right">A recuperar do cliente</Table.Th>
                     <Table.Th>Encerrada em</Table.Th>
                   </Table.Tr>
                 </Table.Thead>
@@ -207,6 +212,8 @@ export function DisputesPage() {
                       <Table.Td>
                         <StatusBadge status={d.status} labels={disputeStatusLabels} />
                       </Table.Td>
+                      <Table.Td ta="right">{d.credit_amount > 0 ? <Money value={d.credit_amount} currency={d.currency} /> : '—'}</Table.Td>
+                      <Table.Td ta="right">{d.recovery_amount > 0 ? <Money value={d.recovery_amount} currency={d.currency} /> : '—'}</Table.Td>
                       <Table.Td>{d.closed_at ? <DateTime value={d.closed_at} /> : '—'}</Table.Td>
                     </Table.Tr>
                   ))}

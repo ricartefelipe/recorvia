@@ -312,6 +312,52 @@ func (w *Worker) Jobs() []scheduler.Job {
 	}
 }
 
+// Executor das conciliações registradas (ADR-071). A execução manual pedida
+// pela API fica registrada em reconciliation_runs e é assumida aqui, com
+// lease; a interrompida (worker reiniciado) é retomada pelo mesmo caminho. O
+// executor roda fora do agendador, que executa uma tarefa por vez: uma
+// conciliação longa não atrasa as demais tarefas.
+const (
+	// reconciliationRunners é o número de execuções simultâneas por worker.
+	reconciliationRunners = 2
+	// reconciliationPoll é o intervalo entre as consultas por execuções a
+	// assumir: limita a espera de quem pediu a conciliação manual.
+	reconciliationPoll = 2 * time.Second
+)
+
+// reconciliationPass assume e executa as conciliações registradas que
+// aguardam um worker. Pânico inesperado vira erro, para que o executor
+// continue (o lease da execução em andamento expira e ela é retomada).
+func (w *Worker) reconciliationPass(ctx context.Context) (res payments.PendingRunsResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("pânico no executor de conciliações: %v", r)
+		}
+	}()
+	return w.Core.Payments.RunPendingReconciliations(ctx)
+}
+
+// runReconciliations executa reconciliationPass na partida e a cada sinal de
+// ticks, até ctx terminar. Com o worker encerrando, a execução em andamento é
+// devolvida e retomada por outra instância ou na próxima partida.
+func (w *Worker) runReconciliations(ctx context.Context, ticks <-chan time.Time) {
+	for {
+		res, err := w.reconciliationPass(ctx)
+		if n := res.Completed + res.Failed + res.Released; n > 0 {
+			w.Core.Log.InfoContext(ctx, "conciliações registradas executadas", slog.Int("completed", res.Completed),
+				slog.Int("failed", res.Failed), slog.Int("released", res.Released))
+		}
+		if err != nil && ctx.Err() == nil {
+			w.Core.Log.WarnContext(ctx, "executor de conciliações falhou", slog.String("error", err.Error()))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticks:
+		}
+	}
+}
+
 // Tarefas da régua de cobrança, do envio de notificações e das entregas de
 // webhooks.
 const (
@@ -408,6 +454,11 @@ func (w *Worker) collectMetrics(ctx context.Context) error {
 	for _, s := range []payments.RefundStatus{payments.RefundRequested, payments.RefundUnknown} {
 		w.Metrics.RefundsInProgress.WithLabelValues(string(s)).Set(float64(refunds[string(s)]))
 	}
+	runs, err := w.Core.Store.ReconciliationRunStats(ctx)
+	if err != nil {
+		return err
+	}
+	w.Metrics.SetReconciliationRuns(reconciliationRunStats(runs))
 	up := 0.0
 	if w.Conn.Connected() {
 		up = 1
@@ -456,6 +507,15 @@ func (w *Worker) Run(ctx context.Context) error {
 			log.Error("agendador encerrado com erro", slog.String("error", err.Error()))
 		}
 	})
+	// As conciliações registradas não dependem do RabbitMQ: o executor
+	// parte com o agendador.
+	for range reconciliationRunners {
+		wg.Go(func() {
+			t := time.NewTicker(reconciliationPoll)
+			defer t.Stop()
+			w.runReconciliations(ctx, t.C)
+		})
+	}
 	select {
 	case <-ctx.Done():
 		wg.Wait()

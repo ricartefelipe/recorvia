@@ -26,9 +26,11 @@ type RefundTx interface {
 	// EnsureOperation grava a operação se ainda não houver outra equivalente
 	// (por exemplo, um cancelamento por cobrança); false indica repetição.
 	EnsureOperation(ctx context.Context, op Operation) (bool, error)
-	// RefundCreditBase devolve o excedente do pagamento da cobrança que virou
-	// crédito do cliente e quanto dele já foi devolvido por reembolsos.
-	RefundCreditBase(ctx context.Context, chargeID uuid.UUID) (overpaid, refunded money.Money, err error)
+	// OverpaymentCreditBase devolve o excedente do pagamento da cobrança que
+	// virou crédito do cliente e quanto dele já foi devolvido ao pagador: por
+	// reembolsos (refunds.credit_amount) e por chargebacks de disputas
+	// perdidas (crédito consumido e valor a recuperar).
+	OverpaymentCreditBase(ctx context.Context, chargeID uuid.UUID) (overpaid, returned money.Money, err error)
 	// LockCustomerCredits bloqueia, até o fim da transação, as movimentações
 	// de crédito do cliente (a mesma serialização do consumo do crédito), para
 	// que o saldo lido em seguida não mude antes do consumo.
@@ -50,9 +52,9 @@ type DisputeTx interface {
 type ReconciliationTx interface {
 	ReconciliationRun(ctx context.Context, id uuid.UUID, forUpdate bool) (ReconciliationRun, error)
 	ReconciliationRunByRequestKey(ctx context.Context, key string) (ReconciliationRun, error)
-	// FailStaleReconciliationRuns encerra como falhas as execuções da conta
-	// com lease expirado (processo interrompido).
-	FailStaleReconciliationRuns(ctx context.Context, accountID uuid.UUID, now time.Time) (int, error)
+	// UpdateReconciliationRunLease grava o lease e a contagem de tentativas
+	// da execução em andamento (assumida, retomada ou devolvida).
+	UpdateReconciliationRunLease(ctx context.Context, r ReconciliationRun) error
 	InsertReconciliationRun(ctx context.Context, r ReconciliationRun) error
 	FinishReconciliationRun(ctx context.Context, r ReconciliationRun) error
 	// ChargesForReconciliation lista as cobranças locais da execução: as
