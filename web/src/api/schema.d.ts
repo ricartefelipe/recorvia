@@ -2060,6 +2060,7 @@ export interface components {
             title: string;
             status: number;
             detail?: string;
+            /** @description Código estável do erro. Além dos códigos de cada operação: `route_not_found` (404, caminho inexistente), `method_not_allowed` (405, com `Allow`), `rate_limited` (429, com `Retry-After`), `payload_too_large` (413) e `internal_error` (500). */
             code: string;
             request_id?: string;
             errors?: {
@@ -2382,7 +2383,7 @@ export interface components {
                 /** Format: int64 */
                 amount: number;
                 /** @enum {string} */
-                kind: "grant" | "consumption" | "return" | "overpayment";
+                kind: "grant" | "consumption" | "return" | "overpayment" | "proration" | "usage_correction";
                 /** Format: uuid */
                 invoice_id?: string | null;
                 reason: string;
@@ -7663,7 +7664,13 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": {
+                        received: boolean;
+                        /** @description O evento já havia sido recebido (reentrega do provedor) */
+                        duplicate: boolean;
+                    };
+                };
             };
             401: components["responses"]["Problem"];
             404: components["responses"]["Problem"];

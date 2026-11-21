@@ -335,6 +335,11 @@ func jsonMap(b []byte) (map[string]any, error) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, fmt.Errorf("pgstore: JSON inválido: %w", err)
 	}
+	if m == nil {
+		// Detalhes ausentes gravados como JSON null (mapa nil serializado):
+		// a API expõe sempre um objeto, como declara o contrato.
+		return map[string]any{}, nil
+	}
 	return m, nil
 }
 

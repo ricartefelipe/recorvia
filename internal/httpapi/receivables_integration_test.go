@@ -33,6 +33,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/paysim"
 	"github.com/ricartefelipe/recorvia/internal/reporting"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
+	"github.com/ricartefelipe/recorvia/internal/testsupport/contract"
 	"github.com/ricartefelipe/recorvia/internal/testsupport/fixture"
 )
 
@@ -63,10 +64,10 @@ func newReceivablesAPI(t *testing.T) *recvAPI {
 	// (destino dos webhooks), criado antes do roteador.
 	var router http.Handler
 	ready := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(contract.Wrap(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-ready
 		router.ServeHTTP(w, r)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 	resolver := gateways.NewResolver(2*time.Second, gateways.Factory{Provider: "simulator", Verifier: simulator.Verifier{},
 		Gateway: func(acc payments.ProviderAccount, hc *http.Client) (payments.Gateway, error) {

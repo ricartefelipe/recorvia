@@ -44,6 +44,9 @@ func TestWorkerHealthMuxSeparatesLivenessFromReadiness(t *testing.T) {
 			map[string]string{"postgres": "ok", "rabbitmq": "unavailable"}},
 		{"verificações ausentes não indicam prontidão", WorkerProbes{}, "/readyz", http.StatusServiceUnavailable, "unavailable",
 			map[string]string{"postgres": "unavailable", "rabbitmq": "unavailable"}},
+		{"encerramento em andamento", WorkerProbes{Database: okDB, Broker: func() bool { return true }, ShuttingDown: func() bool { return true }},
+			"/readyz", http.StatusServiceUnavailable, "unavailable", map[string]string{"postgres": "ok", "rabbitmq": "ok", "worker": "shutting_down"}},
+		{"liveness durante o encerramento", WorkerProbes{ShuttingDown: func() bool { return true }}, "/livez", http.StatusOK, "ok", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

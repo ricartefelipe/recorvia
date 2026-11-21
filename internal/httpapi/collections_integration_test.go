@@ -32,6 +32,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/payments/gateways"
 	"github.com/ricartefelipe/recorvia/internal/reporting"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
+	"github.com/ricartefelipe/recorvia/internal/testsupport/contract"
 	"github.com/ricartefelipe/recorvia/internal/testsupport/fixture"
 	"github.com/ricartefelipe/recorvia/internal/webhooks"
 )
@@ -87,7 +88,7 @@ func newDunningAPI(t *testing.T) *dunningAPI {
 		Catalog: env.Catalog, Subscriptions: env.Subscriptions, Billing: env.Billing, Payments: pay,
 		Reporting: reporting.NewService(env.Store.Reporting(), env.Clock), Notifications: d.notif, Collections: d.coll, Webhooks: d.webhooks,
 		Credentials: credentials})
-	srv := httptest.NewServer(router)
+	srv := httptest.NewServer(contract.Wrap(t, router))
 	t.Cleanup(srv.Close)
 	a.srv = srv
 	return d

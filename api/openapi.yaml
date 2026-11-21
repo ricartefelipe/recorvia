@@ -14,7 +14,12 @@ info:
       da organização.
     - Listas paginadas por cursor: `limit` (1 a 100, padrão 25) e `cursor`.
       A ordenação é determinística (desempate por `id`).
-    - Erros no formato RFC 9457 (`application/problem+json`).
+    - Erros no formato RFC 9457 (`application/problem+json`), com `request_id`
+      igual ao header `X-Request-ID` da resposta. Fora das operações deste
+      contrato, caminho inexistente responde 404 `route_not_found` e método
+      não aceito por um caminho existente responde 405 `method_not_allowed`,
+      com os métodos aceitos no header `Allow`. `HEAD` é aceito onde `GET` é
+      e responde como ele, sem corpo.
     - Concorrência otimista: recursos expõem `version` e `ETag`; alterações
       exigem `If-Match: "<version>"` quando indicado.
     - Operações financeiras de criação exigem `Idempotency-Key` (veja o parâmetro
@@ -1774,7 +1779,16 @@ paths:
         required: true
         content: { application/json: { schema: { type: object } } }
       responses:
-        "200": { description: Recebido e persistido }
+        "200":
+          description: Recebido e persistido
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [received, duplicate]
+                properties:
+                  received: { type: boolean }
+                  duplicate: { type: boolean, description: O evento já havia sido recebido (reentrega do provedor) }
         "401": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "413": { $ref: "#/components/responses/Problem" }
@@ -1984,7 +1998,13 @@ components:
         title: { type: string }
         status: { type: integer }
         detail: { type: string }
-        code: { type: string }
+        code:
+          type: string
+          description: >-
+            Código estável do erro. Além dos códigos de cada operação:
+            `route_not_found` (404, caminho inexistente), `method_not_allowed`
+            (405, com `Allow`), `rate_limited` (429, com `Retry-After`),
+            `payload_too_large` (413) e `internal_error` (500).
         request_id: { type: string }
         errors:
           type: array
@@ -2340,7 +2360,7 @@ components:
             properties:
               id: { type: string, format: uuid }
               amount: { type: integer, format: int64 }
-              kind: { type: string, enum: [grant, consumption, return, overpayment] }
+              kind: { type: string, enum: [grant, consumption, return, overpayment, proration, usage_correction] }
               invoice_id: { type: string, format: uuid, nullable: true }
               reason: { type: string }
               created_at: { type: string, format: date-time }

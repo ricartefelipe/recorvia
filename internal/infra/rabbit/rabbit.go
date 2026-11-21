@@ -19,6 +19,8 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+
+	"github.com/ricartefelipe/recorvia/internal/infra/redact"
 )
 
 // Exchange é o exchange topic dos eventos de domínio.
@@ -47,8 +49,7 @@ func NewConn(url string, log *slog.Logger) *Conn { return &Conn{url: url, log: l
 func (c *Conn) Run(ctx context.Context, onConnect func(*amqp.Connection) error) {
 	backoff := time.Second
 	for ctx.Err() == nil {
-		conn, err := amqp.DialConfig(c.url, amqp.Config{Heartbeat: 10 * time.Second, Locale: "en_US",
-			Properties: amqp.Table{"connection_name": "recorvia"}})
+		conn, err := c.dial()
 		if err == nil && onConnect != nil {
 			if err = onConnect(conn); err != nil {
 				err = errors.Join(err, conn.Close())
@@ -88,6 +89,20 @@ func (c *Conn) Run(ctx context.Context, onConnect func(*amqp.Connection) error) 
 			}
 		}
 	}
+}
+
+// dial abre a conexão. As mensagens de erro do amqp091 repetem a URL
+// malformada inteira, com a senha: elas são saneadas antes de chegar ao log.
+func (c *Conn) dial() (*amqp.Connection, error) {
+	conn, err := amqp.DialConfig(c.url, amqp.Config{Heartbeat: 10 * time.Second, Locale: "en_US",
+		Properties: amqp.Table{"connection_name": "recorvia"}})
+	if err == nil {
+		return conn, nil
+	}
+	if _, perr := amqp.ParseURI(c.url); perr != nil {
+		return nil, redact.ParseError("rabbit", c.url, perr)
+	}
+	return nil, redact.Error(err, c.url)
 }
 
 // Connected informa se há conexão ativa (readiness do worker).
@@ -328,12 +343,23 @@ func (c *Consumer) consume(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
+	return c.dispatch(ctx, deliveries)
+}
+
+// dispatch processa as entregas com a concorrência configurada até ctx
+// terminar ou o canal de entregas fechar. No encerramento, a ordem é: fim do
+// consumo confirmado pelo broker (drain), mensagens em andamento concluídas
+// e confirmadas (wg.Wait) e, por último (em consume), o fechamento do
+// canal. A entrega recebida quando o contexto termina, antes de ter vaga
+// para processamento, é devolvida à fila.
+func (c *Consumer) dispatch(ctx context.Context, deliveries <-chan amqp.Delivery) error {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, c.cfg.Concurrency)
 	defer wg.Wait()
 	for {
 		select {
 		case <-ctx.Done():
+			c.drain(deliveries)
 			return nil
 		case d, ok := <-deliveries:
 			if !ok {
@@ -342,12 +368,49 @@ func (c *Consumer) consume(ctx context.Context) (err error) {
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():
+				c.requeue(d)
+				c.drain(deliveries)
 				return nil
 			}
 			wg.Go(func() {
 				defer func() { <-sem }()
 				c.handle(ctx, d)
 			})
+		}
+	}
+}
+
+// requeue devolve à fila uma entrega que não foi processada.
+func (c *Consumer) requeue(d amqp.Delivery) {
+	if err := d.Nack(false, true); err != nil {
+		c.log.Warn("devolução de mensagem não processada falhou; ela volta à fila com o fechamento do canal",
+			slog.String("message_id", d.MessageId), slog.String("error", err.Error()))
+	}
+}
+
+// drainTimeout limita a espera pela confirmação do cancelamento do consumo.
+const drainTimeout = 5 * time.Second
+
+// drain espera o encerramento do canal de entregas, que o amqp091 fecha
+// quando o broker confirma o basic.cancel enviado ao fim do contexto de
+// ConsumeWithContext. Fechar o canal AMQP com o cancelamento ainda em curso
+// faz o broker receber o basic.cancel num canal fechado e encerrar a conexão
+// inteira (CHANNEL_ERROR 504): as mensagens em processamento nos demais
+// consumidores perderiam o ack e seriam reentregues. As entregas recebidas
+// aqui não foram processadas e são devolvidas à fila na hora (nack com
+// requeue), sem esperar o fechamento do canal.
+func (c *Consumer) drain(deliveries <-chan amqp.Delivery) {
+	timeout := time.NewTimer(drainTimeout)
+	defer timeout.Stop()
+	for {
+		select {
+		case d, ok := <-deliveries:
+			if !ok {
+				return
+			}
+			c.requeue(d)
+		case <-timeout.C:
+			return
 		}
 	}
 }
@@ -386,6 +449,7 @@ func (c *Consumer) handle(parent context.Context, d amqp.Delivery) {
 	defer c.observer.InFlight(c.spec.Name, -1)
 	start := time.Now()
 	m := fromDelivery(d)
+	log := c.messageLog(m)
 	// O processamento não é cancelado pelo encerramento do worker: a
 	// mensagem em andamento termina dentro do timeout do handler.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), c.cfg.HandlerTimeout)
@@ -396,16 +460,15 @@ func (c *Consumer) handle(parent context.Context, d amqp.Delivery) {
 	case err == nil:
 	case errors.As(err, new(*PermanentError)):
 		outcome = "dead_letter"
-		err = c.toDLQ(ctx, m, err)
+		err = c.toDLQ(ctx, log, m, err)
 	default:
 		next := m.Attempt + 1
 		if next >= c.spec.MaxAttempts {
 			outcome = "dead_letter"
-			err = c.toDLQ(ctx, m, err)
+			err = c.toDLQ(ctx, log, m, err)
 		} else {
 			outcome = "retry"
-			c.log.Warn("falha no processamento; retentativa agendada", slog.String("message_id", m.ID), slog.Int("attempt", next),
-				slog.String("error", err.Error()))
+			log.Warn("falha no processamento; retentativa agendada", slog.Int("attempt", next), slog.String("error", err.Error()))
 			m.Attempt = next
 			delay := jitter(RetryDelays[min(next, len(RetryDelays))-1])
 			err = c.pub.Publish(ctx, retryQueue(QueueName(c.spec.Name), min(next, len(RetryDelays))), m, delay)
@@ -415,18 +478,30 @@ func (c *Consumer) handle(parent context.Context, d amqp.Delivery) {
 		// Não foi possível agendar retentativa nem DLQ: devolve à fila
 		// (nack com requeue) para não perder a mensagem.
 		outcome = "requeue"
-		c.log.Error("reencaminhamento falhou; mensagem devolvida", slog.String("message_id", m.ID), slog.String("error", err.Error()))
+		log.Error("reencaminhamento falhou; mensagem devolvida", slog.String("error", err.Error()))
 		if nerr := d.Nack(false, true); nerr != nil {
-			c.log.Error("nack falhou", slog.String("error", nerr.Error()))
+			log.Error("nack falhou", slog.String("error", nerr.Error()))
 		}
 	} else if aerr := d.Ack(false); aerr != nil {
-		c.log.Error("ack falhou; a mensagem será reentregue e deduplicada pelo inbox", slog.String("error", aerr.Error()))
+		log.Error("ack falhou; a mensagem será reentregue e deduplicada pelo inbox", slog.String("error", aerr.Error()))
 	}
 	c.observer.Processed(c.spec.Name, outcome, time.Since(start))
 }
 
-func (c *Consumer) toDLQ(ctx context.Context, m Message, cause error) error {
-	c.log.Error("mensagem enviada à DLQ", slog.String("message_id", m.ID), slog.Int("attempt", m.Attempt), slog.String("error", cause.Error()))
+// messageLog é o logger das decisões sobre uma mensagem (retentativa, DLQ,
+// devolução), com a correlação do evento: message_id, tenant_id e o
+// request_id da requisição que o originou. É o único aviso de falha da
+// mensagem; o registro do handler (internal/app) fica em nível debug.
+func (c *Consumer) messageLog(m Message) *slog.Logger {
+	args := []any{slog.String("message_id", m.ID), slog.String("event_type", m.Type), slog.String("tenant_id", m.TenantID)}
+	if rid := m.Headers["request_id"]; rid != "" {
+		args = append(args, slog.String("request_id", rid))
+	}
+	return c.log.With(args...)
+}
+
+func (c *Consumer) toDLQ(ctx context.Context, log *slog.Logger, m Message, cause error) error {
+	log.Error("mensagem enviada à DLQ", slog.Int("attempt", m.Attempt), slog.String("error", cause.Error()))
 	if m.Headers == nil {
 		m.Headers = map[string]string{}
 	}
