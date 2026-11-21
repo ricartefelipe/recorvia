@@ -118,11 +118,19 @@ docker compose exec rabbitmq rabbitmq-diagnostics -q check_running
 - `/livez` responde e `/readyz` não: o processo está vivo e espera a dependência (ADR-054); não é
   necessário reiniciá-lo.
 - Worker sem `conectado ao broker` nos logs: credenciais (`RECORVIA_AMQP_URL`) ou rede.
+- Worker parado: as conciliações pedidas pela API ficam registradas em `running`, sem quem as
+  execute, e a conta do provedor responde `409 reconciliation_running` a novos pedidos. A API
+  exporta essa espera (`recorvia_reconciliation_oldest_waiting_seconds`), e
+  `RecorviaReconciliationRunsWaiting` dispara quando ela passa de 5 minutos e assim permanece por
+  mais 5 (`> 300` com `for: 5m`): o alerta aparece pouco mais de 10 minutos depois do registro da
+  execução, não aos 5. Antes disso, a ausência do alerta não indica que não haja execução presa; a
+  consulta das execuções em `running` está em [Execução parada](conciliacao.md#execucoes-paradas).
 
 ### Ações
 1. Restabelecer a dependência; a API e o worker reconectam sozinhos (backoff de até 30 s no broker).
 2. Processo parado (`/livez` sem resposta): reiniciar o container. No encerramento, o worker
-   aguarda as mensagens em andamento (até 2 minutos).
+   aguarda as mensagens em andamento (até 2 minutos). Na partida, o worker assume sozinho as
+   conciliações que ficaram aguardando.
 3. Fila sem consumidor com o worker conectado: o canal do consumidor caiu; o worker reabre o canal a
    cada 2 segundos. Persistindo, reiniciar o worker e registrar o erro do log.
 

@@ -222,6 +222,22 @@ func constructorCases() []constructorCase {
 		{"chargeback de reembolso recusado", func() (Transaction, bool, error) {
 			return ChargebackHoldRestored(txID, tenantID, refID, brl(300), instant)
 		}, "dispute.hold_restored", "dispute.hold_restored:", "refund", map[AccountCode]int64{Chargebacks: 300, ProviderClearing: -300}},
+		{"chargeback com crédito do excedente consumido", func() (Transaction, bool, error) {
+			return ChargebackCreditReversed(txID, tenantID, "dispute", refID, brl(2500), brl(0), instant)
+		}, "dispute.credit_reversed", "dispute.credit_reversed:dispute:", "dispute", map[AccountCode]int64{CustomerCredits: 2500, Chargebacks: -2500}},
+		{"chargeback com crédito consumido e valor a recuperar", func() (Transaction, bool, error) {
+			return ChargebackCreditReversed(txID, tenantID, "dispute", refID, brl(500), brl(2000), instant)
+		}, "dispute.credit_reversed", "dispute.credit_reversed:dispute:", "dispute",
+			map[AccountCode]int64{CustomerCredits: 500, CustomerRecoverables: 2000, Chargebacks: -2500}},
+		{"chargeback de reembolso recusado com valor a recuperar", func() (Transaction, bool, error) {
+			return ChargebackCreditReversed(txID, tenantID, "refund", refID, brl(0), brl(700), instant)
+		}, "dispute.credit_reversed", "dispute.credit_reversed:refund:", "refund", map[AccountCode]int64{CustomerRecoverables: 700, Chargebacks: -700}},
+		{"recuperação de valor baixado como incobrável", func() (Transaction, bool, error) {
+			return BadDebtRecovered(txID, tenantID, refID, brl(900), instant)
+		}, "invoice.bad_debt_recovered", "invoice.bad_debt_recovered:", "payment", map[AccountCode]int64{AccountsReceivable: 900, BadDebt: -900}},
+		{"taxa do provedor sem saldo de fatura", func() (Transaction, bool, error) {
+			return ProviderFeeCharged(txID, tenantID, refID, brl(199), instant)
+		}, "payment.provider_fee", "payment.provider_fee:", "payment", map[AccountCode]int64{ProviderFees: 199, ProviderClearing: -199}},
 		{"baixa como incobrável", func() (Transaction, bool, error) {
 			return InvoiceWrittenOff(txID, tenantID, refID, brl(6000), instant)
 		}, "invoice.uncollectible", "invoice.uncollectible:", "invoice", map[AccountCode]int64{BadDebt: 6000, AccountsReceivable: -6000}},
@@ -363,6 +379,18 @@ func TestConstructorsRejectInvalidAmounts(t *testing.T) {
 		_, ok, err = RefundSucceeded(txID, tenantID, refID, brl(100), money.New(1, money.Currency{}), instant)
 		if ok || !errors.Is(err, money.ErrCurrencyMismatch) {
 			t.Fatalf("moedas diferentes: ok=%v err=%v", ok, err)
+		}
+	})
+	t.Run("crédito de chargeback negativo ou sem valor", func(t *testing.T) {
+		for _, parts := range [][2]int64{{-1, 100}, {100, -1}} {
+			_, ok, err := ChargebackCreditReversed(txID, tenantID, "dispute", refID, brl(parts[0]), brl(parts[1]), instant)
+			if ok || !errors.Is(err, ErrInvalidEntry) {
+				t.Fatalf("partes %v: ok=%v err=%v", parts, ok, err)
+			}
+		}
+		// Sem excedente a estornar, não há lançamento.
+		if _, ok, err := ChargebackCreditReversed(txID, tenantID, "dispute", refID, brl(0), brl(0), instant); ok || err != nil {
+			t.Fatalf("sem valor: ok=%v err=%v", ok, err)
 		}
 	})
 	t.Run("ajuste negativo sem valor absoluto representável", func(t *testing.T) {

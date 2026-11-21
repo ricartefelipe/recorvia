@@ -283,6 +283,24 @@ groups:
           summary: "Reembolsos recusados pelo provedor na última hora"
           description: "O valor não foi devolvido ao cliente; o reembolso precisa de nova solicitação ou de devolução por outro meio."
           runbook: docs/operacao/runbooks/conciliacao.md#reembolsos-sem-confirmacao
+      # A conciliação manual é registrada pela API e executada pelo worker
+      # (executor fora do agendador, que consulta as execuções a cada 2 s). A
+      # métrica é a espera mais longa entre as execuções sem worker: desde o
+      # registro (aguardando) ou desde o fim do lease (interrompida, à espera
+      # da retomada). O worker a publica pela tarefa metrics.collect e a API,
+      # que registra os pedidos, a lê do banco a cada coleta: todas as
+      # instâncias exportam o mesmo valor e, sem nenhum worker em execução
+      # (séries do worker obsoletas), a série da API sustenta o alerta.
+      - alert: RecorviaReconciliationRunsWaiting
+        expr: max(recorvia_reconciliation_oldest_waiting_seconds) > 300
+        for: 5m
+        labels:
+          severity: warning
+          area: conciliacao
+        annotations:
+          summary: "Execução de conciliação sem worker há mais de 5 minutos"
+          description: "Uma conciliação registrada aguarda ser assumida ou retomada por um worker; enquanto isso, a conta do provedor não aceita outra execução."
+          runbook: docs/operacao/runbooks/conciliacao.md#execucoes-paradas
 
   - name: recorvia-faturamento
     rules:

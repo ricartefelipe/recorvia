@@ -53,13 +53,22 @@ type Metrics struct {
 	// atualizada pela tarefa payments.recover_operations.
 	PaymentOperationsExhausted *prometheus.GaugeVec
 	Discrepancies              *prometheus.GaugeVec
-	Refunds                    *TotalsCounter
-	RefundsInProgress          *prometheus.GaugeVec
-	WebhooksReceived           *prometheus.CounterVec
-	InvoicesIssued             prometheus.Counter
-	DependencyUp               *prometheus.GaugeVec
-	DBServerConnections        prometheus.Gauge
-	DBServerMaxConns           prometheus.Gauge
+	// ReconciliationRuns conta as execuções de conciliação em andamento por
+	// estado: queued (aguardando um worker), executing (lease vigente) e
+	// stalled (lease expirado, aguardando a retomada).
+	ReconciliationRuns *prometheus.GaugeVec
+	// ReconciliationOldestWaiting é a espera mais longa, em segundos, entre
+	// as execuções que aguardam um worker ou a retomada. As duas métricas
+	// são atualizadas por SetReconciliationRuns: no worker, pela tarefa
+	// metrics.collect; na API, a cada coleta (ObserveReconciliationRuns).
+	ReconciliationOldestWaiting prometheus.Gauge
+	Refunds                     *TotalsCounter
+	RefundsInProgress           *prometheus.GaugeVec
+	WebhooksReceived            *prometheus.CounterVec
+	InvoicesIssued              prometheus.Counter
+	DependencyUp                *prometheus.GaugeVec
+	DBServerConnections         prometheus.Gauge
+	DBServerMaxConns            prometheus.Gauge
 	// NotificationsDispatched conta os resultados do envio de notificações
 	// (sent, retried, failed, deferred, skipped, lost_lease).
 	NotificationsDispatched *prometheus.CounterVec
@@ -128,6 +137,10 @@ func NewMetrics(service string) *Metrics {
 			[]string{"status"}),
 		Discrepancies: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_reconciliation_open_discrepancies", Help: "Divergências de conciliação abertas por tipo.", ConstLabels: cl},
 			[]string{"kind"}),
+		ReconciliationRuns: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_reconciliation_runs_in_progress",
+			Help: "Execuções de conciliação em andamento por estado (queued, executing, stalled).", ConstLabels: cl}, []string{"state"}),
+		ReconciliationOldestWaiting: prometheus.NewGauge(prometheus.GaugeOpts{Name: "recorvia_reconciliation_oldest_waiting_seconds",
+			Help: "Espera mais longa entre as execuções de conciliação que aguardam um worker ou a retomada.", ConstLabels: cl}),
 		Refunds: NewTotalsCounter("recorvia_refunds_total", "Reembolsos concluídos por resultado (succeeded, failed), totais mantidos no banco.", "outcome", cl),
 		RefundsInProgress: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "recorvia_refunds_in_progress", Help: "Reembolsos sem conclusão por situação (requested, unknown).", ConstLabels: cl},
 			[]string{"status"}),
@@ -168,7 +181,8 @@ func NewMetrics(service string) *Metrics {
 	}
 	reg.MustRegister(m.HTTPRequests, m.HTTPDuration, m.ConsumerProcessed, m.ConsumerDuration, m.ConsumerInFlight, m.ConsumerConcurrency,
 		m.OutboxPublished, m.OutboxPublishFailed, m.OutboxPending, m.OutboxOldestSeconds, m.JobRuns, m.JobDuration, m.JobLastSuccess,
-		m.JobInterval, m.ChargeFailures, m.PaymentOperations, m.PaymentOperationsExhausted, m.Discrepancies, m.Refunds, m.RefundsInProgress,
+		m.JobInterval, m.ChargeFailures, m.PaymentOperations, m.PaymentOperationsExhausted, m.Discrepancies, m.ReconciliationRuns,
+		m.ReconciliationOldestWaiting, m.Refunds, m.RefundsInProgress,
 		m.WebhooksReceived, m.InvoicesIssued, m.DependencyUp, m.DBServerConnections, m.DBServerMaxConns,
 		m.NotificationsDispatched, m.WebhookDeliveries, m.CollectionActions,
 		m.DeadLettersOpen, m.DeadLettersOldestOpenSeconds, m.NotificationsBacklog, m.NotificationsBacklogOldestSeconds,
@@ -217,6 +231,75 @@ func newDBPoolCollector(service string, stats func() DBPoolStats) *dbPoolCollect
 // stats a cada coleta.
 func (m *Metrics) RegisterDBPool(stats func() DBPoolStats) {
 	m.Registry.MustRegister(newDBPoolCollector(m.service, stats))
+}
+
+// ReconciliationRunStats são as execuções de conciliação em andamento, de
+// todos os tenants, por estado, e a espera mais longa entre as que aguardam
+// um worker (desde o registro) ou a retomada (desde o fim do lease).
+type ReconciliationRunStats struct {
+	Queued               int64
+	Executing            int64
+	Stalled              int64
+	OldestWaitingSeconds float64
+}
+
+// SetReconciliationRuns publica as execuções de conciliação em andamento.
+func (m *Metrics) SetReconciliationRuns(s ReconciliationRunStats) {
+	m.ReconciliationRuns.WithLabelValues("queued").Set(float64(s.Queued))
+	m.ReconciliationRuns.WithLabelValues("executing").Set(float64(s.Executing))
+	m.ReconciliationRuns.WithLabelValues("stalled").Set(float64(s.Stalled))
+	m.ReconciliationOldestWaiting.Set(s.OldestWaitingSeconds)
+}
+
+// reconciliationRunsCollector lê as execuções de conciliação em andamento a
+// cada coleta, para o processo que não tem a tarefa metrics.collect.
+type reconciliationRunsCollector struct {
+	m       *Metrics
+	timeout time.Duration
+	read    func(ctx context.Context) (ReconciliationRunStats, error)
+}
+
+// ObserveReconciliationRuns passa a atualizar, a cada coleta, as métricas das
+// execuções de conciliação em andamento com a leitura de read (prazo
+// timeout). É o modo da API, que registra os pedidos de conciliação e
+// continua em execução quando nenhum worker está: a execução registrada e
+// não assumida aparece nas métricas mesmo sem worker para exportá-las. Se a
+// leitura falhar ou não terminar no prazo, as séries mantêm o último valor
+// lido (a indisponibilidade do banco aparece em recorvia_dependency_up).
+// Deve ser chamada uma vez, antes de expor as métricas.
+func (m *Metrics) ObserveReconciliationRuns(timeout time.Duration, read func(ctx context.Context) (ReconciliationRunStats, error)) {
+	m.Registry.Unregister(m.ReconciliationRuns)
+	m.Registry.Unregister(m.ReconciliationOldestWaiting)
+	m.Registry.MustRegister(&reconciliationRunsCollector{m: m, timeout: timeout, read: read})
+}
+
+func (c *reconciliationRunsCollector) Describe(ch chan<- *prometheus.Desc) {
+	c.m.ReconciliationRuns.Describe(ch)
+	c.m.ReconciliationOldestWaiting.Describe(ch)
+}
+
+func (c *reconciliationRunsCollector) Collect(ch chan<- prometheus.Metric) {
+	type result struct {
+		stats ReconciliationRunStats
+		err   error
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+	done := make(chan result, 1)
+	go func() {
+		s, err := c.read(ctx)
+		done <- result{s, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err == nil {
+			c.m.SetReconciliationRuns(r.stats)
+		}
+	case <-ctx.Done():
+		// A leitura que ignora o cancelamento não trava a coleta.
+	}
+	c.m.ReconciliationRuns.Collect(ch)
+	c.m.ReconciliationOldestWaiting.Collect(ch)
 }
 
 // DependencyCheck verifica uma dependência; nil indica disponível.

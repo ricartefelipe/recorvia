@@ -269,7 +269,7 @@ func TestPrometheusLoadsAlertRulesAndScrapeTargets(t *testing.T) {
 		"RecorviaPaymentOperationsUnknown", "RecorviaReconciliationDiscrepanciesOpen", "RecorviaDBServerConnectionsHigh", "RecorviaWorkerSaturated",
 		"RecorviaBillingCycleStale", "RecorviaScheduledTaskStale", "RecorviaPaymentOperationsExhausted", "RecorviaEmailDeliveryStalled",
 		"RecorviaWebhookDeliveriesFailing", "RecorviaRefundsUnknown", "RecorviaDeadLettersOpen", "RecorviaNotificationsBacklog",
-		"RecorviaWebhookDeliveriesBacklog", "RecorviaWatchdog", "RecorviaAlertDeliveryFailing", "RecorviaAlertNotificationsFailing"} {
+		"RecorviaWebhookDeliveriesBacklog", "RecorviaWatchdog", "RecorviaAlertDeliveryFailing", "RecorviaAlertNotificationsFailing", "RecorviaReconciliationRunsWaiting"} {
 		if !slices.Contains(alerts, required) {
 			t.Errorf("alerta %s não carregado", required)
 		}

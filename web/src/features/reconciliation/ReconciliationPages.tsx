@@ -18,12 +18,13 @@ import {
   Title,
 } from '@mantine/core';
 import { IconInfoCircle, IconPlayerPlay, IconScale } from '@tabler/icons-react';
-import { useQuery } from '@tanstack/react-query';
-import type { ReactNode } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Controller, useForm, useWatch } from 'react-hook-form';
 import { Link, useParams } from 'react-router';
 import { z } from 'zod';
 import { api } from '../../api/client';
+import { ApiError } from '../../api/http';
 import type { DataList, Discrepancy, DiscrepancyKind, ReconciliationRun } from '../../api/types';
 import { AuditEventList } from '../../components/AuditEventList';
 import { DateTime, ShortId, StatusBadge } from '../../components/format';
@@ -39,10 +40,11 @@ import {
   optionsOf,
   providerLabels,
   reconciliationRunStatusLabels,
+  reconciliationRunTriggerLabels,
   resolutionLabels,
 } from '../../lib/labels';
 import { formatMoney } from '../../lib/money';
-import { notifyError, notifySuccess } from '../../lib/notify';
+import { notifyError, notifyInfo, notifySuccess } from '../../lib/notify';
 import { Can, usePermission, useSession, useTenant } from '../../session/SessionContext';
 
 const enc = encodeURIComponent;
@@ -51,6 +53,7 @@ type Resolution = 'accept_provider' | 'keep_local' | 'adjust_ledger' | 'dismiss'
 const reconciliationApi = {
   runs: (signal?: AbortSignal) => api.get<DataList<ReconciliationRun>>('/api/v1/reconciliation/runs', { signal }),
   run: (idempotencyKey: string) => api.post<ReconciliationRun>('/api/v1/reconciliation/runs', undefined, { idempotencyKey }),
+  getRun: (id: string, signal?: AbortSignal) => api.get<ReconciliationRun>(`/api/v1/reconciliation/runs/${enc(id)}`, { signal }),
   discrepancies: (params: { status?: string; kind?: DiscrepancyKind }, signal?: AbortSignal) =>
     api.get<DataList<Discrepancy>>('/api/v1/reconciliation/discrepancies', { query: params, signal }),
   discrepancy: (id: string, signal?: AbortSignal) => api.get<Discrepancy>(`/api/v1/reconciliation/discrepancies/${enc(id)}`, { signal }),
@@ -82,25 +85,91 @@ export function resolutionsFor(kind: DiscrepancyKind, localValue?: Record<string
   });
 }
 
-export function RunsTab() {
+/** Intervalo de consulta enquanto há execução de conciliação em andamento. */
+export const RUN_POLL_INTERVAL_MS = 2_000;
+
+/** Informa o resultado de uma execução encerrada. */
+function announceFinishedRun(r: ReconciliationRun): void {
+  // A falha (por exemplo, do provedor) encerra a execução como "failed", com a causa.
+  if (r.status === 'failed') {
+    notifyError(`A conciliação não foi concluída: ${r.error || 'falha ao consultar o provedor'}.`);
+    return;
+  }
+  const summary = `${r.checked_count} cobrança(s) verificada(s), ${r.discrepancy_count} divergência(s)`;
+  if (r.error) {
+    notifyInfo(`${summary}. ${r.error}`, 'Conciliação concluída com aviso');
+    return;
+  }
+  notifySuccess(`Conciliação concluída: ${summary}.`);
+}
+
+/** Detalhe da execução em andamento: aguardando o processamento ou retomada. */
+function runProgress(r: ReconciliationRun): string | null {
+  if (r.status !== 'running') return null;
+  if (r.attempts === 0) return 'Aguardando o processamento';
+  return r.attempts > 1 ? `Retomada depois de interrupção (tentativa ${r.attempts})` : null;
+}
+
+/**
+ * Execuções de conciliação. O pedido manual é assíncrono: a API registra a
+ * execução e responde de imediato (202); a tela acompanha a execução pedida
+ * por consulta até ela terminar e então informa o resultado. A chave de
+ * idempotência vale só para o pedido: é descartada assim que a API o aceita,
+ * e o acompanhamento não repete o pedido.
+ */
+export function RunsTab({ pollIntervalMs = RUN_POLL_INTERVAL_MS }: { pollIntervalMs?: number }) {
   const { keys } = useTenant();
+  const queryClient = useQueryClient();
   const idempotency = useIdempotencyKey();
-  const query = useQuery({ queryKey: keys('reconciliation', 'runs'), queryFn: ({ signal }) => reconciliationApi.runs(signal) });
+  const [trackedId, setTrackedId] = useState<string | null>(null);
+  const announced = useRef<string | null>(null);
+  const query = useQuery({
+    queryKey: keys('reconciliation', 'runs'),
+    queryFn: ({ signal }) => reconciliationApi.runs(signal),
+    // Execução em andamento (pedida aqui, por outra pessoa ou agendada): a
+    // lista é atualizada até ela terminar.
+    refetchInterval: (q) => (q.state.data?.data.some((r) => r.status === 'running') ? pollIntervalMs : false),
+  });
+  const tracked = useQuery({
+    queryKey: keys('reconciliation', 'run', trackedId),
+    queryFn: ({ signal }) => reconciliationApi.getRun(trackedId ?? '', signal),
+    enabled: trackedId !== null,
+    staleTime: 0,
+    retry: false,
+    refetchInterval: (q) => (q.state.data && q.state.data.status !== 'running' ? false : pollIntervalMs),
+  });
+  const finished = tracked.data && tracked.data.status !== 'running' ? tracked.data : null;
+  // Recusa definitiva da consulta (por exemplo, sem acesso à execução)
+  // encerra o acompanhamento; erro de rede ou 5xx continua tentando.
+  const lost = tracked.error instanceof ApiError && tracked.error.status >= 400 && tracked.error.status < 500;
+  useEffect(() => {
+    if (trackedId === null || announced.current === trackedId) return;
+    if (!finished && !lost) return;
+    announced.current = trackedId;
+    if (finished) announceFinishedRun(finished);
+    else notifyError('Não foi possível acompanhar a execução; confira a situação na lista de execuções.');
+    setTrackedId(null);
+    void Promise.all(
+      (['reconciliation', 'dashboard'] as const).map((domain) => queryClient.invalidateQueries({ queryKey: keys(domain) })),
+    );
+  }, [trackedId, finished, lost, keys, queryClient]);
   const run = useApiMutation<void, ReconciliationRun>({
     mutationFn: () => reconciliationApi.run(idempotency.keyFor({ operation: 'reconciliation-run' })),
     invalidate: ['reconciliation', 'dashboard'],
-    // Recusa da API (por exemplo, outra execução em andamento) encerra a
-    // intenção: o próximo clique usa outra chave e não repete a recusa.
+    // O pedido aceito (ou recusado, por exemplo com outra execução em
+    // andamento) encerra a intenção: o próximo clique usa outra chave.
     idempotency,
     onSuccess: (r) => {
-      // A falha do provedor encerra a execução como "failed", com a causa.
-      if (r.status === 'failed') {
-        notifyError(`A conciliação não foi concluída: ${r.error || 'falha ao consultar o provedor'}.`);
+      if (r.status !== 'running') {
+        announceFinishedRun(r);
         return;
       }
-      notifySuccess(`Conciliação concluída: ${r.checked_count} cobrança(s) verificada(s), ${r.discrepancy_count} divergência(s).`);
+      announced.current = null;
+      setTrackedId(r.id);
+      notifyInfo('A execução foi registrada; o resultado aparece aqui quando ela terminar.', 'Conciliação em andamento');
     },
   });
+  const inProgress = trackedId !== null || (query.data?.data.some((r) => r.status === 'running') ?? false);
   const onRun = async () => {
     const ok = await confirmAction({
       title: 'Executar conciliação agora',
@@ -113,21 +182,28 @@ export function RunsTab() {
     <Stack>
       <Group justify="flex-end">
         <Can permission="reconciliation.run">
-          <Button leftSection={<IconPlayerPlay size={16} />} onClick={() => void onRun()} loading={run.isPending}>
+          <Button leftSection={<IconPlayerPlay size={16} />} onClick={() => void onRun()} loading={run.isPending || trackedId !== null}>
             Executar conciliação agora
           </Button>
         </Can>
       </Group>
+      {inProgress && (
+        <Alert icon={<IconInfoCircle size={18} />} color="blue" role="status" title="Conciliação em andamento">
+          A execução é feita em segundo plano e pode levar alguns minutos em contas grandes. Esta lista é atualizada até ela terminar; você
+          pode sair desta página.
+        </Alert>
+      )}
       <QueryContent query={query}>
         {({ data }) =>
           data.length === 0 ? (
             <EmptyState title="Nenhuma execução" description="As execuções agendadas e manuais aparecem aqui." />
           ) : (
-            <Table.ScrollContainer minWidth={860}>
+            <Table.ScrollContainer minWidth={940}>
               <Table aria-label="Execuções de conciliação">
                 <Table.Thead>
                   <Table.Tr>
                     <Table.Th>Início</Table.Th>
+                    <Table.Th>Origem</Table.Th>
                     <Table.Th>Provedor</Table.Th>
                     <Table.Th>Janela verificada</Table.Th>
                     <Table.Th>Situação</Table.Th>
@@ -142,6 +218,7 @@ export function RunsTab() {
                       <Table.Td>
                         <DateTime value={r.started_at} />
                       </Table.Td>
+                      <Table.Td>{labelOf(reconciliationRunTriggerLabels, r.trigger)}</Table.Td>
                       <Table.Td>{labelOf(providerLabels, r.provider)}</Table.Td>
                       <Table.Td>
                         <Text size="sm">
@@ -150,8 +227,13 @@ export function RunsTab() {
                       </Table.Td>
                       <Table.Td>
                         <StatusBadge status={r.status} labels={reconciliationRunStatusLabels} />
+                        {runProgress(r) && (
+                          <Text size="xs" c="dimmed">
+                            {runProgress(r)}
+                          </Text>
+                        )}
                         {r.error && (
-                          <Text size="xs" c="red">
+                          <Text size="xs" c={r.status === 'failed' ? 'red' : 'orange'}>
                             {r.error}
                           </Text>
                         )}

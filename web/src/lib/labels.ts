@@ -226,6 +226,11 @@ export const reconciliationRunStatusLabels: Labels = {
   failed: 'Falhou',
 };
 
+export const reconciliationRunTriggerLabels: Labels = {
+  manual: 'Manual',
+  scheduled: 'Agendada',
+};
+
 export const templateKeyLabels: Labels = {
   invoice_issued: 'Fatura emitida',
   reminder_before_due: 'Lembrete antes do vencimento',

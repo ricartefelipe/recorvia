@@ -1,9 +1,12 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -428,5 +431,34 @@ func TestQueueStatsFeedGaugesWithDeclaredStates(t *testing.T) {
 	}
 	if notificationFailedWindow != 24*time.Hour {
 		t.Errorf("janela de falhas diferente da documentada no catálogo (24 horas): %v", notificationFailedWindow)
+	}
+}
+
+// Um pânico inesperado no executor de conciliações vira erro registrado no
+// log: o laço continua nas passadas seguintes e termina com o worker.
+func TestReconciliationRunnerSurvivesPanicAndStopsWithWorker(t *testing.T) {
+	var logs bytes.Buffer
+	// Sem serviço de pagamentos, a passada entra em pânico (ponteiro nulo).
+	w := &Worker{Core: &Core{Log: slog.New(slog.NewTextHandler(&logs, nil))}}
+	if _, err := w.reconciliationPass(context.Background()); err == nil || !strings.Contains(err.Error(), "pânico no executor de conciliações") {
+		t.Fatalf("pânico convertido em erro: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ticks := make(chan time.Time)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.runReconciliations(ctx, ticks)
+	}()
+	// Cada sinal só é recebido depois que a passada anterior terminou.
+	ticks <- time.Time{}
+	ticks <- time.Time{}
+	cancel()
+	<-done
+	if n := strings.Count(logs.String(), "executor de conciliações falhou"); n < 2 {
+		t.Fatalf("falhas registradas no log: %d\n%s", n, logs.String())
+	}
+	if reconciliationRunners < 1 || reconciliationPoll <= 0 || reconciliationPoll > 10*time.Second {
+		t.Fatalf("executor mal configurado: %d instâncias a cada %v", reconciliationRunners, reconciliationPoll)
 	}
 }

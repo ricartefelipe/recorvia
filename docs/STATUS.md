@@ -165,25 +165,6 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
   checks da CI e PR, com 0 aprovações obrigatórias. Recomenda-se exigir ao menos uma aprovação quando
   houver outro revisor.
 
-## Ambiente de desenvolvimento observado
-
-- O checkout está em partição vfat sem bit de execução: ferramentas Go são instaladas em
-  `$(go env GOPATH)/bin`; o frontend é desenvolvido em worktree em outro sistema de arquivos ou via
-  Docker.
-- Docker Desktop: bind mounts de `/run/media` aparecem vazios no container; por isso o compose não
-  usa bind mounts (ADR-020).
-- Portas 6379 e 8081 do host já estavam ocupadas por outros projetos: Redis publicado em
-  `127.0.0.1:6380` e API em `127.0.0.1:18081`.
-- O Docker Desktop guarda o disco virtual no disco interno da máquina: builds de imagens e
-  Testcontainers em paralelo chegaram a encher esse disco, e o daemon só voltou a responder depois
-  de reiniciado. As worktrees de desenvolvimento ficam fora do checkout, num sistema de arquivos com
-  permissão de execução.
-- O BuildKit do Docker Desktop chegou a falhar ao obter o token do Docker Hub pelo proxy interno
-  (TLS handshake timeout) com a rede do host funcionando; baixar antes as imagens-base com
-  `docker pull` contornou o problema.
-- Duas suítes de integração em paralelo na mesma máquina expuseram testes com dependência de tempo,
-  corrigidos na release.
-
 ## Ponto de retomada
 
 Versão `0.1.0` publicada (tag `v0.1.0` em `main`). Próximo passo sugerido: validar o adaptador do
