@@ -254,6 +254,37 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # Exercício de recuperação de desastre de ponta a ponta (ADR-064), num
+  # projeto isolado do compose: origem com dados do seed e da API (segredos
+  # cifrados com duas versões de chave), backup com as chaves guardadas à
+  # parte, destruição do banco, restauração num servidor novo, recusa de chave
+  # errada ou ausente, conciliação da janela perdida antes de religar o worker
+  # e conferência de readiness, decifragem dos segredos e ausência de efeitos
+  # duplicados, como em docs/operacao/backup-e-restauracao.md.
+  disaster-recovery:
+    name: disaster-recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Exercício de recuperação de desastre (make dr-check)
+        run: make dr-check
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: disaster-recovery
+          # Relatório com os tempos medidos, manifestos (contagens e somas de
+          # verificação), saídas da conferência do keyring e logs: o dump e
+          # as chaves não são publicados.
+          path: |
+            backups/dr-check/relatorio.md
+            backups/dr-check/*.manifest
+            backups/dr-check/*.efeitos
+            backups/dr-check/*.txt
+            backups/dr-check/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
   # Construção das imagens e análise de vulnerabilidades. Nenhuma imagem é
   # publicada e não há deploy: as imagens existem apenas no runner.
   image-scan:
