@@ -455,8 +455,186 @@ func TestSetAddress(t *testing.T) {
 	if stored := e.st().addresses[c.ID]; stored != got {
 		t.Fatalf("endereço persistido difere do devolvido: %+v", stored)
 	}
-	if a := e.st().audits[0]; a.Action != "customer.address_updated" || len(a.Details) != 0 {
-		t.Fatalf("auditoria inesperada (sem dados do endereço): %+v", a)
+	a := e.st().audits[0]
+	all := []string{"street", "number", "district", "city", "state", "postal_code", "country"}
+	if a.Action != "customer.address_updated" || !slices.Equal(a.Details["fields"].([]string), all) || a.Details["created"] != true {
+		t.Fatalf("auditoria do cadastro do endereço: %+v", a)
+	}
+
+	// Alteração: somente os nomes dos campos que mudaram, nunca os valores.
+	in.City, in.Complement = "Campinas", "Sala 5"
+	if _, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, c.ID, in); err != nil {
+		t.Fatal(err)
+	}
+	a = e.st().audits[1]
+	if !slices.Equal(a.Details["fields"].([]string), []string{"complement", "city"}) || a.Details["created"] != false {
+		t.Fatalf("auditoria da alteração do endereço: %+v", a)
+	}
+	if strings.Contains(fmt.Sprint(a.Details), "Campinas") || strings.Contains(fmt.Sprint(a.Details), "Sala 5") {
+		t.Fatalf("auditoria não pode conter valores do endereço: %+v", a.Details)
+	}
+
+	// Sem mudança (inclusive depois da normalização), nada é gravado nem auditado.
+	upserts := e.store.calls["UpsertAddress"]
+	in.PostalCode = "01310100"
+	if _, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, c.ID, in); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.st().audits) != 2 || e.store.calls["UpsertAddress"] != upserts {
+		t.Fatalf("endereço igual não deveria ser regravado nem auditado: %d auditorias", len(e.st().audits))
+	}
+}
+
+func TestAddressChangedFields(t *testing.T) {
+	base := Address{Street: "Rua A", Number: "1", District: "Centro", City: "São Paulo", State: "SP", PostalCode: "01310100", Country: "BR"}
+	cases := []struct {
+		name string
+		prev *Address
+		next func(Address) Address
+		want []string
+	}{
+		{"sem endereço anterior", nil, func(a Address) Address { return a },
+			[]string{"street", "number", "district", "city", "state", "postal_code", "country"}},
+		{"igual", &base, func(a Address) Address { return a }, nil},
+		{"rua e número", &base, func(a Address) Address { a.Street, a.Number = "Rua B", "2"; return a }, []string{"street", "number"}},
+		{"bairro, UF e CEP", &base, func(a Address) Address { a.District, a.State, a.PostalCode = "Sé", "RJ", "20000000"; return a },
+			[]string{"district", "state", "postal_code"}},
+		{"país", &base, func(a Address) Address { a.Country = "PT"; return a }, []string{"country"}},
+		{"complemento removido", &Address{Street: "Rua A", Number: "1", Complement: "Fundos", District: "Centro", City: "São Paulo",
+			State: "SP", PostalCode: "01310100", Country: "BR"}, func(a Address) Address { return a }, []string{"complement"}},
+	}
+	for _, tc := range cases {
+		if got := tc.next(base).ChangedFields(tc.prev); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: %v, esperado %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestUpdateContact(t *testing.T) {
+	e := newSvcEnv()
+	c := e.seed(t, companyInput())
+	e.seedContacts(c.ID, 2)
+	target := e.st().contacts[c.ID][1]
+	ct, err := e.svc.UpdateContact(context.Background(), e.tenantID, e.actor, c.ID, target.ID,
+		ContactPatch{Name: ptr(" Carla Souza "), Email: ptr("Carla@ACME.com"), Phone: ptr("(11) 99999-0000"), Role: ptr("Financeiro"),
+			ReceivesBillingEmail: ptr(true)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ct.ID != target.ID || ct.CustomerID != c.ID || ct.Name != "Carla Souza" || ct.Email != "carla@acme.com" || ct.Phone != "11999990000" ||
+		ct.Role != "Financeiro" || !ct.ReceivesBillingEmail || !ct.CreatedAt.Equal(target.CreatedAt) {
+		t.Fatalf("contato alterado: %+v", ct)
+	}
+	if stored := e.st().contacts[c.ID]; stored[1] != ct || stored[0].ID == ct.ID || stored[0].Name != "Contato 0" {
+		t.Fatalf("somente o contato alterado deveria mudar: %+v", stored)
+	}
+	a := e.st().audits[0]
+	want := []string{"name", "email", "phone", "role", "receives_billing_email"}
+	if a.Action != "customer.contact_updated" || a.ResourceID != c.ID.String() || a.Details["contact_id"] != ct.ID ||
+		!slices.Equal(a.Details["fields"].([]string), want) {
+		t.Fatalf("auditoria inesperada: %+v", a)
+	}
+	if s := fmt.Sprint(a.Details); strings.Contains(s, "carla") || strings.Contains(s, "Carla") || strings.Contains(s, "99999") {
+		t.Fatalf("auditoria não pode conter dados do contato: %v", s)
+	}
+
+	// Sem mudança, nada é gravado nem auditado.
+	if _, err := e.svc.UpdateContact(context.Background(), e.tenantID, e.actor, c.ID, target.ID,
+		ContactPatch{Name: ptr("Carla Souza"), Email: ptr("carla@acme.com"), Phone: ptr("11999990000"), Role: ptr("Financeiro"),
+			ReceivesBillingEmail: ptr(true)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.st().audits) != 1 || e.store.calls["UpdateContact"] != 1 {
+		t.Fatalf("contato igual não deveria ser regravado: %d auditorias, %d gravações", len(e.st().audits), e.store.calls["UpdateContact"])
+	}
+	// Alteração vazia não muda nada.
+	if got, err := e.svc.UpdateContact(context.Background(), e.tenantID, e.actor, c.ID, target.ID, ContactPatch{}); err != nil || got != ct {
+		t.Fatalf("alteração vazia: %+v %v", got, err)
+	}
+}
+
+// Campos omitidos na alteração mantêm o valor atual: a preferência de e-mail
+// de cobrança desligada (por exemplo, pelo cliente no portal) não volta ao
+// padrão quando só o cargo muda.
+func TestUpdateContactKeepsOmittedFields(t *testing.T) {
+	e := newSvcEnv()
+	c := e.seed(t, companyInput())
+	current := Contact{ID: uuid.New(), CustomerID: c.ID, Name: "Ana", Email: "ana@acme.com", Phone: "11999990000", Role: "Compras",
+		ReceivesBillingEmail: false, CreatedAt: testNow}
+	e.st().contacts[c.ID] = []Contact{current}
+	got, err := e.svc.UpdateContact(context.Background(), e.tenantID, e.actor, c.ID, current.ID, ContactPatch{Role: ptr("Financeiro")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := current
+	want.Role = "Financeiro"
+	if got != want || e.st().contacts[c.ID][0] != want {
+		t.Fatalf("somente o cargo deveria mudar:\n%+v\n%+v", got, want)
+	}
+	if f := e.st().audits[0].Details["fields"].([]string); !slices.Equal(f, []string{"role"}) {
+		t.Fatalf("campos auditados: %v", f)
+	}
+	// Telefone informado vazio remove o telefone.
+	got, err = e.svc.UpdateContact(context.Background(), e.tenantID, e.actor, c.ID, current.ID, ContactPatch{Phone: ptr("")})
+	if err != nil || got.Phone != "" || got.ReceivesBillingEmail || got.Role != "Financeiro" {
+		t.Fatalf("remoção do telefone: %+v %v", got, err)
+	}
+}
+
+func TestUpdateContactRejected(t *testing.T) {
+	valid := ContactPatch{Name: ptr("Nome"), Email: ptr("nome@acme.com")}
+	cases := []struct {
+		name  string
+		setup func(e *svcEnv, c Customer) (customerID, contactID uuid.UUID)
+		in    ContactPatch
+		kind  apperr.Kind
+		code  string
+	}{
+		{"contato inválido", func(e *svcEnv, c Customer) (uuid.UUID, uuid.UUID) { return c.ID, e.st().contacts[c.ID][0].ID },
+			ContactPatch{Email: ptr("sem-arroba")}, apperr.KindInvalid, "invalid_contact"},
+		{"contato inexistente", func(_ *svcEnv, c Customer) (uuid.UUID, uuid.UUID) { return c.ID, uuid.New() }, valid, apperr.KindNotFound,
+			"contact_not_found"},
+		{"contato de outro cliente", func(e *svcEnv, c Customer) (uuid.UUID, uuid.UUID) {
+			other := e.seed(t, companyInput())
+			return other.ID, e.st().contacts[c.ID][0].ID
+		}, valid, apperr.KindNotFound, "contact_not_found"},
+		{"cliente inexistente", func(e *svcEnv, c Customer) (uuid.UUID, uuid.UUID) { return uuid.New(), e.st().contacts[c.ID][0].ID }, valid,
+			apperr.KindNotFound, "customer_not_found"},
+		{"cliente anonimizado", func(e *svcEnv, c Customer) (uuid.UUID, uuid.UUID) {
+			at := testNow
+			c.AnonymizedAt = &at
+			e.st().customers[c.ID] = c
+			return c.ID, e.st().contacts[c.ID][0].ID
+		}, valid, apperr.KindConflict, "customer_anonymized"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newSvcEnv()
+			c := e.seed(t, companyInput())
+			e.seedContacts(c.ID, 1)
+			before := e.st().contacts[c.ID][0]
+			customerID, contactID := tc.setup(e, c)
+			_, err := e.svc.UpdateContact(context.Background(), e.tenantID, e.actor, customerID, contactID, tc.in)
+			assertAppErr(t, err, tc.kind, tc.code)
+			if e.st().contacts[c.ID][0] != before || len(e.st().audits) != 0 {
+				t.Fatal("contato não deveria mudar")
+			}
+		})
+	}
+	for _, op := range []string{"Get", "Contacts", "UpdateContact", "Audit"} {
+		t.Run("falha em "+op, func(t *testing.T) {
+			e := newSvcEnv()
+			c := e.seed(t, companyInput())
+			e.seedContacts(c.ID, 1)
+			before := e.st().contacts[c.ID][0]
+			e.store.fail[op] = errBoom
+			if _, err := e.svc.UpdateContact(context.Background(), e.tenantID, e.actor, c.ID, before.ID, valid); !errors.Is(err, errBoom) {
+				t.Fatalf("esperado erro propagado, obtido %v", err)
+			}
+			if e.st().contacts[c.ID][0] != before {
+				t.Fatal("alteração deveria ser desfeita")
+			}
+		})
 	}
 }
 
@@ -475,7 +653,7 @@ func TestSetAddressRejected(t *testing.T) {
 		_, err := e.svc.SetAddress(context.Background(), e.tenantID, e.actor, uuid.New(), validAddress())
 		assertAppErr(t, err, apperr.KindNotFound, "customer_not_found")
 	})
-	for _, op := range []string{"UpsertAddress", "Audit"} {
+	for _, op := range []string{"Address", "UpsertAddress", "Audit"} {
 		t.Run("falha em "+op, func(t *testing.T) {
 			e := newSvcEnv()
 			c := e.seed(t, companyInput())
