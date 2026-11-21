@@ -47,8 +47,11 @@ var transientConflicts = map[string]int{
 	"refund_outcome_unknown": 60,
 }
 
+// errMethodNotAllowed indica método HTTP não aceito pela rota (405).
+var errMethodNotAllowed = errors.New("método não permitido para a rota")
+
 var titles = map[int]string{
-	400: "Requisição inválida", 401: "Não autenticado", 403: "Acesso negado", 404: "Não encontrado", 409: "Conflito",
+	400: "Requisição inválida", 401: "Não autenticado", 403: "Acesso negado", 404: "Não encontrado", 405: "Método não permitido", 409: "Conflito",
 	412: "Versão desatualizada", 413: "Conteúdo muito grande", 415: "Tipo de conteúdo não suportado", 422: "Dados inválidos",
 	428: "Pré-condição obrigatória", 429: "Muitas requisições", 500: "Erro interno", 503: "Serviço indisponível",
 }
@@ -66,6 +69,8 @@ func (a *API) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		}
 	} else if errors.As(err, &maxErr) {
 		status, p.Code, p.Detail = http.StatusRequestEntityTooLarge, "payload_too_large", "O corpo da requisição excede o limite permitido."
+	} else if errors.Is(err, errMethodNotAllowed) {
+		status, p.Code, p.Detail = http.StatusMethodNotAllowed, "method_not_allowed", "Método não permitido para este recurso."
 	}
 	if p.Code == "if_match_required" {
 		status = http.StatusPreconditionRequired

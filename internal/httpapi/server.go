@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -159,7 +160,12 @@ func (a *API) handle(r chi.Router, method, pattern string, access Access, perm t
 func NewRouter(d Deps) (*API, http.Handler) {
 	a := &API{Deps: d, log: d.Log}
 	r := chi.NewRouter()
-	r.Use(a.requestID, a.recoverer, a.observe, a.securityHeaders, a.cors)
+	// HEAD em rota GET responde como GET, sem corpo (RFC 9110).
+	r.Use(a.requestID, a.recoverer, a.observe, a.securityHeaders, a.cors, middleware.GetHead)
+	// Rota inexistente e método não permitido também respondem no formato
+	// RFC 9457, com o request_id; o 405 informa os métodos aceitos em Allow.
+	r.NotFound(a.routeNotFound)
+	r.MethodNotAllowed(a.methodNotAllowed(r))
 
 	r.Get("/livez", a.livez)
 	r.Get("/readyz", a.readyz)
@@ -198,6 +204,46 @@ func (a *API) registerAuthenticated(r chi.Router) {
 	a.handle(r, http.MethodPost, "/api/v1/organizations", Authenticated, "", a.createOrganization)
 	a.handle(r, http.MethodPost, "/api/v1/invitations/accept", Authenticated, "", a.acceptInvitation)
 	a.handle(r, http.MethodGet, "/api/v1/admin/tenants", PlatformStaff, "", a.adminTenants)
+}
+
+// routeNotFound responde às rotas que não existem.
+func (a *API) routeNotFound(w http.ResponseWriter, r *http.Request) {
+	a.writeError(w, r, apperr.NotFound("route_not_found", "Recurso não encontrado."))
+}
+
+// allowMethods são os métodos testados para compor o header Allow; HEAD
+// acompanha GET (middleware.GetHead).
+var allowMethods = []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions}
+
+// methodNotAllowed responde ao método não aceito por uma rota existente. O
+// chi não repassa ao handler personalizado os métodos da rota: eles são
+// obtidos consultando o próprio roteador. O chi também chega aqui com método
+// desconhecido (PROPFIND) em qualquer caminho: se nenhum método atende o
+// caminho, a rota não existe (404).
+func (a *API) methodNotAllowed(routes chi.Routes) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.RawPath
+		if path == "" {
+			path = r.URL.Path
+		}
+		var allow []string
+		for _, m := range allowMethods {
+			if routes.Match(chi.NewRouteContext(), m, path) {
+				allow = append(allow, m)
+				if m == http.MethodGet {
+					allow = append(allow, http.MethodHead)
+				}
+			}
+		}
+		if len(allow) == 0 {
+			a.routeNotFound(w, r)
+			return
+		}
+		for _, m := range allow {
+			w.Header().Add("Allow", m)
+		}
+		a.writeError(w, r, errMethodNotAllowed)
+	}
 }
 
 var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{8,64}$`)
@@ -286,12 +332,17 @@ func normalizeMethod(m string) string {
 }
 
 // observe registra log de acesso e métricas por padrão de rota (nunca pela
-// URL concreta, que contém identificadores) e pelo método normalizado.
+// URL concreta, que contém identificadores) e pelo método normalizado. O log
+// de acesso leva a correlação completa da requisição: request_id, trace_id e
+// span_id e, quando identificados, tenant_id, user_id e principal.
 func (a *API) observe(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w}
-		next.ServeHTTP(rec, r)
+		// O coletor recebe o tenant, o usuário e o principal identificados
+		// pelas etapas internas, que o log de acesso inclui.
+		ctx := logging.Collect(r.Context())
+		next.ServeHTTP(rec, r.WithContext(ctx))
 		route := "unmatched"
 		if rc := chi.RouteContext(r.Context()); rc != nil && rc.RoutePattern() != "" {
 			route = rc.RoutePattern()
@@ -316,7 +367,7 @@ func (a *API) observe(next http.Handler) http.Handler {
 		if route == "/livez" || route == "/readyz" {
 			return
 		}
-		a.log.InfoContext(r.Context(), "requisição", slog.String("method", method), slog.String("route", route),
+		a.log.InfoContext(logging.Collected(ctx), "requisição", slog.String("method", method), slog.String("route", route),
 			slog.Int("status", rec.status), slog.Duration("duration", d))
 	})
 }

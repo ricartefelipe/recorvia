@@ -184,6 +184,8 @@ export const creditKindLabels: Labels = {
   consumption: 'Uso em fatura',
   return: 'Devolução',
   overpayment: 'Pagamento a maior',
+  proration: 'Proporcional de mudança de plano',
+  usage_correction: 'Correção de consumo',
 };
 
 export const providerLabels: Labels = { simulator: 'Simulador de pagamentos', asaas: 'Asaas' };
