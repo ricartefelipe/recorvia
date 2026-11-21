@@ -1720,3 +1720,94 @@ há estorno da baixa nem operação para o recebimento de valor já baixado como
 `invoice.bad_debt_recovered` das faturas), que exige decisão do financeiro sobre o lançamento compensatório;
 o recebimento da baixa entra direto no disponível liquidado, sem conciliação com extrato bancário; disputas
 perdidas antes da ADR-070 continuam sem valor a recuperar (o crédito permaneceu com o cliente).
+
+## ADR-082 Correlação de logs, encerramento ordenado, saneamento de credenciais e verificações automáticas de contrato e fixação
+**Status:** aceita.
+**Contexto:** uma auditoria dos requisitos não funcionais e do RF-15 encontrou lacunas na infraestrutura
+transversal. Rota inexistente e método não permitido respondiam fora da RFC 9457. Os logs das tarefas
+agendadas não tinham o nome da tarefa, trace_id e span_id não entravam nos logs e o log de acesso saía sem
+tenant e usuário. Não havia teste de ciclo de vida da API e do worker. A redação de segredos era só por nome
+de chave: a URL do Redis malformada, com a senha, chegava inteira ao log de erro. Nada na CI impedia
+regressões na fixação de versões. As respostas HTTP não eram conferidas contra o contrato.
+**Decisão:**
+- **404, 405 e HEAD.** O roteador registra `NotFound` e `MethodNotAllowed` com o `writeError` padrão:
+  `application/problem+json`, códigos `route_not_found` e `method_not_allowed`, `request_id` no corpo
+  (documentados no contrato). O 405 informa em `Allow` os métodos da rota; o chi não os repassa a um
+  handler personalizado, por isso eles são obtidos consultando o roteador (`Routes.Match`). O chi também
+  chama o handler de 405 com método desconhecido (`PROPFIND`) em qualquer caminho: sem nenhum método que
+  atenda o caminho, a resposta é 404. `HEAD` em rota `GET` responde como o `GET`, sem corpo
+  (`middleware.GetHead`), e aparece em `Allow` junto com `GET`.
+- **Correlação.** O handler de log acrescenta `trace_id` e `span_id` do span ativo do contexto. Esses dois
+  nomes nunca são redigidos, embora `span_id` contenha o termo sensível `pan`. O agendador põe `job` no
+  contexto de cada execução: os logs dos casos de uso e o de falha levam o nome da tarefa. O executor de
+  conciliações registradas usa `job=payments.registered_reconciliations`. O log de acesso é escrito pelo
+  middleware externo; para que ele veja o tenant, o usuário e o principal identificados pelas etapas
+  internas, `logging.Collect` cria um coletor no contexto, `WithAttrs` registra nele os atributos dos
+  contextos derivados e `logging.Collected` os devolve. O consumidor registra cada mensagem em debug
+  (`mensagem processada` ou `falha no processamento da mensagem`) com consumer, message_id, tenant_id, o
+  `request_id` gravado na outbox pela requisição de origem (omitido quando o evento não veio de uma
+  requisição) e o span de consumo; a auditoria gravada pelo consumidor recebe o mesmo `request_id`. O aviso
+  de falha é um só: o do consumidor RabbitMQ, que registra a decisão (retentativa, DLQ ou devolução) com
+  message_id, tipo, tenant_id e request_id.
+- **Encerramento.** `app.SignalContext` (SIGINT e SIGTERM) e `app.Serve` foram extraídos de `cmd/api`.
+  `Serve` fecha os listeners, espera as requisições em andamento até `RECORVIA_SHUTDOWN_TIMEOUT` e encerra
+  os servidores em ordem, de modo que as métricas seguem disponíveis durante a drenagem da API. Um segundo
+  sinal durante a drenagem força a saída imediata (código 1). No worker, `app.RunWorker` mantém o servidor
+  de saúde e métricas no ar enquanto o worker drena: `/livez` continua 200 e `/readyz` responde 503 com
+  `worker=shutting_down`; o servidor fecha depois que o worker termina. O teste de ciclo de vida do worker
+  revelou dois defeitos. Primeiro, a conexão com o RabbitMQ fechava junto com o cancelamento, antes de a
+  mensagem em processamento terminar, e o ack falhava (a mensagem era reentregue e só não duplicava efeitos
+  por causa do inbox). Segundo, o consumidor fechava o canal enquanto o `basic.cancel` disparado pelo fim do
+  contexto ainda estava em curso; o broker respondia com `CHANNEL_ERROR` (504) e derrubava a conexão de
+  todos os consumidores. Agora a conexão usa um contexto próprio e fecha só depois que agendador, executor,
+  relay e consumidores terminam. O consumidor espera a confirmação do cancelamento (`drain`, limitada a 5 s)
+  antes de esperar as mensagens em andamento e de fechar o canal; as entregas recebidas nesse intervalo e a
+  que aguardava vaga são devolvidas à fila na hora (nack com requeue). O `stop_grace_period` do worker no
+  compose é de 2 min 30 s: confirmação do cancelamento, mensagem em andamento (timeout de 2 min) e
+  encerramento do servidor de saúde, com folga.
+- **Credenciais em erros.** `internal/infra/redact` mascara a senha de URLs, inclusive as malformadas, que
+  `net/url` não interpreta. Só a autoridade (o trecho antes do primeiro `/`, `?`, `#`, espaço ou aspas) é
+  tratada como credenciais, de modo que `https://api.test:443/v1/x?email=a@b.com` fica intacta. Quando a
+  autoridade tem `:` seguido de algo que não é porta numérica e não tem `@` (`usuario:Ab3/Cd@host`), a senha
+  contém caracteres reservados sem codificação e as credenciais vão até o primeiro `@` seguinte na mesma
+  linha; na dúvida, mascara-se mais do que o necessário. Segredos literais (senha SMTP, senha extraída da
+  URL) são substituídos onde aparecerem apenas com 8 caracteres ou mais, para não corromper trechos comuns
+  (a senha `p` em `amqps://`); os mais curtos são mascarados na posição da URL. `password=` das strings
+  chave=valor também é removido. As mensagens são saneadas na origem: `redisstore.Open`, `postgres.Open`,
+  `rabbit.Conn` (a cada tentativa de conexão), `migrate` (Up, DownTo, Status e Bootstrap, incluindo as senhas
+  dos papéis) e `mailer` (endereço SMTP configurado com credenciais, senha e token `AUTH PLAIN` repetidos
+  pelo servidor). Para falhas de interpretação de URL, `redact.ParseError` não repete o texto da biblioteca
+  quando a URL tem credenciais (o motivo pode conter trechos da senha: `invalid URL escape "%zz"`, ou a parte
+  depois de um `/` lida como porta, `invalid port ":Ab3dEf"`): a mensagem traz a URL mascarada e a
+  orientação de codificar os caracteres reservados; sem credenciais, o motivo é anexado. A causa original
+  não é encadeada. Nos demais casos, a causa continua acessível por `errors.Is/As`. Como defesa adicional, o
+  handler de log mascara, em qualquer chave, senhas de URLs contidas em textos, erros, valores com
+  `String()` e listas de textos.
+- **Fixação de versões.** `tools/pincheck` (`make pin-check`, passo da CI em `go-quality` e teste que roda
+  contra o próprio repositório em `make test`) falha com: action sem SHA de 40 caracteres, dependência do
+  `package.json` sem versão exata, imagem sem tag fixa e `go.mod` sem `toolchain goX.Y.Z`. As imagens são
+  verificadas em todos os arquivos do Compose (qualquer prefixo, como `deploy/backup/dr.compose.yaml`, com
+  `${VAR:-padrão}` resolvido pelo padrão e variável sem padrão recusada), nos Dockerfiles (com `ARG`
+  resolvido e estágios ignorados) e nos Testcontainers (texto ou constante resolvida pelo AST). A tag precisa
+  começar por uma versão com ao menos major.minor (`18.7-alpine`, `v1.33.1`): `latest`, ausente e tags
+  flutuantes como `18`, `18-alpine`, `alpine`, `lts` ou `stable` são recusadas (nenhuma estava em uso). Isso
+  aceita `1.27` em imagens cuja versão tem três componentes, o que fica a cargo da revisão. As imagens
+  `recorvia-*` sem registro são as construídas pelos Dockerfiles do repositório: basta uma tag explícita
+  diferente de `latest` (`local`, `dr`). As imagens continuam fixadas por tag, sem digest. A fixação por
+  digest exigiria consultar os registros para confirmar cada imagem e mudaria a atualização das versões,
+  por isso ficou de fora desta decisão.
+- **Contrato nas respostas.** `internal/testsupport/contract` valida, nos testes de integração HTTP, cada
+  resposta (status, Content-Type, headers declarados e corpo) contra o schema da operação. Um erro 4xx/5xx
+  não declarado na operação é aceito somente como `application/problem+json` válido contra `Problem`, com
+  `status` igual ao da resposta. Sucesso ou redirecionamento não declarados são divergência.
+**Alternativas:** pôr o nome da tarefa no contexto somente em `internal/app` deixaria o log de falha do
+agendador sem correlação de contexto. Repassar o contexto enriquecido ao log de acesso por um valor mutável
+específico do HTTP exigiria que cada middleware de autenticação o atualizasse; o coletor genérico cobre
+qualquer atributo novo. A redação somente no handler de log foi descartada como solução única porque erros
+também são gravados (última falha de notificação) e devolvidos por comandos. Validar o contrato com um
+middleware em produção foi descartado: custo por requisição e falhas que só apareceriam em execução.
+**Consequências:** o log de acesso e os logs das tarefas, consumidores e requisições levam a correlação
+completa. O encerramento do worker passa a confirmar a mensagem em andamento na mesma conexão e a sinalizar
+a drenagem na readiness. As senhas deixam de aparecer nas falhas de configuração e conexão. Regressões de
+fixação e de contrato falham na CI. O validador de contrato só confere as operações exercitadas pelos testes
+de integração.

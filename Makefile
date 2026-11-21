@@ -61,6 +61,10 @@ lint: ## golangci-lint
 vulncheck: ## govulncheck nas dependências alcançáveis
 	govulncheck $(GO_PKGS)
 
+.PHONY: pin-check
+pin-check: ## Falha com versão sem fixação: action sem SHA, package.json sem versão exata, imagem sem tag, go.mod sem toolchain (RNF-10)
+	$(GO) run ./tools/pincheck
+
 .PHONY: secrets-scan
 secrets-scan: ## Detecção de segredos no repositório (gitleaks)
 	gitleaks detect --source . --no-banner --redact --config .gitleaks.toml
