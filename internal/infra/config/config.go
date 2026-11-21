@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -72,6 +73,13 @@ type Config struct {
 
 	EncryptionKeys      map[string][]byte
 	EncryptionActiveKey string
+	// EncryptionStartupCheck define o que a API e o worker fazem, ao iniciar,
+	// quando o keyring não decifra os dados cifrados em uso no banco.
+	EncryptionStartupCheck KeyringCheckMode
+	// EncryptionLostKeys lista os identificadores de chaves declaradas
+	// perdidas (RECORVIA_ENCRYPTION_LOST_KEYS): os dados cifrados com elas
+	// não são recuperáveis e deixam de impedir a inicialização.
+	EncryptionLostKeys []string
 
 	SMTPAddr     string
 	SMTPFrom     string
@@ -152,6 +160,22 @@ func (r Retention) limits() []retentionLimit {
 	}
 }
 
+// KeyringCheckMode é o modo da conferência do keyring na inicialização
+// (RECORVIA_ENCRYPTION_STARTUP_CHECK).
+type KeyringCheckMode string
+
+// Modos da conferência do keyring na inicialização.
+const (
+	// KeyringCheckEnforce impede a inicialização com keyring incompatível.
+	KeyringCheckEnforce KeyringCheckMode = "enforce"
+	// KeyringCheckWarn registra o problema e inicia assim mesmo, inclusive
+	// quando a conferência não pôde ser concluída (uso: emergência; para uma
+	// chave perdida, declare-a em RECORVIA_ENCRYPTION_LOST_KEYS).
+	KeyringCheckWarn KeyringCheckMode = "warn"
+	// KeyringCheckOff não confere.
+	KeyringCheckOff KeyringCheckMode = "off"
+)
+
 // Getenv abstrai a leitura do ambiente para testes.
 type Getenv func(string) string
 
@@ -214,43 +238,44 @@ func Load(get Getenv) (*Config, error) {
 	}
 	l := &loader{get: get}
 	c := &Config{
-		Env:                 Environment(l.str("RECORVIA_ENV", string(Development))),
-		LogLevel:            l.str("RECORVIA_LOG_LEVEL", "info"),
-		HTTPAddr:            l.str("RECORVIA_HTTP_ADDR", ":8081"),
-		MetricsAddr:         l.str("RECORVIA_METRICS_ADDR", ":9091"),
-		ShutdownTimeout:     l.dur("RECORVIA_SHUTDOWN_TIMEOUT", 20*time.Second),
-		DatabaseURL:         l.str("RECORVIA_DATABASE_URL", ""),
-		DatabaseMaxConns:    int32(l.intv("RECORVIA_DATABASE_MAX_CONNS", 20)),
-		MigrationsDBURL:     l.str("RECORVIA_MIGRATIONS_DATABASE_URL", ""),
-		RedisURL:            l.str("RECORVIA_REDIS_URL", ""),
-		AMQPURL:             l.str("RECORVIA_AMQP_URL", ""),
-		WorkerConcurrency:   l.intv("RECORVIA_WORKER_CONCURRENCY", 8),
-		WorkerPrefetch:      l.intv("RECORVIA_WORKER_PREFETCH", 16),
-		WorkerID:            l.str("RECORVIA_WORKER_ID", hostnameOr("worker")),
-		OutboxBatchSize:     l.intv("RECORVIA_OUTBOX_BATCH_SIZE", 100),
-		OutboxLease:         l.dur("RECORVIA_OUTBOX_LEASE", 30*time.Second),
-		SchedulerTick:       l.dur("RECORVIA_SCHEDULER_TICK", 5*time.Second),
-		ConsumerMaxAttempts: l.intv("RECORVIA_CONSUMER_MAX_ATTEMPTS", 5),
-		OIDCIssuer:          l.str("RECORVIA_OIDC_ISSUER", ""),
-		OIDCDiscoveryURL:    l.str("RECORVIA_OIDC_DISCOVERY_URL", ""),
-		OIDCClientID:        l.str("RECORVIA_OIDC_CLIENT_ID", ""),
-		OIDCClientSecret:    l.str("RECORVIA_OIDC_CLIENT_SECRET", ""),
-		OIDCRedirectURL:     l.str("RECORVIA_OIDC_REDIRECT_URL", ""),
-		SessionTTL:          l.dur("RECORVIA_SESSION_TTL", 12*time.Hour),
-		SessionIdleTTL:      l.dur("RECORVIA_SESSION_IDLE_TTL", 2*time.Hour),
-		CookieSecure:        l.boolv("RECORVIA_COOKIE_SECURE", true),
-		CookieName:          l.str("RECORVIA_COOKIE_NAME", "__Host-recorvia_session"),
-		EncryptionActiveKey: l.str("RECORVIA_ENCRYPTION_ACTIVE_KEY", ""),
-		SMTPAddr:            l.str("RECORVIA_SMTP_ADDR", ""),
-		SMTPFrom:            l.str("RECORVIA_SMTP_FROM", ""),
-		SMTPUsername:        l.str("RECORVIA_SMTP_USERNAME", ""),
-		SMTPPassword:        l.str("RECORVIA_SMTP_PASSWORD", ""),
-		SMTPTLS:             l.str("RECORVIA_SMTP_TLS", "starttls"),
-		SMTPTimeout:         l.dur("RECORVIA_SMTP_TIMEOUT", 15*time.Second),
-		PaySimURL:           l.str("RECORVIA_PAYSIM_URL", ""),
-		PaySimPublicURL:     l.str("RECORVIA_PAYSIM_PUBLIC_URL", ""),
-		WebhookPublicURL:    l.str("RECORVIA_WEBHOOK_PUBLIC_URL", ""),
-		RateLimitPerMinute:  l.intv("RECORVIA_RATE_LIMIT_PER_MINUTE", 600),
+		Env:                    Environment(l.str("RECORVIA_ENV", string(Development))),
+		LogLevel:               l.str("RECORVIA_LOG_LEVEL", "info"),
+		HTTPAddr:               l.str("RECORVIA_HTTP_ADDR", ":8081"),
+		MetricsAddr:            l.str("RECORVIA_METRICS_ADDR", ":9091"),
+		ShutdownTimeout:        l.dur("RECORVIA_SHUTDOWN_TIMEOUT", 20*time.Second),
+		DatabaseURL:            l.str("RECORVIA_DATABASE_URL", ""),
+		DatabaseMaxConns:       int32(l.intv("RECORVIA_DATABASE_MAX_CONNS", 20)),
+		MigrationsDBURL:        l.str("RECORVIA_MIGRATIONS_DATABASE_URL", ""),
+		RedisURL:               l.str("RECORVIA_REDIS_URL", ""),
+		AMQPURL:                l.str("RECORVIA_AMQP_URL", ""),
+		WorkerConcurrency:      l.intv("RECORVIA_WORKER_CONCURRENCY", 8),
+		WorkerPrefetch:         l.intv("RECORVIA_WORKER_PREFETCH", 16),
+		WorkerID:               l.str("RECORVIA_WORKER_ID", hostnameOr("worker")),
+		OutboxBatchSize:        l.intv("RECORVIA_OUTBOX_BATCH_SIZE", 100),
+		OutboxLease:            l.dur("RECORVIA_OUTBOX_LEASE", 30*time.Second),
+		SchedulerTick:          l.dur("RECORVIA_SCHEDULER_TICK", 5*time.Second),
+		ConsumerMaxAttempts:    l.intv("RECORVIA_CONSUMER_MAX_ATTEMPTS", 5),
+		OIDCIssuer:             l.str("RECORVIA_OIDC_ISSUER", ""),
+		OIDCDiscoveryURL:       l.str("RECORVIA_OIDC_DISCOVERY_URL", ""),
+		OIDCClientID:           l.str("RECORVIA_OIDC_CLIENT_ID", ""),
+		OIDCClientSecret:       l.str("RECORVIA_OIDC_CLIENT_SECRET", ""),
+		OIDCRedirectURL:        l.str("RECORVIA_OIDC_REDIRECT_URL", ""),
+		SessionTTL:             l.dur("RECORVIA_SESSION_TTL", 12*time.Hour),
+		SessionIdleTTL:         l.dur("RECORVIA_SESSION_IDLE_TTL", 2*time.Hour),
+		CookieSecure:           l.boolv("RECORVIA_COOKIE_SECURE", true),
+		CookieName:             l.str("RECORVIA_COOKIE_NAME", "__Host-recorvia_session"),
+		EncryptionActiveKey:    l.str("RECORVIA_ENCRYPTION_ACTIVE_KEY", ""),
+		EncryptionStartupCheck: KeyringCheckMode(l.str("RECORVIA_ENCRYPTION_STARTUP_CHECK", string(KeyringCheckEnforce))),
+		SMTPAddr:               l.str("RECORVIA_SMTP_ADDR", ""),
+		SMTPFrom:               l.str("RECORVIA_SMTP_FROM", ""),
+		SMTPUsername:           l.str("RECORVIA_SMTP_USERNAME", ""),
+		SMTPPassword:           l.str("RECORVIA_SMTP_PASSWORD", ""),
+		SMTPTLS:                l.str("RECORVIA_SMTP_TLS", "starttls"),
+		SMTPTimeout:            l.dur("RECORVIA_SMTP_TIMEOUT", 15*time.Second),
+		PaySimURL:              l.str("RECORVIA_PAYSIM_URL", ""),
+		PaySimPublicURL:        l.str("RECORVIA_PAYSIM_PUBLIC_URL", ""),
+		WebhookPublicURL:       l.str("RECORVIA_WEBHOOK_PUBLIC_URL", ""),
+		RateLimitPerMinute:     l.intv("RECORVIA_RATE_LIMIT_PER_MINUTE", 600),
 
 		PortalLinkTTL:        l.dur("RECORVIA_PORTAL_LINK_TTL", 72*time.Hour),
 		PortalSessionTTL:     l.dur("RECORVIA_PORTAL_SESSION_TTL", 2*time.Hour),
@@ -279,6 +304,11 @@ func Load(get Getenv) (*Config, error) {
 	default:
 		l.errs = append(l.errs, fmt.Errorf("RECORVIA_ENV: valor desconhecido %q", c.Env))
 	}
+	switch c.EncryptionStartupCheck {
+	case KeyringCheckEnforce, KeyringCheckWarn, KeyringCheckOff:
+	default:
+		l.errs = append(l.errs, fmt.Errorf("RECORVIA_ENCRYPTION_STARTUP_CHECK: use enforce, warn ou off (recebido %q)", c.EncryptionStartupCheck))
+	}
 	if raw := l.str("RECORVIA_PUBLIC_URL", "http://localhost:8080"); raw != "" {
 		u, err := url.Parse(raw)
 		if err != nil || u.Scheme == "" || u.Host == "" {
@@ -293,6 +323,7 @@ func Load(get Getenv) (*Config, error) {
 		}
 	}
 	c.EncryptionKeys = parseKeys(l, l.str("RECORVIA_ENCRYPTION_KEYS", ""))
+	c.EncryptionLostKeys = parseLostKeys(l, l.str("RECORVIA_ENCRYPTION_LOST_KEYS", ""), c.EncryptionKeys)
 	for _, p := range strings.Split(l.str("RECORVIA_WEBHOOK_ALLOWED_PRIVATE_CIDRS", ""), ",") {
 		if p = strings.TrimSpace(p); p == "" {
 			continue
@@ -342,6 +373,31 @@ func parseKeys(l *loader, raw string) map[string][]byte {
 	return keys
 }
 
+// parseLostKeys lê a lista de identificadores de chaves declaradas perdidas:
+// só o identificador (nunca o valor), e nenhum que esteja configurado em
+// RECORVIA_ENCRYPTION_KEYS.
+func parseLostKeys(l *loader, raw string, keys map[string][]byte) []string {
+	var lost []string
+	for _, id := range strings.Split(raw, ",") {
+		id = strings.TrimSpace(id)
+		switch {
+		case id == "" || slices.Contains(lost, id):
+			continue
+		case strings.Contains(id, ":"):
+			l.errs = append(l.errs, errors.New("RECORVIA_ENCRYPTION_LOST_KEYS: informe somente os identificadores, separados por vírgula"))
+			continue
+		}
+		if _, ok := keys[id]; ok {
+			l.errs = append(l.errs, fmt.Errorf("RECORVIA_ENCRYPTION_LOST_KEYS: a chave %q está em RECORVIA_ENCRYPTION_KEYS; "+
+				"uma chave configurada não pode ser declarada perdida", id))
+			continue
+		}
+		lost = append(lost, id)
+	}
+	slices.Sort(lost)
+	return lost
+}
+
 func hostnameOr(def string) string {
 	if h, err := os.Hostname(); err == nil && h != "" {
 		return h
@@ -374,6 +430,10 @@ func (c *Config) validateCommon() []error {
 	}
 	return append(errs, c.validateRetention()...)
 }
+
+// ValidateStore valida o que os comandos que usam somente o banco e o
+// keyring exigem (por exemplo, a conferência do keyring).
+func (c *Config) ValidateStore() error { return errors.Join(c.validateCommon()...) }
 
 // ValidateAPI valida o que a API utiliza.
 func (c *Config) ValidateAPI() error {

@@ -50,7 +50,13 @@ type Env struct {
 // New cria o ambiente. maxConns controla o tamanho do pool.
 func New(t testing.TB, maxConns int32, now time.Time) *Env {
 	t.Helper()
-	db := pgtest.AppDB(t, maxConns)
+	return NewOn(t, pgtest.AppDB(t, maxConns), now)
+}
+
+// NewOn cria o ambiente sobre um pool já aberto (por exemplo, o de um banco
+// criado por pgtest.Isolated).
+func NewOn(t testing.TB, db *postgres.DB, now time.Time) *Env {
+	t.Helper()
 	kr, err := secrets.NewKeyring(map[string][]byte{"t1": bytes.Repeat([]byte{7}, 32)}, "t1")
 	if err != nil {
 		t.Fatal(err)

@@ -144,6 +144,9 @@ func Open(ctx context.Context, cfg *config.Config, log *slog.Logger, appName str
 	if err != nil {
 		return nil, err
 	}
+	if keyring, err = keyring.WithLostKeys(cfg.EncryptionLostKeys); err != nil {
+		return nil, err
+	}
 	db, err := postgres.Open(ctx, cfg.DatabaseURL, postgres.Options{MaxConns: cfg.DatabaseMaxConns, ApplicationName: appName,
 		Tracer: otelpgx.NewTracer()})
 	if err != nil {
