@@ -193,6 +193,7 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
+        /** @description Altera o perfil da organização. `address`, quando enviado, substitui o endereço da organização (no formato do endereço de cobrança do cliente); ausente, mantém o atual (o endereço não é removido). Cada alteração registra `organization.updated` na auditoria; a mudança do endereço registra também `organization.address_updated`, com os nomes dos campos alterados (`fields`) e se o endereço foi cadastrado agora (`created`), nunca os valores. O endereço é copiado para o emitente de cada fatura emitida depois da alteração; faturas já emitidas mantêm o emitente gravado na emissão. */
         patch: operations["updateOrganization"];
         trace?: never;
     };
@@ -1134,7 +1135,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description Documento comercial da fatura emitida, em HTML imprimível sem scripts. Traz o aviso de que a fatura comercial não é documento fiscal, o emitente (nome, razão social e CNPJ da organização gravados na emissão; faturas emitidas antes da migration 00019 usam os dados atuais), o cliente com documento e endereço de cobrança copiados na emissão, emissão, vencimento, condições de pagamento, período de faturamento, itens com período, e o quadro de totais que fecha com o saldo: subtotal, descontos, total, créditos aplicados, notas de crédito, pago, valor baixado e saldo. Na fatura cancelada, o documento informa o cancelamento e o quadro mostra o crédito devolvido ao cliente e o valor cancelado, com saldo zero. */
+        /** @description Documento comercial da fatura emitida, em HTML imprimível sem scripts. Traz o aviso de que a fatura comercial não é documento fiscal, o emitente (nome, razão social, CNPJ e endereço da organização gravados na emissão; faturas emitidas antes da migration 00019 usam o nome, a razão social e o CNPJ atuais, e as emitidas antes da migration 00025 ou sem endereço cadastrado saem sem o endereço do emitente), o cliente com documento e endereço de cobrança copiados na emissão, emissão, vencimento, condições de pagamento, período de faturamento, itens com período, e o quadro de totais que fecha com o saldo: subtotal, descontos, total, créditos aplicados, notas de crédito, pago, valor baixado e saldo. Na fatura cancelada, o documento informa o cancelamento e o quadro mostra o crédito devolvido ao cliente e o valor cancelado, com saldo zero. */
         get: operations["getInvoiceDocument"];
         put?: never;
         post?: never;
@@ -2116,6 +2117,7 @@ export interface components {
             timezone?: string;
             invoice_prefix?: string;
             payment_terms_days?: number;
+            address?: components["schemas"]["Address"];
         };
         Organization: {
             /** Format: uuid */
@@ -2128,6 +2130,8 @@ export interface components {
             currency: string;
             invoice_prefix: string;
             payment_terms_days: number;
+            /** @description Endereço da organização, copiado para o emitente das faturas emitidas; nulo enquanto não cadastrado. */
+            address: components["schemas"]["Address"] | null;
             /** @enum {string} */
             status: "active" | "suspended" | "closed";
             /** Format: date-time */
@@ -3615,6 +3619,15 @@ export interface components {
                     /** @description Encerramento no provedor (client_id e post_logout_redirect_uri), sem tokens */
                     redirect_url: string;
                 };
+            };
+        };
+        /** @description Provedor de pagamento inacessível nesta requisição (RFC 9457): as credenciais da conta do provedor não puderam ser decifradas com as chaves de cifragem configuradas (`provider_credentials_unreadable`; confira o keyring da instalação ou configure o provedor novamente) ou, na resolução de divergência que consulta o provedor, ele não respondeu (`provider_unavailable`). Nada é gravado; repita depois de corrigir a causa. */
+        ProviderUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/problem+json": components["schemas"]["Problem"];
             };
         };
         /** @description Acesso negado (RFC 9457). A operação exige a sessão de um usuário: credenciais de API recebem o código `user_session_required`, mesmo com escopos; outros códigos indicam permissão insuficiente. */
@@ -6235,6 +6248,7 @@ export interface operations {
                 };
             };
             409: components["responses"]["Problem"];
+            503: components["responses"]["ProviderUnavailable"];
         };
     };
     runBilling: {
@@ -6600,6 +6614,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            503: components["responses"]["ProviderUnavailable"];
         };
     };
     listPaymentProviders: {
@@ -6791,6 +6806,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            503: components["responses"]["ProviderUnavailable"];
         };
     };
     getReconciliationRun: {
@@ -6906,6 +6922,7 @@ export interface operations {
                 };
             };
             409: components["responses"]["Problem"];
+            503: components["responses"]["ProviderUnavailable"];
         };
     };
     listCollectionPolicies: {
@@ -7675,6 +7692,7 @@ export interface operations {
             401: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
             413: components["responses"]["Problem"];
+            503: components["responses"]["ProviderUnavailable"];
         };
     };
     portalAccess: {

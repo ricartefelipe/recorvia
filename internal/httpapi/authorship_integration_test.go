@@ -13,6 +13,7 @@ import (
 	"github.com/ricartefelipe/recorvia/internal/outbox"
 	"github.com/ricartefelipe/recorvia/internal/pgstore"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
+	"github.com/ricartefelipe/recorvia/internal/testsupport/contract"
 	"github.com/ricartefelipe/recorvia/internal/testsupport/pgtest"
 )
 
@@ -269,6 +270,10 @@ END $$`); err != nil {
 	}
 
 	path := "/api/v1/dead-letters/" + id + "/discard"
+	// A falha é provocada de propósito no banco: o 500 internal_error não é
+	// declarado no contrato e fica como exceção explícita desta requisição
+	// (ADR-084).
+	contract.AllowUndeclared(t, http.MethodPost, path, http.StatusInternalServerError)
 	if r := a.raw(http.MethodPost, path, map[string]any{"reason": "Evento obsoleto"}, bearer(secret)); r.status != http.StatusInternalServerError {
 		t.Fatalf("descarte com auditoria indisponível: %d %v", r.status, r.body)
 	}
