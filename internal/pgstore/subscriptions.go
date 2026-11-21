@@ -175,7 +175,7 @@ func (tx subscriptionsTx) List(ctx context.Context, f subscriptions.ListFilter) 
 	}
 	limit := pageLimit(f.Limit)
 	rows, err := tx.q.ListSubscriptions(ctx, dbgen.ListSubscriptionsParams{TenantID: tx.tenantID, Status: strPtr(string(f.Status)),
-		CustomerID: f.CustomerID, CursorTs: cts, CursorID: cid, RowLimit: int32(limit + 1)})
+		OnlyInForce: f.InForce, CustomerID: f.CustomerID, CursorTs: cts, CursorID: cid, RowLimit: int32(limit + 1)})
 	if err != nil {
 		return subscriptions.Page{}, err
 	}

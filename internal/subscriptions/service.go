@@ -19,7 +19,10 @@ import (
 
 // ListFilter define filtros permitidos.
 type ListFilter struct {
-	Status     Status
+	Status Status
+	// InForce restringe às assinaturas em trial, ativas ou em atraso, as
+	// mesmas das assinaturas ativas do painel.
+	InForce    bool
 	CustomerID *uuid.UUID
 	Limit      int
 	Cursor     string

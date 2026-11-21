@@ -473,7 +473,7 @@ func (tx billingTx) List(ctx context.Context, f billing.ListFilter) (billing.Pag
 	}
 	limit := pageLimit(f.Limit)
 	rows, err := tx.q.ListInvoices(ctx, dbgen.ListInvoicesParams{TenantID: tx.tenantID, Status: strPtr(string(f.Status)), CustomerID: f.CustomerID,
-		SubscriptionID: f.SubscriptionID, IssuedFrom: f.IssuedFrom, IssuedTo: f.IssuedTo, OnlyOverdue: f.Overdue, Now: &f.Now,
+		SubscriptionID: f.SubscriptionID, IssuedFrom: f.IssuedFrom, IssuedTo: f.IssuedTo, OnlyOverdue: f.Overdue, OnlyOpenBalance: f.OpenBalance, Now: &f.Now,
 		CursorTs: cts, CursorID: cid, RowLimit: int32(limit + 1)})
 	if err != nil {
 		return billing.Page{}, err
