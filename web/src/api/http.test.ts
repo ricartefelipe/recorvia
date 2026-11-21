@@ -61,6 +61,16 @@ describe('cliente HTTP', () => {
     expect(await req.json()).toEqual({ amount: 1000, method: 'pix' });
   });
 
+  it('o corpo vai em JSON canônico: a mesma chave acompanha os mesmos bytes em qualquer ordem de inserção', async () => {
+    const { client } = setup();
+    const requests = capture('post', '/api/v1/subscriptions', () => HttpResponse.json({ id: 's1' }, { status: 201 }));
+    await client.post('/api/v1/subscriptions', { quantity: 1, plan_id: 'p1', customer_id: 'c1' }, { idempotencyKey: 'chave-0002' });
+    await client.post('/api/v1/subscriptions', { customer_id: 'c1', plan_id: 'p1', quantity: 1 }, { idempotencyKey: 'chave-0002' });
+    const [first, second] = await Promise.all(requests.map((r) => r.text()));
+    expect(first).toBe('{"customer_id":"c1","plan_id":"p1","quantity":1}');
+    expect(second).toBe(first);
+  });
+
   it('omite o header de organização quando solicitado (endpoints da sessão)', async () => {
     const { client } = setup();
     const requests = capture('put', '/api/v1/session/tenant', () => HttpResponse.json({}));

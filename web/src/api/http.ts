@@ -1,3 +1,4 @@
+import { canonicalJSON } from '../lib/json';
 import type { components } from './schema';
 
 export type Problem = components['schemas']['Problem'];
@@ -155,7 +156,8 @@ export function createHttpClient(config: HttpClientConfig): HttpClient {
       response = await fetchImpl(url, {
         method,
         headers,
-        body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+        // JSON canônico: a mesma Idempotency-Key sempre com os mesmos bytes.
+        body: options.body !== undefined ? canonicalJSON(options.body) : undefined,
         credentials: 'same-origin',
         signal: options.signal,
       });

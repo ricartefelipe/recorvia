@@ -732,6 +732,7 @@ export interface paths {
         };
         get: operations["listSubscriptions"];
         put?: never;
+        /** @description Cria a assinatura com a versão de preço vigente do plano. Exige `Idempotency-Key`: a repetição devolve o resultado registrado (sem o header `ETag`; a versão está no corpo) e, depois de um processamento interrompido ou da validade do registro (24 h), a chave de negócio derivada da chave devolve a mesma assinatura em vez de criar outra. A mesma chave com outro conteúdo de negócio (cliente, plano, quantidade, início, avaliação ou prazo) responde 409 `request_key_reused`; 409 `subscription_in_progress` (com Retry-After) indica outra criação com a mesma chave ainda não confirmada. */
         post: operations["createSubscription"];
         delete?: never;
         options?: never;
@@ -3347,7 +3348,7 @@ export interface components {
         CSRF: string;
         /** @description Versão esperada do recurso, entre aspas (ex. "3"). */
         IfMatch: string;
-        /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+        /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
         IdempotencyKey: string;
         ID: string;
         Limit: number;
@@ -3958,11 +3959,13 @@ export interface operations {
     createAddonOrder: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path?: never;
             cookie?: never;
@@ -3986,6 +3989,8 @@ export interface operations {
                 };
             };
             403: components["responses"]["UserSessionRequired"];
+            409: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
         };
     };
     listPlatformStatements: {
@@ -4196,7 +4201,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -4380,7 +4385,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -4913,11 +4918,13 @@ export interface operations {
     createSubscription: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path?: never;
             cookie?: never;
@@ -4931,6 +4938,7 @@ export interface operations {
             /** @description Assinatura criada */
             201: {
                 headers: {
+                    ETag?: string;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4938,6 +4946,7 @@ export interface operations {
                 };
             };
             403: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
         };
     };
@@ -5235,11 +5244,13 @@ export interface operations {
     schedulePriceAdjustment: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
                 id: components["parameters"]["ID"];
@@ -5261,6 +5272,7 @@ export interface operations {
                     "application/json": components["schemas"]["PriceAdjustment"];
                 };
             };
+            409: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
         };
     };
@@ -5294,11 +5306,13 @@ export interface operations {
     applySubscriptionCoupon: {
         parameters: {
             query?: never;
-            header?: {
+            header: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
                 id: components["parameters"]["ID"];
@@ -5623,7 +5637,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5661,7 +5675,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5696,7 +5710,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5726,7 +5740,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path?: never;
@@ -5807,7 +5821,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -5983,7 +5997,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path: {
@@ -6231,7 +6245,7 @@ export interface operations {
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
                 /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
                 "X-CSRF-Token"?: components["parameters"]["CSRF"];
-                /** @description Chave única (8 a 255 caracteres) por operação; repetição equivalente devolve o resultado registrado. Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
+                /** @description Chave única (8 a 255 caracteres) por operação. O registro tem escopo de organização, cliente da API (usuário ou credencial) e operação (método e rota): a mesma chave em outra operação é independente. A impressão do pedido é o método, o caminho e os bytes do corpo como enviados; a repetição equivalente (mesmos bytes) devolve o resultado registrado (status, corpo, Content-Type e Location, com `Idempotent-Replayed: true`), e a mesma chave com outro corpo, inclusive um JSON equivalente serializado com outra ordem de campos ou espaços, ou com outro recurso no caminho, responde 409 `idempotency_key_reused`. O registro vale por 24 h; só a execução que detém a chave registra o resultado (uma execução cujo processamento foi assumido por outra não o sobrescreve). Respostas 5xx, 401, 403, 429, conflitos transitórios com Retry-After (por exemplo, reconciliation_running e subscription_in_progress) e respostas 202 (pedido aceito e ainda em processamento) não ficam registradas, e a repetição com a mesma chave executa o pedido novamente; o caso de uso reconhece o pedido já feito pela chave e não duplica o efeito. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path?: never;
