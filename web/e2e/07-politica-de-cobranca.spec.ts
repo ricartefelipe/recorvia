@@ -26,8 +26,9 @@ test('(g) cria e edita uma política de cobrança', async ({ page }) => {
     // O padrão do formulário traz lembretes em -3, 0, 3 e 7 dias.
     await dialog.getByRole('button', { name: 'Adicionar lembrete' }).click();
     await dialog.getByLabel('Lembrete 5 (dias)').fill('15');
-    await dialog.getByText('Suspender a assinatura após atraso', { exact: true }).click();
-    await expect(dialog.getByRole('switch', { name: 'Suspender a assinatura após atraso' })).toBeChecked();
+    // O input do interruptor do Mantine é transparente e cobre o controle
+    // inteiro: check() clica nele e confere que ficou marcado.
+    await dialog.getByRole('switch', { name: 'Suspender a assinatura após atraso' }).check();
     await dialog.getByLabel('Suspender após quantos dias de atraso').fill('45');
     await expect(dialog.getByRole('switch', { name: 'Política padrão da organização' })).not.toBeChecked();
     await dialog.getByRole('button', { name: 'Salvar política' }).click();
