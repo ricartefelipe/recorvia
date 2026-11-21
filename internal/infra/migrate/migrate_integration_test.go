@@ -5,10 +5,14 @@ package migrate_test
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ricartefelipe/recorvia/internal/infra/migrate"
+	"github.com/ricartefelipe/recorvia/internal/kernel/money"
+	"github.com/ricartefelipe/recorvia/internal/testsupport/fixture"
 	"github.com/ricartefelipe/recorvia/internal/testsupport/pgtest"
 )
 
@@ -218,5 +222,73 @@ func TestQueueMetricsMigrationDownAndUp(t *testing.T) {
 		if !exists(t, pool, q) {
 			t.Fatalf("esquema após o Up: %s", q)
 		}
+	}
+}
+
+// A migration 00019 é reversível: o Down devolve o gatilho e a constraint de
+// saldo da 00006, remove os dados do emitente e o índice da listagem, e
+// devolve o saldo das faturas canceladas à conta antiga; o Up seguinte volta a
+// congelar a observação e o emitente, recria o índice e zera de novo o saldo
+// das canceladas (inclusive as já existentes).
+func TestInvoiceGuardMigrationDownAndUp(t *testing.T) {
+	ctx := context.Background()
+	env := pgtest.Start(t)
+	pool := pgtest.OwnerPool(t)
+	const name = "00019_fatura_emitida_congela_observacao.sql"
+	const frozen = `SELECT position('NEW.memo IS DISTINCT FROM OLD.memo' IN pg_get_functiondef('app_invoice_guard()'::regprocedure)) > 0
+		AND position('NEW.issuer_snapshot IS DISTINCT FROM OLD.issuer_snapshot' IN pg_get_functiondef('app_invoice_guard()'::regprocedure)) > 0`
+	const trigger = `SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'invoices_guard' AND tgrelid = 'invoices'::regclass)`
+	const objects = `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'invoices' AND column_name = 'issuer_snapshot')
+		AND EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'invoices_tenant_created_idx'
+		    AND indexdef LIKE '%(tenant_id, created_at DESC, id DESC)%')
+		AND position('void' IN pg_get_constraintdef((SELECT oid FROM pg_constraint WHERE conname = 'invoices_due_consistency'))) > 0`
+	const noObjects = `SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'invoices' AND column_name = 'issuer_snapshot')
+		AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'invoices_tenant_created_idx')
+		AND position('void' IN pg_get_constraintdef((SELECT oid FROM pg_constraint WHERE conname = 'invoices_due_consistency'))) = 0`
+
+	// Fatura cancelada com crédito aplicado: 180,00 com 15,00 de crédito.
+	fx := fixture.New(t, 2, time.Now().UTC())
+	tn := fx.NewTenant(t, "migracao-void")
+	cust := fx.NewCustomer(t, tn)
+	if err := fx.Billing.GrantCredit(ctx, tn.ID, tn.Actor, nil, cust.ID, money.New(1500, money.BRL), "Cortesia comercial", ""); err != nil {
+		t.Fatal(err)
+	}
+	fx.NewSubscription(t, tn, cust.ID, fx.NewFlatPlan(t, tn, 18000).ID, nil)
+	if _, err := fx.Engine.RunTenant(ctx, tn.ID, tn.Actor); err != nil {
+		t.Fatal(err)
+	}
+	var id uuid.UUID
+	var version int
+	if err := pool.QueryRow(ctx, `SELECT id, version FROM invoices WHERE tenant_id = $1`, tn.ID).Scan(&id, &version); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.Billing.Void(ctx, tn.ID, tn.Actor, id, "Emitida em duplicidade", version); err != nil {
+		t.Fatal(err)
+	}
+	due := func() int64 {
+		t.Helper()
+		var v int64
+		if err := pool.QueryRow(ctx, `SELECT amount_due FROM invoices WHERE id = $1`, id).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+
+	if !exists(t, pool, frozen) || !exists(t, pool, trigger) || !exists(t, pool, objects) || due() != 0 {
+		t.Fatalf("esquema antes do Down (saldo da cancelada %d)", due())
+	}
+	reverted, err := migrate.DownTo(ctx, env.OwnerURL, 18)
+	if err != nil || len(reverted) == 0 || reverted[len(reverted)-1] != name {
+		t.Fatalf("reversão: %v %v", reverted, err)
+	}
+	if exists(t, pool, frozen) || !exists(t, pool, trigger) || !exists(t, pool, noObjects) || due() != 16500 {
+		t.Fatalf("após o Down, deveria valer o esquema da 00006 (saldo da cancelada %d)", due())
+	}
+	applied, err := migrate.Up(ctx, env.OwnerURL)
+	if err != nil || len(applied) != len(reverted) || applied[0] != name {
+		t.Fatalf("reaplicação: %v %v", applied, err)
+	}
+	if !exists(t, pool, frozen) || !exists(t, pool, trigger) || !exists(t, pool, objects) || due() != 0 {
+		t.Fatalf("após o Up, o esquema da 00019 deveria voltar (saldo da cancelada %d)", due())
 	}
 }
