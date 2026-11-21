@@ -2,6 +2,7 @@ package mailer
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"mime"
@@ -177,6 +178,11 @@ func (s *smtpServer) handle(c net.Conn) {
 			} else {
 				_ = tp.PrintfLine("250 teste")
 			}
+		case "AUTH":
+			// Servidor que repete as credenciais recebidas na recusa.
+			token := strings.TrimSpace(strings.TrimPrefix(line, "AUTH PLAIN"))
+			decoded, _ := base64.StdEncoding.DecodeString(token)
+			_ = tp.PrintfLine("535 5.7.8 recusado %s (%s)", token, strings.ReplaceAll(string(decoded), "\x00", " "))
 		case "MAIL":
 			_ = tp.PrintfLine("250 ok")
 		case "RCPT":
@@ -372,5 +378,38 @@ func TestSendIgnoresQuitFailureAfterAcceptedData(t *testing.T) {
 				t.Fatalf("mensagem aceita deve contar como enviada: %+v %v", res, err)
 			}
 		})
+	}
+}
+
+// RNF-12: a recusa da autenticação pelo servidor, mesmo repetindo o token
+// AUTH PLAIN e a senha, não leva credenciais à mensagem de erro (que vai para
+// o log e para a última falha da notificação); a classificação continua
+// valendo.
+func TestSendErrorNeverCarriesSMTPCredentials(t *testing.T) {
+	srv := newSMTPServer(t, "250 ok", false)
+	const password = "s3nh4-do-smtp"
+	m, err := New(Config{Addr: srv.ln.Addr().String(), From: "cobranca@recorvia.test", TLS: TLSNone, Username: "envio",
+		Password: password, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.Send(context.Background(), Message{ID: "n1", To: []string{"a@cliente.test"}, Subject: "Teste", Text: "corpo"})
+	token := base64.StdEncoding.EncodeToString([]byte("\x00envio\x00" + password))
+	if err == nil || strings.Contains(err.Error(), password) || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "535") {
+		t.Fatalf("erro %v", err)
+	}
+	if !IsPermanent(err) {
+		t.Fatalf("a recusa 535 continua permanente: %v", err)
+	}
+}
+
+// RNF-12: um endereço SMTP configurado com credenciais não as repete no erro
+// de configuração.
+func TestNewDoesNotRepeatCredentialsOfInvalidAddress(t *testing.T) {
+	for _, addr := range []string{"envio:s3nh4-do-smtp@smtp.exemplo.test:587", "smtp://envio:s3nh4-do-smtp@smtp.exemplo.test:587"} {
+		_, err := New(Config{Addr: addr, From: "cobranca@recorvia.test", Password: "outra"})
+		if err == nil || strings.Contains(err.Error(), "s3nh4-do-smtp") || !strings.Contains(err.Error(), "smtp.exemplo.test:587") {
+			t.Fatalf("%s: %v", addr, err)
+		}
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/ricartefelipe/recorvia/internal/identity"
+	"github.com/ricartefelipe/recorvia/internal/infra/redact"
 	"github.com/ricartefelipe/recorvia/internal/infra/secrets"
 	"github.com/ricartefelipe/recorvia/internal/portal"
 )
@@ -38,16 +39,18 @@ func New(rdb redis.UniversalClient, keyring *secrets.Keyring, ns string) *Store 
 
 // Open conecta ao Redis a partir da URL.
 func Open(ctx context.Context, url string) (*redis.Client, error) {
+	// As mensagens de erro de go-redis repetem a URL inteira (com a senha);
+	// elas são saneadas antes de chegar ao log.
 	opt, err := redis.ParseURL(url)
 	if err != nil {
-		return nil, fmt.Errorf("redis: URL inválida: %w", err)
+		return nil, redact.ParseError("redis", url, err)
 	}
 	opt.DialTimeout, opt.ReadTimeout, opt.WriteTimeout = 3*time.Second, 2*time.Second, 2*time.Second
 	rdb := redis.NewClient(opt)
 	pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if err := rdb.Ping(pctx).Err(); err != nil {
-		return nil, errors.Join(fmt.Errorf("redis: conexão: %w", err), rdb.Close())
+		return nil, errors.Join(redact.Error(fmt.Errorf("redis: conexão: %w", err), url, opt.Password), rdb.Close())
 	}
 	return rdb, nil
 }

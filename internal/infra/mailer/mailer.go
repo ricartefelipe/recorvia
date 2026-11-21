@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"mime"
@@ -31,6 +32,8 @@ import (
 	"net/textproto"
 	"strings"
 	"time"
+
+	"github.com/ricartefelipe/recorvia/internal/infra/redact"
 )
 
 // Modos de TLS aceitos.
@@ -85,7 +88,7 @@ type Mailer struct {
 func New(cfg Config) (*Mailer, error) {
 	host, port, err := net.SplitHostPort(cfg.Addr)
 	if err != nil || host == "" || port == "" {
-		return nil, fmt.Errorf("mailer: endereço SMTP inválido %q", cfg.Addr)
+		return nil, fmt.Errorf("mailer: endereço SMTP inválido %q (use host:porta)", safeAddr(cfg.Addr, cfg.Password))
 	}
 	from, err := mail.ParseAddress(cfg.From)
 	if err != nil {
@@ -144,6 +147,30 @@ func classify(err error) error {
 	return &SendError{Err: err}
 }
 
+// safeAddr devolve o endereço SMTP sem credenciais: um endereço configurado
+// por engano como usuário:senha@host:porta (ou como URL) perde tudo o que
+// antecede o último "@".
+func safeAddr(addr, password string) string {
+	addr = redact.String(addr, password)
+	if i := strings.LastIndex(addr, "@"); i >= 0 {
+		return redact.Mask + addr[i:]
+	}
+	return addr
+}
+
+// sanitize remove da falha de envio a senha SMTP e o token AUTH PLAIN
+// (base64 de usuário e senha), caso o servidor ou a biblioteca os repitam:
+// a mensagem vai para o log e para a última falha da notificação.
+func (m *Mailer) sanitize(err error) error {
+	var se *SendError
+	if m.cfg.Password == "" || !errors.As(err, &se) {
+		return err
+	}
+	plain := base64.StdEncoding.EncodeToString([]byte("\x00" + m.cfg.Username + "\x00" + m.cfg.Password))
+	se.Err = redact.Error(se.Err, m.cfg.Password, plain)
+	return err
+}
+
 func (m *Mailer) tlsConfig() *tls.Config {
 	c := &tls.Config{MinVersion: tls.VersionTLS12}
 	if m.cfg.TLSConfig != nil {
@@ -186,7 +213,7 @@ func (m *Mailer) Send(ctx context.Context, msg Message) (Result, error) {
 	defer cancel()
 	refused, err := m.deliver(ctx, deadline, msg.To, data)
 	if err != nil {
-		return Result{}, classify(err)
+		return Result{}, m.sanitize(classify(err))
 	}
 	return Result{MessageID: id, Refused: refused}, nil
 }
