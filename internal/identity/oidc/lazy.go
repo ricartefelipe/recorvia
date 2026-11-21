@@ -87,12 +87,21 @@ func (l *Lazy) Refresh(ctx context.Context, rt string) (identity.Tokens, error) 
 }
 
 // EndSessionURL delega ao provedor.
-func (l *Lazy) EndSessionURL(hint, redirect string) string {
+func (l *Lazy) EndSessionURL(redirect string) string {
 	p, err := l.get(context.Background())
 	if err != nil {
 		return redirect
 	}
-	return p.EndSessionURL(hint, redirect)
+	return p.EndSessionURL(redirect)
+}
+
+// RevokeTokens delega ao provedor.
+func (l *Lazy) RevokeTokens(ctx context.Context, tokens identity.Tokens) error {
+	p, err := l.get(ctx)
+	if err != nil {
+		return err
+	}
+	return p.RevokeTokens(ctx, tokens)
 }
 
 // NewPKCEVerifier gera o verificador PKCE.
