@@ -72,5 +72,14 @@ SELECT COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount
   JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
  WHERE e.tenant_id = @tenant_id AND a.code = 'customer_recoverables';
 
+-- name: DashboardPendingProviderReceipt :one
+-- Saldo atual da conta de pagamentos confirmados no provedor (débitos menos
+-- créditos): pagamentos já confirmados, contados em Recebido, cujo valor o
+-- provedor ainda não creditou (ADR-080).
+SELECT COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END), 0)::bigint AS balance
+  FROM ledger_entries e
+  JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+ WHERE e.tenant_id = @tenant_id AND a.code = 'provider_confirmed';
+
 -- name: DashboardUnknownOperations :one
 SELECT count(*)::int FROM payment_operations WHERE tenant_id = @tenant_id AND status = 'unknown';

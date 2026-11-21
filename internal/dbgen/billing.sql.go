@@ -120,7 +120,7 @@ func (q *Queries) GetCycleFeeItem(ctx context.Context, arg GetCycleFeeItemParams
 }
 
 const getInvoice = `-- name: GetInvoice :one
-SELECT id, tenant_id, customer_id, subscription_id, number, status, kind, currency, billing_period_start, billing_period_end, issued_at, due_at, subtotal, discount_total, total, credit_applied, amount_paid, amount_credited, amount_written_off, amount_due, customer_snapshot, memo, paid_at, voided_at, void_reason, uncollectible_at, created_at, updated_at, version FROM invoices WHERE tenant_id = $1 AND id = $2
+SELECT id, tenant_id, customer_id, subscription_id, number, status, kind, currency, billing_period_start, billing_period_end, issued_at, due_at, subtotal, discount_total, total, credit_applied, amount_paid, amount_credited, amount_written_off, amount_due, customer_snapshot, memo, paid_at, voided_at, void_reason, uncollectible_at, created_at, updated_at, version, issuer_snapshot FROM invoices WHERE tenant_id = $1 AND id = $2
 `
 
 type GetInvoiceParams struct {
@@ -161,12 +161,13 @@ func (q *Queries) GetInvoice(ctx context.Context, arg GetInvoiceParams) (Invoice
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Version,
+		&i.IssuerSnapshot,
 	)
 	return i, err
 }
 
 const getInvoiceForUpdate = `-- name: GetInvoiceForUpdate :one
-SELECT id, tenant_id, customer_id, subscription_id, number, status, kind, currency, billing_period_start, billing_period_end, issued_at, due_at, subtotal, discount_total, total, credit_applied, amount_paid, amount_credited, amount_written_off, amount_due, customer_snapshot, memo, paid_at, voided_at, void_reason, uncollectible_at, created_at, updated_at, version FROM invoices WHERE tenant_id = $1 AND id = $2 FOR UPDATE
+SELECT id, tenant_id, customer_id, subscription_id, number, status, kind, currency, billing_period_start, billing_period_end, issued_at, due_at, subtotal, discount_total, total, credit_applied, amount_paid, amount_credited, amount_written_off, amount_due, customer_snapshot, memo, paid_at, voided_at, void_reason, uncollectible_at, created_at, updated_at, version, issuer_snapshot FROM invoices WHERE tenant_id = $1 AND id = $2 FOR UPDATE
 `
 
 type GetInvoiceForUpdateParams struct {
@@ -207,6 +208,7 @@ func (q *Queries) GetInvoiceForUpdate(ctx context.Context, arg GetInvoiceForUpda
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Version,
+		&i.IssuerSnapshot,
 	)
 	return i, err
 }
@@ -252,11 +254,12 @@ func (q *Queries) InsertCreditNote(ctx context.Context, arg InsertCreditNotePara
 const insertInvoice = `-- name: InsertInvoice :exec
 INSERT INTO invoices (id, tenant_id, customer_id, subscription_id, number, status, kind, currency, billing_period_start, billing_period_end,
                       issued_at, due_at, subtotal, discount_total, total, credit_applied, amount_paid, amount_credited, amount_written_off,
-                      amount_due, customer_snapshot, memo, paid_at, created_at, updated_at, version)
+                      amount_due, customer_snapshot, issuer_snapshot, memo, paid_at, created_at, updated_at, version)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
         $9, $10, $11, $12, $13, $14,
-        $15, $16, $17, $18, $19, $20, $21, $22,
-        $23, $24, $24, 1)
+        $15, $16, $17, $18, $19, $20, $21,
+        $22, $23,
+        $24, $25, $25, 1)
 `
 
 type InsertInvoiceParams struct {
@@ -281,6 +284,7 @@ type InsertInvoiceParams struct {
 	AmountWrittenOff   int64
 	AmountDue          int64
 	CustomerSnapshot   []byte
+	IssuerSnapshot     []byte
 	Memo               string
 	PaidAt             *time.Time
 	CreatedAt          time.Time
@@ -309,6 +313,7 @@ func (q *Queries) InsertInvoice(ctx context.Context, arg InsertInvoiceParams) er
 		arg.AmountWrittenOff,
 		arg.AmountDue,
 		arg.CustomerSnapshot,
+		arg.IssuerSnapshot,
 		arg.Memo,
 		arg.PaidAt,
 		arg.CreatedAt,
@@ -447,6 +452,75 @@ func (q *Queries) InsertSubscriptionProration(ctx context.Context, arg InsertSub
 		arg.CreatedAt,
 	)
 	return err
+}
+
+const invoiceListPosition = `-- name: InvoiceListPosition :many
+SELECT i.created_at, i.id
+  FROM invoices i
+ WHERE i.tenant_id = $1
+   AND ($2::text IS NULL OR i.status = $2)
+   AND ($3::uuid IS NULL OR i.customer_id = $3)
+   AND ($4::uuid IS NULL OR i.subscription_id = $4)
+   AND ($5::timestamptz IS NULL OR i.issued_at >= $5)
+   AND ($6::timestamptz IS NULL OR i.issued_at < $6)
+   AND (NOT $7::boolean OR (i.status IN ('open', 'partially_paid') AND i.due_at <= $8))
+   AND ($9::timestamptz IS NULL OR (i.created_at, i.id) < ($9::timestamptz, $10::uuid))
+ ORDER BY i.created_at DESC, i.id DESC
+ OFFSET $11 LIMIT 2
+`
+
+type InvoiceListPositionParams struct {
+	TenantID       uuid.UUID
+	Status         *string
+	CustomerID     *uuid.UUID
+	SubscriptionID *uuid.UUID
+	IssuedFrom     *time.Time
+	IssuedTo       *time.Time
+	OnlyOverdue    bool
+	Now            *time.Time
+	CursorTs       *time.Time
+	CursorID       *uuid.UUID
+	RowOffset      int32
+}
+
+type InvoiceListPositionRow struct {
+	CreatedAt time.Time
+	ID        uuid.UUID
+}
+
+// Chave de ordenação da fatura na posição row_offset (base zero) da mesma
+// listagem de ListInvoices, e da seguinte, se houver: usada para limitar a
+// exportação e informar onde começa a parte seguinte.
+func (q *Queries) InvoiceListPosition(ctx context.Context, arg InvoiceListPositionParams) ([]InvoiceListPositionRow, error) {
+	rows, err := q.db.Query(ctx, invoiceListPosition,
+		arg.TenantID,
+		arg.Status,
+		arg.CustomerID,
+		arg.SubscriptionID,
+		arg.IssuedFrom,
+		arg.IssuedTo,
+		arg.OnlyOverdue,
+		arg.Now,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.RowOffset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []InvoiceListPositionRow
+	for rows.Next() {
+		var i InvoiceListPositionRow
+		if err := rows.Scan(&i.CreatedAt, &i.ID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listInvoiceCharges = `-- name: ListInvoiceCharges :many
@@ -632,7 +706,7 @@ func (q *Queries) ListInvoiceItems(ctx context.Context, arg ListInvoiceItemsPara
 }
 
 const listInvoices = `-- name: ListInvoices :many
-SELECT i.id, i.tenant_id, i.customer_id, i.subscription_id, i.number, i.status, i.kind, i.currency, i.billing_period_start, i.billing_period_end, i.issued_at, i.due_at, i.subtotal, i.discount_total, i.total, i.credit_applied, i.amount_paid, i.amount_credited, i.amount_written_off, i.amount_due, i.customer_snapshot, i.memo, i.paid_at, i.voided_at, i.void_reason, i.uncollectible_at, i.created_at, i.updated_at, i.version, c.name AS customer_name
+SELECT i.id, i.tenant_id, i.customer_id, i.subscription_id, i.number, i.status, i.kind, i.currency, i.billing_period_start, i.billing_period_end, i.issued_at, i.due_at, i.subtotal, i.discount_total, i.total, i.credit_applied, i.amount_paid, i.amount_credited, i.amount_written_off, i.amount_due, i.customer_snapshot, i.memo, i.paid_at, i.voided_at, i.void_reason, i.uncollectible_at, i.created_at, i.updated_at, i.version, i.issuer_snapshot, c.name AS customer_name
   FROM invoices i JOIN customers c ON c.tenant_id = i.tenant_id AND c.id = i.customer_id
  WHERE i.tenant_id = $1
    AND ($2::text IS NULL OR i.status = $2)
@@ -690,6 +764,7 @@ type ListInvoicesRow struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 	Version            int32
+	IssuerSnapshot     []byte
 	CustomerName       string
 }
 
@@ -744,6 +819,7 @@ func (q *Queries) ListInvoices(ctx context.Context, arg ListInvoicesParams) ([]L
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.Version,
+			&i.IssuerSnapshot,
 			&i.CustomerName,
 		); err != nil {
 			return nil, err

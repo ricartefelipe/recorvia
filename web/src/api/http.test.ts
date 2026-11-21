@@ -1,7 +1,7 @@
 import { http, HttpResponse } from 'msw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { server } from '../test/server';
-import { ApiError, createHttpClient, loginUrl, NetworkError, redirectToLogin, resetRedirectGuard } from './http';
+import { ApiError, createHttpClient, loginUrl, NetworkError, redirectToLogin, resetRedirectGuard, type TextWithHeaders } from './http';
 
 function setup() {
   const onUnauthorized = vi.fn();
@@ -69,6 +69,17 @@ describe('cliente HTTP', () => {
     const [first, second] = await Promise.all(requests.map((r) => r.text()));
     expect(first).toBe('{"customer_id":"c1","plan_id":"p1","quantity":1}');
     expect(second).toBe(first);
+  });
+
+  it('textWithHeaders devolve o corpo textual e os cabeçalhos da resposta', async () => {
+    const { client } = setup();
+    const requests = capture('get', '/api/v1/invoices/export', () =>
+      new HttpResponse('numero;cliente\n', { headers: { 'Content-Type': 'text/csv', 'X-Recorvia-Export-Truncated': 'true' } }),
+    );
+    const result = await client.get<TextWithHeaders>('/api/v1/invoices/export', { responseType: 'textWithHeaders' });
+    expect(result.text).toBe('numero;cliente\n');
+    expect(result.headers.get('X-Recorvia-Export-Truncated')).toBe('true');
+    expect(requests[0].headers.get('Accept')).toBe('*/*');
   });
 
   it('omite o header de organização quando solicitado (endpoints da sessão)', async () => {

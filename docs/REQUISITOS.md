@@ -48,8 +48,14 @@ a sessão e exige associação ativa.
   por `tenant_id`, FKs compostas e RLS).
 
 **Aceite:** um auditor não altera dados; um operador não estorna; um usuário
-sem associação recebe 403 mesmo informando um tenant existente; recurso de
-outro tenant responde 404.
+sem associação ativa recebe 403 `no_membership` ao tentar ativar uma
+organização, existente ou não (`PUT /api/v1/session/tenant`), e nas rotas de
+uma organização da qual foi removido enquanto a sessão a mantinha ativa (a
+remoção também encerra essas sessões, que passam a responder 401); o header
+`X-Recorvia-Tenant` não escolhe a organização: diferente da organização ativa
+da sessão (ou do tenant da credencial de API), a requisição responde 409
+`tenant_mismatch` sem executar a operação; recurso de outro tenant responde
+404.
 
 ### RF-03 Clientes
 - Pessoa física ou jurídica, contatos, endereço de cobrança, identificador
@@ -172,8 +178,11 @@ O ledger não substitui contabilidade fiscal nem reconhecimento contábil.
 ### RF-14 Identidade e sessões
 - Keycloak com Authorization Code + PKCE; sessão no backend Go com cookie
   HttpOnly, `Secure` em produção e `SameSite=Lax`.
-- Tokens do provedor permanecem no servidor; proteção CSRF; expiração,
-  revogação, rotação e logout.
+- Tokens do provedor permanecem no servidor (nem o ID token vai ao navegador
+  no logout); proteção CSRF; expiração, revogação, rotação e logout.
+- Revogação: "encerrar todas as minhas sessões"; o membro removido perde as
+  sessões com aquela organização ativa; o usuário desativado perde todas as
+  sessões na primeira requisição.
 - Credenciais máquina a máquina com escopos e vínculo a um tenant, rotação e
   revogação.
 - Portal do cliente via link temporário de uso único trocado por sessão
@@ -193,7 +202,13 @@ O ledger não substitui contabilidade fiscal nem reconhecimento contábil.
 - Planos da plataforma com limites de usuários, contratos ativos e
   funcionalidades; implantação assistida como serviço adicional.
 - Valores são hipóteses configuráveis (`docs/negocio/modelo-comercial.md`).
-- Limites aplicados nos casos de uso (convites, assinaturas ativas, recursos).
+- Limites aplicados nos casos de uso (convites, aceite de convites, troca de
+  plano, criação e reativação de assinaturas, recursos), contados com a
+  assinatura da plataforma bloqueada: requisições simultâneas não passam do
+  limite. Convites pendentes ocupam vagas de usuário.
+- Implantação assistida atendida pela equipe da plataforma (agendar, concluir
+  ou cancelar o pedido, com auditoria); o pedido concluído é cobrado uma vez,
+  no demonstrativo mensal do período da conclusão.
 
 ### RF-17 Dashboard
 - Receita faturada e recebida separadas; MRR, ARR, inadimplência, churn e

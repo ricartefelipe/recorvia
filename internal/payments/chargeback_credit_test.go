@@ -108,11 +108,12 @@ func TestDisputeLostConsumesOverpaymentCredit(t *testing.T) {
 				net[ledger.Chargebacks] != -2500 {
 				t.Fatalf("partidas: %v", net)
 			}
-			// Ciclo inteiro: o provedor ficou só com a taxa, chargebacks
+			// Ciclo inteiro: o provedor ficou só com a taxa (o disponível
+			// fica negativo nela), chargebacks
 			// registra a receita estornada e o excedente não fica nas duas
 			// contas (chargebacks e crédito do cliente).
 			net := ledgerNet(f.store.posted)
-			if net[ledger.ProviderClearing] != -199 || net[ledger.Chargebacks] != 10000 || net[ledger.CustomerCredits] != -2500+tc.consumed ||
+			if net[ledger.Cash] != -199 || net[ledger.ProviderClearing] != 0 || net[ledger.ProviderConfirmed] != 0 || net[ledger.Chargebacks] != 10000 || net[ledger.CustomerCredits] != -2500+tc.consumed ||
 				net[ledger.CustomerRecoverables] != tc.recovery {
 				t.Fatalf("ledger: %v", net)
 			}
@@ -233,7 +234,7 @@ func TestDisputeLostCreditWithRefunds(t *testing.T) {
 		credit := refundCredit + disputeCredit + recovery
 		if credit > 2500 || net[ledger.Refunds] != refunded-refundCredit || net[ledger.Chargebacks] != chargedBack-disputeCredit-recovery ||
 			net[ledger.CustomerCredits] != -2500+refundCredit+disputeCredit || net[ledger.CustomerRecoverables] != recovery ||
-			net[ledger.ProviderClearing] != 12500-199-chargedBack-refunded {
+			net[ledger.Cash] != 12500-199-chargedBack-refunded || net[ledger.ProviderClearing] != 0 {
 			t.Fatalf("ledger: %v", net)
 		}
 	}
@@ -303,7 +304,7 @@ func TestDisputeLostCreditWithRefunds(t *testing.T) {
 		}
 		net := ledgerNet(f.store.posted)
 		if net[ledger.Chargebacks] != 7000 || net[ledger.Refunds] != 3000 || net[ledger.CustomerRecoverables] != 2000 ||
-			net[ledger.ProviderClearing] != -199 {
+			net[ledger.Cash] != -199 || net[ledger.ProviderClearing] != 0 || net[ledger.ProviderConfirmed] != 0 {
 			t.Fatalf("ledger: %v", net)
 		}
 	})
@@ -339,7 +340,7 @@ func TestDisputeLostCreditWithRefunds(t *testing.T) {
 			t.Fatalf("auditoria do aumento do chargeback: %v", increased)
 		}
 		net := ledgerNet(f.store.posted)
-		if net[ledger.Chargebacks] != 10000 || net[ledger.CustomerRecoverables] != 600 || net[ledger.ProviderClearing] != -199 {
+		if net[ledger.Chargebacks] != 10000 || net[ledger.CustomerRecoverables] != 600 || net[ledger.Cash] != -199 || net[ledger.ProviderClearing] != 0 || net[ledger.ProviderConfirmed] != 0 {
 			t.Fatalf("ledger: %v", net)
 		}
 	})

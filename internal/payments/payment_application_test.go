@@ -67,8 +67,8 @@ func TestProviderPaymentOfFailedChargeIsApplied(t *testing.T) {
 		t.Fatalf("lançamentos: %v", kinds)
 	}
 	net := ledgerNet(f.store.posted)
-	if net[ledger.AccountsReceivable] != -10000 || net[ledger.ProviderFees] != 199 || net[ledger.ProviderClearing] != 10000-199 {
-		t.Fatalf("ledger: %+v", net)
+	if net[ledger.AccountsReceivable] != -10000 || net[ledger.ProviderConfirmed] != 10000 || net[ledger.ProviderFees] != 0 {
+		t.Fatalf("ledger: bruto confirmado, taxa só no recebimento: %+v", net)
 	}
 	if len(f.store.audits) == 0 || f.store.audits[0].Action != "charge.paid_after_failure" || !slices.Contains(f.auditActions(), "payment.applied") {
 		t.Fatalf("auditoria: %v", f.auditActions())
@@ -120,8 +120,8 @@ func TestProviderPaymentOfFailedChargeAfterRetryBecomesCredit(t *testing.T) {
 		t.Fatalf("valor integral vira crédito do cliente: %+v", f.store.credits)
 	}
 	net := ledgerNet(f.store.posted)
-	if net[ledger.CustomerCredits] != -10000 || net[ledger.ProviderFees] != 199 || net[ledger.ProviderClearing] != 10000-199 {
-		t.Fatalf("ledger: %+v", net)
+	if net[ledger.CustomerCredits] != -10000 || net[ledger.ProviderConfirmed] != 10000 || net[ledger.ProviderFees] != 0 {
+		t.Fatalf("ledger: bruto confirmado, taxa só no recebimento: %+v", net)
 	}
 	if a := f.auditActions(); len(a) == 0 || a[0] != "charge.paid_after_failure" || f.store.audits[0].Details["invoice_status"] != string(billing.Paid) {
 		t.Fatalf("auditoria: %v", a)

@@ -293,9 +293,13 @@ type Action struct {
 	Stage  string `json:"stage"`
 }
 
-// Apply executa a ação: pay, pay_silently, fail, refund, chargeback,
-// diverge e replay. Uma cobrança recusada (fail) ainda pode ser paga, como no
-// pagamento por outro meio depois da recusa do cartão no mesmo checkout.
+// Apply executa a ação: pay, pay_silently, confirm, receive, fail, refund,
+// chargeback, diverge e replay. pay é o pagamento já recebido (creditado),
+// como Pix e boleto; confirm é o pagamento confirmado e ainda não creditado,
+// como o cartão no prazo de recebimento, e receive informa o crédito do
+// pagamento confirmado. Uma cobrança recusada (fail) ainda pode ser paga,
+// como no pagamento por outro meio depois da recusa do cartão no mesmo
+// checkout.
 func (s *Sim) Apply(id string, a Action) (Charge, error) {
 	s.st.mu.Lock()
 	defer s.st.mu.Unlock()
@@ -305,7 +309,7 @@ func (s *Sim) Apply(id string, a Action) (Charge, error) {
 	}
 	now := s.now()
 	switch a.Name {
-	case "pay", "pay_silently":
+	case "pay", "pay_silently", "confirm":
 		if c.Status != "pending" && c.Status != "failed" {
 			return *c, fmt.Errorf("cobrança não está pendente nem recusada")
 		}
@@ -317,10 +321,20 @@ func (s *Sim) Apply(id string, a Action) (Charge, error) {
 		if a.Fee != nil {
 			fee = *a.Fee
 		}
-		c.Status, c.PaidAmount, c.Fee, c.NetAmount, c.PaidAt, c.UpdatedAt = "paid", paid, fee, paid-fee, &now, now
-		if a.Name == "pay" {
-			s.emit(c, "charge.paid")
+		status, event := "paid", "charge.paid"
+		if a.Name == "confirm" {
+			status, event = "confirmed", "charge.confirmed"
 		}
+		c.Status, c.PaidAmount, c.Fee, c.NetAmount, c.PaidAt, c.UpdatedAt = status, paid, fee, paid-fee, &now, now
+		if a.Name != "pay_silently" {
+			s.emit(c, event)
+		}
+	case "receive":
+		if c.Status != "confirmed" {
+			return *c, fmt.Errorf("cobrança não está confirmada")
+		}
+		c.Status, c.UpdatedAt = "paid", now
+		s.emit(c, "charge.received")
 	case "fail":
 		if c.Status != "pending" {
 			return *c, fmt.Errorf("cobrança não está pendente")

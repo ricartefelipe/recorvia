@@ -46,8 +46,11 @@ type Raw struct {
 	Refunds            int64
 	Chargebacks        int64
 	OpenRecoverables   int64
-	UnknownOperations  int
-	OpenDiscrepancies  int
+	// PendingProviderReceipt é o saldo de pagamentos confirmados no provedor
+	// e ainda não creditados por ele.
+	PendingProviderReceipt int64
+	UnknownOperations      int
+	OpenDiscrepancies      int
 }
 
 // Dashboard são os indicadores calculados.
@@ -70,18 +73,26 @@ type Dashboard struct {
 	Refunds               int64
 	Chargebacks           int64
 	OpenRecoverables      int64
-	OpenDiscrepancies     int
-	UnknownOperations     int
-	Definitions           map[string]string
+	// PendingProviderReceipt: parte de Recebido (no mês ou antes) ainda não
+	// creditada pelo provedor.
+	PendingProviderReceipt int64
+	OpenDiscrepancies      int
+	UnknownOperations      int
+	Definitions            map[string]string
 }
 
 // Definitions descreve as fórmulas exibidas na interface.
 var Definitions = map[string]string{
 	"mrr": "MRR: soma do componente recorrente fixo mensal das assinaturas ativas ou em atraso (valor fixo, ou preço unitário × quantidade); " +
 		"planos anuais entram divididos por 12. Exclui trial, consumo medido, excedente e cobranças avulsas.",
-	"arr":         "ARR: MRR × 12.",
-	"billed":      "Faturado: total das faturas emitidas no mês (exclui canceladas). Separado em recorrente fixo e consumo.",
-	"received":    "Recebido: soma dos pagamentos confirmados no mês (pela data de pagamento), via provedor ou registro manual.",
+	"arr":    "ARR: MRR × 12.",
+	"billed": "Faturado: total das faturas emitidas no mês (exclui canceladas). Separado em recorrente fixo e consumo.",
+	"received": "Recebido: soma dos pagamentos confirmados no mês (pela data de pagamento), via provedor ou registro manual. Inclui " +
+		"pagamentos confirmados pelo provedor e ainda não creditados por ele (por exemplo, cartão no prazo de recebimento), " +
+		"mostrados em A receber do provedor.",
+	"pending_receipt": "A receber do provedor: saldo atual dos pagamentos confirmados pelo provedor cujo valor ele ainda não creditou " +
+		"(conta de pagamentos confirmados no provedor). Quando o provedor informa o recebimento, o valor bruto passa aos valores " +
+		"em liquidação, a taxa é reconhecida e o líquido vai para o disponível liquidado.",
 	"open":        "Recebíveis em aberto: saldo devedor das faturas em aberto ou parcialmente pagas.",
 	"overdue":     "Recebíveis vencidos: parcela dos recebíveis em aberto com vencimento já ultrapassado.",
 	"delinquency": "Inadimplência: saldo vencido das faturas com vencimento nos últimos 90 dias ÷ total dessas faturas.",
@@ -137,7 +148,8 @@ func Compute(month string, raw Raw) (Dashboard, error) {
 		OverdueReceivables: raw.OverdueReceivables, DelinquencyRateBP: ratio(raw.DelinquencyOpen, raw.DelinquencyBase),
 		ChurnRateBP: ratio(int64(raw.EndedInPeriod), int64(raw.ActiveAtStart)), ActiveSubscriptions: raw.ActiveNow,
 		NewSubscriptions: raw.CreatedInPeriod, CanceledSubscriptions: raw.EndedInPeriod, Refunds: raw.Refunds, Chargebacks: raw.Chargebacks,
-		OpenRecoverables: raw.OpenRecoverables, OpenDiscrepancies: raw.OpenDiscrepancies, UnknownOperations: raw.UnknownOperations, Definitions: Definitions,
+		OpenRecoverables: raw.OpenRecoverables, PendingProviderReceipt: raw.PendingProviderReceipt, OpenDiscrepancies: raw.OpenDiscrepancies,
+		UnknownOperations: raw.UnknownOperations, Definitions: Definitions,
 	}, nil
 }
 

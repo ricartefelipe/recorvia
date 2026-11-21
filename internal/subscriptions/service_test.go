@@ -129,8 +129,8 @@ func (s *fakeStore) PriceVersion(_ context.Context, id uuid.UUID) (catalog.Price
 	return p, nil
 }
 
-func (s *fakeStore) PlatformPlan(context.Context) (platformbilling.Plan, error) {
-	return s.platformPlan, s.fail("PlatformPlan")
+func (s *fakeStore) LockPlatformPlan(context.Context) (platformbilling.Plan, error) {
+	return s.platformPlan, s.fail("LockPlatformPlan")
 }
 
 func (s *fakeStore) PlatformUsage(context.Context) (platformbilling.Usage, error) {
@@ -438,7 +438,7 @@ func TestServiceCreateAllowsUsageWithFeatureAndBelowLimit(t *testing.T) {
 }
 
 func TestServiceCreatePropagatesStoreFailures(t *testing.T) {
-	for _, method := range []string{"TenantLocation", "Customer", "Plan", "PriceVersion", "PlatformPlan", "PlatformUsage",
+	for _, method := range []string{"TenantLocation", "Customer", "Plan", "PriceVersion", "LockPlatformPlan", "PlatformUsage",
 		"Insert", "InsertHistory", "Emit", "Audit"} {
 		t.Run(method, func(t *testing.T) {
 			f := newServiceFixture(t, catalog.Flat)
@@ -697,6 +697,43 @@ func TestServiceMutateVersionMismatch(t *testing.T) {
 	wantKind(t, err, apperr.KindPreconditionFailed, "version_mismatch")
 	if f.store.updates != 0 || f.store.subs[sub.ID].Status != Active || len(f.store.events) != 0 || len(f.store.audits) != 0 {
 		t.Fatal("versão divergente não pode alterar nada")
+	}
+}
+
+// Assinaturas suspensas não contam como contratos ativos: reativar ocupa uma
+// vaga e confere o limite do plano da plataforma, com o plano lido sob
+// bloqueio. Sem isso, suspender, criar novas e reativar passaria do limite.
+func TestServiceReactivateChecksPlatformSubscriptionLimit(t *testing.T) {
+	f := newServiceFixture(t, catalog.Flat)
+	sub := f.create(t)
+	if _, err := f.svc.Suspend(context.Background(), f.tenantID, f.actor, sub.ID, "pausa", 0); err != nil {
+		t.Fatal(err)
+	}
+	limit := 1
+	f.store.platformPlan.MaxActiveSubscriptions = &limit
+	f.store.usage = platformbilling.Usage{ActiveSubscriptions: 1} // a vaga foi ocupada por outra assinatura
+	f.store.histories, f.store.audits, f.store.events = nil, nil, nil
+	updates := f.store.updates
+
+	_, err := f.svc.Reactivate(context.Background(), f.tenantID, f.actor, sub.ID, 0)
+	wantKind(t, err, apperr.KindLimitExceeded, "platform_subscription_limit")
+	if f.store.updates != updates || f.store.subs[sub.ID].Status != Suspended || len(f.store.events) != 0 || len(f.store.audits) != 0 {
+		t.Fatal("reativação acima do limite não pode alterar nada")
+	}
+
+	for _, op := range []string{"LockPlatformPlan", "PlatformUsage"} {
+		f.store.usage = platformbilling.Usage{}
+		f.store.errs = map[string]error{op: errors.New("banco indisponível")}
+		if _, err := f.svc.Reactivate(context.Background(), f.tenantID, f.actor, sub.ID, 0); err == nil || f.store.subs[sub.ID].Status != Suspended {
+			t.Fatalf("%s: falha deveria ser propagada sem reativar: %v", op, err)
+		}
+	}
+	f.store.errs = map[string]error{}
+
+	// Com a vaga livre, a reativação passa.
+	got, err := f.svc.Reactivate(context.Background(), f.tenantID, f.actor, sub.ID, 0)
+	if err != nil || got.Status != Active {
+		t.Fatalf("reativação dentro do limite: %v %s", err, got.Status)
 	}
 }
 

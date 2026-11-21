@@ -14,6 +14,7 @@ verificação.
 | [Expurgo por retenção](retencao.md) | `RecorviaRetentionPurgeStale`, `RecorviaRetentionPurgeBacklog` |
 | [Encaminhamento de alertas](alertas.md) | `RecorviaWatchdog`, `RecorviaAlertDeliveryFailing`, `RecorviaAlertNotificationsFailing` |
 | [Isolamento de dados](isolamento-de-dados.md) | sem alerta automático (incidente aberto por suspeita ou relato) |
+| [Equipe da plataforma](equipe-da-plataforma.md) | sem alerta automático (inclusão e remoção de integrantes da equipe) |
 | [Recuperação de desastre e chaves de cifragem](recuperacao-de-desastre.md) | sem alerta próprio (`RecorviaDependencyUnavailable` e `RecorviaTargetDown` acompanham a perda do banco e a recusa de inicialização por chave errada) |
 
 ## Convenções dos comandos

@@ -812,8 +812,9 @@ func TestProcessWebhookConfirmationAppliesPayment(t *testing.T) {
 		t.Fatalf("lançamentos: %v", got)
 	}
 	net := ledgerNet(f.store.posted)
-	if net[ledger.ProviderClearing] != 9801 || net[ledger.AccountsReceivable] != -10000 || net[ledger.ProviderFees] != 199 {
-		t.Fatalf("ledger: bruto sai de contas a receber, taxa é despesa: %+v", net)
+	if net[ledger.ProviderConfirmed] != 10000 || net[ledger.AccountsReceivable] != -10000 || net[ledger.ProviderFees] != 0 ||
+		net[ledger.ProviderClearing] != 0 || net[ledger.Cash] != 0 {
+		t.Fatalf("ledger: bruto confirmado sai de contas a receber, sem taxa nem liquidação antes do recebimento: %+v", net)
 	}
 	if got := f.store.eventTypes(); !slices.Equal(got, []string{outbox.EventPaymentConfirmed, outbox.EventInvoicePaid}) {
 		t.Fatalf("eventos: %v", got)
@@ -864,12 +865,13 @@ func TestProcessWebhookOverpaymentBecomesCustomerCredit(t *testing.T) {
 	if len(f.store.credits) != 1 || f.store.credits[0].amount.Amount() != 350 || f.store.credits[0].kind != "overpayment" || *f.store.credits[0].invoiceID != inv.ID {
 		t.Fatalf("excedente vira crédito do cliente: %+v", f.store.credits)
 	}
-	if got := f.store.ledgerKinds(); !slices.Equal(got, []string{"payment.confirmed", "payment.overpayment"}) {
+	if got := f.store.ledgerKinds(); !slices.Equal(got, []string{"payment.confirmed", "payment.overpayment", "payment.received", "settlement.received"}) {
 		t.Fatalf("lançamentos: %v", got)
 	}
 	net := ledgerNet(f.store.posted)
-	if net[ledger.ProviderClearing] != 10350-199 || net[ledger.CustomerCredits] != -350 || net[ledger.AccountsReceivable] != -10000 {
-		t.Fatalf("ledger do excedente via provedor: %+v", net)
+	if net[ledger.Cash] != 10350-199 || net[ledger.ProviderFees] != 199 || net[ledger.CustomerCredits] != -350 || net[ledger.AccountsReceivable] != -10000 ||
+		net[ledger.ProviderConfirmed] != 0 || net[ledger.ProviderClearing] != 0 {
+		t.Fatalf("ledger do excedente via provedor: bruto recebido, líquido no disponível: %+v", net)
 	}
 }
 
@@ -914,8 +916,18 @@ func TestProcessWebhookRepeatedConfirmationDoesNotDuplicatePayment(t *testing.T)
 	received := providerSnapshot(ProviderReceived, "RECEIVED", 10000, 199, nil)
 	wid := f.storeWebhook(t, WebhookEvent{EventID: "evt_2", ProviderChargeID: "pay_1", Status: ProviderReceived, Charge: received})
 	f.process(t, wid)
-	if len(f.store.payments) != 1 || len(f.store.posted) != 1 {
+	f.process(t, f.storeWebhook(t, WebhookEvent{EventID: "evt_3", ProviderChargeID: "pay_1", Status: ProviderReceived, Charge: received}))
+	if len(f.store.payments) != 1 {
 		t.Fatalf("confirmações sucessivas não duplicam: pagamentos=%d", len(f.store.payments))
+	}
+	// O recebimento leva o bruto confirmado aos valores em liquidação e o
+	// líquido ao disponível uma única vez.
+	if got := f.store.ledgerKinds(); !slices.Equal(got, []string{"payment.confirmed", "payment.received", "settlement.received"}) {
+		t.Fatalf("lançamentos: %v", got)
+	}
+	if net := ledgerNet(f.store.posted); net[ledger.Cash] != 9801 || net[ledger.ProviderFees] != 199 || net[ledger.ProviderConfirmed] != 0 ||
+		net[ledger.ProviderClearing] != 0 || net[ledger.AccountsReceivable] != -10000 {
+		t.Fatalf("ledger depois do recebimento: %+v", net)
 	}
 	if got := f.store.charges[c.ID]; got.Status != ChargePaid || got.ProviderStatus != "RECEIVED" {
 		t.Fatalf("situação do provedor atualizada: %+v", got)
@@ -1263,8 +1275,14 @@ func TestProviderPaymentForAlreadyPaidInvoiceRecognizesFee(t *testing.T) {
 	f.process(t, f.storeWebhook(t, WebhookEvent{EventID: "evt_1", ProviderChargeID: "pay_1", Status: ProviderConfirmed,
 		Charge: providerSnapshot(ProviderConfirmed, "CONFIRMED", 10000, 199, nil)}))
 	net := ledgerNet(f.store.posted)
-	if net[ledger.ProviderFees] != 199 || net[ledger.ProviderClearing] != 10000-199 {
-		t.Fatalf("a taxa do provedor deve ser reconhecida também neste caminho: %+v", net)
+	if net[ledger.ProviderConfirmed] != 10000 || net[ledger.CustomerCredits] != -10000 || net[ledger.ProviderFees] != 0 {
+		t.Fatalf("confirmado: bruto aguardando o recebimento, sem taxa: %+v", net)
+	}
+	f.process(t, f.storeWebhook(t, WebhookEvent{EventID: "evt_2", ProviderChargeID: "pay_1", Status: ProviderReceived,
+		Charge: providerSnapshot(ProviderReceived, "RECEIVED", 10000, 199, nil)}))
+	net = ledgerNet(f.store.posted)
+	if net[ledger.ProviderFees] != 199 || net[ledger.Cash] != 10000-199 || net[ledger.ProviderConfirmed] != 0 || net[ledger.ProviderClearing] != 0 {
+		t.Fatalf("a taxa do provedor deve ser reconhecida no recebimento também neste caminho: %+v", net)
 	}
 }
 

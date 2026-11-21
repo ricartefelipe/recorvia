@@ -13,13 +13,14 @@ import {
   UnstyledButton,
 } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import { IconBuilding, IconChevronDown, IconLogout, IconPlus } from '@tabler/icons-react';
+import { IconBuilding, IconChevronDown, IconDeviceDesktopOff, IconHeadset, IconLogout, IconPlus } from '@tabler/icons-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink as RouterNavLink, Outlet, useLocation } from 'react-router';
+import { confirmAction } from '../components/ui';
 import { handleMutationError } from '../lib/errors';
 import { roleLabels } from '../lib/labels';
 import { useSession } from '../session/SessionContext';
-import { logout } from '../session/sessionApi';
+import { logout, logoutAll } from '../session/sessionApi';
 import { useTenantSwitch } from '../session/useTenantSwitch';
 import { isGroup, visibleNavigation, type NavItem } from './navigation';
 
@@ -53,17 +54,29 @@ function TenantSelector() {
   );
 }
 
-function UserMenu() {
-  const { user, tenant } = useSession();
+/** Menu do usuário; assign permite substituir a navegação do navegador (testes). */
+export function UserMenu({ assign }: { assign?: (url: string) => void }) {
+  const { user, tenant, session } = useSession();
   const [leaving, setLeaving] = useState(false);
-  const onLogout = async () => {
+  const leave = async (action: () => Promise<void>) => {
     setLeaving(true);
     try {
-      await logout();
+      await action();
     } catch (error) {
       setLeaving(false);
       handleMutationError(error);
     }
+  };
+  const onLogout = () => leave(() => logout(assign));
+  const onLogoutAll = async () => {
+    const ok = await confirmAction({
+      title: 'Encerrar todas as sessões',
+      message:
+        'Encerrar todas as suas sessões no Recorvia, em todos os navegadores e dispositivos, inclusive esta? Será preciso entrar de novo em cada um deles.',
+      confirmLabel: 'Encerrar todas',
+      danger: true,
+    });
+    if (ok) await leave(() => logoutAll(assign));
   };
   return (
     <Menu position="bottom-end" withArrow>
@@ -91,7 +104,15 @@ function UserMenu() {
         <Menu.Item component={Link} to="/organizacoes/nova" leftSection={<IconPlus size={16} />}>
           Criar organização
         </Menu.Item>
+        {session.platform_staff && (
+          <Menu.Item component={Link} to="/admin/servicos" leftSection={<IconHeadset size={16} />}>
+            Atendimento de serviços
+          </Menu.Item>
+        )}
         <Menu.Divider />
+        <Menu.Item leftSection={<IconDeviceDesktopOff size={16} />} onClick={() => void onLogoutAll()} disabled={leaving}>
+          Encerrar todas as sessões
+        </Menu.Item>
         <Menu.Item
           color="red"
           leftSection={leaving ? <Loader size={14} /> : <IconLogout size={16} />}

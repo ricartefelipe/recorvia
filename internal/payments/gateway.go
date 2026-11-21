@@ -17,8 +17,11 @@ import (
 type ProviderStatus string
 
 const (
-	ProviderPending             ProviderStatus = "pending"
-	ProviderConfirmed           ProviderStatus = "confirmed"
+	ProviderPending ProviderStatus = "pending"
+	// ProviderConfirmed: pagamento confirmado, valor ainda não creditado pelo
+	// provedor (por exemplo, cartão aguardando o prazo de recebimento).
+	ProviderConfirmed ProviderStatus = "confirmed"
+	// ProviderReceived: pagamento recebido, valor creditado pelo provedor.
 	ProviderReceived            ProviderStatus = "received"
 	ProviderOverdue             ProviderStatus = "overdue"
 	ProviderFailed              ProviderStatus = "failed"
@@ -42,6 +45,11 @@ func (s ProviderStatus) IsPaid() bool {
 	}
 	return false
 }
+
+// IsReceived informa se a situação implica pagamento recebido pelo
+// provedor: paga e não apenas confirmada. Reembolsos e chargebacks pressupõem
+// valor processado pelo provedor e implicam o recebimento (ADR-080).
+func (s ProviderStatus) IsReceived() bool { return s.IsPaid() && s != ProviderConfirmed }
 
 // CustomerData identifica o pagador para o provedor.
 type CustomerData struct {

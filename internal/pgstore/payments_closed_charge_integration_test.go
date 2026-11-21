@@ -115,8 +115,8 @@ func TestProviderPaymentOfFailedChargeIsApplied(t *testing.T) {
 	}
 	fee := paysim.Fee(10000)
 	net := ledgerNetByCode(t, h)
-	if net[""] != 0 || net["accounts_receivable"] != 0 || net["provider_fees"] != fee || net["provider_clearing"] != 10000-fee ||
-		net["billed_revenue"] != -10000 {
+	if net[""] != 0 || net["accounts_receivable"] != 0 || net["provider_fees"] != fee || net["cash"] != 10000-fee ||
+		net["provider_clearing"] != 0 || net["provider_confirmed"] != 0 || net["billed_revenue"] != -10000 {
 		t.Fatalf("ledger balanceado com recebimento e taxa: %+v", net)
 	}
 }
@@ -166,14 +166,16 @@ func TestProviderPaymentOfChargeOfVoidedInvoiceBecomesCredit(t *testing.T) {
 		AND resource_id = $2 AND details->>'invoice_status' = 'void'`, h.tn.ID, c.ID.String()); n != 1 {
 		t.Fatalf("auditoria do pagamento após cancelamento local: %d", n)
 	}
-	if n := countRows(t, h.env, h.tn.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND kind IN ('payment.overpayment', 'payment.provider_fee')`,
-		h.tn.ID); n != 2 {
-		t.Fatalf("lançamentos de crédito e taxa: %d", n)
+	// Crédito na confirmação; taxa no recebimento, com a liquidação do
+	// líquido no disponível.
+	if n := countRows(t, h.env, h.tn.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1
+		AND kind IN ('payment.overpayment', 'payment.received', 'settlement.received')`, h.tn.ID); n != 3 {
+		t.Fatalf("lançamentos de crédito, recebimento e liquidação: %d", n)
 	}
 	fee := paysim.Fee(10000)
 	net := ledgerNetByCode(t, h)
 	if net[""] != 0 || net["accounts_receivable"] != 0 || net["billed_revenue"] != 0 || net["customer_credits"] != -10000 ||
-		net["provider_fees"] != fee || net["provider_clearing"] != 10000-fee {
+		net["provider_fees"] != fee || net["cash"] != 10000-fee || net["provider_clearing"] != 0 || net["provider_confirmed"] != 0 {
 		t.Fatalf("ledger balanceado: crédito integral e taxa reconhecida: %+v", net)
 	}
 	h.env.Clock.Advance(10 * time.Minute)

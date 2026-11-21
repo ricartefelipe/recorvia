@@ -53,7 +53,10 @@ type Tx interface {
 	Customer(ctx context.Context, id uuid.UUID) (customers.Customer, error)
 	Plan(ctx context.Context, id uuid.UUID) (catalog.Plan, error)
 	PriceVersion(ctx context.Context, id uuid.UUID) (catalog.PriceVersion, error)
-	PlatformPlan(ctx context.Context) (platformbilling.Plan, error)
+	// LockPlatformPlan lê o plano da plataforma bloqueando a assinatura do
+	// tenant na plataforma até o fim da transação: criações e reativações
+	// simultâneas contam os contratos ativos uma de cada vez.
+	LockPlatformPlan(ctx context.Context) (platformbilling.Plan, error)
 	PlatformUsage(ctx context.Context) (platformbilling.Usage, error)
 
 	// Insert grava a assinatura. false indica que outra transação já
@@ -185,7 +188,7 @@ func (s *Service) Create(ctx context.Context, tenantID uuid.UUID, actor audit.Ac
 		if err != nil {
 			return err
 		}
-		pplan, err := tx.PlatformPlan(ctx)
+		pplan, err := tx.LockPlatformPlan(ctx)
 		if err != nil {
 			return err
 		}
@@ -194,11 +197,7 @@ func (s *Service) Create(ctx context.Context, tenantID uuid.UUID, actor audit.Ac
 				return err
 			}
 		}
-		usage, err := tx.PlatformUsage(ctx)
-		if err != nil {
-			return err
-		}
-		if err := platformbilling.CheckSubscriptionLimit(pplan, usage); err != nil {
+		if err := checkSubscriptionLimit(ctx, tx, pplan); err != nil {
 			return err
 		}
 		start := now
@@ -247,6 +246,16 @@ func (s *Service) Create(ctx context.Context, tenantID uuid.UUID, actor audit.Ac
 			map[string]any{"plan_id": plan.ID, "price_version": price.Version, "quantity": qty}))
 	})
 	return sub, err
+}
+
+// checkSubscriptionLimit confere o limite de contratos ativos do plano da
+// plataforma; o plano deve ter sido lido com LockPlatformPlan.
+func checkSubscriptionLimit(ctx context.Context, tx Tx, pplan platformbilling.Plan) error {
+	usage, err := tx.PlatformUsage(ctx)
+	if err != nil {
+		return err
+	}
+	return platformbilling.CheckSubscriptionLimit(pplan, usage)
 }
 
 // Get retorna uma assinatura.
@@ -363,8 +372,22 @@ func (s *Service) Suspend(ctx context.Context, tenantID uuid.UUID, actor audit.A
 		func(_ Tx, sub *Subscription, now time.Time) error { return sub.Suspend(reason, now) })
 }
 
-// Reactivate reativa a assinatura suspensa.
+// Reactivate reativa a assinatura suspensa. Suspensas não contam como
+// contratos ativos: a reativação ocupa uma vaga e confere o limite do plano
+// da plataforma, como a criação.
 func (s *Service) Reactivate(ctx context.Context, tenantID uuid.UUID, actor audit.Actor, id uuid.UUID, expectedVersion int) (Subscription, error) {
 	return s.mutate(ctx, tenantID, actor, id, expectedVersion, "subscription.reactivated", outbox.EventSubscriptionReactivate,
-		func(_ Tx, sub *Subscription, now time.Time) error { return sub.Reactivate(now) })
+		func(tx Tx, sub *Subscription, now time.Time) error {
+			if sub.Status != Suspended {
+				return sub.Reactivate(now) // recusa com o erro de transição
+			}
+			pplan, err := tx.LockPlatformPlan(ctx)
+			if err != nil {
+				return err
+			}
+			if err := checkSubscriptionLimit(ctx, tx, pplan); err != nil {
+				return err
+			}
+			return sub.Reactivate(now)
+		})
 }

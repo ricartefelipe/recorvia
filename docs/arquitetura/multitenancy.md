@@ -62,7 +62,11 @@ as demais funções do publicador da outbox (`app_outbox_mark_published`, `app_o
 `app_retention_tenants` (tenants com dados vencidos de um tipo, somente IDs), `app_retention_purge`
 (remove um lote vencido de um tipo e recusa a chamada fora da transação do próprio tenant) e
 `app_customer_delete_notifications` (exclui as notificações de um cliente na transação da
-anonimização). Toda função `SECURITY DEFINER` criada por
+anonimização). O atendimento dos serviços adicionais pela equipe da plataforma (ADR-077) usa
+`app_platform_addon_orders` (pedidos de serviço adicional de todas as organizações, sem dados dos
+clientes dos tenants, chamada somente pelas rotas `/api/v1/admin/...`) e `app_platform_tenant_names`
+(nome e slug das organizações desses pedidos); agendar, concluir e cancelar ocorrem na transação do
+tenant do pedido, com auditoria na trilha dele. Toda função `SECURITY DEFINER` criada por
 migration precisa constar nesta seção: o teste `TestSecurityDefinerFunctionsAreDocumented`
 (`internal/infra/migrate`) compara as migrations com este documento.
 

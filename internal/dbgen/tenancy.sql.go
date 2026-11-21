@@ -95,6 +95,39 @@ func (q *Queries) FindInvitation(ctx context.Context, tokenHash []byte) (FindInv
 	return i, err
 }
 
+const getAddonOrderForUpdate = `-- name: GetAddonOrderForUpdate :one
+SELECT id, tenant_id, addon_code, status, notes, price_amount, requested_by, created_at, updated_at, scheduled_for, completed_at, canceled_at, cancel_reason, handled_by, statement_id, version FROM platform_addon_orders WHERE tenant_id = $1 AND id = $2 FOR UPDATE
+`
+
+type GetAddonOrderForUpdateParams struct {
+	TenantID uuid.UUID
+	ID       uuid.UUID
+}
+
+func (q *Queries) GetAddonOrderForUpdate(ctx context.Context, arg GetAddonOrderForUpdateParams) (PlatformAddonOrder, error) {
+	row := q.db.QueryRow(ctx, getAddonOrderForUpdate, arg.TenantID, arg.ID)
+	var i PlatformAddonOrder
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.AddonCode,
+		&i.Status,
+		&i.Notes,
+		&i.PriceAmount,
+		&i.RequestedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ScheduledFor,
+		&i.CompletedAt,
+		&i.CanceledAt,
+		&i.CancelReason,
+		&i.HandledBy,
+		&i.StatementID,
+		&i.Version,
+	)
+	return i, err
+}
+
 const getDefaultPlatformPlan = `-- name: GetDefaultPlatformPlan :one
 SELECT code, name, description, monthly_price_amount, currency, max_users, max_active_subscriptions, features, trial_days, is_default, active, sort_order, created_at FROM platform_plans WHERE is_default AND active
 `
@@ -545,7 +578,7 @@ func (q *Queries) InsertTenantPlatformSubscription(ctx context.Context, arg Inse
 }
 
 const listAddonOrders = `-- name: ListAddonOrders :many
-SELECT id, tenant_id, addon_code, status, notes, price_amount, requested_by, created_at, updated_at FROM platform_addon_orders WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT 100
+SELECT id, tenant_id, addon_code, status, notes, price_amount, requested_by, created_at, updated_at, scheduled_for, completed_at, canceled_at, cancel_reason, handled_by, statement_id, version FROM platform_addon_orders WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT 100
 `
 
 func (q *Queries) ListAddonOrders(ctx context.Context, tenantID uuid.UUID) ([]PlatformAddonOrder, error) {
@@ -567,6 +600,45 @@ func (q *Queries) ListAddonOrders(ctx context.Context, tenantID uuid.UUID) ([]Pl
 			&i.RequestedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ScheduledFor,
+			&i.CompletedAt,
+			&i.CanceledAt,
+			&i.CancelReason,
+			&i.HandledBy,
+			&i.StatementID,
+			&i.Version,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAllPlatformAddons = `-- name: ListAllPlatformAddons :many
+SELECT code, name, description, price_amount, currency, kind, active FROM platform_addons ORDER BY code
+`
+
+func (q *Queries) ListAllPlatformAddons(ctx context.Context) ([]PlatformAddon, error) {
+	rows, err := q.db.Query(ctx, listAllPlatformAddons)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PlatformAddon
+	for rows.Next() {
+		var i PlatformAddon
+		if err := rows.Scan(
+			&i.Code,
+			&i.Name,
+			&i.Description,
+			&i.PriceAmount,
+			&i.Currency,
+			&i.Kind,
+			&i.Active,
 		); err != nil {
 			return nil, err
 		}
@@ -798,6 +870,22 @@ func (q *Queries) LockActiveOwners(ctx context.Context, tenantID uuid.UUID) ([]u
 	return items, nil
 }
 
+const markAddonsBilled = `-- name: MarkAddonsBilled :exec
+UPDATE platform_addon_orders SET statement_id = $1
+ WHERE tenant_id = $2 AND status = 'completed' AND statement_id IS NULL AND completed_at < $3
+`
+
+type MarkAddonsBilledParams struct {
+	StatementID *uuid.UUID
+	TenantID    uuid.UUID
+	Before      *time.Time
+}
+
+func (q *Queries) MarkAddonsBilled(ctx context.Context, arg MarkAddonsBilledParams) error {
+	_, err := q.db.Exec(ctx, markAddonsBilled, arg.StatementID, arg.TenantID, arg.Before)
+	return err
+}
+
 const platformTenantCatalog = `-- name: PlatformTenantCatalog :many
 SELECT tenant_id::uuid AS tenant_id, name::text AS name, slug::text AS slug, status::text AS status,
        COALESCE(plan_code, '')::text AS plan_code, COALESCE(platform_status, '')::text AS platform_status, member_count::bigint AS member_count,
@@ -845,19 +933,104 @@ func (q *Queries) PlatformTenantCatalog(ctx context.Context) ([]PlatformTenantCa
 	return items, nil
 }
 
-const sumCompletedAddons = `-- name: SumCompletedAddons :one
-SELECT COALESCE(sum(price_amount), 0)::bigint FROM platform_addon_orders
- WHERE tenant_id = $1 AND status = 'completed' AND updated_at >= $2 AND updated_at < $3
+const platformTenantNames = `-- name: PlatformTenantNames :many
+SELECT tenant_id::uuid AS tenant_id, name::text AS name, slug::text AS slug FROM app_platform_tenant_names($1::uuid[])
 `
 
-type SumCompletedAddonsParams struct {
-	TenantID    uuid.UUID
-	PeriodStart time.Time
-	PeriodEnd   time.Time
+type PlatformTenantNamesRow struct {
+	TenantID uuid.UUID
+	Name     string
+	Slug     string
 }
 
-func (q *Queries) SumCompletedAddons(ctx context.Context, arg SumCompletedAddonsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, sumCompletedAddons, arg.TenantID, arg.PeriodStart, arg.PeriodEnd)
+func (q *Queries) PlatformTenantNames(ctx context.Context, ids []uuid.UUID) ([]PlatformTenantNamesRow, error) {
+	rows, err := q.db.Query(ctx, platformTenantNames, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PlatformTenantNamesRow
+	for rows.Next() {
+		var i PlatformTenantNamesRow
+		if err := rows.Scan(&i.TenantID, &i.Name, &i.Slug); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const staffAddonOrders = `-- name: StaffAddonOrders :many
+SELECT id, tenant_id, addon_code, status, notes, price_amount, requested_by, created_at, updated_at, scheduled_for, completed_at, canceled_at, cancel_reason, handled_by, statement_id, version FROM app_platform_addon_orders($1::text, $2::timestamptz, $3::uuid,
+  $4::int)
+`
+
+type StaffAddonOrdersParams struct {
+	Status   *string
+	AfterAt  *time.Time
+	AfterID  *uuid.UUID
+	RowLimit int32
+}
+
+func (q *Queries) StaffAddonOrders(ctx context.Context, arg StaffAddonOrdersParams) ([]PlatformAddonOrder, error) {
+	rows, err := q.db.Query(ctx, staffAddonOrders,
+		arg.Status,
+		arg.AfterAt,
+		arg.AfterID,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PlatformAddonOrder
+	for rows.Next() {
+		var i PlatformAddonOrder
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.AddonCode,
+			&i.Status,
+			&i.Notes,
+			&i.PriceAmount,
+			&i.RequestedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ScheduledFor,
+			&i.CompletedAt,
+			&i.CanceledAt,
+			&i.CancelReason,
+			&i.HandledBy,
+			&i.StatementID,
+			&i.Version,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const sumUnbilledCompletedAddons = `-- name: SumUnbilledCompletedAddons :one
+SELECT COALESCE(sum(price_amount), 0)::bigint FROM platform_addon_orders
+ WHERE tenant_id = $1 AND status = 'completed' AND statement_id IS NULL AND completed_at < $2
+`
+
+type SumUnbilledCompletedAddonsParams struct {
+	TenantID uuid.UUID
+	Before   *time.Time
+}
+
+// Pedidos concluídos antes do fim do período que ainda não entraram em
+// demonstrativo (ADR-077).
+func (q *Queries) SumUnbilledCompletedAddons(ctx context.Context, arg SumUnbilledCompletedAddonsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, sumUnbilledCompletedAddons, arg.TenantID, arg.Before)
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
@@ -896,6 +1069,46 @@ func (q *Queries) TenantsDuePlatformStatement(ctx context.Context, now time.Time
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateAddonOrder = `-- name: UpdateAddonOrder :execrows
+UPDATE platform_addon_orders
+   SET status = $1, scheduled_for = $2, completed_at = $3,
+       canceled_at = $4, cancel_reason = $5, handled_by = $6,
+       updated_at = $7, version = version + 1
+ WHERE tenant_id = $8 AND id = $9 AND version = $10
+`
+
+type UpdateAddonOrderParams struct {
+	Status       string
+	ScheduledFor *time.Time
+	CompletedAt  *time.Time
+	CanceledAt   *time.Time
+	CancelReason *string
+	HandledBy    *uuid.UUID
+	UpdatedAt    time.Time
+	TenantID     uuid.UUID
+	ID           uuid.UUID
+	Version      int32
+}
+
+func (q *Queries) UpdateAddonOrder(ctx context.Context, arg UpdateAddonOrderParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateAddonOrder,
+		arg.Status,
+		arg.ScheduledFor,
+		arg.CompletedAt,
+		arg.CanceledAt,
+		arg.CancelReason,
+		arg.HandledBy,
+		arg.UpdatedAt,
+		arg.TenantID,
+		arg.ID,
+		arg.Version,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const updateInvitation = `-- name: UpdateInvitation :exec

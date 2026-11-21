@@ -150,7 +150,7 @@ func TestComputeCopiesAggregates(t *testing.T) {
 	raw := Raw{
 		Billed: 100, BilledRecurring: 70, BilledUsage: 30, Received: 90, OpenReceivables: 40,
 		OverdueReceivables: 15, ActiveNow: 12, CreatedInPeriod: 3, EndedInPeriod: 2, ActiveAtStart: 11,
-		Refunds: 5, Chargebacks: 1, OpenRecoverables: 7, UnknownOperations: 2, OpenDiscrepancies: 4,
+		Refunds: 5, Chargebacks: 1, OpenRecoverables: 7, PendingProviderReceipt: 8, UnknownOperations: 2, OpenDiscrepancies: 4,
 	}
 	d, err := Compute("2026-10", raw)
 	if err != nil {
@@ -159,8 +159,8 @@ func TestComputeCopiesAggregates(t *testing.T) {
 	want := Dashboard{
 		Month: "2026-10", Currency: "BRL", Billed: 100, BilledRecurring: 70, BilledUsage: 30, Received: 90,
 		OpenReceivables: 40, OverdueReceivables: 15, ChurnRateBP: 1818, ActiveSubscriptions: 12,
-		NewSubscriptions: 3, CanceledSubscriptions: 2, Refunds: 5, Chargebacks: 1, OpenRecoverables: 7, OpenDiscrepancies: 4,
-		UnknownOperations: 2,
+		NewSubscriptions: 3, CanceledSubscriptions: 2, Refunds: 5, Chargebacks: 1, OpenRecoverables: 7, PendingProviderReceipt: 8,
+		OpenDiscrepancies: 4, UnknownOperations: 2,
 	}
 	d.Definitions = nil
 	if !reflect.DeepEqual(d, want) {
@@ -173,7 +173,7 @@ func TestComputeExposesDefinitions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"mrr", "arr", "billed", "received", "open", "overdue", "delinquency", "churn", "refunds", "chargebacks", "recoverables"} {
+	for _, k := range []string{"mrr", "arr", "billed", "received", "open", "overdue", "delinquency", "churn", "refunds", "chargebacks", "recoverables", "pending_receipt"} {
 		if d.Definitions[k] == "" {
 			t.Errorf("definição %q ausente", k)
 		}

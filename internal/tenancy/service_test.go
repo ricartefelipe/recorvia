@@ -479,7 +479,7 @@ func TestInviteUnlimitedPlan(t *testing.T) {
 }
 
 func TestInviteStoreErrors(t *testing.T) {
-	for _, op := range []string{"PlatformPlan", "PlatformUsage", "PendingInvitations", "InsertInvitation", "Emit", "Audit"} {
+	for _, op := range []string{"LockPlatformPlan", "PlatformUsage", "PendingInvitations", "InsertInvitation", "Emit", "Audit"} {
 		t.Run(op, func(t *testing.T) {
 			e := newEnv(t)
 			e.store.fail[op] = errBoom
@@ -666,6 +666,41 @@ func TestAcceptInvitationRejected(t *testing.T) {
 	}
 }
 
+// O aceite confere o limite de usuários de novo: depois de um rebaixamento do
+// plano (ou de qualquer mudança que reduza as vagas), convites antigos não
+// levam a organização além do limite.
+func TestAcceptInvitationRechecksUserLimit(t *testing.T) {
+	e := newEnv(t) // plano com até 3 usuários e 1 membro ativo
+	_, first := e.invite(t, "a@acme.com", RoleOperator)
+	_, second := e.invite(t, "b@acme.com", RoleOperator)
+	one := 2
+	e.d().plan.MaxUsers = &one
+
+	if _, err := e.svc.AcceptInvitation(context.Background(), UserRef{ID: uuid.New(), Email: "a@acme.com"}, first); err != nil {
+		t.Fatalf("o primeiro aceite cabe no limite: %v", err)
+	}
+	if e.store.calls["LockPlatformPlan"] < 3 {
+		t.Fatal("o aceite deve ler o plano com bloqueio")
+	}
+	before := len(e.d().members)
+	_, err := e.svc.AcceptInvitation(context.Background(), UserRef{ID: uuid.New(), Email: "b@acme.com"}, second)
+	assertAppErr(t, err, apperr.KindLimitExceeded, "platform_user_limit")
+	if len(e.d().members) != before {
+		t.Fatal("aceite acima do limite não pode criar associação")
+	}
+
+	// Membro removido que volta também ocupa vaga.
+	former := e.addMember(RoleAuditor, MembershipRemoved, "volta@acme.com")
+	e.d().plan.MaxUsers = nil
+	_, back := e.invite(t, "volta@acme.com", RoleFinance)
+	e.d().plan.MaxUsers = &one
+	_, err = e.svc.AcceptInvitation(context.Background(), former, back)
+	assertAppErr(t, err, apperr.KindLimitExceeded, "platform_user_limit")
+	if e.d().members[former.ID].Status != MembershipRemoved {
+		t.Fatal("membro removido não pode ser reativado acima do limite")
+	}
+}
+
 func TestAcceptInvitationValidatesTokenBeforeLookup(t *testing.T) {
 	e := newEnv(t)
 	_, err := e.svc.AcceptInvitation(context.Background(), UserRef{ID: uuid.New()}, "")
@@ -691,8 +726,10 @@ func TestAcceptInvitationStoreErrors(t *testing.T) {
 		op   string
 		user func(*env) UserRef
 	}{
+		{"LockPlatformPlan", newcomer},
 		{"Invitation", newcomer},
 		{"Membership", newcomer},
+		{"PlatformUsage", newcomer},
 		{"InsertMembership", newcomer},
 		{"UpdateMembership", removed},
 		{"UpdateInvitation", newcomer},

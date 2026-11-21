@@ -106,7 +106,7 @@ func TestChargebackConsumesOverpaymentCreditWithSimulator(t *testing.T) {
 		}
 		h.assertLedgerBalanced(t)
 		net := ledgerNetByCode(t, h)
-		if net["chargebacks"] != 10000 || net["customer_credits"] != 0 || net["customer_recoverables"] != 0 || net["provider_clearing"] != -fee ||
+		if net["chargebacks"] != 10000 || net["customer_credits"] != 0 || net["customer_recoverables"] != 0 || net["cash"] != -fee || net["provider_clearing"] != 0 || net["provider_confirmed"] != 0 ||
 			net["refunds"] != 0 {
 			t.Fatalf("ledger: %v", net)
 		}
@@ -166,7 +166,7 @@ func TestChargebackConsumesOverpaymentCreditWithSimulator(t *testing.T) {
 		// estornada é a da fatura contestada e os 20,00 usados ficam a
 		// recuperar do cliente.
 		if net["chargebacks"] != 10000 || net["customer_recoverables"] != 2000 || net["customer_credits"] != 0 ||
-			net["provider_clearing"] != -fee || net["accounts_receivable"] != 0 {
+			net["cash"] != -fee || net["provider_clearing"] != 0 || net["provider_confirmed"] != 0 || net["accounts_receivable"] != 0 {
 			t.Fatalf("ledger: %v", net)
 		}
 		if n := h.sum(t, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'dispute.lost'
@@ -198,7 +198,7 @@ func TestChargebackConsumesOverpaymentCreditWithSimulator(t *testing.T) {
 		}
 		h.assertLedgerBalanced(t)
 		if net := ledgerNetByCode(t, h); net["chargebacks"] != 10000 || net["refunds"] != 0 || net["customer_credits"] != 0 ||
-			net["provider_clearing"] != -fee {
+			net["cash"] != -fee || net["provider_clearing"] != 0 || net["provider_confirmed"] != 0 {
 			t.Fatalf("ledger: %v", net)
 		}
 	})
@@ -324,7 +324,7 @@ func TestChargebackCreditWithRefundSettledAfterLossWithSimulator(t *testing.T) {
 		// cortesia continua no saldo do cliente.
 		net := ledgerNetByCode(t, h)
 		if net["chargebacks"] != 7000 || net["refunds"] != 3000 || net["customer_credits"] != -700 || net["customer_recoverables"] != 0 ||
-			net["provider_clearing"] != -fee {
+			net["cash"] != -fee || net["provider_clearing"] != 0 || net["provider_confirmed"] != 0 {
 			t.Fatalf("ledger: %v", net)
 		}
 		if n := h.sum(t, `SELECT COALESCE(sum(amount), 0)::bigint FROM customer_credit_entries WHERE tenant_id = $1 AND kind = 'consumption'`); n != -2500 {
@@ -389,7 +389,7 @@ func TestChargebackCreditWithRefundSettledAfterLossWithSimulator(t *testing.T) {
 		// cortesia continua no saldo.
 		net := ledgerNetByCode(t, h)
 		if net["chargebacks"] != 7000 || net["refunds"] != 3000 || net["customer_credits"] != -700 || net["customer_recoverables"] != 2000 ||
-			net["provider_clearing"] != -fee || net["accounts_receivable"] != 0 {
+			net["cash"] != -fee || net["provider_clearing"] != 0 || net["provider_confirmed"] != 0 || net["accounts_receivable"] != 0 {
 			t.Fatalf("ledger: %v", net)
 		}
 		if dispute, refund := creditReversals(t, h, "dispute"), creditReversals(t, h, "refund"); dispute != 1 || refund != 0 {
@@ -439,7 +439,7 @@ func TestChargebackCreditWithRefundSettledAfterLossWithSimulator(t *testing.T) {
 		h.assertLedgerBalanced(t)
 		net := ledgerNetByCode(t, h)
 		if net["chargebacks"] != 10000 || net["refunds"] != 0 || net["customer_credits"] != 0 || net["customer_recoverables"] != 0 ||
-			net["provider_clearing"] != -fee {
+			net["cash"] != -fee || net["provider_clearing"] != 0 || net["provider_confirmed"] != 0 {
 			t.Fatalf("ledger: %v", net)
 		}
 		if n := h.sum(t, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'dispute.chargeback_increased'

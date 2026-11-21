@@ -6,9 +6,16 @@ import { actorTypeLabels, labelOf } from '../lib/labels';
 import { DateTime, JsonView } from './format';
 import { EmptyState } from './states';
 
-function actorText(event: AuditEvent): string {
-  if (event.actor_label) return event.actor_label;
-  const type = labelOf(actorTypeLabels, event.actor_type);
+/**
+ * Quem executou a ação. Ações da equipe da plataforma (atendimento de
+ * serviços adicionais) são feitas por quem não é membro da organização: o
+ * nome vem identificado como da equipe, para não parecer um usuário
+ * desconhecido.
+ */
+export function actorText(event: AuditEvent): string {
+  const staff = (event.details as Record<string, unknown> | null | undefined)?.platform_staff === true;
+  if (event.actor_label) return staff ? `${event.actor_label} (equipe da plataforma Recorvia)` : event.actor_label;
+  const type = staff ? 'Equipe da plataforma Recorvia' : labelOf(actorTypeLabels, event.actor_type);
   return event.actor_id ? `${type} ${event.actor_id.slice(0, 8)}` : type;
 }
 

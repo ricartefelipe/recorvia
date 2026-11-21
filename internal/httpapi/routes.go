@@ -55,6 +55,7 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	// Anonimização: irreversível, com justificativa e somente por uma pessoa identificada (ADR-061).
 	t(post, "/api/v1/customers/{id}/anonymize", tenancy.PermCustomersAnonymize, a.anonymizeCustomer, idempotent(), userSession())
 	t(post, "/api/v1/customers/{id}/contacts", tenancy.PermCustomersWrite, a.addContact)
+	t(patch, "/api/v1/customers/{id}/contacts/{contact_id}", tenancy.PermCustomersWrite, a.updateContact)
 	t(del, "/api/v1/customers/{id}/contacts/{contact_id}", tenancy.PermCustomersWrite, a.removeContact)
 	t(put, "/api/v1/customers/{id}/billing-address", tenancy.PermCustomersWrite, a.setAddress)
 	t(get, "/api/v1/customers/{id}/history", tenancy.PermCustomersRead, a.customerHistory)
@@ -133,6 +134,7 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	t(get, "/api/v1/notification-templates", tenancy.PermCollectionsRead, a.listNotificationTemplates)
 	t(put, "/api/v1/notification-templates/{key}", tenancy.PermCollectionsWrite, a.updateNotificationTemplate)
 	t(get, "/api/v1/notifications", tenancy.PermCollectionsRead, a.listNotifications)
+	t(get, "/api/v1/notifications/{id}/events", tenancy.PermCollectionsRead, a.listNotificationEvents)
 
 	t(get, "/api/v1/webhook-event-types", tenancy.PermWebhooksRead, a.listWebhookEventTypes)
 	t(get, "/api/v1/webhook-endpoints", tenancy.PermWebhooksRead, a.listWebhookEndpoints)
@@ -141,6 +143,7 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	t(del, "/api/v1/webhook-endpoints/{id}", tenancy.PermWebhooksWrite, a.deleteWebhookEndpoint)
 	t(post, "/api/v1/webhook-endpoints/{id}/rotate-secret", tenancy.PermWebhooksWrite, a.rotateWebhookSecret)
 	t(get, "/api/v1/webhook-endpoints/{id}/deliveries", tenancy.PermWebhooksRead, a.listWebhookDeliveries)
+	t(get, "/api/v1/webhook-deliveries/{id}/attempts", tenancy.PermWebhooksRead, a.listWebhookDeliveryAttempts)
 	t(post, "/api/v1/webhook-deliveries/{id}/retry", tenancy.PermWebhooksWrite, a.retryWebhookDelivery)
 
 	t(get, "/api/v1/ledger/accounts", tenancy.PermLedgerRead, a.ledgerAccounts)

@@ -53,6 +53,13 @@ func confirmedWebhook(eventID, providerChargeID string, amount, fee int64) Webho
 	return WebhookEvent{EventID: eventID, Type: "PAYMENT_CONFIRMED", ProviderChargeID: providerChargeID, Status: ProviderConfirmed, Charge: snap}
 }
 
+// receivedWebhook informa o pagamento já recebido (creditado) pelo provedor.
+func receivedWebhook(eventID, providerChargeID string, amount, fee int64) WebhookEvent {
+	snap := providerSnapshot(ProviderReceived, "RECEIVED", amount, fee, nil)
+	snap.ProviderChargeID = providerChargeID
+	return WebhookEvent{EventID: eventID, Type: "PAYMENT_RECEIVED", ProviderChargeID: providerChargeID, Status: ProviderReceived, Charge: snap}
+}
+
 func TestHandleInvoiceCreditedReplacesDivergentCharge(t *testing.T) {
 	f := newPayFixture(t)
 	inv, old := awaitingCharge(t, f)
@@ -165,8 +172,8 @@ func TestProviderPaymentOfChargeCanceledAfterCreditNoteIsApplied(t *testing.T) {
 		t.Fatalf("lançamentos: %v", kinds)
 	}
 	net := ledgerNet(f.store.posted)
-	if net[ledger.AccountsReceivable] != -7000 || net[ledger.CustomerCredits] != -3000 || net[ledger.ProviderFees] != 199 ||
-		net[ledger.ProviderClearing] != 10000-199 {
+	if net[ledger.AccountsReceivable] != -7000 || net[ledger.CustomerCredits] != -3000 || net[ledger.ProviderFees] != 0 ||
+		net[ledger.ProviderConfirmed] != 10000 {
 		t.Fatalf("ledger: %+v", net)
 	}
 	if a := f.auditActions(); len(a) == 0 || a[0] != "charge.paid_after_local_cancellation" || !slices.Contains(a, "payment.applied") {
@@ -207,7 +214,7 @@ func TestProviderPaymentOfChargeCanceledWithVoidedInvoiceBecomesCredit(t *testin
 	if len(f.store.credits) != 1 || f.store.credits[0].amount.Amount() != 10000 {
 		t.Fatalf("pagamento de fatura cancelada vira crédito integral: %+v", f.store.credits)
 	}
-	if net := ledgerNet(f.store.posted); net[ledger.ProviderFees] != 199 || net[ledger.CustomerCredits] != -10000 {
+	if net := ledgerNet(f.store.posted); net[ledger.ProviderConfirmed] != 10000 || net[ledger.CustomerCredits] != -10000 {
 		t.Fatalf("ledger: %+v", net)
 	}
 	if f.invoice(inv.ID).Status != billing.Void {

@@ -77,6 +77,10 @@ type Deps struct {
 	Portal        *portal.Service
 	Credentials   *apicredentials.Service
 	Providers     []string
+	// InvoiceExportMaxRows limita as faturas por arquivo exportado; zero usa
+	// o padrão (exportMaxRows). Os testes reduzem o limite para exercitar a
+	// exportação em partes.
+	InvoiceExportMaxRows int
 	// Ready verifica dependências críticas (readiness).
 	Ready func(ctx context.Context) map[string]error
 }
@@ -193,11 +197,17 @@ func NewRouter(d Deps) (*API, http.Handler) {
 
 func (a *API) registerAuthenticated(r chi.Router) {
 	a.handle(r, http.MethodPost, "/auth/logout", Authenticated, "", a.authLogout)
+	a.handle(r, http.MethodPost, "/auth/logout-all", Authenticated, "", a.authLogoutAll)
 	a.handle(r, http.MethodGet, "/api/v1/session", Authenticated, "", a.getSession)
 	a.handle(r, http.MethodPut, "/api/v1/session/tenant", Authenticated, "", a.switchTenant)
 	a.handle(r, http.MethodPost, "/api/v1/organizations", Authenticated, "", a.createOrganization)
 	a.handle(r, http.MethodPost, "/api/v1/invitations/accept", Authenticated, "", a.acceptInvitation)
 	a.handle(r, http.MethodGet, "/api/v1/admin/tenants", PlatformStaff, "", a.adminTenants)
+	// Atendimento dos serviços adicionais pela equipe da plataforma (ADR-077).
+	a.handle(r, http.MethodGet, "/api/v1/admin/addon-orders", PlatformStaff, "", a.adminAddonOrders)
+	a.handle(r, http.MethodPost, "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/schedule", PlatformStaff, "", a.adminScheduleAddonOrder)
+	a.handle(r, http.MethodPost, "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/complete", PlatformStaff, "", a.adminCompleteAddonOrder)
+	a.handle(r, http.MethodPost, "/api/v1/admin/tenants/{tenant_id}/addon-orders/{id}/cancel", PlatformStaff, "", a.adminCancelAddonOrder)
 }
 
 var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{8,64}$`)
@@ -335,6 +345,11 @@ func (a *API) securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// exposedHeaders são os cabeçalhos de resposta liberados para origens
+// permitidas (Access-Control-Expose-Headers).
+const exposedHeaders = "ETag, Location, X-Request-ID, Idempotent-Replayed, X-Recorvia-Export-Limit, X-Recorvia-Export-Truncated, " +
+	"X-Recorvia-Export-Next-Cursor, X-Recorvia-Export-Next-Part"
+
 // cors só responde a origens explicitamente permitidas; por padrão a
 // aplicação é servida na mesma origem e nenhum header CORS é emitido.
 func (a *API) cors(next http.Handler) http.Handler {
@@ -351,6 +366,10 @@ func (a *API) cors(next http.Handler) http.Handler {
 			h.Set("Access-Control-Allow-Origin", origin)
 			h.Set("Access-Control-Allow-Credentials", "true")
 			h.Set("Vary", "Origin")
+			// Cabeçalhos de resposta que a interface lê (concorrência,
+			// idempotência, rastreio e o corte da exportação de faturas): sem
+			// isto, o navegador os esconde do fetch em outra origem.
+			h.Set("Access-Control-Expose-Headers", exposedHeaders)
 			if r.Method == http.MethodOptions {
 				h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE")
 				h.Set("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token, X-Recorvia-Tenant, If-Match, Idempotency-Key, X-Request-ID")

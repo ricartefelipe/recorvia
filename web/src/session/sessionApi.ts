@@ -51,3 +51,13 @@ export async function logout(assign: (url: string) => void = (url) => window.loc
   applySessionToClient(null);
   assign(result?.redirect_url || '/entrar');
 }
+
+/**
+ * Encerra todas as sessões do usuário, em todos os navegadores, e segue para
+ * o encerramento da sessão no provedor indicado pelo backend.
+ */
+export async function logoutAll(assign: (url: string) => void = (url) => window.location.assign(url)): Promise<void> {
+  const result = await api.post<{ redirect_url: string }>('/auth/logout-all', undefined, { tenant: false });
+  applySessionToClient(null);
+  assign(result?.redirect_url || '/entrar');
+}

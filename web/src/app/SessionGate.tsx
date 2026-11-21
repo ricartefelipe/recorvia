@@ -57,10 +57,15 @@ export function SessionGate() {
   );
 }
 
-/** Rotas internas exigem organização ativa; sem organização vai ao onboarding. */
+/**
+ * Rotas internas exigem organização ativa; sem organização vai ao onboarding,
+ * exceto a equipe da plataforma, que segue para o atendimento de serviços.
+ */
 export function RequireTenant({ children }: { children: ReactNode }) {
   const { session, tenant } = useSession();
-  if (session.organizations.length === 0) return <Navigate to="/organizacoes/nova" replace />;
+  if (session.organizations.length === 0) {
+    return <Navigate to={session.platform_staff ? '/admin/servicos' : '/organizacoes/nova'} replace />;
+  }
   if (!tenant) return <Navigate to="/organizacoes" replace />;
   // A troca de organização remonta toda a área interna (sem estado residual).
   return <Fragment key={`${session.user.id}:${tenant.id}`}>{children}</Fragment>;
