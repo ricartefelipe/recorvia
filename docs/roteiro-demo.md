@@ -10,6 +10,10 @@ criados pelo seed (executado por `make up`; repetir com `docker compose --profil
 | `davi.auditor@acme.test` | `Recorvia#Demo2026` | Acme Software (demonstração) | auditor |
 | `carla.owner@beta.test` | `Recorvia#Demo2026` | Beta Consultoria (demonstração) | proprietária |
 | `nova.empresa@exemplo.test` | `Recorvia#Demo2026` | sem organização (onboarding) | — |
+| `equipe@recorvia.test` | `Recorvia#Demo2026` | sem organização (equipe da plataforma) | atendimento de serviços |
+
+O usuário da equipe da plataforma é incluído em `platform_staff` pelo `migrate up` do ambiente local
+(inclusão e remoção em outros ambientes: `docs/operacao/runbooks/equipe-da-plataforma.md`).
 
 Endereços: aplicação em http://localhost:8080, simulador de pagamentos em http://localhost:8090,
 Mailpit em http://localhost:8025 e RabbitMQ em http://localhost:15672.
@@ -83,6 +87,11 @@ Mailpit em http://localhost:8025 e RabbitMQ em http://localhost:15672.
 10. **Isolamento**: saia e entre como `carla.owner@beta.test`. A lista de clientes não contém os
     dados da Acme; abrir a URL de uma fatura da Acme mostra *não encontrado* (404); enviar
     `X-Recorvia-Tenant` da Acme resulta em 409; trocar para a Acme é negado (403).
+11. **Implantação assistida**: como `ana.owner@acme.test`, em *Plataforma*, solicite a implantação
+    assistida. Saia e entre como `equipe@recorvia.test` (sem organização): a página inicial leva ao
+    *Atendimento de serviços* (`/admin/servicos`), onde o pedido aparece em aberto. Agende, conclua
+    (o valor entra no próximo demonstrativo mensal da Acme) ou cancele com justificativa. A
+    auditoria da Acme registra cada ação, com o autor identificado como equipe da plataforma.
 
 ## Cenários adicionais do simulador
 

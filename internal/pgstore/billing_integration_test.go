@@ -5,17 +5,22 @@ package pgstore_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/ricartefelipe/recorvia/internal/billing"
+	"github.com/ricartefelipe/recorvia/internal/infra/postgres"
 	"github.com/ricartefelipe/recorvia/internal/kernel/calendar"
+	"github.com/ricartefelipe/recorvia/internal/kernel/ids"
 	"github.com/ricartefelipe/recorvia/internal/outbox"
 	"github.com/ricartefelipe/recorvia/internal/testsupport/fixture"
+	"github.com/ricartefelipe/recorvia/internal/testsupport/pgtest"
 )
 
 func countRows(t *testing.T, env *fixture.Env, tenantID uuid.UUID, query string, args ...any) int {
@@ -121,27 +126,81 @@ func TestBillingCatchUpAfterSchedulerDowntime(t *testing.T) {
 	}
 }
 
-// Fatura emitida não pode ser reescrita (gatilho no banco).
+// Fatura emitida não pode ser reescrita nem excluída (gatilho no banco). O
+// papel da aplicação nem tem privilégio de DELETE; o gatilho é exercitado como
+// dono das tabelas, que tem todos os privilégios e não está sujeito ao RLS,
+// de modo que a recusa vem do próprio gatilho (P0001), com a mensagem dele.
 func TestIssuedInvoiceCannotBeRewritten(t *testing.T) {
 	ctx := context.Background()
 	env := fixture.New(t, 2, now)
 	tn := env.NewTenant(t, "guard")
 	plan := env.NewFlatPlan(t, tn, 5000)
-	env.NewSubscription(t, tn, env.NewCustomer(t, tn).ID, plan.ID, nil)
+	cust := env.NewCustomer(t, tn)
+	env.NewSubscription(t, tn, cust.ID, plan.ID, nil)
 	if _, err := env.Engine.RunTenant(ctx, tn.ID, tn.Actor); err != nil {
 		t.Fatal(err)
 	}
-	for _, stmt := range []string{
-		`UPDATE invoices SET total = 1, subtotal = 1, amount_due = 1 WHERE tenant_id = $1`,
-		`DELETE FROM invoices WHERE tenant_id = $1`,
-	} {
-		err := env.DB.InTenantTx(ctx, tn.ID, func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, stmt, tn.ID)
-			return err
+	owner := pgtest.OwnerPool(t)
+	var issuedID uuid.UUID
+	var issuer []byte
+	if err := owner.QueryRow(ctx, `SELECT id, issuer_snapshot FROM invoices WHERE tenant_id = $1 AND status = 'open'`, tn.ID).
+		Scan(&issuedID, &issuer); err != nil {
+		t.Fatal(err)
+	}
+	// O motor grava o emitente na emissão, como estava a organização.
+	if !strings.Contains(string(issuer), `"name": "Org guard"`) && !strings.Contains(string(issuer), `"name":"Org guard"`) {
+		t.Fatalf("emitente gravado na emissão: %s", issuer)
+	}
+	// O papel da aplicação não exclui faturas: falta de privilégio, antes do gatilho.
+	err := env.DB.InTenantTx(ctx, tn.ID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `DELETE FROM invoices WHERE tenant_id = $1 AND id = $2`, tn.ID, issuedID)
+		return err
+	})
+	if !postgres.IsInsufficientPrivilege(err) {
+		t.Fatalf("DELETE pelo papel da aplicação deveria faltar privilégio: %v", err)
+	}
+	cases := []struct {
+		name, stmt, message string
+	}{
+		{"valores", `UPDATE invoices SET total = 1, subtotal = 1, amount_due = 1 WHERE id = $1`, "não pode ser reescrita"},
+		{"observação", `UPDATE invoices SET memo = 'observação alterada depois da emissão' WHERE id = $1`, "não pode ser reescrita"},
+		{"snapshot do cliente", `UPDATE invoices SET customer_snapshot = '{}' WHERE id = $1`, "não pode ser reescrita"},
+		{"criação", `UPDATE invoices SET created_at = created_at - interval '1 day' WHERE id = $1`, "não pode ser reescrita"},
+		{"emitente", `UPDATE invoices SET issuer_snapshot = '{"name": "Outra organização"}' WHERE id = $1`, "não pode ser reescrita"},
+		{"emitente removido", `UPDATE invoices SET issuer_snapshot = NULL WHERE id = $1`, "não pode ser reescrita"},
+		{"exclusão", `DELETE FROM invoices WHERE id = $1`, "não pode ser excluída"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := owner.Exec(ctx, tc.stmt, issuedID)
+			var pgErr *pgconn.PgError
+			if !postgres.IsRaisedException(err) || !errors.As(err, &pgErr) || !strings.Contains(pgErr.Message, tc.message) {
+				t.Fatalf("o gatilho deveria recusar com %q: %v", tc.message, err)
+			}
 		})
-		if err == nil {
-			t.Fatalf("o banco aceitou: %s", stmt)
-		}
+	}
+	// Fatura cancelada não tem saldo devedor (constraint de consistência).
+	if _, err := owner.Exec(ctx, `UPDATE invoices SET status = 'void', voided_at = now() WHERE id = $1`, issuedID); !postgres.IsNamedCheckViolation(err,
+		"invoices_due_consistency") {
+		t.Fatalf("cancelada com saldo deveria violar a constraint: %v", err)
+	}
+	// O andamento continua permitido: a situação muda com o saldo coerente.
+	if _, err := owner.Exec(ctx, `UPDATE invoices SET status = 'paid', amount_paid = total, amount_due = 0, paid_at = now() WHERE id = $1`,
+		issuedID); err != nil {
+		t.Fatalf("andamento da fatura emitida recusado: %v", err)
+	}
+	// Rascunho pode ser alterado e excluído (ramo DELETE que devolve OLD).
+	draftID := ids.New()
+	if _, err := owner.Exec(ctx, `INSERT INTO invoices (id, tenant_id, customer_id, status, kind, subtotal, total, amount_due, customer_snapshot)
+		VALUES ($1, $2, $3, 'draft', 'manual', 500, 500, 500, '{}')`, draftID, tn.ID, cust.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Exec(ctx, `UPDATE invoices SET memo = 'rascunho revisado' WHERE id = $1`, draftID); err != nil {
+		t.Fatalf("alteração do rascunho: %v", err)
+	}
+	tag, err := owner.Exec(ctx, `DELETE FROM invoices WHERE id = $1`, draftID)
+	if err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("exclusão do rascunho: %v %v", tag, err)
 	}
 }
 

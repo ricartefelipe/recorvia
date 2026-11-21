@@ -79,4 +79,68 @@ describe('ações da assinatura por permissão', () => {
     expect(requests[0].headers.get('If-Match')).toBe('"2"');
     expect(await requests[0].json()).toEqual({ mode: 'immediate' });
   });
+
+  it('mudança imediata explica a fatura no aumento e o crédito na redução', async () => {
+    const { user } = render(['subscriptions.read', 'subscriptions.write']);
+    await user.click(screen.getByRole('button', { name: 'Ações' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Alterar quantidade' }));
+    expect(screen.getByRole('radio', { name: /Imediatamente/ })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Vale agora, com prorrata do período corrente: no aumento, gera fatura pela diferença; na redução, a diferença vira crédito do cliente, abatido nas próximas faturas.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Gera fatura de prorrata pela diferença/)).not.toBeInTheDocument();
+  });
+
+  it('suspensão envia If-Match, o motivo e confirma', async () => {
+    const requests: Request[] = [];
+    server.use(
+      http.post('/api/v1/subscriptions/:id/suspend', ({ request }) => {
+        requests.push(request.clone());
+        return HttpResponse.json({ ...subscription, status: 'suspended', version: 3 });
+      }),
+    );
+    const { user } = render(['subscriptions.read', 'subscriptions.write']);
+    await user.click(screen.getByRole('button', { name: 'Ações' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Suspender' }));
+    expect(screen.getByText('A assinatura deixa de gerar novas faturas até ser reativada.')).toBeInTheDocument();
+    await user.type(screen.getByLabelText('Motivo'), 'Inadimplência em negociação');
+    await user.click(screen.getByRole('button', { name: 'Suspender' }));
+    await screen.findByText('Assinatura suspensa.');
+    expect(requests).toHaveLength(1);
+    expect(requests[0].headers.get('If-Match')).toBe('"2"');
+    expect(await requests[0].json()).toEqual({ reason: 'Inadimplência em negociação' });
+  });
+
+  it('reativação pede confirmação, explica a cobrança e envia If-Match', async () => {
+    const requests: Request[] = [];
+    server.use(
+      http.post('/api/v1/subscriptions/:id/reactivate', ({ request }) => {
+        requests.push(request.clone());
+        return HttpResponse.json({ ...subscription, status: 'active', version: 4 });
+      }),
+    );
+    const suspended: Subscription = { ...subscription, status: 'suspended', cancel_at_period_end: false, version: 3 };
+    server.use(
+      http.get('/api/v1/plans', () => HttpResponse.json({ data: [] })),
+      http.get('/api/v1/metrics', () => HttpResponse.json({ data: [] })),
+    );
+    const { user } = renderPage(<SubscriptionActions subscription={suspended} />, {
+      session: makeSession({ permissions: ['subscriptions.read', 'subscriptions.write'] }),
+    });
+    await user.click(screen.getByRole('button', { name: 'Ações' }));
+    expect(screen.queryByRole('menuitem', { name: 'Suspender' })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole('menuitem', { name: 'Reativar' }));
+    expect(
+      await screen.findByText(
+        'A assinatura volta a ser faturada a partir do período atual, se ele ainda não foi faturado. Os períodos inteiros em que ficou suspensa não são cobrados.',
+      ),
+    ).toBeInTheDocument();
+    expect(requests).toHaveLength(0);
+    await user.click(screen.getByRole('button', { name: 'Reativar' }));
+    await screen.findByText('Assinatura reativada.');
+    expect(requests).toHaveLength(1);
+    expect(requests[0].headers.get('If-Match')).toBe('"3"');
+  });
 });

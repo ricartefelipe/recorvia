@@ -134,8 +134,8 @@ func (tx subscriptionsTx) PriceVersion(ctx context.Context, id uuid.UUID) (catal
 	return tx.priceVersion(ctx, id)
 }
 
-func (tx subscriptionsTx) PlatformPlan(ctx context.Context) (platformbilling.Plan, error) {
-	return tx.platformPlan(ctx)
+func (tx subscriptionsTx) LockPlatformPlan(ctx context.Context) (platformbilling.Plan, error) {
+	return tx.lockedPlatformPlan(ctx)
 }
 
 func (tx subscriptionsTx) PlatformUsage(ctx context.Context) (platformbilling.Usage, error) {

@@ -53,6 +53,7 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	// Anonimização: irreversível, com justificativa e somente por uma pessoa identificada (ADR-061).
 	t(post, "/api/v1/customers/{id}/anonymize", tenancy.PermCustomersAnonymize, a.anonymizeCustomer, idempotent(), userSession())
 	t(post, "/api/v1/customers/{id}/contacts", tenancy.PermCustomersWrite, a.addContact)
+	t(patch, "/api/v1/customers/{id}/contacts/{contact_id}", tenancy.PermCustomersWrite, a.updateContact)
 	t(del, "/api/v1/customers/{id}/contacts/{contact_id}", tenancy.PermCustomersWrite, a.removeContact)
 	t(put, "/api/v1/customers/{id}/billing-address", tenancy.PermCustomersWrite, a.setAddress)
 	t(get, "/api/v1/customers/{id}/history", tenancy.PermCustomersRead, a.customerHistory)

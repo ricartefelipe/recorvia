@@ -29,7 +29,7 @@ func (q *Queries) FindPortalLink(ctx context.Context, tokenHash []byte) (FindPor
 }
 
 const getPortalInvoice = `-- name: GetPortalInvoice :one
-SELECT id, tenant_id, customer_id, subscription_id, number, status, kind, currency, billing_period_start, billing_period_end, issued_at, due_at, subtotal, discount_total, total, credit_applied, amount_paid, amount_credited, amount_written_off, amount_due, customer_snapshot, memo, paid_at, voided_at, void_reason, uncollectible_at, created_at, updated_at, version FROM invoices WHERE tenant_id = $1 AND customer_id = $2 AND id = $3 AND status <> 'draft'
+SELECT id, tenant_id, customer_id, subscription_id, number, status, kind, currency, billing_period_start, billing_period_end, issued_at, due_at, subtotal, discount_total, total, credit_applied, amount_paid, amount_credited, amount_written_off, amount_due, customer_snapshot, memo, paid_at, voided_at, void_reason, uncollectible_at, created_at, updated_at, version, issuer_snapshot FROM invoices WHERE tenant_id = $1 AND customer_id = $2 AND id = $3 AND status <> 'draft'
 `
 
 type GetPortalInvoiceParams struct {
@@ -71,6 +71,7 @@ func (q *Queries) GetPortalInvoice(ctx context.Context, arg GetPortalInvoicePara
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Version,
+		&i.IssuerSnapshot,
 	)
 	return i, err
 }
@@ -251,7 +252,7 @@ func (q *Queries) ListPortalInvoiceItems(ctx context.Context, arg ListPortalInvo
 
 const listPortalInvoices = `-- name: ListPortalInvoices :many
 
-SELECT id, tenant_id, customer_id, subscription_id, number, status, kind, currency, billing_period_start, billing_period_end, issued_at, due_at, subtotal, discount_total, total, credit_applied, amount_paid, amount_credited, amount_written_off, amount_due, customer_snapshot, memo, paid_at, voided_at, void_reason, uncollectible_at, created_at, updated_at, version FROM invoices
+SELECT id, tenant_id, customer_id, subscription_id, number, status, kind, currency, billing_period_start, billing_period_end, issued_at, due_at, subtotal, discount_total, total, credit_applied, amount_paid, amount_credited, amount_written_off, amount_due, customer_snapshot, memo, paid_at, voided_at, void_reason, uncollectible_at, created_at, updated_at, version, issuer_snapshot FROM invoices
  WHERE tenant_id = $1 AND customer_id = $2 AND status <> 'draft' AND issued_at IS NOT NULL
    AND ($3::timestamptz IS NULL OR (issued_at, id) < ($3::timestamptz, $4::uuid))
  ORDER BY issued_at DESC, id DESC
@@ -316,6 +317,7 @@ func (q *Queries) ListPortalInvoices(ctx context.Context, arg ListPortalInvoices
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.Version,
+			&i.IssuerSnapshot,
 		); err != nil {
 			return nil, err
 		}

@@ -416,7 +416,8 @@ func (a *API) portalInvoiceDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	a.writeInvoiceDocument(w, r, invoiceDocumentData{Org: d.OrganizationName, Invoice: d.Invoice.Invoice, Location: d.Location,
+	a.writeInvoiceDocument(w, r, invoiceDocumentData{Issuer: DocumentIssuer{Name: d.OrganizationName, LegalName: d.OrganizationLegalName,
+		Document: d.OrganizationDocument}, Invoice: d.Invoice.Invoice, Location: d.Location,
 		CheckoutURL: d.CheckoutURL, CustomerFacing: true})
 }
 

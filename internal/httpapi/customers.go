@@ -230,35 +230,79 @@ func (a *API) anonymizeCustomer(w http.ResponseWriter, r *http.Request) {
 	a.writeVersioned(w, r, http.StatusOK, res.Customer.Version, anonymizationDTO(res))
 }
 
+// contactInput é o corpo da inclusão e da alteração de contato. Sem
+// receives_billing_email, o contato recebe as cobranças por e-mail.
+type contactInput struct {
+	Name                 string `json:"name"`
+	Email                string `json:"email"`
+	Phone                string `json:"phone"`
+	Role                 string `json:"role"`
+	ReceivesBillingEmail *bool  `json:"receives_billing_email"`
+}
+
+func (in contactInput) domain() customers.ContactInput {
+	receives := true
+	if in.ReceivesBillingEmail != nil {
+		receives = *in.ReceivesBillingEmail
+	}
+	return customers.ContactInput{Name: in.Name, Email: in.Email, Phone: in.Phone, Role: in.Role, ReceivesBillingEmail: receives}
+}
+
 func (a *API) addContact(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	var in struct {
-		Name                 string `json:"name"`
-		Email                string `json:"email"`
-		Phone                string `json:"phone"`
-		Role                 string `json:"role"`
-		ReceivesBillingEmail *bool  `json:"receives_billing_email"`
-	}
+	var in contactInput
 	if err := decodeJSON(r, &in); err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	receives := true
-	if in.ReceivesBillingEmail != nil {
-		receives = *in.ReceivesBillingEmail
-	}
 	p := mustPrincipal(r)
-	c, err := a.Customers.AddContact(r.Context(), p.TenantID, p.Actor(), id, customers.ContactInput{Name: in.Name, Email: in.Email, Phone: in.Phone,
-		Role: in.Role, ReceivesBillingEmail: receives})
+	c, err := a.Customers.AddContact(r.Context(), p.TenantID, p.Actor(), id, in.domain())
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
 	a.writeJSON(w, r, http.StatusCreated, contDTO(c))
+}
+
+// contactPatchInput é o corpo da alteração de contato: campo omitido mantém o
+// valor atual.
+type contactPatchInput struct {
+	Name                 *string `json:"name"`
+	Email                *string `json:"email"`
+	Phone                *string `json:"phone"`
+	Role                 *string `json:"role"`
+	ReceivesBillingEmail *bool   `json:"receives_billing_email"`
+}
+
+// updateContact altera os campos informados do contato.
+func (a *API) updateContact(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	contactID, err := pathUUID(r, "contact_id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	var in contactPatchInput
+	if err := decodeJSON(r, &in); err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	p := mustPrincipal(r)
+	c, err := a.Customers.UpdateContact(r.Context(), p.TenantID, p.Actor(), id, contactID, customers.ContactPatch{Name: in.Name, Email: in.Email,
+		Phone: in.Phone, Role: in.Role, ReceivesBillingEmail: in.ReceivesBillingEmail})
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	a.writeJSON(w, r, http.StatusOK, contDTO(c))
 }
 
 func (a *API) removeContact(w http.ResponseWriter, r *http.Request) {
@@ -300,6 +344,8 @@ func (a *API) setAddress(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, r, http.StatusOK, addr)
 }
 
+// customerHistory lista o histórico do cliente (auditoria), do mais recente
+// para o mais antigo, em páginas por cursor.
 func (a *API) customerHistory(w http.ResponseWriter, r *http.Request) {
 	id, err := pathUUID(r, "id")
 	if err != nil {
@@ -311,12 +357,18 @@ func (a *API) customerHistory(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	events, _, err := a.Store.AuditEvents(r.Context(), p.TenantID, pgstore.AuditFilter{ResourceType: "customer", ResourceID: id.String(), Limit: 100})
+	limit, err := queryLimit(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, list(auditDTOs(events)))
+	events, next, err := a.Store.AuditEvents(r.Context(), p.TenantID, pgstore.AuditFilter{ResourceType: "customer", ResourceID: id.String(),
+		Limit: limit, Cursor: r.URL.Query().Get("cursor")})
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	a.writeJSON(w, r, http.StatusOK, newPage(auditDTOs(events), next))
 }
 
 func (a *API) creditBalanceView(r *http.Request, customerID uuid.UUID) (map[string]any, error) {

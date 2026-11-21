@@ -26,7 +26,7 @@ const platformApi = {
   statements: (signal?: AbortSignal) => api.get<DataList<PlatformStatement>>('/api/v1/platform/statements', { signal }),
 };
 
-function UsageBar({ label, used, max }: { label: string; used: number; max: number | null | undefined }) {
+function UsageBar({ label, used, max, detail }: { label: string; used: number; max: number | null | undefined; detail?: string }) {
   const unlimited = max === null || max === undefined;
   const pct = unlimited ? 0 : Math.min(100, Math.round((used / Math.max(1, max)) * 100));
   return (
@@ -34,12 +34,44 @@ function UsageBar({ label, used, max }: { label: string; used: number; max: numb
       <Group justify="space-between">
         <Text size="sm">{label}</Text>
         <Text size="sm" fw={600}>
-          {used} {unlimited ? '(sem limite)' : `de ${max}`}
+          {detail ?? used} {unlimited ? '(sem limite)' : `de ${max}`}
         </Text>
       </Group>
       {!unlimited && <Progress value={pct} color={pct >= 90 ? 'red' : pct >= 75 ? 'orange' : 'blue'} aria-label={`${label}: ${pct}% do limite`} />}
     </Stack>
   );
+}
+
+function usersDetail(active: number, pending: number): string {
+  const activeText = `${active} ${active === 1 ? 'ativo' : 'ativos'}`;
+  if (pending === 0) return activeText;
+  return `${activeText} + ${pending} ${pending === 1 ? 'convite pendente' : 'convites pendentes'}`;
+}
+
+function OrderProgress({ order }: { order: AddonOrder }) {
+  switch (order.status) {
+    case 'scheduled':
+      return (
+        <Text size="xs" c="dimmed">
+          Agendado para <DateTime value={order.scheduled_for} />
+        </Text>
+      );
+    case 'completed':
+      return (
+        <Text size="xs" c="dimmed">
+          Concluído em <DateTime value={order.completed_at} />
+          {order.billed ? ' · cobrado no demonstrativo' : ' · entra no próximo demonstrativo'}
+        </Text>
+      );
+    case 'canceled':
+      return order.cancel_reason ? (
+        <Text size="xs" c="dimmed">
+          Motivo: {order.cancel_reason}
+        </Text>
+      ) : null;
+    default:
+      return null;
+  }
 }
 
 function Overview({ overview }: { overview: PlatformOverview }) {
@@ -84,10 +116,16 @@ function Overview({ overview }: { overview: PlatformOverview }) {
           <Title order={2} size="h4">
             Limites e uso
           </Title>
-          <UsageBar label="Usuários ativos" used={usage.active_users} max={plan.max_users} />
+          <UsageBar
+            label="Usuários (ativos e convites pendentes)"
+            used={usage.active_users + usage.pending_invitations}
+            max={plan.max_users}
+            detail={usersDetail(usage.active_users, usage.pending_invitations)}
+          />
           <UsageBar label="Assinaturas ativas dos seus clientes" used={usage.active_subscriptions} max={plan.max_active_subscriptions} />
           <Text size="xs" c="dimmed">
-            Ao atingir um limite, novos convites ou assinaturas são recusados até a troca de plano.
+            Ao atingir um limite, novos convites ou assinaturas são recusados até a troca de plano. Convites pendentes
+            reservam vagas de usuário e contam na troca para um plano menor.
           </Text>
         </Stack>
       </Paper>
@@ -257,6 +295,7 @@ function AddonsSection() {
                     <Table.Td>{addonName.get(o.addon_code) ?? o.addon_code}</Table.Td>
                     <Table.Td>
                       <StatusBadge status={o.status} labels={addonOrderStatusLabels} />
+                      <OrderProgress order={o} />
                     </Table.Td>
                     <Table.Td ta="right">
                       <Money value={o.price} currency={o.currency} />
