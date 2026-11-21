@@ -548,6 +548,10 @@ func TestReceivablesAPIDisputes(t *testing.T) {
 	if dash["chargebacks"] != float64(6000) || dash["refunds"] != float64(0) {
 		t.Fatalf("painel: chargebacks=%v reembolsos=%v", dash["chargebacks"], dash["refunds"])
 	}
+	// Mês futuro não tem fluxo nem posição: 422 com o campo do erro.
+	if p, _ := owner.expect(http.StatusUnprocessableEntity, http.MethodGet, "/api/v1/dashboard?month=2099-01", nil); p["code"] != "future_month" {
+		t.Fatalf("painel de mês futuro: %v", p)
+	}
 
 	// Reenvio dos eventos não reabre nem duplica disputas.
 	r.simAction(t, won.ProviderChargeID, paysim.Action{Name: "replay"})

@@ -225,6 +225,35 @@ func TestQueueMetricsMigrationDownAndUp(t *testing.T) {
 	}
 }
 
+// A migration dos índices do painel (ADR-074) é reversível: o Down remove os
+// cinco índices sem tocar no esquema anterior; o Up seguinte os recria.
+func TestDashboardIndexesMigrationDownAndUp(t *testing.T) {
+	ctx := context.Background()
+	env := pgtest.Start(t)
+	pool := pgtest.OwnerPool(t)
+	const name = "00023_indices_do_painel.sql"
+	const indexes = `(SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname IN ('payments_invoice_idx',
+		'invoices_paid_at_idx', 'invoices_voided_at_idx', 'invoices_uncollectible_at_idx', 'invoices_issued_due_idx'))`
+	if !exists(t, pool, `SELECT `+indexes+` = 5`) {
+		t.Fatal("índices do painel ausentes antes do Down")
+	}
+	reverted, err := migrate.DownTo(ctx, env.OwnerURL, 22)
+	if err != nil || len(reverted) == 0 || reverted[len(reverted)-1] != name {
+		t.Fatalf("reversão: %v %v", reverted, err)
+	}
+	if !exists(t, pool, `SELECT `+indexes+` = 0 AND to_regclass('public.dispute_recovery_settlements') IS NOT NULL
+	    AND to_regclass('public.invoices_open_due_idx') IS NOT NULL`) {
+		t.Fatal("esquema após o Down")
+	}
+	applied, err := migrate.Up(ctx, env.OwnerURL)
+	if err != nil || len(applied) != len(reverted) || applied[0] != name {
+		t.Fatalf("reaplicação: %v %v", applied, err)
+	}
+	if !exists(t, pool, `SELECT `+indexes+` = 5`) {
+		t.Fatal("índices do painel ausentes após o Up")
+	}
+}
+
 // A migration do atendimento dos serviços adicionais é reversível: o Down
 // remove colunas, constraints, índices, o gatilho de proteção e as funções da
 // equipe da plataforma, sem tocar na tabela de pedidos; o Up seguinte recria

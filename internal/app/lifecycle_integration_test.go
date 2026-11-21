@@ -357,9 +357,15 @@ func TestRequestIDReachesConsumerLogsAndAudit(t *testing.T) {
 	api := httptest.NewServer(router)
 	t.Cleanup(api.Close)
 	now := env.Clock.Now()
+	// A sessão nasce com as gerações correntes do usuário (ADR-078): uma
+	// sessão sem elas é recusada como revogada.
+	gen, tenantGen, err := sessions.Generations(ctx, tn.Owner.ID, &tn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sess := identity.Session{ID: identity.RandomToken(32), UserID: tn.Owner.ID, ActiveTenantID: &tn.ID, CSRFToken: identity.RandomToken(16),
-		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(time.Hour)}
-	if err := sessions.Save(ctx, sess, time.Hour); err != nil {
+		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(time.Hour), Generation: gen, TenantGeneration: tenantGen}
+	if err := sessions.Create(ctx, sess, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 

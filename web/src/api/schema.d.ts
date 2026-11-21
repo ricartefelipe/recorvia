@@ -3388,40 +3388,64 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** @description Indicadores do painel financeiro (RF-17). Cada indicador tem a fórmula em definitions e a base temporal em bases: month (fluxo do mês consultado), month_end (posição em position_at) ou current (posição atual, seja qual for o mês). Fórmulas detalhadas em docs/arquitetura/indicadores.md. */
         Dashboard: {
             month: string;
             currency: string;
             /**
+             * Format: date-time
+             * @description Instante das posições de base month_end: o último instante do mês consultado ou, no mês corrente, o momento da consulta.
+             */
+            position_at: string;
+            /**
              * Format: int64
-             * @description Receita recorrente mensal fixa (exclui consumo)
+             * @description Receita recorrente mensal fixa na posição atual, com o reajuste vigente e líquida de descontos recorrentes (exclui consumo)
              */
             mrr: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description MRR × 12 na posição atual
+             */
             arr: number;
             /**
              * Format: int64
              * @description Total emitido no mês
              */
             billed: number;
-            /** Format: int64 */
-            billed_recurring?: number;
-            /** Format: int64 */
-            billed_usage?: number;
+            /**
+             * Format: int64
+             * @description Parte faturada nos itens de mensalidade
+             */
+            billed_recurring: number;
+            /**
+             * Format: int64
+             * @description Parte faturada nos itens de consumo e excedente
+             */
+            billed_usage: number;
             /**
              * Format: int64
              * @description Pagamentos confirmados no mês, pela data de pagamento, via provedor ou registro manual. Inclui os pagamentos confirmados pelo provedor e ainda não creditados por ele (pending_provider_receipt).
              */
             received: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Saldo a receber em position_at
+             */
             open_receivables: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Saldo a receber vencido em position_at
+             */
             overdue_receivables: number;
-            /** @description Pontos-base */
+            /** @description Pontos-base, em position_at */
             delinquency_rate_bp: number;
-            /** @description Pontos-base */
+            /** @description Pontos-base, sobre as assinaturas vigentes fora de trial no início do mês */
             churn_rate_bp: number;
+            /** @description Em trial, ativas ou em atraso em position_at */
             active_subscriptions: number;
+            /** @description Iniciadas no mês */
             new_subscriptions: number;
+            /** @description Encerradas no mês */
             canceled_subscriptions: number;
             /**
              * Format: int64
@@ -3435,20 +3459,68 @@ export interface components {
             chargebacks: number;
             /**
              * Format: int64
-             * @description Saldo atual dos valores a recuperar de clientes (conta customer_recoverables): crédito de pagamento excedente já usado e estornado por chargeback, menos as baixas recebidas e perdidas. Não depende do mês consultado.
+             * @description Saldo dos valores a recuperar de clientes (conta customer_recoverables) em position_at: crédito de pagamento excedente já usado e estornado por chargeback, menos as baixas recebidas e perdidas.
              */
             open_recoverables: number;
             /**
              * Format: int64
-             * @description Saldo atual dos pagamentos confirmados pelo provedor e ainda não creditados por ele (conta provider_confirmed), por exemplo cartão no prazo de recebimento. No recebimento, o bruto passa aos valores em liquidação, a taxa é reconhecida e o líquido vai para o disponível liquidado (ADR-080). Não depende do mês consultado.
+             * @description Saldo, em position_at, dos pagamentos confirmados pelo provedor e ainda não creditados por ele (conta provider_confirmed), por exemplo cartão no prazo de recebimento. No recebimento, o bruto passa aos valores em liquidação, a taxa é reconhecida e o líquido vai para o disponível liquidado (ADR-080).
              */
             pending_provider_receipt: number;
-            open_discrepancies?: number;
-            unknown_operations?: number;
+            /** @description Divergências de conciliação abertas na posição atual */
+            open_discrepancies: number;
+            /** @description Operações de pagamento com resultado desconhecido na posição atual */
+            unknown_operations: number;
+            /** @description Fórmula de cada indicador, com a chave igual ao nome do campo. */
             definitions: {
-                [key: string]: string;
+                mrr: string;
+                arr: string;
+                billed: string;
+                billed_recurring: string;
+                billed_usage: string;
+                received: string;
+                open_receivables: string;
+                overdue_receivables: string;
+                delinquency_rate_bp: string;
+                churn_rate_bp: string;
+                active_subscriptions: string;
+                new_subscriptions: string;
+                canceled_subscriptions: string;
+                refunds: string;
+                chargebacks: string;
+                open_recoverables: string;
+                pending_provider_receipt: string;
+                open_discrepancies: string;
+                unknown_operations: string;
+            };
+            /** @description Base temporal de cada indicador, com a chave igual ao nome do campo. */
+            bases: {
+                mrr: components["schemas"]["DashboardBasis"];
+                arr: components["schemas"]["DashboardBasis"];
+                billed: components["schemas"]["DashboardBasis"];
+                billed_recurring: components["schemas"]["DashboardBasis"];
+                billed_usage: components["schemas"]["DashboardBasis"];
+                received: components["schemas"]["DashboardBasis"];
+                open_receivables: components["schemas"]["DashboardBasis"];
+                overdue_receivables: components["schemas"]["DashboardBasis"];
+                delinquency_rate_bp: components["schemas"]["DashboardBasis"];
+                churn_rate_bp: components["schemas"]["DashboardBasis"];
+                active_subscriptions: components["schemas"]["DashboardBasis"];
+                new_subscriptions: components["schemas"]["DashboardBasis"];
+                canceled_subscriptions: components["schemas"]["DashboardBasis"];
+                refunds: components["schemas"]["DashboardBasis"];
+                chargebacks: components["schemas"]["DashboardBasis"];
+                open_recoverables: components["schemas"]["DashboardBasis"];
+                pending_provider_receipt: components["schemas"]["DashboardBasis"];
+                open_discrepancies: components["schemas"]["DashboardBasis"];
+                unknown_operations: components["schemas"]["DashboardBasis"];
             };
         };
+        /**
+         * @description month: fluxo do mês consultado; month_end: posição em position_at; current: posição atual, que não muda com o mês.
+         * @enum {string}
+         */
+        DashboardBasis: "month" | "month_end" | "current";
         PortalSession: {
             customer: {
                 /** Format: uuid */
@@ -5309,6 +5381,8 @@ export interface operations {
                 limit?: components["parameters"]["Limit"];
                 cursor?: components["parameters"]["Cursor"];
                 status?: components["schemas"]["SubscriptionStatus"];
+                /** @description Somente assinaturas em trial, ativas ou em atraso, as das assinaturas ativas do painel. */
+                in_force?: boolean;
                 customer_id?: string;
             };
             header?: {
@@ -5877,6 +5951,8 @@ export interface operations {
                 issued_from?: string;
                 issued_to?: string;
                 overdue?: boolean;
+                /** @description Somente faturas com saldo em aberto (abertas ou parcialmente pagas), as dos recebíveis em aberto do painel. */
+                open_balance?: boolean;
             };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
@@ -7543,7 +7619,7 @@ export interface operations {
     getDashboard: {
         parameters: {
             query?: {
-                /** @description Mês de referência (AAAA-MM) no fuso da organização */
+                /** @description Mês de referência (AAAA-MM) no fuso da organização; padrão, o mês corrente. Mês inválido (invalid_month) ou futuro (future_month) responde 422. */
                 month?: string;
             };
             header?: {
@@ -7564,6 +7640,7 @@ export interface operations {
                     "application/json": components["schemas"]["Dashboard"];
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     receiveProviderWebhook: {
