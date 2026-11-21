@@ -497,7 +497,8 @@ export interface paths {
         delete: operations["removeCustomerContact"];
         options?: never;
         head?: never;
-        patch?: never;
+        /** @description Altera os campos informados do contato; campo omitido mantém o valor atual (inclusive `receives_billing_email`, que o próprio cliente pode ter alterado pelo portal). `phone` vazio remove o telefone. Sem mudança, nada é gravado. O histórico do cliente registra `customer.contact_updated` com os nomes dos campos alterados, nunca os valores. Responde 404 `contact_not_found` para contato inexistente ou de outro cliente e 409 `customer_anonymized` para cliente anonimizado. */
+        patch: operations["updateCustomerContact"];
         trace?: never;
     };
     "/api/v1/customers/{id}/billing-address": {
@@ -508,7 +509,7 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** @description Grava o endereço de cobrança do cliente. Responde 409 `customer_anonymized` para cliente anonimizado, que não volta a receber dados pessoais. */
+        /** @description Grava o endereço de cobrança do cliente. Sem mudança, nada é gravado. O histórico do cliente registra `customer.address_updated` com os nomes dos campos alterados (`fields`) e se o endereço foi cadastrado agora (`created`), nunca os valores. Responde 409 `customer_anonymized` para cliente anonimizado, que não volta a receber dados pessoais. */
         put: operations["setCustomerAddress"];
         post?: never;
         delete?: never;
@@ -524,6 +525,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Histórico do cliente (auditoria), do evento mais recente para o mais antigo, em páginas por cursor: `next_cursor` pede a página seguinte e é nulo na última. */
         get: operations["getCustomerHistory"];
         put?: never;
         post?: never;
@@ -984,6 +986,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Gera o CSV das faturas sob demanda (não é armazenado), separado por ponto e vírgula, das mais recentes para as mais antigas. Colunas: numero, cliente, situacao, emissao, vencimento, periodo_inicio e periodo_fim (primeiro e último dia incluídos no período de faturamento), subtotal, desconto, total, creditos_aplicados, valor_creditado (notas de crédito), pago, valor_baixado, saldo e moeda. Valores em reais com ponto decimal; datas no fuso da organização. Textos que começam com =, +, -, @, tabulação ou retorno de carro recebem um apóstrofo na frente (neutralização de fórmulas). Cada arquivo tem no máximo `X-Recorvia-Export-Limit` faturas (50.000); quando há mais, `X-Recorvia-Export-Truncated` é `true`, `X-Recorvia-Export-Next-Cursor` traz o cursor da parte seguinte e `X-Recorvia-Export-Next-Part` o número dela; a parte seguinte é pedida com os mesmos filtros, `cursor` e `part`, e o arquivo de cada parte se chama `faturas-parte-N.csv`. As partes são consultas independentes, sem uma fotografia única: uma fatura alterada entre partes de modo a entrar ou sair do filtro (por exemplo, de situação) pode faltar ou aparecer numa parte, mas nenhuma fatura que continua no filtro se repete nem é pulada. Fatura cancelada sai com saldo zero. Cada exportação fica na auditoria (`invoices.exported`). */
         get: operations["exportInvoices"];
         put?: never;
         post?: never;
@@ -1016,6 +1019,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Documento comercial da fatura emitida, em HTML imprimível sem scripts. Traz o aviso de que a fatura comercial não é documento fiscal, o emitente (nome, razão social e CNPJ da organização gravados na emissão; faturas emitidas antes da migration 00019 usam os dados atuais), o cliente com documento e endereço de cobrança copiados na emissão, emissão, vencimento, condições de pagamento, período de faturamento, itens com período, e o quadro de totais que fecha com o saldo: subtotal, descontos, total, créditos aplicados, notas de crédito, pago, valor baixado e saldo. Na fatura cancelada, o documento informa o cancelamento e o quadro mostra o crédito devolvido ao cliente e o valor cancelado, com saldo zero. */
         get: operations["getInvoiceDocument"];
         put?: never;
         post?: never;
@@ -2167,6 +2171,14 @@ export interface components {
             /** @default true */
             receives_billing_email: boolean;
         };
+        /** @description Alteração parcial do contato; campo omitido mantém o valor atual. */
+        ContactPatch: {
+            name?: string;
+            email?: string;
+            phone?: string;
+            role?: string;
+            receives_billing_email?: boolean;
+        };
         Contact: {
             /** Format: uuid */
             id: string;
@@ -2617,7 +2629,10 @@ export interface components {
             amount_credited: number;
             /** Format: int64 */
             amount_written_off: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Saldo devedor; zero na fatura cancelada (o crédito aplicado volta ao cliente).
+             */
             amount_due: number;
             overdue: boolean;
             /** Format: date-time */
@@ -4287,6 +4302,41 @@ export interface operations {
             };
         };
     };
+    updateCustomerContact: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
+                "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
+                /** @description Obrigatório para sessões de navegador em métodos que alteram estado. */
+                "X-CSRF-Token"?: components["parameters"]["CSRF"];
+            };
+            path: {
+                id: components["parameters"]["ID"];
+                contact_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactPatch"];
+            };
+        };
+        responses: {
+            /** @description Contato alterado */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Contact"];
+                };
+            };
+            404: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+        };
+    };
     setCustomerAddress: {
         parameters: {
             query?: never;
@@ -4322,7 +4372,10 @@ export interface operations {
     };
     getCustomerHistory: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
                 "X-Recorvia-Tenant"?: components["parameters"]["Tenant"];
@@ -4342,9 +4395,12 @@ export interface operations {
                 content: {
                     "application/json": {
                         data: components["schemas"]["AuditEvent"][];
+                        next_cursor?: string | null;
                     };
                 };
             };
+            404: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
         };
     };
     getCustomerCredits: {
@@ -5474,6 +5530,10 @@ export interface operations {
                 status?: components["schemas"]["InvoiceStatus"];
                 issued_from?: string;
                 issued_to?: string;
+                /** @description Cursor da parte seguinte (X-Recorvia-Export-Next-Cursor da parte anterior) */
+                cursor?: string;
+                /** @description Número da parte (X-Recorvia-Export-Next-Part da parte anterior), usado no nome do arquivo e na auditoria */
+                part?: number;
             };
             header?: {
                 /** @description Organização ativa. Validada contra a sessão ou a credencial; divergência gera 409. */
@@ -5487,12 +5547,21 @@ export interface operations {
             /** @description CSV gerado sob demanda (não é armazenado) */
             200: {
                 headers: {
+                    /** @description Máximo de faturas por arquivo */
+                    "X-Recorvia-Export-Limit"?: number;
+                    /** @description true quando há faturas além deste arquivo */
+                    "X-Recorvia-Export-Truncated"?: "true" | "false";
+                    /** @description Cursor da parte seguinte (somente quando o arquivo foi cortado) */
+                    "X-Recorvia-Export-Next-Cursor"?: string;
+                    /** @description Número da parte seguinte (somente quando o arquivo foi cortado) */
+                    "X-Recorvia-Export-Next-Part"?: number;
                     [name: string]: unknown;
                 };
                 content: {
                     "text/csv": string;
                 };
             };
+            422: components["responses"]["Problem"];
         };
     };
     getInvoice: {
