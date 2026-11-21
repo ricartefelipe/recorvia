@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
-import type { Notification, NotificationTemplate } from '../../api/types';
+import type { Notification, NotificationEvent, NotificationTemplate } from '../../api/types';
 import { AUDITOR_PERMISSIONS, makeSession } from '../../test/fixtures';
 import { renderPage } from '../../test/render';
 import { server } from '../../test/server';
@@ -28,6 +28,7 @@ const notification: Notification = {
   recipient: 'financeiro@cliente.test, contas@cliente.test',
   subject: 'Fatura ACME-000123 vencida em 10/11/2026',
   status: 'canceled',
+  status_reason: 'superseded',
   send_after: '2026-11-13T11:00:00Z',
   attempts: 0,
   last_error: '',
@@ -85,5 +86,62 @@ describe('histórico de envios', () => {
     expect(within(table).getByText('Lembrete após o vencimento')).toBeInTheDocument();
     expect(within(table).getByRole('link', { name: 'Ver fatura' })).toHaveAttribute('href', `/faturas/${notification.invoice_id}`);
     expect(queries[0]).toContain('status=canceled');
+  });
+
+  it('mostra o motivo da situação em português', async () => {
+    const reasons: [Notification['status'], string, string][] = [
+      ['canceled', 'invoice_paid', 'Fatura paga'],
+      ['scheduled', 'frequency_limit', 'Limite diário de mensagens atingido'],
+      ['scheduled', 'outside_send_window', 'Fora da janela de envio'],
+      ['suppressed', 'no_recipient', 'Sem destinatário'],
+    ];
+    server.use(
+      http.get('/api/v1/notifications', () =>
+        HttpResponse.json({
+          data: [
+            notification,
+            ...reasons.map(([status, status_reason], i) => ({ ...notification, id: `0195f1a0-0000-7000-8000-0000000a010${i}`, status, status_reason })),
+            { ...notification, id: '0195f1a0-0000-7000-8000-0000000a0199', status: 'sent', status_reason: '', sent_at: '2026-11-13T11:00:05Z' },
+          ],
+          next_cursor: null,
+        }),
+      ),
+    );
+    renderPage(<CollectionsPage />, { route: '/?aba=historico' });
+    const table = await screen.findByRole('table', { name: 'Histórico de notificações' });
+    expect(within(table).getByText('Substituída por um passo posterior da régua')).toBeInTheDocument();
+    for (const [, , label] of reasons) expect(within(table).getByText(label)).toBeInTheDocument();
+    expect(within(table).queryByText('superseded')).not.toBeInTheDocument();
+  });
+
+  it('abre a linha do tempo da notificação com os eventos gravados', async () => {
+    const events: NotificationEvent[] = [
+      { status: 'scheduled', reason: 'scheduled', attempt: 0, detail: '', occurred_at: '2026-11-13T09:00:00Z' },
+      { status: 'scheduled', reason: 'outside_send_window', attempt: 0, detail: '2026-11-13T11:00:00Z', occurred_at: '2026-11-13T09:00:01Z' },
+      { status: 'sending', reason: 'attempt', attempt: 1, detail: '', occurred_at: '2026-11-13T11:00:00Z' },
+      { status: 'scheduled', reason: 'retry_scheduled', attempt: 1, detail: '421 serviço indisponível', occurred_at: '2026-11-13T11:00:02Z' },
+      { status: 'canceled', reason: 'superseded', attempt: 1, detail: '', occurred_at: '2026-11-13T11:30:00Z' },
+    ];
+    const requested: string[] = [];
+    server.use(
+      http.get('/api/v1/notifications', () => HttpResponse.json({ data: [notification], next_cursor: null })),
+      http.get('/api/v1/notifications/:id/events', ({ params }) => {
+        requested.push(String(params.id));
+        return HttpResponse.json({ data: events });
+      }),
+    );
+    const { user } = renderPage(<CollectionsPage />, { route: '/?aba=historico', session: makeSession({ permissions: AUDITOR_PERMISSIONS }) });
+    const table = await screen.findByRole('table', { name: 'Histórico de notificações' });
+    await user.click(within(table).getByRole('button', { name: `Linha do tempo: ${notification.subject}` }));
+    const timeline = await screen.findByRole('table', { name: 'Linha do tempo da notificação' });
+    expect(requested).toEqual([notification.id]);
+    const rows = within(timeline).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(5);
+    expect(within(rows[1]).getByText('Fora da janela de envio')).toBeInTheDocument();
+    expect(within(rows[1]).getByText(/Adiada para/)).toBeInTheDocument();
+    expect(within(rows[2]).getByText('Tentativa de envio')).toBeInTheDocument();
+    expect(within(rows[3]).getByText('Nova tentativa agendada')).toBeInTheDocument();
+    expect(within(rows[3]).getByText('421 serviço indisponível')).toBeInTheDocument();
+    expect(within(rows[4]).getByText('Substituída por um passo posterior da régua')).toBeInTheDocument();
   });
 });

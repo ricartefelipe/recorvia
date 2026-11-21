@@ -93,11 +93,13 @@ export type CollectionPolicyInput = S['CollectionPolicyInput'];
 export type CollectionPolicy = S['CollectionPolicy'];
 export type NotificationTemplate = S['NotificationTemplate'];
 export type Notification = S['Notification'];
+export type NotificationEvent = S['NotificationEvent'];
 
 export type WebhookEndpointInput = S['WebhookEndpointInput'];
 export type WebhookEndpoint = S['WebhookEndpoint'];
 export type WebhookEndpointWithSecret = S['WebhookEndpointWithSecret'];
 export type WebhookDelivery = S['WebhookDelivery'];
+export type WebhookDeliveryAttempt = S['WebhookDeliveryAttempt'];
 
 export type ApiCredential = S['ApiCredential'];
 export type ApiCredentialWithSecret = S['ApiCredentialWithSecret'];

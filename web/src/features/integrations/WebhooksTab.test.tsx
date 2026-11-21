@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
-import type { WebhookDelivery, WebhookEndpoint } from '../../api/types';
+import type { WebhookDelivery, WebhookDeliveryAttempt, WebhookEndpoint } from '../../api/types';
 import { AUDITOR_PERMISSIONS, makeSession } from '../../test/fixtures';
 import { renderPage } from '../../test/render';
 import { server } from '../../test/server';
@@ -109,5 +109,48 @@ describe('webhooks enviados', () => {
     const table = await screen.findByRole('table', { name: 'Entregas' });
     expect(within(table).getByText('Tentativas esgotadas')).toBeInTheDocument();
     expect(within(table).queryByRole('button', { name: 'Reenviar' })).not.toBeInTheDocument();
+  });
+
+  it('mostra as tentativas individuais de uma entrega', async () => {
+    const attempts: WebhookDeliveryAttempt[] = [
+      { attempt: 1, started_at: '2026-11-16T12:00:00Z', duration_ms: 10012, status_code: null, error: 'tempo esgotado', signature_count: 1 },
+      { attempt: 2, started_at: '2026-11-16T12:01:00Z', duration_ms: 230, status_code: 503, error: 'resposta sem sucesso do destino', signature_count: 2 },
+      { attempt: 3, started_at: '2026-11-16T12:05:00Z', duration_ms: 85, status_code: 204, error: '', signature_count: 2 },
+    ];
+    const requested: string[] = [];
+    server.use(
+      http.get('/api/v1/webhook-endpoints', () => HttpResponse.json({ data: [endpoint] })),
+      http.get('/api/v1/webhook-endpoints/:id/deliveries', () =>
+        HttpResponse.json({
+          data: [
+            delivery('0195f1a0-0000-7000-8000-0000000d0001', 'succeeded', { attempts: 3, last_status_code: 204, delivered_at: '2026-11-16T12:05:00Z' }),
+            delivery('0195f1a0-0000-7000-8000-0000000d0003', 'pending', { attempts: 0, next_attempt_at: '2026-11-16T12:05:00Z' }),
+          ],
+          next_cursor: null,
+        }),
+      ),
+      http.get('/api/v1/webhook-deliveries/:id/attempts', ({ params }) => {
+        requested.push(String(params.id));
+        return HttpResponse.json({ data: attempts });
+      }),
+    );
+    const { user } = renderPage(<WebhookDeliveriesPage />, {
+      path: '/integracoes/webhooks/:id',
+      route: `/integracoes/webhooks/${endpoint.id}`,
+      session: makeSession({ permissions: AUDITOR_PERMISSIONS }),
+    });
+    const table = await screen.findByRole('table', { name: 'Entregas' });
+    // Entrega ainda não tentada não oferece a consulta.
+    expect(within(table).getAllByRole('button', { name: 'Tentativas' })).toHaveLength(1);
+    await user.click(within(table).getByRole('button', { name: 'Tentativas' }));
+    const list = await screen.findByRole('table', { name: 'Tentativas da entrega' });
+    expect(requested).toEqual(['0195f1a0-0000-7000-8000-0000000d0001']);
+    const rows = within(list).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(3);
+    expect(within(rows[0]).getByText('Sem resposta')).toBeInTheDocument();
+    expect(within(rows[0]).getByText('tempo esgotado')).toBeInTheDocument();
+    expect(within(rows[1]).getByText('503')).toBeInTheDocument();
+    expect(within(rows[1]).getByText('230 ms')).toBeInTheDocument();
+    expect(within(rows[2]).getByText('204')).toBeInTheDocument();
   });
 });

@@ -8,6 +8,7 @@ import type {
   ProviderAccountConfigured,
   ProviderAccountInput,
   WebhookDelivery,
+  WebhookDeliveryAttempt,
   WebhookEndpoint,
   WebhookEndpointInput,
   WebhookEndpointWithSecret,
@@ -41,6 +42,8 @@ export const integrationsApi = {
     }),
   deliveries: (id: string, params: { cursor?: string; limit?: number }, signal?: AbortSignal) =>
     api.get<CursorPage<WebhookDelivery>>(`/api/v1/webhook-endpoints/${enc(id)}/deliveries`, { query: { ...params }, signal }),
+  deliveryAttempts: (id: string, signal?: AbortSignal) =>
+    api.get<DataList<WebhookDeliveryAttempt>>(`/api/v1/webhook-deliveries/${enc(id)}/attempts`, { signal }),
   retryDelivery: (id: string) => api.post<WebhookDelivery>(`/api/v1/webhook-deliveries/${enc(id)}/retry`),
 };
 
