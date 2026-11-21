@@ -196,7 +196,8 @@ O ledger não substitui contabilidade fiscal nem reconhecimento contábil.
 
 ### RF-17 Dashboard
 - Receita faturada e recebida separadas; MRR, ARR, inadimplência, churn e
-  demais indicadores com fórmulas documentadas.
+  demais indicadores com fórmulas documentadas
+  (`docs/arquitetura/indicadores.md`, ADR-074).
 
 ## Requisitos não funcionais
 
