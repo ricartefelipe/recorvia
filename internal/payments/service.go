@@ -66,6 +66,8 @@ type Tx interface {
 
 	DefaultAccount(ctx context.Context) (ProviderAccount, error)
 	Account(ctx context.Context, id uuid.UUID) (ProviderAccount, error)
+	// AccountByProvider devolve a conta sem as credenciais (APIKey e Secret
+	// vazios): a troca da configuração não depende de decifrar a anterior.
 	AccountByProvider(ctx context.Context, provider string) (ProviderAccount, error)
 	SaveAccount(ctx context.Context, a ProviderAccount, endpointTokenHash []byte) error
 	Accounts(ctx context.Context) ([]ProviderAccount, error)

@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -33,6 +34,14 @@ func main() {
 	log := logging.New(os.Stdout, os.Getenv("RECORVIA_LOG_LEVEL"), "api")
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		if err := app.Healthcheck(os.Getenv("RECORVIA_HTTP_ADDR"), ":8081"); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == app.KeyringCheckCommand {
+		// Confere o keyring contra o banco e termina, sem iniciar o serviço.
+		if err := app.RunKeyringCheck(context.Background(), os.Getenv, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "erro:", err)
 			os.Exit(1)
 		}
 		return
@@ -67,6 +76,9 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	defer core.Close()
+	if err := app.VerifyKeyring(ctx, core.Store, cfg.EncryptionStartupCheck, log); err != nil {
+		return err
+	}
 	rdb, err := redisstore.Open(ctx, cfg.RedisURL)
 	if err != nil {
 		return err
