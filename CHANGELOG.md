@@ -6,6 +6,119 @@ Todas as mudanças relevantes são registradas aqui. Formato baseado em
 
 ## [Não lançado]
 
+## [0.3.0] - 2026-11-21
+
+Auditoria de todos os requisitos (RF-01 a RF-17 e RNF-01 a RNF-12) e correção do que ela encontrou.
+
+### Adicionado
+- Demonstrativo e documento da fatura com emitente, endereço de cobrança, períodos, condições e o
+  aviso de que a fatura comercial não é documento fiscal; exportação CSV com descontos, créditos,
+  notas de crédito, baixa e período, em partes quando passa de 50 mil linhas.
+- `PATCH /api/v1/customers/{id}/contacts/{contact_id}`; histórico do cliente paginado por cursor.
+- Lista, agendamento, conclusão e cancelamento dos serviços adicionais pela equipe da plataforma;
+  usuário de demonstração `equipe@recorvia.test` e runbook da equipe da plataforma.
+- Histórico de notificações com o motivo de cada situação e linha do tempo
+  (`GET /api/v1/notifications/{id}/events`); tentativas das entregas de webhooks
+  (`GET /api/v1/webhook-deliveries/{id}/attempts`).
+- Painel: indicador "A receber do provedor"; fórmula (`definitions`) e base temporal (`bases`:
+  mês, fim do mês ou atual) de cada indicador, e `position_at`; filtros `open_balance=true` nas
+  faturas e `in_force=true` nas assinaturas; fórmulas em `docs/arquitetura/indicadores.md`.
+- Simulador de pagamentos: ações `confirm` e `receive`; replay em ordem determinística.
+- Rota inexistente e método não permitido em `application/problem+json` (`route_not_found`,
+  `method_not_allowed` com `Allow`); `HEAD` responde como `GET`, sem corpo.
+- Logs com `trace_id` e `span_id`; log de acesso com `tenant_id` e `user_id`; tarefas agendadas
+  com `job`; consumidores com o `request_id` da requisição de origem, que chega à auditoria.
+- `/readyz` do worker responde 503 durante a drenagem; um segundo sinal força a saída.
+- `make pin-check` e passo da CI: falham com action sem SHA, dependência npm sem versão exata,
+  imagem sem tag fixa ou com tag flutuante e `go.mod` sem toolchain (ADR-082).
+- Testes de integração HTTP validam cada resposta contra o contrato OpenAPI.
+- Concorrência otimista nas alterações de recursos versionados que ainda não a exigiam: papel e
+  remoção de membro, arquivamento de cliente e de cupom, endereço de cobrança (versão do cliente),
+  nova versão de preço (versão do plano), provedor de pagamento, rotação e revogação de credencial,
+  resolução de divergência, templates de e-mail, remoção e rotação do segredo de endpoint de
+  webhook, troca do plano da plataforma e atendimento dos serviços adicionais pela equipe. Sem
+  `If-Match`, 428; com versão divergente, 412 sem nenhum efeito; o sucesso devolve `ETag`. Template
+  padrão e provedor não configurado usam `"0"` (ADR-083 e ADR-085).
+- Paginação por cursor (`limit`, `cursor`, `next_cursor`; 25 por padrão) em disputas, divergências e
+  execuções de conciliação, operações de pagamento, mensagens não processadas, convites, movimentos
+  de crédito, credenciais de API, produtos, planos, cupons, métricas, pedidos de serviços adicionais,
+  demonstrativos da plataforma e reajustes de assinatura; antes, essas listas cortavam entre 36 e
+  500 itens sem avisar. Os campos de seleção da interface carregam todas as páginas (ADR-085).
+- Endereço da organização no perfil (`PATCH /api/v1/organization`, campo `address`, auditado como
+  `organization.address_updated`), copiado para o emitente na emissão e exibido no documento da
+  fatura (ADR-084).
+- Aviso de que a fatura comercial não é documento fiscal na página da fatura do portal e no e-mail
+  padrão de fatura emitida.
+- Cards do painel com link para a lista filtrada correspondente, só com a permissão de leitura da
+  lista; filtros "Somente com saldo em aberto" (faturas) e "Somente em vigor" (assinaturas).
+- `requested_tenant_id` no log de acesso, inclusive em requisições recusadas antes da validação do
+  tenant.
+- Roteiros E2E de onboarding, política de cobrança, endpoint de webhook e convite com aceite;
+  usuária de demonstração `gabi.convidada@exemplo.test`.
+- Migrations `00019` a `00024` (a numeração `00020` não foi usada).
+
+### Alterado
+- **Contrato:** as quatro rotas de criação financeira acima respondem 422
+  `idempotency_key_required` sem a chave; `subscription_in_progress` e `credit_note_in_progress`
+  são conflitos transitórios, com `Retry-After`.
+- **Contrato:** a fatura cancelada tem `amount_due` igual a zero; o histórico do cliente devolve 25
+  eventos por página, com `next_cursor`; um mês futuro no painel responde 422.
+- No logout, sem o ID token, o Keycloak pede confirmação ao usuário.
+- `stop_grace_period` do worker passa a 2m30s.
+- Detalhes ausentes no histórico e na auditoria passam a ser `{}` em vez de `null`.
+- **Contrato:** as alterações listadas acima exigem `If-Match`; as listas acima são paginadas e as
+  operações de pagamento passam a vir pela data de criação; `sort` fora da allowlist, ou numa lista
+  que não ordena por parâmetro, responde 422 `invalid_sort` em vez de ser ignorado. Membros,
+  credenciais, divergências, contas de provedor, templates e a assinatura da plataforma expõem
+  `version`. Produtos e planos passam a vir do mais recente para o mais antigo.
+- Tornar uma conta de provedor a padrão dá versão nova à conta que perde o padrão.
+- O validador de contrato dos testes recusa 5xx não declarado; o 503 do provedor está declarado nas
+  operações que o devolvem.
+
+### Corrigido
+- **Cobrança em dobro na reentrega:** os consumidores `payments.invoice_issued` e
+  `payments.invoice_credited` gravavam o inbox depois do efeito, em transação separada; uma
+  mensagem reentregue depois de uma cobrança recusada criava outra cobrança no provedor. A marcação
+  do inbox e a cobrança ficam na mesma transação, e a chamada ao provedor acontece depois do commit
+  (ADR-076).
+- **Idempotency-Key:** `POST /api/v1/subscriptions`, `/platform/addon-orders`,
+  `/subscriptions/{id}/price-adjustments` e `/subscriptions/{id}/discounts` aceitavam pedidos sem a
+  chave. Só a execução que detém a chave (`lease_token`) registra ou libera o resultado (ADR-075).
+- **Assinatura duplicada:** a criação grava a chave de negócio e a impressão do pedido; a repetição
+  devolve a mesma assinatura, também com pedidos concorrentes e depois da validade do registro HTTP.
+- **Limites do plano da plataforma:** podiam ser ultrapassados descendo de plano e aceitando
+  convites pendentes, suspendendo e reativando assinaturas ou com pedidos simultâneos. Convites
+  pendentes ocupam vagas e as checagens são serializadas pela assinatura da plataforma (ADR-077).
+- **Implantação assistida:** o pedido nunca era atendido nem cobrado. A equipe da plataforma lista,
+  agenda, conclui e cancela; o serviço concluído entra uma única vez no demonstrativo.
+- **Logout:** o ID token não vai mais ao navegador; o servidor revoga o refresh token (ADR-078).
+- **Revogação de sessões:** "Encerrar todas as sessões"; o membro removido perde as sessões
+  daquela organização e o usuário desativado perde todas; a revogação usa gerações no Redis com
+  gravação condicional, para que uma requisição em andamento não recrie a sessão revogada.
+- **Fatura:** o quadro de totais do documento fecha com o saldo; o emitente é gravado na emissão;
+  a observação da fatura emitida fica congelada; a fatura cancelada fica sem saldo (ADR-079).
+- **Edição de contato:** omitir um campo restaurava o valor padrão e podia reativar o e-mail de
+  cobrança desligado pelo cliente.
+- **Ledger:** confirmação, recebimento e liquidação do provedor em contas distintas
+  (`provider_confirmed`, `provider_clearing`, `cash`); os valores em liquidação passam ao disponível,
+  inclusive em reembolsos, chargebacks, disputas e ajustes de conciliação (ADR-080). A conciliação
+  detecta o recebimento perdido.
+- **Aviso de suspensão** fora da janela de horário da régua (ADR-081).
+- **Painel financeiro:** divergências abertas sempre zero; MRR e ARR sem reajuste e sem cupons
+  recorrentes; churn contando trial cancelado; indicadores de saldo mostrando a posição de hoje em
+  meses passados; fórmulas com chaves diferentes entre a API e a tela (ADR-074).
+- **Senhas em mensagens de erro:** URLs do Redis, do RabbitMQ e do PostgreSQL, inclusive com
+  caracteres reservados sem codificação na senha, e credenciais SMTP saem mascaradas dos erros e dos
+  logs, sem alterar URLs sem credenciais.
+- **Encerramento do worker:** a conexão com o RabbitMQ fecha depois das mensagens em andamento,
+  então o ack não se perde; entregas não processadas voltam à fila na hora.
+- **Simulador de pagamentos:** reembolso e chargeback de cobrança confirmada e ainda não recebida
+  passam a ser aceitos, como no provedor real; o pagador é idempotente por comerciante.
+- **Política de cobrança:** a mensagem de lembretes repetidos nunca aparecia no formulário.
+
+### Removido
+- `identity.Service.RevokeAll`, sem uso.
+
 ## [0.2.0] - 2026-11-21
 
 ### Adicionado
@@ -179,6 +292,7 @@ Todas as mudanças relevantes são registradas aqui. Formato baseado em
   `user_session_required`, e o tratamento de dead letters grava a auditoria,
   com a justificativa, na mesma transação da resolução (ADR-059).
 
-[Não lançado]: https://github.com/ricartefelipe/recorvia/compare/v0.2.0...HEAD
+[Não lançado]: https://github.com/ricartefelipe/recorvia/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ricartefelipe/recorvia/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ricartefelipe/recorvia/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ricartefelipe/recorvia/releases/tag/v0.1.0
