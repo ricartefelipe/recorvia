@@ -5,6 +5,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
+	"github.com/ricartefelipe/recorvia/internal/kernel/calendar"
 	"github.com/ricartefelipe/recorvia/internal/kernel/money"
 	"github.com/ricartefelipe/recorvia/internal/payments"
 	"github.com/ricartefelipe/recorvia/internal/pgstore"
@@ -68,10 +70,18 @@ func (a *API) listRefunds(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, r, http.StatusOK, newPage(out, next))
 }
 
-func disputeDTO(d pgstore.DisputeWithHistory) map[string]any {
+// disputeDTO expõe a disputa com o valor a recuperar do cliente, as baixas
+// já feitas (recebido e perdido) e o que ainda falta recuperar (ADR-073).
+func disputeDTO(d payments.Dispute) (map[string]any, error) {
+	outstanding, err := d.RecoveryOutstanding()
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{"id": d.ID, "charge_id": d.ChargeID, "status": d.Status, "amount": d.Amount.Amount(),
 		"credit_amount": d.CreditAmount.Amount(), "recovery_amount": d.RecoveryAmount.Amount(),
-		"currency": d.Amount.Currency().Code(), "opened_at": d.OpenedAt, "closed_at": d.ClosedAt}
+		"recovery_received_amount": d.RecoveryReceived.Amount(), "recovery_written_off_amount": d.RecoveryWrittenOff.Amount(),
+		"recovery_outstanding_amount": outstanding.Amount(), "currency": d.Amount.Currency().Code(), "opened_at": d.OpenedAt,
+		"closed_at": d.ClosedAt}, nil
 }
 
 func (a *API) listDisputes(w http.ResponseWriter, r *http.Request) {
@@ -82,9 +92,103 @@ func (a *API) listDisputes(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(items))
 	for _, d := range items {
-		out = append(out, disputeDTO(d))
+		dto, err := disputeDTO(d.Dispute)
+		if err != nil {
+			a.writeError(w, r, err)
+			return
+		}
+		out = append(out, dto)
 	}
 	a.writeJSON(w, r, http.StatusOK, list(out))
+}
+
+// getDispute devolve a disputa com o saldo a recuperar do cliente.
+func (a *API) getDispute(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	d, err := a.Payments.Dispute(r.Context(), mustPrincipal(r).TenantID, id)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	dto, err := disputeDTO(d)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	a.writeJSON(w, r, http.StatusOK, dto)
+}
+
+func recoverySettlementDTO(s payments.RecoverySettlement) map[string]any {
+	return map[string]any{"id": s.ID, "dispute_id": s.DisputeID, "outcome": s.Outcome, "amount": s.Amount.Amount(),
+		"currency": s.Amount.Currency().Code(), "effective_date": s.EffectiveDate.String(), "justification": s.Justification,
+		"settled_by": s.SettledBy, "ledger_transaction_id": s.LedgerTransactionID, "created_at": s.CreatedAt}
+}
+
+// listRecoverySettlements lista as baixas do valor a recuperar da disputa,
+// em ordem de registro.
+func (a *API) listRecoverySettlements(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	_, items, err := a.Payments.RecoverySettlements(r.Context(), mustPrincipal(r).TenantID, id)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, s := range items {
+		out = append(out, recoverySettlementDTO(s))
+	}
+	a.writeJSON(w, r, http.StatusOK, list(out))
+}
+
+// settleRecovery registra a baixa, total ou parcial, do valor a recuperar da
+// disputa perdida: recebido do cliente fora do provedor ou perdido. A chave de
+// negócio derivada do Idempotency-Key torna o pedido idempotente também depois
+// da expiração do registro HTTP; baixas concorrentes nunca somam mais que o
+// valor a recuperar. Com credencial de API, a autoria fica na auditoria
+// (settled_by nulo).
+func (a *API) settleRecovery(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	var in struct {
+		Outcome       string  `json:"outcome"`
+		Amount        int64   `json:"amount"`
+		EffectiveDate *string `json:"effective_date"`
+		Justification string  `json:"justification"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	var effective *calendar.Date
+	if in.EffectiveDate != nil {
+		d, err := calendar.ParseDate(*in.EffectiveDate)
+		if err != nil {
+			a.writeError(w, r, apperr.Invalid("invalid_recovery_settlement", "Baixa do valor a recuperar inválida.",
+				apperr.FieldError{Field: "effective_date", Message: "Use o formato AAAA-MM-DD."}))
+			return
+		}
+		effective = &d
+	}
+	p := mustPrincipal(r)
+	st, _, err := a.Payments.SettleRecovery(r.Context(), p.TenantID, p.Actor(), p.UserID(), payments.RecoverySettlementInput{DisputeID: id,
+		Outcome: payments.RecoveryOutcome(in.Outcome), Amount: money.New(in.Amount, money.BRL), EffectiveDate: effective,
+		Justification: in.Justification, RequestKey: idempotencyKeyFrom(r.Context())})
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	a.writeJSON(w, r, http.StatusCreated, recoverySettlementDTO(st))
 }
 
 func runDTO(r payments.ReconciliationRun) map[string]any {

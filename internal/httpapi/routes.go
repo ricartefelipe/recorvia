@@ -112,6 +112,10 @@ func (a *API) registerTenantRoutes(r chi.Router) {
 	t(get, "/api/v1/refunds", tenancy.PermPaymentsRead, a.listRefunds)
 	t(get, "/api/v1/payments", tenancy.PermPaymentsRead, a.listPayments)
 	t(get, "/api/v1/disputes", tenancy.PermPaymentsRead, a.listDisputes)
+	t(get, "/api/v1/disputes/{id}", tenancy.PermPaymentsRead, a.getDispute)
+	// Baixa do valor a recuperar de cliente da disputa perdida (ADR-073).
+	t(get, "/api/v1/disputes/{id}/recovery-settlements", tenancy.PermPaymentsRead, a.listRecoverySettlements)
+	t(post, "/api/v1/disputes/{id}/recovery-settlements", tenancy.PermPaymentsRecovery, a.settleRecovery, idempotent())
 	t(get, "/api/v1/payment-operations", tenancy.PermPaymentsRead, a.listOperations)
 	t(post, "/api/v1/payment-operations/{id}/retry", tenancy.PermPaymentsCharge, a.retryOperation)
 	t(get, "/api/v1/payment-providers", tenancy.PermIntegrationsRead, a.listProviders)

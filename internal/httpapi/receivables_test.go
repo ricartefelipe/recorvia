@@ -17,10 +17,10 @@ import (
 
 	"github.com/ricartefelipe/recorvia/api"
 	"github.com/ricartefelipe/recorvia/internal/kernel/apperr"
+	"github.com/ricartefelipe/recorvia/internal/kernel/calendar"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
 	"github.com/ricartefelipe/recorvia/internal/kernel/money"
 	"github.com/ricartefelipe/recorvia/internal/payments"
-	"github.com/ricartefelipe/recorvia/internal/pgstore"
 	"github.com/ricartefelipe/recorvia/internal/tenancy"
 )
 
@@ -60,6 +60,15 @@ func assertMatchesSchema(t *testing.T, schema string, dto map[string]any) {
 	}
 }
 
+func mustDisputeDTO(t *testing.T, d payments.Dispute) map[string]any {
+	t.Helper()
+	dto, err := disputeDTO(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dto
+}
+
 func TestReceivablesDTOsMatchContract(t *testing.T) {
 	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 	later := now.Add(time.Hour)
@@ -74,13 +83,22 @@ func TestReceivablesDTOsMatchContract(t *testing.T) {
 			Amount: brl(3000), Reason: "Cancelamento do contrato", CreatedAt: now})},
 		{"reembolso efetivado", "Refund", refundDTO(payments.Refund{ID: uuid.New(), ChargeID: charge, Status: payments.RefundSucceeded,
 			Amount: brl(3000), Reason: "Cancelamento do contrato", ProviderRefundID: "rf_1", CreatedAt: now, CompletedAt: &later})},
-		{"disputa aberta", "Dispute", disputeDTO(pgstore.DisputeWithHistory{Dispute: payments.Dispute{ID: uuid.New(), ChargeID: charge,
-			Status: payments.DisputeOpened, Amount: brl(5000), OpenedAt: now}})},
-		{"disputa perdida", "Dispute", disputeDTO(pgstore.DisputeWithHistory{Dispute: payments.Dispute{ID: uuid.New(), ChargeID: charge,
-			Status: payments.DisputeLost, Amount: brl(5000), OpenedAt: now, ClosedAt: &later}})},
-		{"disputa perdida com crédito consumido e valor a recuperar", "Dispute", disputeDTO(pgstore.DisputeWithHistory{Dispute: payments.Dispute{
+		{"disputa aberta", "Dispute", mustDisputeDTO(t, payments.Dispute{ID: uuid.New(), ChargeID: charge,
+			Status: payments.DisputeOpened, Amount: brl(5000), OpenedAt: now})},
+		{"disputa perdida", "Dispute", mustDisputeDTO(t, payments.Dispute{ID: uuid.New(), ChargeID: charge,
+			Status: payments.DisputeLost, Amount: brl(5000), OpenedAt: now, ClosedAt: &later})},
+		{"disputa perdida com crédito consumido e valor a recuperar", "Dispute", mustDisputeDTO(t, payments.Dispute{
 			ID: uuid.New(), ChargeID: charge, Status: payments.DisputeLost, Amount: brl(12500), CreditAmount: brl(500), RecoveryAmount: brl(2000),
-			OpenedAt: now, ClosedAt: &later}})},
+			OpenedAt: now, ClosedAt: &later})},
+		{"disputa perdida com baixas do valor a recuperar", "Dispute", mustDisputeDTO(t, payments.Dispute{
+			ID: uuid.New(), ChargeID: charge, Status: payments.DisputeLost, Amount: brl(12500), CreditAmount: brl(500), RecoveryAmount: brl(2000),
+			RecoveryReceived: brl(1500), RecoveryWrittenOff: brl(200), OpenedAt: now, ClosedAt: &later})},
+		{"baixa recebida por usuário", "RecoverySettlement", recoverySettlementDTO(payments.RecoverySettlement{ID: uuid.New(), DisputeID: uuid.New(),
+			Outcome: payments.RecoveryReceived, Amount: brl(1500), EffectiveDate: calendar.Date{Year: 2026, Month: time.November, Day: 17},
+			Justification: "Transferência identificada no extrato.", SettledBy: &user, LedgerTransactionID: uuid.New(), CreatedAt: now})},
+		{"baixa perdida por credencial de API", "RecoverySettlement", recoverySettlementDTO(payments.RecoverySettlement{ID: uuid.New(),
+			DisputeID: uuid.New(), Outcome: payments.RecoveryWrittenOff, Amount: brl(500), EffectiveDate: calendar.Date{Year: 2026, Month: time.November, Day: 17},
+			Justification: "Acordo comercial: valor perdoado.", LedgerTransactionID: uuid.New(), CreatedAt: now})},
 		{"execução aguardando o worker", "ReconciliationRun", runDTO(payments.ReconciliationRun{ID: uuid.New(), Provider: "simulator",
 			Trigger: payments.TriggerManual, Status: payments.RunRunning, WindowStart: now.Add(-24 * time.Hour), WindowEnd: now, StartedAt: now})},
 		{"execução retomada em andamento", "ReconciliationRun", runDTO(payments.ReconciliationRun{ID: uuid.New(), Provider: "simulator",
@@ -127,6 +145,15 @@ func TestReceivablesHandlersRejectInvalidInput(t *testing.T) {
 		{"execução com identificador inválido", http.MethodGet, "/", ``, map[string]string{"id": "123"}, a.getReconciliationRun, 404, "not_found"},
 		{"divergência com identificador inválido", http.MethodGet, "/", ``, map[string]string{"id": "123"}, a.getDiscrepancy, 404, "not_found"},
 		{"resolução com identificador inválido", http.MethodPost, "/", `{}`, map[string]string{"id": "123"}, a.resolveDiscrepancy, 404, "not_found"},
+		{"disputa com identificador inválido", http.MethodGet, "/", ``, map[string]string{"id": "123"}, a.getDispute, 404, "not_found"},
+		{"baixas com disputa inválida", http.MethodGet, "/", ``, map[string]string{"id": "123"}, a.listRecoverySettlements, 404, "not_found"},
+		{"baixa com disputa inválida", http.MethodPost, "/", `{}`, map[string]string{"id": "123"}, a.settleRecovery, 404, "not_found"},
+		{"baixa com campo desconhecido", http.MethodPost, "/", `{"outcome":"received","amount":1,"justification":"conferido no extrato","fee":1}`,
+			map[string]string{"id": id}, a.settleRecovery, 422, "invalid_json"},
+		{"baixa com data fora do formato", http.MethodPost, "/", `{"outcome":"received","amount":1,"effective_date":"17/11/2026","justification":"conferido no extrato"}`,
+			map[string]string{"id": id}, a.settleRecovery, 422, "invalid_recovery_settlement"},
+		{"baixa sem justificativa", http.MethodPost, "/", `{"outcome":"received","amount":1}`,
+			map[string]string{"id": id}, a.settleRecovery, 422, "invalid_recovery_settlement"},
 		{"resolução com campo desconhecido", http.MethodPost, "/", `{"resolution":"dismiss","justification":"conferido no extrato","x":1}`,
 			map[string]string{"id": id}, a.resolveDiscrepancy, 422, "invalid_json"},
 	}
