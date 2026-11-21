@@ -161,7 +161,108 @@ func (a *API) createPortalLink(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusCreated, map[string]any{"url": a.portalURL(token), "expires_at": l.ExpiresAt})
+	a.writeJSON(w, r, http.StatusCreated, map[string]any{"id": l.ID, "url": a.portalURL(token), "expires_at": l.ExpiresAt})
+}
+
+type portalLinkCreatorDTO struct {
+	Type string    `json:"type"`
+	ID   uuid.UUID `json:"id"`
+	Name *string   `json:"name"`
+}
+
+// portalLinkDTO é o link como a organização o vê: nunca traz o token nem o
+// hash do token.
+type portalLinkDTO struct {
+	ID           uuid.UUID            `json:"id"`
+	Status       string               `json:"status"`
+	CreatedAt    time.Time            `json:"created_at"`
+	ExpiresAt    time.Time            `json:"expires_at"`
+	UsedAt       *time.Time           `json:"used_at"`
+	RevokedAt    *time.Time           `json:"revoked_at"`
+	RevokeReason *string              `json:"revoke_reason"`
+	CreatedBy    portalLinkCreatorDTO `json:"created_by"`
+}
+
+func portalLinkView(l portal.LinkSummary) portalLinkDTO {
+	out := portalLinkDTO{ID: l.ID, Status: string(l.Current), CreatedAt: l.CreatedAt, ExpiresAt: l.ExpiresAt, UsedAt: l.UsedAt, RevokedAt: l.RevokedAt}
+	if l.RevokeReason != "" {
+		reason := l.RevokeReason
+		out.RevokeReason = &reason
+	}
+	switch {
+	case l.CreatedByCredential != nil:
+		out.CreatedBy = portalLinkCreatorDTO{Type: "api_credential", ID: *l.CreatedByCredential}
+	case l.CreatedByUser != nil:
+		out.CreatedBy = portalLinkCreatorDTO{Type: "user", ID: *l.CreatedByUser}
+	}
+	if l.CreatorName != "" {
+		name := l.CreatorName
+		out.CreatedBy.Name = &name
+	}
+	return out
+}
+
+// listPortalLinks lista os links do portal de um cliente, dos mais novos
+// para os mais antigos.
+func (a *API) listPortalLinks(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	limit, err := queryLimit(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	if a.Portal == nil {
+		a.writeError(w, r, apperr.Unavailable("portal_unavailable", "Portal do cliente indisponível."))
+		return
+	}
+	page, err := a.Portal.Links(r.Context(), mustPrincipal(r).TenantID, id, portal.PageQuery{Limit: limit, Cursor: r.URL.Query().Get("cursor")})
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	out := make([]portalLinkDTO, 0, len(page.Items))
+	for _, l := range page.Items {
+		out = append(out, portalLinkView(l))
+	}
+	a.writeJSON(w, r, http.StatusOK, newPage(out, page.NextCursor))
+}
+
+// revokePortalLink revoga um link do cliente e encerra as sessões do portal
+// abertas com ele. Repetir a chamada tem o mesmo resultado (204) e não gera
+// nova auditoria. Não há coluna de autoria: quem revogou fica na auditoria,
+// pelo ator, e a rota aceita credenciais de API pelo escopo (ADR-059).
+func (a *API) revokePortalLink(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	linkID, err := pathUUID(r, "link_id")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	if a.Portal == nil {
+		a.writeError(w, r, apperr.Unavailable("portal_unavailable", "Portal do cliente indisponível."))
+		return
+	}
+	p := mustPrincipal(r)
+	res, err := a.Portal.RevokeLink(r.Context(), p.TenantID, p.Actor(), id, linkID)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	if res.SessionCleanupErr != nil {
+		// O link está revogado e a sessão já não é aceita; fica pendente
+		// apenas a remoção no armazenamento, refeita ao repetir a chamada.
+		a.log.WarnContext(r.Context(), "sessões do link revogado não removidas do armazenamento",
+			slog.String("error", res.SessionCleanupErr.Error()))
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // portalAccess troca o token do link por uma sessão do portal e redireciona
@@ -256,14 +357,21 @@ func portalInvoiceView(inv portal.Invoice) (portalInvoiceDTO, error) {
 	return out, nil
 }
 
+// portalInvoices lista as faturas do cliente da sessão em páginas. O cursor
+// é apenas uma posição: cliente e organização vêm da sessão do portal.
 func (a *API) portalInvoices(w http.ResponseWriter, r *http.Request) {
-	items, err := a.Portal.Invoices(r.Context(), mustPortalSession(r))
+	limit, err := queryLimit(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	out := make([]portalInvoiceDTO, 0, len(items))
-	for _, inv := range items {
+	page, err := a.Portal.Invoices(r.Context(), mustPortalSession(r), portal.PageQuery{Limit: limit, Cursor: r.URL.Query().Get("cursor")})
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	out := make([]portalInvoiceDTO, 0, len(page.Items))
+	for _, inv := range page.Items {
 		d, err := portalInvoiceView(inv)
 		if err != nil {
 			a.writeError(w, r, err)
@@ -271,7 +379,7 @@ func (a *API) portalInvoices(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, d)
 	}
-	a.writeJSON(w, r, http.StatusOK, list(out))
+	a.writeJSON(w, r, http.StatusOK, newPage(out, page.NextCursor))
 }
 
 func (a *API) portalInvoiceDetail(w http.ResponseWriter, r *http.Request) (portal.InvoiceDetail, bool) {
