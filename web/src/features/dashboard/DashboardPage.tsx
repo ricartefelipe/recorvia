@@ -33,6 +33,7 @@ const DEFINITION_LABELS: Record<string, string> = {
   canceled_subscriptions: 'Assinaturas canceladas',
   refunds: 'Reembolsos',
   chargebacks: 'Chargebacks',
+  recoverables: 'Valores a recuperar de clientes',
   open_discrepancies: 'Divergências abertas',
   unknown_operations: 'Operações com resultado desconhecido',
 };
@@ -186,9 +187,18 @@ function DashboardContent({ data }: { data: Dashboard }) {
       </Section>
 
       <Section title="Estornos e exceções">
-        <SimpleGrid cols={{ base: 1, xs: 2, lg: 4 }}>
+        <SimpleGrid cols={{ base: 1, xs: 2, lg: 5 }}>
           <StatCard label="Reembolsos" value={money(data.refunds)} definitionKey="refunds" definitions={defs} href="/reembolsos" />
           <StatCard label="Chargebacks" value={money(data.chargebacks)} definitionKey="chargebacks" definitions={defs} href="/disputas" />
+          <StatCard
+            label="Valores a recuperar de clientes"
+            value={money(data.open_recoverables)}
+            definitionKey="recoverables"
+            definitions={defs}
+            tone={(data.open_recoverables ?? 0) > 0 ? 'warning' : undefined}
+            hint="Saldo atual, sem relação com o mês"
+            href="/disputas"
+          />
           <StatCard
             label="Divergências abertas"
             value={openDiscrepancies}
