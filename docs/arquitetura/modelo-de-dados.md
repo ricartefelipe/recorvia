@@ -34,6 +34,8 @@ erDiagram
   refunds ||--o| payment_operations : executa
   charges ||--o{ disputes : contesta
   disputes ||--o{ dispute_events : registra
+  disputes ||--o{ dispute_recovery_settlements : baixa
+  ledger_transactions ||--o| dispute_recovery_settlements : lança
   payment_provider_accounts ||--o{ reconciliation_runs : concilia
   reconciliation_runs ||--o{ reconciliation_discrepancies : encontra
   charges ||--o{ reconciliation_discrepancies : diverge
@@ -98,7 +100,7 @@ erDiagram
 | Consumo | `usage_events`, `usage_aggregates` |
 | Faturamento | `invoice_number_sequences`, `invoices`, `invoice_items`, `invoice_status_history`, `credit_notes` |
 | Pagamentos | `payment_provider_accounts`, `charges`, `payment_operations`, `payments`, `provider_webhook_events` |
-| Recebíveis | `refunds`, `disputes`, `dispute_events`, `reconciliation_runs`, `reconciliation_discrepancies` |
+| Recebíveis | `refunds`, `disputes`, `dispute_events`, `dispute_recovery_settlements`, `reconciliation_runs`, `reconciliation_discrepancies` |
 | Ledger | `ledger_accounts`, `ledger_transactions`, `ledger_entries` |
 | Cobrança e notificações | `collection_policies`, `notification_templates`, `notifications`, `notification_events`, `invoice_delinquencies`, `collection_suspensions` |
 | Webhooks enviados | `webhook_endpoints`, `webhook_endpoint_secrets`, `webhook_events`, `webhook_deliveries`, `webhook_delivery_attempts` |
@@ -111,7 +113,8 @@ erDiagram
 | `charges.amount_refund_pending` | valor reservado por reembolsos ainda não confirmados; a confirmação o move para `amount_refunded` e a recusa o libera. O saldo reembolsável é `amount_paid - amount_refunded - amount_charged_back - amount_refund_pending` |
 | `refunds` | reembolso total ou parcial (`requested`, `succeeded`, `failed`, `unknown`); `origin` distingue pedido do Recorvia (`recorvia`, com `request_key` e `requested_by`) de reembolso feito no provedor (`provider`); `credit_amount` é a parte que devolveu crédito do cliente gerado pelo excedente do próprio pagamento; `provider_refund_id` é único por cobrança |
 | `payment_operations` (`kind = 'refund'`, `'cancel_charge'`) | chamada externa do reembolso (vinculada por `refund_id`, referência externa = ID do reembolso) e do cancelamento no provedor (uma por cobrança) |
-| `disputes`, `dispute_events` | disputa por cobrança (`opened`, `under_review`, `won`, `lost`) com o valor contestado e o histórico imutável de transições com a situação informada pelo provedor. Na disputa perdida de pagamento com excedente, `credit_amount` é o crédito do cliente consumido pelo chargeback e `recovery_amount` é a parte do excedente que o cliente já havia usado e passa a ser valor a recuperar (ADR-070); as duas ficam em zero fora da disputa perdida e somam, no máximo, o valor contestado |
+| `disputes`, `dispute_events` | disputa por cobrança (`opened`, `under_review`, `won`, `lost`) com o valor contestado e o histórico imutável de transições com a situação informada pelo provedor. Na disputa perdida de pagamento com excedente, `credit_amount` é o crédito do cliente consumido pelo chargeback e `recovery_amount` é a parte do excedente que o cliente já havia usado e passa a ser valor a recuperar (ADR-070); as duas ficam em zero fora da disputa perdida e somam, no máximo, o valor contestado. `recovery_received_amount` e `recovery_written_off_amount` são os totais das baixas do valor a recuperar (recebido e perdido, ADR-073), mantidos somente pelo gatilho da tabela de baixas; a soma nunca passa de `recovery_amount`, e o saldo a recuperar é `recovery_amount - recovery_received_amount - recovery_written_off_amount` |
+| `dispute_recovery_settlements` | baixa, total ou parcial, do valor a recuperar de uma disputa perdida (ADR-073): `outcome` (`received`, recebido do cliente fora do provedor; `written_off`, perdido), valor, `effective_date` (data do recebimento ou da decisão, no fuso do tenant), justificativa obrigatória (10 a 2.000 caracteres), `settled_by` (nulo para credencial de API), `request_key` derivada do `Idempotency-Key` e `ledger_transaction_id` do lançamento da baixa. Imutável |
 | `reconciliation_runs` | execução manual ou agendada (`trigger_type`) sobre a janela `[window_start, window_end)` da conta do provedor, com `request_key` derivada do `Idempotency-Key`. A execução manual é registrada em `running` com `lease_until` nulo (aguardando um worker) e `attempts = 0`; o worker que a assume grava o lease e soma uma tentativa. Com o lease expirado (worker interrompido) ou devolvido (lease nulo de novo), a execução continua em `running` e é retomada; ao ser assumida depois de três tentativas interrompidas, é encerrada como `failed` (ADR-071). Há no máximo uma execução em `running` por conta do provedor |
 | `reconciliation_charge_checks` | última verificação de cada cobrança por uma execução de conciliação concluída; orienta o rodízio das cobranças fora da janela que ainda podem mudar no provedor (nunca verificadas e verificadas há mais tempo primeiro) |
 | `reconciliation_discrepancies` | divergência deduplicada por `dedupe_key` (tipo, objeto e valores) com primeira e última execução, ocorrências, valores inteiros usados na resolução (`local_amount`, `provider_amount`), retratos exibidos (`local_value`, `provider_value`), resolução, justificativa, responsável e lançamento de ajuste |
@@ -142,6 +145,7 @@ cobrança (`pg_advisory_xact_lock`), sem bloquear a linha da cobrança.
 | Pedido de reembolso único; reembolso do provedor registrado uma vez | `refunds_request_key`, `refunds_provider_refund_key` |
 | Operação de reembolso vinculada ao reembolso; um cancelamento no provedor por cobrança | `payment_operations_refund_link`, `payment_operations_refund_fk`, `payment_operations_cancel_key` |
 | Uma disputa aberta por cobrança; histórico imutável | `disputes_open_key`, `app_reject_mutation` em `dispute_events` |
+| Baixas do valor a recuperar nunca acima do valor a recuperar, inclusive concorrentes; totais iguais à soma das baixas; baixa imutável e pedido único | gatilho `dispute_recovery_settlements_apply` (acumula na disputa sob o bloqueio da linha) + `disputes_recovery_settled_within`; gatilho `disputes_recovery_guard` (os totais só mudam pela baixa); `app_reject_mutation` em `dispute_recovery_settlements`; `dispute_recovery_settlements_request_key` |
 | Uma conciliação em andamento por conta; divergência única por chave | `reconciliation_runs_running_key`, `reconciliation_discrepancies_dedupe_key` |
 | Divergência resolvida com justificativa; descartada somente por `dismiss` | `reconciliation_discrepancies_resolution`, `reconciliation_discrepancies_dismissed` |
 | Reembolso, disputa e execução concluídos com data | `refunds_completion`, `disputes_closed`, `reconciliation_runs_finished` |

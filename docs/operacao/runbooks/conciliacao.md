@@ -268,18 +268,64 @@ de crédito nunca fica negativo, e esse valor é lançado na conta `customer_rec
 recuperar de clientes) do ledger.
 
 ```sql
--- Disputas perdidas com valor a recuperar do cliente, por tenant (superusuário).
-SELECT d.tenant_id, d.id, d.charge_id, c.customer_id, d.recovery_amount, d.closed_at
+-- Disputas perdidas com saldo a recuperar do cliente, por tenant (superusuário).
+SELECT d.tenant_id, d.id, d.charge_id, c.customer_id, d.recovery_amount, d.recovery_received_amount,
+       d.recovery_written_off_amount,
+       d.recovery_amount - d.recovery_received_amount - d.recovery_written_off_amount AS outstanding, d.closed_at
   FROM disputes d JOIN charges c ON c.tenant_id = d.tenant_id AND c.id = d.charge_id
- WHERE d.status = 'lost' AND d.recovery_amount > 0 ORDER BY d.closed_at DESC;
+ WHERE d.status = 'lost' AND d.recovery_amount > d.recovery_received_amount + d.recovery_written_off_amount
+ ORDER BY d.closed_at DESC;
 ```
 - A cobrança do valor a recuperar é decisão do tenant (por exemplo, uma fatura avulsa para o
   cliente). O Recorvia registra o valor na disputa, no histórico da fatura (`reason = chargeback`),
-  na auditoria (`dispute.lost`, `dispute.chargeback_increased`) e no evento `dispute.closed`; não há
-  operação de baixa automática da conta `customer_recoverables` (ver `docs/STATUS.md`).
+  na auditoria (`dispute.lost`, `dispute.chargeback_increased`) e no evento `dispute.closed`.
 - O lançamento `dispute.credit_reversed` (`GET /api/v1/ledger/transactions?reference_type=dispute&reference_id=<id>`)
   mostra as duas partes: débito em `customer_credits` (crédito consumido) e em
   `customer_recoverables` (valor a recuperar), crédito em `chargebacks`.
+
+<a id="baixa-do-valor-a-recuperar"></a>
+
+### Baixa do valor a recuperar
+
+O valor a recuperar sai de `customer_recoverables` pela baixa da disputa (ADR-073), feita na tela
+de disputas ("Dar baixa") ou por `POST /api/v1/disputes/{id}/recovery-settlements`
+(`payments.settle_recovery`, com `Idempotency-Key`), sempre com valor, data efetiva e
+justificativa:
+
+| Desfecho | Quando usar | Lançamento |
+|---|---|---|
+| `received` (recebido) | o cliente pagou o valor fora do provedor (transferência, acerto comercial) | `dispute.recovery_received`: débito em `cash`, crédito em `customer_recoverables` |
+| `written_off` (perdido) | o tenant desistiu de cobrar | `dispute.recovery_written_off`: débito em `bad_debt`, crédito em `customer_recoverables` |
+
+- Baixas parciais se acumulam; a soma nunca passa do valor a recuperar (o banco recusa, também com
+  pedidos concorrentes: `409 recovery_exceeds_outstanding`). Com o saldo zerado, a disputa recusa
+  novas baixas (`409 recovery_already_settled`).
+- `GET /api/v1/disputes/{id}` mostra `recovery_received_amount`, `recovery_written_off_amount` e
+  `recovery_outstanding_amount` (quanto falta recuperar); `GET /api/v1/disputes/{id}/recovery-settlements`
+  lista as baixas com justificativa e autor (nulo para credencial de API). Cada baixa grava a
+  auditoria `dispute.recovery_settled` e o evento `dispute.recovery_settled`.
+- A baixa é imutável e não há, nesta versão, operação de estorno da baixa nem de recuperação de
+  valor já baixado como perdido (ADR-073). Antes de registrar, confira valor e desfecho (a tela pede
+  confirmação). Uma baixa registrada por engano, ou um recebimento que chega depois da baixa como
+  perdido, exige decisão do financeiro sobre o lançamento compensatório; até lá, registre o caso na
+  justificativa das baixas seguintes ou no histórico do cliente.
+- O recebimento da baixa vai para o disponível liquidado (`cash`) pelo instante do registro, não
+  pela data efetiva; ele não entra no indicador "Recebido" do painel (que soma pagamentos de
+  faturas). O indicador "Valores a recuperar de clientes" (`open_recoverables`) é o saldo atual de
+  `customer_recoverables` e deve bater com a soma de `outstanding` da consulta acima.
+
+```sql
+-- Conferência por tenant (superusuário): saldo de customer_recoverables no ledger contra o saldo a
+-- recuperar das disputas. Esperado: nenhuma linha.
+SELECT coalesce(l.tenant_id, d.tenant_id) AS tenant_id, coalesce(l.balance, 0) AS ledger_balance,
+       coalesce(d.outstanding, 0) AS disputes_outstanding
+  FROM (SELECT e.tenant_id, sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END) AS balance
+          FROM ledger_entries e JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
+         WHERE a.code = 'customer_recoverables' GROUP BY e.tenant_id) l
+  FULL JOIN (SELECT tenant_id, sum(recovery_amount - recovery_received_amount - recovery_written_off_amount) AS outstanding
+               FROM disputes GROUP BY tenant_id) d ON d.tenant_id = l.tenant_id
+ WHERE coalesce(l.balance, 0) <> coalesce(d.outstanding, 0);
+```
 
 <a id="divergencias-abertas"></a>
 

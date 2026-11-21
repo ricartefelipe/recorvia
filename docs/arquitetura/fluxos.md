@@ -300,7 +300,47 @@ Webhook
 da decisão que chega antes do da abertura abre e decide a disputa na mesma transação; o da abertura, que
 chega depois com retrato anterior, é ignorado. Eventos repetidos, fora de ordem ou anteriores ao
 encerramento não reabrem disputas (ADR-036). Durante a disputa e depois do chargeback a cobrança não aceita
-reembolso. `GET /api/v1/disputes` (`payments.read`) lista as disputas mais recentes.
+reembolso. `GET /api/v1/disputes` (`payments.read`) lista as disputas mais recentes e
+`GET /api/v1/disputes/{id}` devolve uma delas, com o saldo a recuperar.
+
+## Baixa do valor a recuperar
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as Usuário ou credencial (payments.settle_recovery)
+  participant A as API
+  participant P as Pagamentos
+  participant DB as PostgreSQL
+  U->>A: POST /api/v1/disputes/{id}/recovery-settlements (Idempotency-Key)
+  A->>P: SettleRecovery (desfecho, valor, data efetiva, justificativa)
+  P->>DB: tx: disputa FOR UPDATE; baixa já registrada pela chave?
+  alt chave já usada na mesma baixa
+    P-->>A: baixa registrada (sem novo efeito)
+  else nova baixa
+    P->>DB: confere disputa perdida, saldo a recuperar e data efetiva
+    P->>DB: ledger dispute.recovery_received (cash) ou dispute.recovery_written_off (bad_debt), crédito em customer_recoverables
+    P->>DB: dispute_recovery_settlements; gatilho acumula o total na disputa (disputes_recovery_settled_within)
+    P->>DB: outbox dispute.recovery_settled; auditoria dispute.recovery_settled
+  end
+  A-->>U: 201 com a baixa
+```
+
+1. **Pedido.** A rota exige `payments.settle_recovery` e `Idempotency-Key`. A repetição com a mesma chave
+   devolve a mesma baixa, também depois da expiração do registro HTTP (chave de negócio `request_key`); a
+   chave usada com outro valor ou desfecho é recusada (`request_key_reused`).
+2. **Validação.** Só a disputa perdida com valor a recuperar aceita baixa (`dispute_without_recovery`); o
+   valor é positivo e no máximo o saldo (`recovery_exceeds_outstanding`, `recovery_already_settled`); a data
+   efetiva, no fuso do tenant, não fica no futuro nem antes do encerramento da disputa; a justificativa tem
+   de 10 a 2.000 caracteres.
+3. **Concorrência.** A disputa é bloqueada no início; mesmo sem a verificação da aplicação, o gatilho que
+   acumula a baixa atualiza a linha da disputa (esperando a baixa concorrente) e a constraint
+   `disputes_recovery_settled_within` recusa a soma acima do valor a recuperar.
+4. **Ledger.** Um lançamento por baixa, com o instante do registro (meses fechados não mudam) e referência
+   `dispute_recovery_settlement`. `chargebacks` não muda; o indicador `open_recoverables` do painel é o saldo
+   de `customer_recoverables`.
+5. **Autoria.** `settled_by` é o usuário da sessão; com credencial de API fica nulo e a auditoria registra o
+   ator `api_credential` (ADR-059).
 
 ## Cancelamento no provedor
 
@@ -526,7 +566,7 @@ indisponível interrompem só o rodízio, sem tornar a execução parcial nem fa
 | `metrics.collect` (15 s) | `recorvia_reconciliation_open_discrepancies{kind}`, `recorvia_reconciliation_runs_in_progress{state}`, `recorvia_reconciliation_oldest_waiting_seconds`, `recorvia_refunds_total{outcome}` e `recorvia_refunds_in_progress{status}` a partir de contagens agregadas do banco (ADR-039) |
 | API, a cada coleta do Prometheus | `recorvia_reconciliation_runs_in_progress{state}` e `recorvia_reconciliation_oldest_waiting_seconds`, lidas das mesmas contagens agregadas: a execução registrada que nenhum worker assumiu aparece nas métricas mesmo sem worker em execução (ADR-071) |
 
-Os eventos `refund.succeeded`, `refund.failed`, `dispute.opened`, `dispute.closed` e
+Os eventos `refund.succeeded`, `refund.failed`, `dispute.opened`, `dispute.closed`, `dispute.recovery_settled` e
 `reconciliation.discrepancy_detected` são gravados na outbox na mesma transação dos efeitos e publicados no
 RabbitMQ; nesta versão nenhum consumidor interno depende deles (ficam disponíveis para notificações e
 webhooks enviados).

@@ -1391,7 +1391,8 @@ com o botão "Carregar mais faturas". O analisador do cursor tem teste de fuzz, 
 `05-portal` percorre duas páginas e a revogação de links.
 
 ## ADR-070 Chargeback consome o crédito do pagamento excedente
-**Status:** aceita (resolve a limitação registrada na ADR-036: "o chargeback não consome crédito do cliente").
+**Status:** aceita (resolve a limitação registrada na ADR-036: "o chargeback não consome crédito do cliente"); a
+baixa do valor a recuperar (recebido ou perdido), registrada aqui como pendência, veio com a ADR-073.
 **Contexto:** o pagamento acima do saldo da fatura (ou de fatura já quitada ou cancelada) vira crédito do
 cliente (`payment.overpayment`, ADR-030). O reembolso já devolve esse crédito antes de reduzir a receita
 (ADR-034), mas a disputa perdida estornava o valor pago inteiro e deixava o crédito com o cliente: ele
@@ -1534,3 +1535,67 @@ assíncronos, desde que o caso de uso reconheça o pedido pela chave de negócio
 `idempotency_keys.response_location` (nulo nas respostas sem o header e nos resultados registrados antes
 dela, cuja repetição continua saindo sem `Location` até a chave expirar, em 24 horas); o registro vale para
 qualquer rota idempotente que responda com `Location`.
+
+## ADR-073 Baixa do valor a recuperar de cliente: recebida ou perdida, parcial e limitada no banco
+**Status:** aceita (resolve a pendência da ADR-070: "não há operação de baixa da conta `customer_recoverables`").
+**Contexto:** na disputa perdida de pagamento com excedente, a parte do crédito que o cliente já havia usado
+vira valor a recuperar (`disputes.recovery_amount`, débito em `customer_recoverables`, ADR-070). Sem operação
+de baixa, o valor ficava no ativo para sempre: o recebimento por fora do provedor e a desistência da cobrança
+não tinham registro, e o saldo da conta deixava de representar o que o cliente ainda deve.
+**Decisão:**
+- **Operação.** `POST /api/v1/disputes/{id}/recovery-settlements` (`payments.SettleRecovery`) registra uma
+  baixa com desfecho, valor, data efetiva e justificativa obrigatória (10 a 2.000 caracteres). Desfechos:
+  `received` (o cliente pagou fora do provedor: transferência, acerto comercial) e `written_off` (o tenant
+  desiste de cobrar). Baixas parciais são permitidas e podem combinar os dois desfechos.
+- **Ledger.** Um lançamento por baixa, referência `dispute_recovery_settlement`, com crédito em
+  `customer_recoverables` e débito em `cash` ("Disponível liquidado", a mesma conta do recebimento manual) no
+  recebido (`dispute.recovery_received`) ou em `bad_debt` ("Perdas com inadimplência", a mesma conta das
+  faturas incobráveis) no perdido (`dispute.recovery_written_off`). Nenhuma conta nova. O lançamento usa o
+  instante do registro; a data efetiva fica na baixa (como `payments.paid_at` no recebimento manual), de modo
+  que meses já fechados não mudam. `chargebacks` não é tocada: a receita perdida continua a mesma.
+- **Limite no banco.** A tabela nova `dispute_recovery_settlements` (migration `00018`, RLS, FKs compostas com
+  o tenant para a disputa e o lançamento, imutável por `app_reject_mutation`, somente `SELECT` e `INSERT` para
+  a aplicação) tem um gatilho `AFTER INSERT` que acumula a baixa em `disputes.recovery_received_amount` ou
+  `disputes.recovery_written_off_amount`. A constraint `disputes_recovery_settled_within` limita a soma a
+  `recovery_amount`. Como o gatilho atualiza a linha da disputa, duas baixas concorrentes se serializam no
+  bloqueio da linha e a segunda é avaliada com a soma já confirmada da primeira: o banco recusa o excesso
+  mesmo sem a verificação da aplicação. O gatilho `disputes_recovery_guard` impede que os totais mudem por
+  outro caminho (alteração direta ou disputa criada com baixa). O caso de uso também bloqueia a disputa
+  (`FOR UPDATE`) no início, o que serializa a repetição da chave e devolve conflitos claros:
+  `dispute_without_recovery`, `recovery_already_settled`, `recovery_exceeds_outstanding`.
+- **Data efetiva.** Padrão: hoje no fuso do tenant. Não pode estar no futuro nem antes do encerramento da
+  disputa.
+- **Idempotência e autoria.** `Idempotency-Key` obrigatória; a chave de negócio (`request_key`, ADR-022) devolve
+  a mesma baixa depois da expiração do registro HTTP e recusa a chave usada com outro valor ou desfecho
+  (`request_key_reused`). `settled_by` é o usuário da sessão; com credencial de API fica nulo e a auditoria
+  registra o ator `api_credential` (ADR-059).
+- **Evento e auditoria.** Na mesma transação: evento `dispute.recovery_settled` na outbox (assinável por
+  webhooks enviados, com desfecho, valor, data efetiva e saldo restante) e auditoria `dispute.recovery_settled`
+  no recurso da disputa, com a justificativa.
+- **Leitura.** A disputa (`GET /api/v1/disputes` e o novo `GET /api/v1/disputes/{id}`) expõe
+  `recovery_received_amount`, `recovery_written_off_amount` e `recovery_outstanding_amount` (quanto falta
+  recuperar). `GET /api/v1/disputes/{id}/recovery-settlements` lista as baixas em ordem de registro.
+- **Permissão.** Nova `payments.settle_recovery` (proprietário, administrador e financeiro, delegável a
+  credenciais de API), separada de `payments.record_manual`: a baixa também reconhece perda, decisão que não
+  cabe a quem só registra recebimentos de faturas. A leitura usa `payments.read`.
+- **Painel.** Novo indicador `open_recoverables` ("Valores a recuperar de clientes"): saldo atual de
+  `customer_recoverables`, sem relação com o mês. O recebido da baixa não entra em "Recebido", que soma
+  pagamentos de faturas; o indicador de chargebacks não muda com a baixa.
+- **Interface.** Na lista de disputas, a coluna "Saldo a recuperar" e a ação "Dar baixa" (ou "Ver baixas" sem
+  saldo ou sem permissão) abrem o resumo (a recuperar, recebido, perdido, saldo), as baixas registradas e o
+  formulário com desfecho, valor (padrão: o saldo), data efetiva e justificativa, com confirmação que explica
+  o efeito no ledger.
+
+**Alternativas:** guardar só a tabela de baixas e somar na leitura foi descartado: o limite dependeria de
+bloqueio consultivo ou de nível de isolamento serializável em todo caminho que grava baixa; com os totais na
+linha da disputa, a própria constraint garante o limite. Fatura avulsa para cobrar o valor não foi adotada
+como mecanismo de baixa: criaria receita faturada nova para um valor que já foi receita, e o recebimento
+continuaria sem baixar `customer_recoverables`. Uma conta de despesa nova para a perda foi descartada: a perda
+é inadimplência do cliente, a mesma natureza de `bad_debt`.
+**Consequências:** migration `00018` (tabela, gatilhos, funções `app_dispute_recovery_settled` e
+`app_disputes_recovery_guard`, colunas e constraint em `disputes`); o Down remove tudo isso, mas os
+lançamentos das baixas permanecem no ledger, sem a tabela que os explica. Limitações: a baixa é imutável e não
+há estorno da baixa nem operação para o recebimento de valor já baixado como perdido (o equivalente a
+`invoice.bad_debt_recovered` das faturas), que exige decisão do financeiro sobre o lançamento compensatório;
+o recebimento da baixa entra direto no disponível liquidado, sem conciliação com extrato bancário; disputas
+perdidas antes da ADR-070 continuam sem valor a recuperar (o crédito permaneceu com o cliente).
