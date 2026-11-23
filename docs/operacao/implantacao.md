@@ -35,7 +35,7 @@ Arquivos:
 | `deploy/producao/compose.yaml` | serviços, redes, volumes, limites e healthchecks |
 | `deploy/producao/.env.example` | todas as variáveis, explicadas; copie para `.env` |
 | `deploy/producao/gerar-segredos.sh` | gera senhas e a chave de cifragem com segurança |
-| `deploy/producao/caddy/` | imagem do proxy (Caddyfile) |
+| `deploy/producao/caddy/` | imagem do proxy (Caddyfile; Caddy compilado com dependências corrigidas, rodando como usuário sem privilégios com permissão só para abrir 80 e 443) |
 | `deploy/producao/keycloak/` | imagem do Keycloak de produção e o realm sem usuários |
 | `deploy/producao/verificar.sh` | verificação automatizada (`make prod-check`), para rodar fora da produção |
 

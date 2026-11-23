@@ -380,6 +380,13 @@ services:
     build:
       context: caddy
     <<: *security
+    # A imagem roda como usuário sem privilégios (10001). O Docker já libera
+    # portas baixas no container (net.ipv4.ip_unprivileged_port_start=0); o
+    # binário também tem a capability de abrir 80 e 443 (setcap), para outros
+    # runtimes, e por isso NET_BIND_SERVICE precisa continuar no conjunto
+    # permitido: sem ela, o kernel recusa executar o binário.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
     environment:
       RECORVIA_DOMAIN: ${RECORVIA_DOMAIN}
       KEYCLOAK_DOMAIN: ${KEYCLOAK_DOMAIN}

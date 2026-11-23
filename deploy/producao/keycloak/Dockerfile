@@ -23,5 +23,7 @@ COPY --from=build /opt/keycloak/ /opt/keycloak/
 # e-mail nem nome e não conseguiria entrar.
 COPY --chown=1000:0 realm-master.json /opt/keycloak/data/import/master-realm.json
 COPY --chown=1000:0 realm-producao.json /opt/keycloak/data/import/recorvia-realm.json
+# Usuário sem privilégios da imagem oficial, declarado explicitamente.
+USER 1000
 ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]
 CMD ["start", "--optimized", "--import-realm"]

@@ -2590,7 +2590,10 @@ serviço do banco depois.
   idempotente. Extensões (como o backup contínuo) entram por um arquivo compose adicional (`COMPOSE_FILE`), sem
   editar o arquivo base.
 - **Proxy: Caddy.** HTTPS automático (ACME) com renovação, redirecionamento de HTTP, HTTP/3 e configuração
-  curta, embutida na imagem `recorvia-proxy` (ADR-020). A aplicação fica em `RECORVIA_DOMAIN`, toda
+  curta, embutida na imagem `recorvia-proxy` (ADR-020). O binário é compilado na imagem (xcaddy, imagem
+  oficial de build) com as dependências corrigidas que a versão do Caddy ainda não trazia, e roda como
+  usuário sem privilégios, com `cap_net_bind_service` no binário, `/data` e `/config` do usuário e, no
+  compose, `cap_drop: ALL` com `cap_add: NET_BIND_SERVICE`; o Keycloak declara `USER 1000`. A aplicação fica em `RECORVIA_DOMAIN`, toda
   encaminhada ao nginx da imagem web, que já serve a SPA e a API na mesma origem. O Keycloak fica em
   `KEYCLOAK_DOMAIN`, um subdomínio próprio, porque o caminho `/auth` da origem da aplicação já é do login do
   Recorvia. Nesse domínio o proxy repassa só o que está numa lista do que é permitido: `/realms/recorvia/*`
