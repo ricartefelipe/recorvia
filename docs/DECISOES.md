@@ -2583,12 +2583,14 @@ serviço do banco depois.
   construídas no servidor a partir do checkout da tag (etiqueta `RECORVIA_VERSION`); as externas têm tag fixa
   (`make pin-check`). A migration roda antes da API e do worker, como no compose local. Todo serviço contínuo
   tem healthcheck, `restart: unless-stopped`, limites de CPU e memória e rotação de logs; os serviços sem
-  estado rodam com sistema de arquivos somente leitura, sem capabilities e com `no-new-privileges`. Três redes:
-  `edge` (proxy, web, Keycloak), `app` (com saída para a internet: provedor de pagamento, SMTP, webhooks) e
-  `data` (PostgreSQL, Redis, RabbitMQ, sem saída para a internet). O banco usa a imagem oficial,
-  com o volume `postgres-data` e um banco `keycloak` no mesmo servidor, criado por um serviço de bootstrap
-  idempotente. Extensões (como o backup contínuo) entram por um arquivo compose adicional (`COMPOSE_FILE`), sem
-  editar o arquivo base.
+  estado rodam com sistema de arquivos somente leitura, sem capabilities e com `no-new-privileges`. Quatro redes:
+  `edge` (proxy, web, Keycloak), `app` (com saída para a internet: provedor de pagamento, SMTP, webhooks),
+  `data` (PostgreSQL, Redis, RabbitMQ e agente de backup, sem saída para a internet) e `storage` (só PostgreSQL e
+  agente de backup, com saída para o S3). O banco usa a imagem `recorvia-postgres` com o backup contínuo (ADR-087:
+  arquivamento de WAL e o serviço `postgres-backup`, chave do backup num arquivo montado como segredo, gerado por
+  `gerar-segredos.sh`), com o volume `postgres-data` e um banco `keycloak` no mesmo servidor, criado por um serviço
+  de bootstrap idempotente. Extensões entram por um arquivo compose adicional (`COMPOSE_FILE`), sem editar o
+  arquivo base. O `make prod-check` confere o arquivamento com um MinIO que só existe no compose de verificação.
 - **Proxy: Caddy.** HTTPS automático (ACME) com renovação, redirecionamento de HTTP, HTTP/3 e configuração
   curta, embutida na imagem `recorvia-proxy` (ADR-020). O binário é compilado na imagem (xcaddy, imagem
   oficial de build) com as dependências corrigidas que a versão do Caddy ainda não trazia, e roda como
@@ -2690,6 +2692,97 @@ continua o mesmo na produção. O Keycloak 26.8.2 traz o Guava com a CVE-2026-10
 2026-12-31), agora também numa imagem de produção. Provedor, Asaas em produção e SMTP transacional continuam
 decisões do dono.
 
+## ADR-087 Backup contínuo do PostgreSQL com WAL-G, cifrado no cliente, e recuperação para um ponto no tempo
+**Status:** aceita. Completa a ADR-055 (o backup lógico continua) e a ADR-064 (a recuperação de desastre ganha a
+recuperação para um instante).
+**Contexto:** o backup lógico (ADR-055) só recupera o instante do dump: com backup diário, a perda chega a 24 horas, e a
+conciliação com o provedor (ADR-064) precisa cobrir toda essa janela. A pendência registrada era a falta de
+arquivamento contínuo de WAL, de réplicas, de outra região e do backup do Keycloak. O pacote de produção usa a imagem
+oficial do PostgreSQL e precisa receber o backup como um componente que outro compose inclua.
+**Decisão:**
+- **Ferramenta: WAL-G 3.0.10**, compilado do código-fonte num estágio da imagem `recorvia-postgres`
+  (`deploy/postgres/Dockerfile`): o pacote do código é conferido pela soma SHA-256 fixada no Dockerfile e as
+  dependências Go pelo `go.sum` do próprio WAL-G (`-mod=readonly`); o binário é estático, com a libsodium incluída, e
+  roda na imagem oficial `postgres:18.7-alpine`, a mesma base do compose (a cópia física só volta para a mesma versão
+  principal e a mesma biblioteca de ordenação de texto).
+- **Arquivamento contínuo**: `archive_mode=on`, `archive_timeout=60s`, `archive_command` e `restore_command` pelo
+  agente `recorvia-pgbackup` (`cmd/pgbackup`, `internal/infra/pgbackup`), que traduz a configuração
+  `RECORVIA_BACKUP_*` (ou os arquivos `*_FILE`) para o WAL-G e recusa operar sem destino ou sem chave. O
+  `restore_command` devolve erro fatal (126) quando um segmento existe mas não pode ser lido ou decifrado, e 1 só
+  quando ele não existe: um erro de leitura não encerra a recuperação antes do instante pedido. O WAL-G recusa
+  sobrescrever um segmento já arquivado com outro conteúdo (`WALG_PREVENT_WAL_OVERWRITE`).
+- **Cifragem no cliente** com a libsodium (secretstream XChaCha20-Poly1305, autenticada) e uma chave de 32 bytes do
+  backup, obrigatória, guardada como as chaves da aplicação: fora do armazenamento do backup e do repositório (ADR-063 e
+  ADR-064). As chaves da aplicação continuam fora do backup; restaurar exige as duas. Cada backup base leva nos
+  metadados a impressão digital da chave (HMAC-SHA256 truncado, que não revela a chave), e a restauração recusa uma
+  chave diferente antes de baixar qualquer arquivo.
+- **Backup base agendado e retenção** pelo agente (`recorvia-pgbackup serve`, serviço `postgres-backup`, mesma imagem,
+  volume de dados somente para leitura): o agendamento parte da lista de backups do próprio armazenamento (sobrevive a
+  reinícios) e antecipa o backup sem nenhum backup, com o intervalo vencido (padrão 24 h) ou com o servidor numa linha
+  do tempo posterior à do último backup (depois de uma restauração para um instante). A retenção mantém o maior de dois
+  conjuntos, os N mais recentes (padrão 7) e os dos últimos D dias (padrão 7), e remove o WAL anterior ao mais antigo
+  mantido.
+- **Restauração para um instante** (`make pitr-restore`, `deploy/backup/pitr-restore.sh`): só num volume de dados
+  vazio e com o servidor parado (em execução, reiniciando ou pausado é recusado); segue a linha do tempo mais recente do
+  arquivo ou a pedida (`TIMELINE`), sempre gravada em `recovery_target_timeline`, com aviso quando há outras; lê os
+  arquivos `.history` arquivados e só aceita backups base do histórico da linha seguida (um backup da linha abandonada
+  depois da ramificação faria a recuperação terminar com "requested timeline is not a child of this server's history");
+  escolhe o backup base terminado antes do instante, extrai, grava o alvo e a promoção, inicia o servidor, remove
+  o alvo da configuração depois da promoção, confere o banco com as consultas do manifesto lógico (comparadas com um
+  manifesto informado), o ledger e a RLS, e religa o agente. A religação da aplicação segue a regra da ADR-064: chaves
+  conferidas, API sem tráfego, conciliação da janela entre o instante e o incidente e só então o worker; as filas do
+  RabbitMQ são descartadas, porque as mensagens posteriores ao instante pertencem a uma linha do tempo descartada.
+- **Exercício** `make pitr-check` (job `pitr-check` da CI), no estilo do `dr-check` e com as mesmas proteções do projeto
+  e do diretório, com MinIO como S3 local: dados antes de T só no WAL, instante T registrado com a escrita parada, dados
+  depois de T, destruição do servidor, recusa da chave do backup errada e ausente (no roteiro e no próprio WAL-G),
+  restauração até T, conferência do que volta e do que não volta, aplicação religada com a conciliação antes do worker
+  e medição do RPO (atraso do arquivamento) e do RTO.
+- **Keycloak**: o banco dele fica no mesmo servidor PostgreSQL (banco `keycloak`, exercitado pelo `pitr-check`), coberto
+  pelo mesmo backup base e WAL e restaurado no mesmo instante do Recorvia; a exportação do realm (`make keycloak-export`)
+  exige banco externo (o banco embutido de desenvolvimento é recusado) e vai cifrada para o mesmo destino pelo agente,
+  com a ida e volta exercitada.
+- **Sem root e conferência da partida como o usuário do arquivamento**: a imagem roda como `postgres` (uid 70,
+  `USER` do Dockerfile; os segredos montados precisam ser legíveis por ele, por exemplo 0444) e o entrypoint executa
+  `check-config` como esse usuário (com `gosu` só se o container for iniciado como root), o mesmo do `archive_command`,
+  que relê os segredos `*_FILE` a cada segmento. O código-fonte do WAL-G é baixado só por HTTPS, inclusive nos
+  redirecionamentos, e conferido pela soma SHA-256.
+- **Métricas e alertas**: o agente exporta a idade do último segmento arquivado (lida de `pg_stat_archiver`), as falhas
+  do arquivamento, os segmentos pendentes, o fim do último backup base (lido do armazenamento) e o intervalo
+  configurado e os bytes do segmento atual (informativo); alertas `RecorviaWALArchiveStale` (só com segmentos
+  `.ready` aguardando ou falhas do arquivamento, para que um banco ocioso, como na manutenção e na recuperação com o
+  worker parado, não dispare), `RecorviaWALArchiveFailing`, `RecorviaBaseBackupStale` (proporcional ao
+  intervalo), `RecorviaBackupDependencyUnavailable` e `RecorviaBackupAgentMissing`, com testes no `promtool` e runbook
+  (`docs/operacao/runbooks/backup-continuo.md`). A coleta `recorvia-backup` usa a descoberta pelo DNS do compose: sem o
+  componente (ambiente local), não há alvo nem alerta.
+- **RPO e RTO esperados**: RPO de até cerca de 1 minuto com o arquivamento em dia (o segmento ainda não arquivado se
+  perde), alertado a partir de 10 minutos de atraso; recuperação sem perda até qualquer instante dentro da retenção. RTO
+  do banco igual à extração do backup base mais a reaplicação do WAL desde ele (no máximo um intervalo de escrita), mais
+  as etapas da ADR-064 para a aplicação. Os valores observados ficam no relatório do exercício e em
+  `docs/operacao/backup-e-restauracao.md`.
+
+**Alternativas:** pgBackRest (retenção e verificação mais completas) exigiria, para o backup base fora do container do
+servidor, um servidor TLS do próprio pgBackRest ou acesso pelo soquete, e só fala HTTPS com o S3, o que obrigaria a gerar
+certificados para o MinIO local; os pacotes do Alpine não mantêm versões antigas, e a compilação pede várias bibliotecas
+de sistema. O WAL-G roda como um binário estático, recebe a configuração pelo ambiente, aceita endpoint HTTP e tem
+cifragem autenticada com uma chave simétrica do mesmo tipo das chaves da aplicação. A cifragem OpenPGP do WAL-G (chave
+pública no servidor) foi descartada pela operação de chaves mais complexa e pela biblioteca obsoleta. O binário oficial
+do WAL-G é compilado para glibc e não roda na imagem alpine; trocar a imagem para a variante Debian mudaria a biblioteca
+de ordenação de texto dos volumes existentes. Um agendador externo (cron do host ou do orquestrador) deixaria o backup
+base fora do compose e sem métricas próprias. O backup do volume em nível de disco não oferece recuperação para um
+instante nem cifragem no cliente.
+**Consequências:** o servidor não inicia sem destino e sem chave; um armazenamento indisponível acumula WAL no disco do
+servidor (alertado). A imagem do PostgreSQL passa a ser construída pelo projeto (`make postgres-image`, também em
+`make images`), e a compilação do WAL-G leva alguns minutos sem cache. O Trivy não aponta vulnerabilidades no WAL-G nem
+no agente; as corrigíveis da imagem estão na base oficial `postgres:18.7-alpine` (o `gosu`, compilado com um Go antigo, e a
+`libxml2` do Alpine), a mesma do compose, e por isso a imagem fica fora do `make image-scan` e do job `image-scan` até a
+atualização da base. A troca da chave do backup exige um backup base
+imediato, e um instante entre a troca e o fim desse backup não é recuperável. Restaurações de teste não podem usar o
+destino de produção com o servidor de origem em uso. O agente usa o superusuário e lê o diretório de dados pelo volume
+compartilhado, o que o prende ao mesmo host do servidor. Continuam fora: réplica de leitura ou de espera, cópia e
+restauração em outra região, verificação periódica automática de cópias reais, papel de privilégio mínimo para o agente e
+exportação agendada do realm do Keycloak. O pacote de produção (`deploy/producao`, ADR-086) usa o componente por
+`extends`, com a chave por arquivo, o agente somente leitura e a rede `storage` só para o servidor e o agente.
+
 ## ADR-088 Teste de carga manual com limites de produção e primeiras correções de vazão
 **Status:** aceita.
 **Contexto:** antes de abrir para clientes faltava saber quanto o Recorvia aguenta num servidor com os
@@ -2754,3 +2847,74 @@ conexão do worker ao mesmo tempo (até 4 a mais no pool, que já é disputado: 
 números do teste valem para a máquina em que foram medidos, compartilhada com outra frente de
 trabalho; comparações entre versões devem ser feitas na mesma máquina. O histórico sintético é emitido
 no dia da execução, o que deixa o painel do mês mais caro que numa base real do mesmo tamanho.
+
+## ADR-089 Revisão de segurança antes da abertura: login vinculado ao navegador, origens CORS validadas, CSP na API e IPv4 embutido em IPv6
+**Status:** aceita.
+**Contexto:** antes de abrir o Recorvia na internet (pacote de produção da ADR-086), a aplicação foi revista
+como um atacante a veria: isolamento entre organizações, autenticação e sessão, borda HTTP, entrada e saída,
+webhooks recebidos, dependências e segredos. O resultado completo, o modelo de ameaças e os riscos que
+continuam abertos estão em `docs/operacao/seguranca.md`. A revisão achou um problema explorável (login CSRF)
+e três pontos de endurecimento; o isolamento entre organizações não teve achado, mas não havia teste de
+acesso cruzado por referência direta para a maior parte das rotas.
+**Decisão:**
+- **Login vinculado ao navegador.** O `state` do OIDC era guardado só no servidor (Redis), sem ligação com o
+  navegador que iniciou o login. Quem atacava podia iniciar um login, entrar no provedor com a própria conta e
+  levar outra pessoa ao `/auth/callback` com o `state` e o código dele: o navegador da vítima recebia uma sessão
+  na conta de quem atacou (login CSRF), e o que ela cadastrasse ficaria com ele. Agora cada `/auth/login` gera
+  um vínculo novo de 256 bits e o grava num cookie próprio do fluxo, com nome derivado do `state` (nome do
+  cookie de sessão, sufixo `_login_` e 16 caracteres hexadecimais do SHA-256 do `state`; portanto `__Host-` em
+  produção). O cookie é HttpOnly, Secure conforme a configuração, `SameSite=Lax` (o callback chega por
+  navegação vinda do provedor) e dura o fluxo de login, 10 minutos; o caminho é `/auth`, exceto com o prefixo
+  `__Host-`, que exige `/`. O fluxo guarda só o SHA-256 do vínculo, e o callback exige o mesmo valor
+  (comparação em tempo constante). O fluxo é consumido antes da conferência: um callback em outro navegador
+  inutiliza o `state` sem trocar o código no provedor. Como cada fluxo tem o seu cookie, logins em abas
+  simultâneas não se sobrescrevem, nem quando as duas abas começam sem cookie, e concluir um não derruba o
+  outro. O callback remove o cookie do fluxo em qualquer desfecho (sucesso, `error=` do provedor ou recusa); a
+  partir de 5 fluxos pendentes no navegador, um novo login descarta os anteriores, para que os cookies não se
+  acumulem. Vínculo malformado em `BeginLogin` é erro de aplicação com código estável
+  (`422 login_binding_invalid`). Fluxos gravados antes da mudança, sem vínculo, são recusados (o usuário entra
+  de novo).
+- **Origens CORS validadas.** `RECORVIA_ALLOWED_ORIGINS` recebe CORS com credenciais e vale na conferência de
+  origem do CSRF; qualquer texto era aceito. Agora cada origem precisa estar na forma serializada que o
+  navegador envia no `Origin` (`esquema://host[:porta]`, minúsculas, sem caminho, query, fragmento nem
+  credenciais, sem a porta padrão do esquema, sem porta vazia, zero ou com zeros à esquerda), `null` e `*` são
+  recusados na partida e, em produção, só origens `https` valem. Uma origem que nunca coincidiria com o
+  `Origin` recebido faria o CORS e o CSRF falharem sem aviso. A mensagem de erro passa o valor por
+  `internal/infra/redact` (sem a senha de uma origem com credenciais).
+- **CSP também na API.** As respostas da API passam a levar `Content-Security-Policy: default-src 'none';
+  frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, além dos cabeçalhos que já tinham, também
+  quando ela é alcançada sem o nginx à frente. O documento HTML da fatura continua com a própria política.
+  Atrás do nginx, `Referrer-Policy`, `X-Frame-Options` e `X-Content-Type-Options` saíam duas vezes (o da API e
+  o da interface, e no `Referrer-Policy` valia o último); o nginx passa a ocultar os da API
+  (`proxy_hide_header`) e cada um sai uma vez, com o valor da interface (`same-origin`, que só tem efeito nos
+  documentos, todos da interface). A CSP da API não é ocultada: as duas políticas valem e a mais restritiva
+  prevalece. `make prod-check` confere que cada cabeçalho sai uma única vez nas respostas da API.
+- **IPv4 embutido em IPv6 nos webhooks enviados.** A proteção contra SSRF (ADR-045) passa a recusar `::/96`
+  (endereços compatíveis com IPv4, obsoletos, além de `::` e `::1`), `::ffff:0:0:0/96` (IPv4 traduzido, SIIT),
+  `3fff::/20` (documentação) e `5f00::/16` (SRv6), que um tradutor na rede poderia levar a um IPv4 interno.
+  O mapeamento `::ffff:a.b.c.d` e o NAT64 já eram convertidos para o IPv4 antes da conferência.
+- **Testes de acesso cruzado.** `TestCrossTenantReferencesOverHTTP` e `TestCrossTenantReceivablesOverHTTP`
+  tentam, com a sessão do dono de outra organização, alcançar por identificador os recursos de uma organização
+  (clientes, contatos, endereço, créditos, links do portal, produtos, planos e preços, assinaturas e o ciclo de
+  vida delas, faturas, documento, pagamento manual, cobrança, membros, convites, credenciais, endpoints e
+  entregas de webhook, régua, cobranças, reembolsos, disputas, baixas e operações), por referência no corpo
+  (assinatura com cliente ou plano de outra organização, troca para plano alheio, consumo com assinatura
+  alheia), por cursor de listagem e por credencial de API; todas respondem como recurso inexistente e nada da
+  outra organização muda.
+
+**Alternativas:** guardar o `state` num cookie em vez do Redis dispensaria o armazenamento, mas o fluxo
+continuaria precisando do verificador PKCE e do nonce no servidor; o vínculo por cookie com hash no fluxo
+mantém o desenho da ADR-012. Um único cookie de vínculo por navegador, reaproveitado entre logins, foi a
+primeira versão desta decisão: duas abas que começavam sem cookie recebiam vínculos diferentes no mesmo nome (só
+o último ficava), e o primeiro callback concluído removia o vínculo da outra aba. Um cookie por fluxo resolve as
+duas coisas ao custo de até 5 cookies pequenos durante o login. O caminho `/auth` em produção exigiria trocar
+`__Host-` por `__Secure-`, que não impede outro subdomínio do mesmo domínio de plantar o cookie de um fluxo
+iniciado por quem ataca; ficou `/` com `__Host-`. Confirmar no provedor todo evento do Asaas antes
+de aplicá-lo (o webhook do Asaas é autenticado só por token, ADR-013) foi deixado como recomendação: muda o
+ciclo do pagamento (ADR-080) e custa uma chamada por evento; a conciliação (ADR-038) já detecta divergências.
+**Consequências:** logins em andamento na implantação desta versão falham uma vez (`login_invalid`) e o usuário
+entra de novo. Uma configuração com origem malformada, `null`, `*` ou `http` em produção deixa a API sem subir,
+com a variável no erro. As respostas da API que passam pelo nginx levam duas políticas de CSP (a da interface e
+a da API); o navegador aplica as duas, e a da API é a mais restritiva. Os riscos que continuam abertos (token
+do Asaas, limites por IP que confiam no `X-Real-IP`, ausência de limite de tentativas na borda para o
+Keycloak, e-mails de destinatários recusados nos registros de erro) estão em `docs/operacao/seguranca.md`.

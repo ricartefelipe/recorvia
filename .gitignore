@@ -42,3 +42,6 @@ web/.eslintcache
 # Dados locais
 /tmp/
 /backups/
+
+# Chave de cifragem do backup contínuo da produção (gerar-segredos.sh).
+deploy/producao/segredos/
