@@ -86,6 +86,16 @@ func TestPolicyCheck(t *testing.T) {
 		{"203.0.113.9", false, false},
 		{"2001:db8::1", false, false},
 		{"2002:7f00:1::1", false, false},
+		// IPv4 embutido em formas que não são o mapeamento ::ffff:a.b.c.d:
+		// compatível (obsoleto) e traduzido (SIIT); a exceção local de
+		// 127.0.0.0/8 não vale para elas.
+		{"::127.0.0.1", false, false},
+		{"::8.8.8.8", false, false},
+		{"::ffff:0:127.0.0.1", false, false},
+		{"::ffff:0:a9fe:a9fe", false, false},
+		{"3fff::1", false, false},    // documentação (RFC 9637)
+		{"5f00::1", false, false},    // SRv6 SIDs (RFC 9602)
+		{"2001:4860::1", true, true}, // unicast global fora de 2001::/23
 	}
 	for _, c := range cases {
 		ip := netip.MustParseAddr(c.ip)

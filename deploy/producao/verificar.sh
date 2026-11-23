@@ -19,7 +19,8 @@
 #      X-Forwarded-For enviado pelo cliente ou por outro container;
 #   5. o login: /auth/login redireciona ao Keycloak com o redirect_uri do
 #      domínio, e o Keycloak aceita e mostra o formulário;
-#   6. problem+json numa rota inexistente da API;
+#   6. problem+json numa rota inexistente da API, com os cabeçalhos de
+#      segurança uma única vez;
 #   7. as portas: nenhum container publica outra porta, /metrics e a saúde do
 #      Keycloak não passam pelo proxy, e o domínio do Keycloak só repassa o
 #      realm recorvia e os recursos estáticos: console, API de administração,
@@ -354,6 +355,14 @@ grep -qiE '^HTTP/[0-9.]+ 404' "$work/h404" || die "rota inexistente: $(head -n 1
 grep -qi '^content-type: application/problem+json' "$work/h404" || die "rota inexistente sem application/problem+json"
 jq -e '.code == "route_not_found" and (.request_id | length > 0)' <<<"$resp" >/dev/null || die "corpo inesperado: $resp"
 ok "404 application/problem+json com code e request_id"
+# A API e o nginx definem os mesmos cabeçalhos de segurança: cada um sai uma
+# única vez (o nginx oculta os da API), com o valor da interface.
+for h in referrer-policy x-frame-options x-content-type-options; do
+  n=$(grep -ci "^$h:" "$work/h404" || true)
+  [[ $n == 1 ]] || die "resposta da API com $n cabeçalhos $h"
+done
+grep -qi '^referrer-policy: same-origin' "$work/h404" || die "Referrer-Policy da resposta da API diferente do da interface"
+ok "Referrer-Policy, X-Frame-Options e X-Content-Type-Options uma única vez nas respostas da API"
 
 log "7. portas"
 ports=$(docker ps --filter "label=com.docker.compose.project=$project" --format '{{.Label "com.docker.compose.service"}} {{.Ports}}' |
