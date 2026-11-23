@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ricartefelipe/recorvia/internal/infra/redact"
 )
 
 // Environment identifica o ambiente de execução.
@@ -318,9 +320,17 @@ func Load(get Getenv) (*Config, error) {
 		}
 	}
 	for _, o := range strings.Split(l.str("RECORVIA_ALLOWED_ORIGINS", ""), ",") {
-		if o = strings.TrimSpace(o); o != "" {
-			c.AllowedOrigins = append(c.AllowedOrigins, o)
+		if o = strings.TrimSpace(o); o == "" {
+			continue
 		}
+		if !validOrigin(o) {
+			// O valor pode trazer credenciais (https://usuario:senha@host):
+			// a senha não vai para a mensagem.
+			l.errs = append(l.errs, fmt.Errorf("RECORVIA_ALLOWED_ORIGINS: origem inválida %q (use esquema://host[:porta] como o navegador envia, "+
+				"sem caminho e sem a porta padrão do esquema; \"null\" e \"*\" não são aceitos)", redact.URL(o)))
+			continue
+		}
+		c.AllowedOrigins = append(c.AllowedOrigins, o)
 	}
 	c.EncryptionKeys = parseKeys(l, l.str("RECORVIA_ENCRYPTION_KEYS", ""))
 	c.EncryptionLostKeys = parseLostKeys(l, l.str("RECORVIA_ENCRYPTION_LOST_KEYS", ""), c.EncryptionKeys)
@@ -450,6 +460,11 @@ func (c *Config) ValidateAPI() error {
 		if !strings.HasPrefix(c.CookieName, "__Host-") {
 			errs = append(errs, errors.New("em produção o cookie de sessão deve usar o prefixo __Host-"))
 		}
+		for _, o := range c.AllowedOrigins {
+			if !strings.HasPrefix(o, "https://") {
+				errs = append(errs, fmt.Errorf("em produção RECORVIA_ALLOWED_ORIGINS aceita só origens https (recebido %q)", o))
+			}
+		}
 	}
 	if strings.HasPrefix(c.CookieName, "__Host-") && !c.CookieSecure {
 		errs = append(errs, errors.New("cookies __Host- exigem RECORVIA_COOKIE_SECURE=true"))
@@ -531,4 +546,30 @@ func (c *Config) validateRetention() []error {
 // ValidateMigrations valida o executável de migrations.
 func (c *Config) ValidateMigrations() error {
 	return errors.Join(require(nil, "RECORVIA_MIGRATIONS_DATABASE_URL", c.MigrationsDBURL)...)
+}
+
+// validOrigin aceita somente uma origem serializada como o navegador a envia
+// no cabeçalho Origin (esquema http ou https, host e porta opcional, sem
+// caminho, query, fragmento nem credenciais). As origens permitidas recebem
+// CORS com credenciais e passam na conferência de origem do CSRF: "null"
+// (iframes em sandbox, documentos locais) e "*" nunca são aceitos.
+func validOrigin(o string) bool {
+	u, err := url.Parse(o)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Hostname() == "" || u.User != nil ||
+		u.Opaque != "" || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery || u.Path != "" {
+		return false
+	}
+	if o != u.Scheme+"://"+u.Host || strings.ToLower(o) != o || strings.HasSuffix(u.Host, ":") {
+		return false
+	}
+	// O navegador omite a porta padrão do esquema e nunca envia porta vazia
+	// ou com zeros à esquerda: "https://app:443" jamais coincidiria com o
+	// Origin recebido, e o CORS e a conferência do CSRF falhariam sem aviso.
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port || (u.Scheme == "https" && n == 443) || (u.Scheme == "http" && n == 80) {
+			return false
+		}
+	}
+	return true
 }
