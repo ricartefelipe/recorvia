@@ -8,14 +8,19 @@ servidor Linux com Docker, de um domínio e de um servidor de e-mail.
 
 ```text
 Internet ──80/443──> proxy (Caddy, HTTPS automático)
-                      ├── RECORVIA_DOMAIN ──> web (nginx: interface + /api, /auth, /webhooks, /readyz) ──> api
+                      ├── RECORVIA_DOMAIN ──> web (nginx: interface + /api, /auth, /webhooks, /livez) ──> api
                       └── KEYCLOAK_DOMAIN ──> keycloak (login)
 api, worker ──> postgres (bancos recorvia e keycloak), redis, rabbitmq      (rede interna, sem internet)
 worker ──> SMTP, provedor de pagamento, webhooks dos clientes                (saída para a internet)
 ```
 
 - Só o proxy publica portas no servidor: 80 e 443 (TCP e UDP). Banco, Redis, RabbitMQ, API e
-  Keycloak não ficam acessíveis de fora.
+  Keycloak não ficam acessíveis de fora. No domínio do Keycloak, o proxy só repassa o realm
+  `recorvia` (login) e os recursos estáticos; o console, a API de administração e o realm
+  `master` só abrem para `KEYCLOAK_ADMIN_ALLOWED_CIDRS` (fechados por padrão).
+- Redes: `edge` (proxy, web e Keycloak, com IPv6 e endereços fixos para o proxy), `app` (web,
+  API, worker e Keycloak, com saída para a internet) e `data` (banco, Redis e RabbitMQ, sem saída
+  para a internet).
 - A cada subida, o `migrate-bootstrap` acerta os papéis do banco, o `migrate` aplica as
   migrations e só então a API e o worker iniciam.
 - Não há simulador de pagamentos, Mailpit nem dados de demonstração. O realm do Keycloak começa
@@ -38,7 +43,10 @@ Arquivos:
 
 - **Sistema**: Linux de 64 bits (por exemplo, Ubuntu 24.04 LTS ou Debian 13), com acesso SSH por
   chave e atualizações automáticas de segurança.
-- **Docker** 27 ou superior, com o plugin Compose 2.24 ou superior, e **Git**.
+- **Docker** 27 ou superior, com o plugin Compose 2.24 ou superior, e **Git**. Mantenha o
+  `ip6tables` do daemon ligado (padrão do Docker 27 em diante; confira que `/etc/docker/daemon.json`
+  não tem `"ip6tables": false`): é ele que entrega as conexões IPv6 ao proxy com o endereço real
+  do cliente.
 - **Tamanho mínimo**: 4 vCPU, 8 GB de RAM e 80 GB de SSD. Os limites do compose somam cerca de
   6,5 GB de memória (PostgreSQL 2 GB, Keycloak 1,5 GB, RabbitMQ 1 GB, API e worker 512 MB cada,
   demais menores). Com o perfil `observability`, conte mais 2 GB. Para ajustar os limites, use
@@ -52,7 +60,8 @@ Arquivos:
 
 ## DNS
 
-Dois nomes, ambos apontando para o IP do servidor (registros `A` e, com IPv6, `AAAA`):
+Dois nomes, ambos apontando para o IP do servidor (registros `A` e, se o servidor tiver IPv6
+público, `AAAA`):
 
 | Variável | Exemplo | Uso |
 |---|---|---|
@@ -63,6 +72,16 @@ Crie os registros **antes** da primeira subida: o Caddy pede os certificados na 
 autoridade só os emite se o nome já apontar para o servidor. Se houver CDN ou balanceador à
 frente, desligue o proxy dele nesses nomes (somente DNS) ou declare-o em `trusted_proxies` no
 `Caddyfile`: o Caddy ignora `X-Forwarded-For` vindo de quem não é confiável.
+
+**IPv6.** A rede `edge` tem IPv6 (sub-rede ULA fixa), e o Docker, com `ip6tables`, encaminha as
+conexões IPv6 publicadas direto ao proxy, que vê o endereço real do cliente (limites por IP e
+restrição do console do Keycloak). Publique o `AAAA` só depois de conferir isso: de uma rede
+IPv6 externa (por exemplo, o celular sem Wi-Fi), abra `https://RECORVIA_DOMAIN/clientes` e veja
+`docker compose logs --tail 5 web`. A linha precisa trazer o IPv6 do aparelho; se trouxer um
+endereço `10.86.86.1` ou `fd52:6563:6f72:86::1` (o gateway da rede), o `ip6tables` está
+desligado no daemon: ligue-o ou **não publique o `AAAA`**. Se as faixas `10.86.86.0/24` ou
+`fd52:6563:6f72:86::/64` colidirem com a rede do servidor, troque-as no `.env`
+(`RECORVIA_EDGE_SUBNET*` e `RECORVIA_PROXY_IPV*`).
 
 Para o e-mail transacional, configure no domínio do remetente os registros SPF, DKIM e DMARC
 indicados pelo provedor de e-mail.
@@ -99,7 +118,7 @@ Preencha à mão o que o script listou (todas marcadas com `[PREENCHER]` no `.en
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD` | servidor de e-mail transacional |
 | `SMTP_TLS` e `KEYCLOAK_SMTP_STARTTLS`/`KEYCLOAK_SMTP_SSL` | `starttls` (587) com `true`/`false`, ou `tls` (465) com `false`/`true` |
 | `RECORVIA_SMTP_FROM`, `KEYCLOAK_SMTP_FROM` | remetentes das cobranças e do login |
-| `KEYCLOAK_ADMIN_ALLOWED_CIDRS` | IPs da operação que podem abrir o console do Keycloak (recomendado) |
+| `KEYCLOAK_ADMIN_ALLOWED_CIDRS` | IPs (CIDR, separados por espaço) da operação ou da VPN que podem abrir o console do Keycloak e o realm `master`. Sem a variável, ninguém abre; liberar para todos exige `0.0.0.0/0 ::/0` escrito de propósito (não recomendado) |
 
 O que a aplicação confere sozinha em produção (`RECORVIA_ENV=production`, já fixado no compose; a
 API ou o worker não sobem se algo falhar):
@@ -125,8 +144,14 @@ credenciais dos provedores nem os segredos dos webhooks
 cd /opt/recorvia/deploy/producao
 docker compose up -d --build --wait
 docker compose ps
-curl -s https://app.example.com/readyz        # {"checks":{"postgres":"ok","redis":"ok"},"status":"ok"}
+curl -s https://app.example.com/livez         # {"status":"ok"} (pela internet)
+docker compose exec -T web wget -q -O - http://api:8081/readyz
+# {"checks":{"postgres":"ok","redis":"ok"},"status":"ok"} (só pela rede interna)
 ```
+
+`/readyz` consulta o PostgreSQL e o Redis a cada chamada: fica só na rede interna, para que
+ninguém de fora esgote o pool de conexões. Pela internet, `/livez` diz se a API responde, sem tocar
+nas dependências.
 
 A construção das imagens leva alguns minutos. O Keycloak, na primeira partida, cria as tabelas,
 importa o realm e o administrador temporário (até 2 minutos). Se o certificado não sair, veja
@@ -134,14 +159,22 @@ importa o realm e o administrador temporário (até 2 minutos). Se o certificado
 
 ### Administrador definitivo do Keycloak
 
-1. Abra `https://auth.example.com/admin/` e entre com `KEYCLOAK_ADMIN_USER` e
+1. Defina `KEYCLOAK_ADMIN_ALLOWED_CIDRS` no `.env` com o seu IP (por exemplo,
+   `203.0.113.10/32`) e recrie o proxy (`docker compose up -d proxy`). Abra
+   `https://auth.example.com/admin/` e entre com `KEYCLOAK_ADMIN_USER` e
    `KEYCLOAK_ADMIN_PASSWORD`. O Keycloak avisa que é um administrador temporário.
 2. No realm **master**, crie o administrador definitivo (*Users → Add user*), defina a senha, dê
    o papel `admin` (*Role mapping*) e exija segundo fator (*Required user actions → Configure
    OTP*).
 3. Saia, entre com o novo usuário, configure o segundo fator e apague o usuário temporário.
-4. As variáveis `KEYCLOAK_ADMIN_*` deixam de ter efeito (só valem com o banco vazio); pode
-   manter os valores no `.env`.
+4. As variáveis `KEYCLOAK_ADMIN_USER` e `KEYCLOAK_ADMIN_PASSWORD` deixam de ter efeito (só
+   valem com o banco vazio); pode manter os valores no `.env`.
+5. Fora das janelas de administração, remova seu IP de `KEYCLOAK_ADMIN_ALLOWED_CIDRS` (ou
+   restrinja à VPN) e recrie o proxy.
+
+O realm `master` é importado da imagem na primeira partida com proteção contra força bruta (5
+falhas, espera de 1 a 15 minutos), senha de 12 a 128 caracteres e eventos de login e de
+administração.
 
 ### Primeiro usuário e organização
 
@@ -217,7 +250,7 @@ RECORVIA_PG_CONTAINER=$(docker compose ps -q postgres) make -C ../.. backup
 docker compose stop api worker                         # o worker drena por até 2m30s
 docker compose up -d --wait                            # bootstrap, migrations, API, worker, web
 docker compose logs migrate                            # migrations aplicadas
-curl -s https://app.example.com/readyz
+docker compose exec -T web wget -q -O - http://api:8081/readyz
 ```
 
 **Voltar atrás**: as imagens da versão anterior continuam no servidor com a etiqueta antiga. Se
@@ -241,7 +274,7 @@ cofre **antes** de aplicar, atualize o `.env` e registre quem fez e quando.
 | `KEYCLOAK_DB_PASSWORD` | troque no `.env` e rode `docker compose up -d --wait`: o `keycloak-db-bootstrap` aplica a senha e o Keycloak é recriado |
 | `POSTGRES_SUPERUSER_PASSWORD` | `docker compose exec postgres psql -U postgres -c "\password postgres"` com o valor novo, depois atualize o `.env` (a variável da imagem só vale na criação do volume) |
 | `REDIS_PASSWORD` | troque no `.env` e `docker compose up -d --wait redis api` (as sessões persistem no volume) |
-| `RABBITMQ_PASSWORD` | `docker compose exec rabbitmq rabbitmqctl change_password recorvia '<nova>'`, atualize o `.env` e `docker compose up -d --wait worker api` |
+| `RABBITMQ_PASSWORD` | `RABBITMQ_USER=$(sed -n 's/^RABBITMQ_USER=//p' .env)` e `docker compose exec rabbitmq rabbitmqctl change_password "$RABBITMQ_USER" '<nova>'`; atualize o `.env` e `docker compose up -d --wait worker api` |
 | `RECORVIA_OIDC_CLIENT_SECRET` | no console, realm recorvia, *Clients → recorvia-web → Credentials → Regenerate*; copie o valor para o `.env` e `docker compose up -d --wait api` (logins em andamento nesse intervalo falham e são repetidos) |
 | Administrador do Keycloak | pelo console (*Users → Credentials*) |
 | `GRAFANA_ADMIN_PASSWORD` | pelo Grafana (*Profile → Change password*) e no `.env` |
@@ -270,8 +303,10 @@ recebimento do alerta diário `RecorviaWatchdog`: sem ele, nada avisa que os ale
 
 Fora do servidor (o que o próprio servidor não consegue avisar):
 
-- **Disponibilidade externa**: um verificador externo consultando `https://RECORVIA_DOMAIN/readyz`
-  (espera 200 e `"status":"ok"`) e `https://KEYCLOAK_DOMAIN/realms/recorvia` a cada minuto.
+- **Disponibilidade externa**: um verificador externo consultando `https://RECORVIA_DOMAIN/livez`
+  (espera 200 e `"status":"ok"`) e `https://KEYCLOAK_DOMAIN/realms/recorvia` a cada minuto. A
+  prontidão das dependências (`/readyz`, só na rede interna) aparece no Prometheus
+  (`recorvia_dependency_up`) e no alerta `RecorviaDependencyUnavailable`.
 - **Certificados**: validade dos dois nomes (o Caddy renova cerca de 30 dias antes; alerte com
   menos de 14 dias).
 - **Recursos do servidor**: disco (alerta com menos de 20% livre; o banco e os logs crescem),
@@ -304,10 +339,13 @@ os pontos de extensão, e o volume de dados é `postgres-data`.
 compose numa máquina de desenvolvimento ou de CI, num projeto isolado (`recorvia-prodcheck`), com
 os domínios `localhost` e `auth.localhost` (certificados da autoridade interna do Caddy) e o proxy
 publicado só em 127.0.0.1. Confere a configuração (portas, serviços de demonstração, healthchecks,
-restart e limites), HTTPS e HSTS, `/readyz`, a interface, o endereço do cliente visto pelo nginx,
-o login redirecionando ao Keycloak com o `redirect_uri` do domínio, problem+json numa rota
-inexistente, as portas dos containers em execução, o bloqueio do console de administração, o realm
-de produção e o backup do banco do Keycloak, e derruba o projeto no fim. Exige as portas 80 e 443 de 127.0.0.1 livres. Não rode no
+restart e limites), HTTPS e HSTS, `/livez` pela origem pública e `/readyz` só pela rede interna, a
+interface, o endereço do cliente visto pelo nginx (também por IPv6, e sem aceitar
+`X-Forwarded-For` forjado), o login redirecionando ao Keycloak com o `redirect_uri` do domínio,
+problem+json numa rota inexistente, as portas dos containers em execução, a lista do que o proxy
+repassa no domínio do Keycloak (console, API de administração, realm `master` e variantes de
+caminho com 403), os realms `recorvia` e `master` e o backup do banco do Keycloak, e derruba o
+projeto no fim. Exige as portas 80 e 443 de 127.0.0.1 livres. Não rode no
 servidor de produção.
 
 ## Pendências que dependem do dono

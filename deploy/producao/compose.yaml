@@ -13,9 +13,9 @@
 #   realm do Keycloak não tem usuários.
 # - Imagens externas com tag fixa (make pin-check); as da aplicação são
 #   construídas aqui a partir do checkout da versão (RECORVIA_VERSION).
-# - Redes: "borda" (proxy, web e Keycloak), "aplicacao" (web, API, worker,
+# - Redes: "edge" (proxy, web e Keycloak), "app" (web, API, worker,
 #   Keycloak, com saída para a internet: provedor de pagamento, SMTP e
-#   webhooks) e "dados" (PostgreSQL, Redis e RabbitMQ, sem saída para a
+#   webhooks) e "data" (PostgreSQL, Redis e RabbitMQ, sem saída para a
 #   internet).
 #
 # Extensões (por exemplo, o backup contínuo do PostgreSQL): acrescente um
@@ -98,7 +98,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql
     shm_size: 256mb
-    networks: [dados]
+    networks: [data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 10s
@@ -128,7 +128,7 @@ services:
       RECORVIA_BOOTSTRAP_DATABASE_URL: postgres://postgres:${POSTGRES_SUPERUSER_PASSWORD}@postgres:5432/postgres?sslmode=disable
       RECORVIA_OWNER_PASSWORD: ${RECORVIA_OWNER_PASSWORD:?defina no .env}
       RECORVIA_APP_PASSWORD: ${RECORVIA_APP_PASSWORD:?defina no .env}
-    networks: [dados]
+    networks: [data]
     restart: "no"
     logging: *logging
 
@@ -144,7 +144,7 @@ services:
     environment:
       RECORVIA_ENV: production
       RECORVIA_MIGRATIONS_DATABASE_URL: postgres://recorvia_owner:${RECORVIA_OWNER_PASSWORD}@postgres:5432/recorvia?sslmode=disable
-    networks: [dados]
+    networks: [data]
     restart: "no"
     logging: *logging
 
@@ -157,10 +157,10 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        psql -X -q -v ON_ERROR_STOP=1 -v senha="$$KEYCLOAK_DB_PASSWORD" <<'SQL'
+        psql -X -q -v ON_ERROR_STOP=1 -v password="$$KEYCLOAK_DB_PASSWORD" <<'SQL'
         SELECT format('%s ROLE keycloak LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD %L',
                       CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'keycloak') THEN 'ALTER' ELSE 'CREATE' END,
-                      :'senha')
+                      :'password')
         \gexec
         SELECT 'CREATE DATABASE keycloak OWNER keycloak'
          WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'keycloak')
@@ -177,7 +177,7 @@ services:
       PGDATABASE: postgres
       PGPASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
       KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?defina no .env}
-    networks: [dados]
+    networks: [data]
     restart: "no"
     logging: *logging
 
@@ -197,7 +197,7 @@ services:
       REDISCLI_AUTH: ${REDIS_PASSWORD:?defina no .env}
     volumes:
       - redis-data:/data
-    networks: [dados]
+    networks: [data]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -221,7 +221,7 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?defina no .env}
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
-    networks: [dados]
+    networks: [data]
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 15s
@@ -249,11 +249,11 @@ services:
       # A API conversa com o Keycloak pela rede interna (descoberta e troca
       # do código); o navegador, pelo endereço público.
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
-      # TLS termina no proxy; o Keycloak confia nos cabeçalhos X-Forwarded-*
-      # somente vindos das redes privadas do Docker.
+      # TLS termina no proxy; o Keycloak só aceita os cabeçalhos
+      # X-Forwarded-* vindos dos endereços fixos do proxy na rede edge.
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded
-      KC_PROXY_TRUSTED_ADDRESSES: ${KEYCLOAK_PROXY_TRUSTED_ADDRESSES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+      KC_PROXY_TRUSTED_ADDRESSES: ${RECORVIA_PROXY_IPV4:-10.86.86.10},${RECORVIA_PROXY_IPV6:-fd52:6563:6f72:86::10}
       # Administrador temporário do realm master: criado só na primeira
       # partida (banco sem administrador); depois as variáveis são ignoradas.
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:-admin-temporario}
@@ -269,7 +269,7 @@ services:
       KEYCLOAK_SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       KEYCLOAK_SMTP_STARTTLS: ${KEYCLOAK_SMTP_STARTTLS:-true}
       KEYCLOAK_SMTP_SSL: ${KEYCLOAK_SMTP_SSL:-false}
-    networks: [borda, aplicacao, dados]
+    networks: [edge, app, data]
     healthcheck:
       # A descoberta do realm, e não só /health/ready: na primeira partida o
       # Keycloak fica pronto antes de terminar a importação do realm e
@@ -301,7 +301,7 @@ services:
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
-    networks: [aplicacao, dados]
+    networks: [app, data]
     healthcheck:
       test: ["CMD", "/app", "healthcheck"]
       interval: 10s
@@ -329,7 +329,7 @@ services:
     depends_on:
       migrate: { condition: service_completed_successfully }
       rabbitmq: { condition: service_healthy }
-    networks: [aplicacao, dados]
+    networks: [app, data]
     healthcheck:
       test: ["CMD", "/app", "healthcheck"]
       interval: 10s
@@ -353,9 +353,13 @@ services:
     cap_drop: [ALL]
     tmpfs:
       - /tmp:mode=1777,size=64m
+    environment:
+      # Único remetente cujo X-Forwarded-For vale como endereço do cliente
+      # (o proxy, nos endereços fixos da rede edge): web/real-ip.sh.
+      RECORVIA_TRUSTED_PROXIES: ${RECORVIA_PROXY_IPV4:-10.86.86.10},${RECORVIA_PROXY_IPV6:-fd52:6563:6f72:86::10}
     depends_on:
       api: { condition: service_healthy }
-    networks: [borda, aplicacao]
+    networks: [edge, app]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 10s
@@ -380,7 +384,9 @@ services:
       RECORVIA_DOMAIN: ${RECORVIA_DOMAIN}
       KEYCLOAK_DOMAIN: ${KEYCLOAK_DOMAIN}
       ACME_EMAIL: ${ACME_EMAIL:?defina no .env}
-      KEYCLOAK_ADMIN_ALLOWED_CIDRS: ${KEYCLOAK_ADMIN_ALLOWED_CIDRS:-0.0.0.0/0 ::/0}
+      # Vazia ou ausente: console fechado (só o loopback do container, que
+      # nenhum cliente alcança). Liberar a todos exige "0.0.0.0/0 ::/0".
+      KEYCLOAK_ADMIN_ALLOWED_CIDRS: ${KEYCLOAK_ADMIN_ALLOWED_CIDRS:-127.0.0.1/32 ::1/128}
     ports:
       - "80:80"
       - "443:443"
@@ -391,7 +397,12 @@ services:
     depends_on:
       web: { condition: service_healthy }
       keycloak: { condition: service_started }
-    networks: [borda]
+    # Endereços fixos: o nginx da imagem web e o Keycloak só confiam no
+    # X-Forwarded-For vindo daqui.
+    networks:
+      edge:
+        ipv4_address: ${RECORVIA_PROXY_IPV4:-10.86.86.10}
+        ipv6_address: ${RECORVIA_PROXY_IPV6:-fd52:6563:6f72:86::10}
     healthcheck:
       # API de administração do Caddy, só no loopback do container.
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
@@ -417,7 +428,7 @@ services:
     <<: *security
     depends_on:
       jaeger: { condition: service_healthy }
-    networks: [aplicacao]
+    networks: [app]
     restart: unless-stopped
     deploy:
       resources:
@@ -432,7 +443,7 @@ services:
     <<: *security
     ports:
       - "127.0.0.1:${JAEGER_UI_PORT:-16686}:16686"
-    networks: [aplicacao]
+    networks: [app]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:13133/status"]
       interval: 15s
@@ -461,7 +472,7 @@ services:
       - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - prometheus-data:/prometheus
-    networks: [aplicacao, dados]
+    networks: [app, data]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
       interval: 15s
@@ -494,7 +505,7 @@ services:
       - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
     volumes:
       - alertmanager-data:/alertmanager
-    networks: [aplicacao]
+    networks: [app]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9093/-/ready"]
       interval: 15s
@@ -523,7 +534,7 @@ services:
       - grafana-data:/var/lib/grafana
     depends_on:
       prometheus: { condition: service_healthy }
-    networks: [aplicacao]
+    networks: [app]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
       interval: 15s
@@ -537,9 +548,21 @@ services:
     logging: *logging
 
 networks:
-  borda: {}
-  aplicacao: {}
-  dados:
+  # IPv6 na rede do proxy: com ele, o Docker encaminha as conexões IPv6
+  # publicadas direto ao container (ip6tables, padrão do Docker 27 em
+  # diante), e o Caddy vê o endereço real do cliente. Sem IPv6 na rede, o
+  # docker-proxy atenderia o IPv6 e o cliente apareceria como o gateway da
+  # bridge. Sub-redes fixas (fora das faixas automáticas do Docker) para os
+  # endereços fixos do proxy; troque-as no .env se colidirem com a rede do
+  # servidor.
+  edge:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: ${RECORVIA_EDGE_SUBNET:-10.86.86.0/24}
+        - subnet: ${RECORVIA_EDGE_SUBNET_IPV6:-fd52:6563:6f72:86::/64}
+  app: {}
+  data:
     internal: true
 
 volumes:

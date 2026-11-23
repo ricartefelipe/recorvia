@@ -7,5 +7,5 @@ COPY Caddyfile /etc/caddy/Caddyfile
 # Recusa no build uma configuração inválida (com valores de exemplo para as
 # variáveis lidas na partida).
 RUN RECORVIA_DOMAIN=app.example.com KEYCLOAK_DOMAIN=auth.example.com ACME_EMAIL=ops@example.com \
-    KEYCLOAK_ADMIN_ALLOWED_CIDRS="0.0.0.0/0 ::/0" \
+    KEYCLOAK_ADMIN_ALLOWED_CIDRS="127.0.0.1/32 ::1/128" \
     caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile

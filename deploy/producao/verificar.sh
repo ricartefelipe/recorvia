@@ -13,18 +13,21 @@
 #      memória;
 #   2. HTTPS com certificado válido para a autoridade do proxy, HSTS e
 #      redirecionamento de HTTP para HTTPS;
-#   3. /readyz da API pela origem pública;
+#   3. /livez da API pela origem pública e /readyz só pela rede interna;
 #   4. a interface (index.html e um asset) e o endereço do cliente visto pelo
-#      nginx (o do cliente, não o do proxy);
+#      nginx: o do cliente, não o do proxy, também em IPv6, e nunca o de um
+#      X-Forwarded-For enviado pelo cliente ou por outro container;
 #   5. o login: /auth/login redireciona ao Keycloak com o redirect_uri do
 #      domínio, e o Keycloak aceita e mostra o formulário;
 #   6. problem+json numa rota inexistente da API;
 #   7. as portas: nenhum container publica outra porta, /metrics e a saúde do
-#      Keycloak não passam pelo proxy e o console de administração do
-#      Keycloak é recusado fora de KEYCLOAK_ADMIN_ALLOWED_CIDRS;
-#   8. o realm de produção: sem usuários, verificação de e-mail, política de
-#      senha, proteção contra força bruta, cliente com os endereços do
-#      domínio e o segredo do .env;
+#      Keycloak não passam pelo proxy, e o domínio do Keycloak só repassa o
+#      realm recorvia e os recursos estáticos: console, API de administração,
+#      realm master e variantes de caminho (;, .., codificados) recebem 403
+#      com KEYCLOAK_ADMIN_ALLOWED_CIDRS no padrão (fechado);
+#   8. os realms: recorvia sem usuários, com verificação de e-mail, política
+#      de senha, proteção contra força bruta e cliente com os endereços do
+#      domínio e o segredo do .env; master com proteção contra força bruta;
 #   9. o backup do banco do Keycloak (pg_dump legível por pg_restore).
 #
 # Variáveis (todas opcionais):
@@ -41,8 +44,10 @@
 #   RECORVIA_PROD_CHECK_TIMEOUT  espera máxima, em segundos, da subida
 #                                (padrão: 600)
 #
-# Exige docker com o plugin compose 2.24 ou superior, curl e jq, e as portas
-# 80 e 443 de 127.0.0.1 livres.
+# Exige docker com o plugin compose 2.24 ou superior e suporte a redes IPv6,
+# curl e jq, e as portas 80 e 443 de 127.0.0.1 livres. Usa a imagem
+# curlimages/curl como cliente dentro da rede edge (IPv6 e X-Forwarded-For
+# forjado).
 set -euo pipefail
 umask 077
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -54,6 +59,7 @@ build=${RECORVIA_PROD_CHECK_BUILD:-1}
 keep=${RECORVIA_PROD_CHECK_KEEP:-0}
 timeout_s=${RECORVIA_PROD_CHECK_TIMEOUT:-600}
 label=recorvia.prod-check
+curl_image=curlimages/curl:8.17.0
 app=localhost
 auth=auth.localhost
 
@@ -71,6 +77,17 @@ case $project in
   recorvia | recorvia-producao) die "RECORVIA_PROD_CHECK_PROJECT não pode ser $project (ambiente local ou produção)" ;;
   "" | *[!a-z0-9_-]*) die "RECORVIA_PROD_CHECK_PROJECT inválido: $project" ;;
 esac
+
+# O ambiente de quem chama não entra na verificação: as variáveis do Compose e
+# todas as que o compose.yaml interpola valem só pelo .env de teste (o
+# ambiente do shell teria precedência sobre ele).
+unset COMPOSE_PROFILES COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_PATH_SEPARATOR OTEL_EXPORTER_OTLP_ENDPOINT
+while IFS= read -r var; do
+  unset "$var"
+done < <({
+  grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' compose.yaml | cut -c3-
+  compgen -e | grep -E '^(RECORVIA_|KEYCLOAK_|SMTP_|ALERTMANAGER_|GRAFANA_|PROMETHEUS_|JAEGER_|RABBITMQ_|REDIS_|POSTGRES_|ACME_|RUNBOOK_|OTEL_)'
+} | sort -u)
 
 work=$(mktemp -d)
 env_file=$work/.env
@@ -127,9 +144,9 @@ set_env RECORVIA_VERSION "$tag"
 set_env RECORVIA_DOMAIN "$app"
 set_env KEYCLOAK_DOMAIN "$auth"
 set_env ACME_EMAIL operacao@example.com
-# Endereço de documentação (TEST-NET-1): o console de administração do
-# Keycloak precisa ser recusado para a máquina que verifica.
-set_env KEYCLOAK_ADMIN_ALLOWED_CIDRS 192.0.2.0/24
+# KEYCLOAK_ADMIN_ALLOWED_CIDRS fica como no .env.example (ausente): o padrão
+# do compose precisa manter o console fechado.
+grep -q '^KEYCLOAK_ADMIN_ALLOWED_CIDRS=' "$env_file" && die "o .env.example não deve abrir o console do Keycloak por padrão"
 # O worker só valida a configuração do SMTP na partida; nenhum e-mail é
 # enviado na verificação.
 set_env SMTP_HOST smtp.example.com
@@ -214,11 +231,17 @@ headers=$(c -D - -o /dev/null "https://$app/")
 grep -qi '^strict-transport-security: max-age=' <<<"$headers" || die "resposta HTTPS sem HSTS"
 ok "HSTS presente"
 
-log "3. /readyz"
-body=$(c -f "https://$app/readyz") || die "/readyz não respondeu 200"
+log "3. /livez e /readyz"
+body=$(c -f "https://$app/livez") || die "/livez não respondeu 200"
+jq -e '.status == "ok"' <<<"$body" >/dev/null || die "/livez inesperado: $body"
+ok "/livez pela origem pública: $body"
+body=$(c "https://$app/readyz")
+! grep -q '"checks"' <<<"$body" || die "/readyz exposto pela origem pública"
+ok "/readyz fora da origem pública"
+body=$(compose exec -T web wget -q -O - http://api:8081/readyz) || die "/readyz não respondeu 200 na rede interna"
 jq -e '.status == "ok" and .checks.postgres == "ok" and .checks.redis == "ok"' <<<"$body" >/dev/null ||
   die "/readyz inesperado: $body"
-ok "/readyz: $body"
+ok "/readyz pela rede interna: $body"
 
 log "4. interface"
 index=$(c -f "https://$app/") || die "a interface não carregou"
@@ -231,12 +254,39 @@ headers=$(c -D - -o /dev/null "https://$app/clientes")
 grep -qi "^content-security-policy: default-src 'self'" <<<"$headers" || die "interface sem Content-Security-Policy"
 ok "index.html, $asset e rota da SPA com CSP"
 # O nginx registra o endereço do cliente que o proxy informou, não o do
-# próprio proxy (limites por IP da API, X-Real-IP).
-proxy_ips=" $(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$(compose ps -q proxy)") "
-client=$(compose logs --no-log-prefix web | grep -F '"GET /clientes ' | tail -n 1 | awk '{ print $1 }')
+# próprio proxy (limites por IP da API, X-Real-IP), e ignora o
+# X-Forwarded-For de qualquer outro remetente.
+proxy_id=$(compose ps -q proxy)
+proxy_ips=" $(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}' "$proxy_id") "
+edge=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' "$proxy_id")
+# logged_client CAMINHO: endereço registrado pelo nginx no último acesso.
+logged_client() {
+  compose logs --no-log-prefix web | grep -F "\"GET $1 " | tail -n 1 | awk '{ print $1 }'
+}
+c -o /dev/null -H 'X-Forwarded-For: 203.0.113.7' "https://$app/clientes"
+client=$(logged_client /clientes)
 [[ -n $client ]] || die "acesso à interface ausente do log do nginx"
 [[ $proxy_ips != *" $client "* ]] || die "o nginx vê o endereço do proxy ($client) em vez do cliente"
-ok "o nginx vê o endereço do cliente ($client), não o do proxy"
+[[ $client != 203.0.113.7 ]] || die "o X-Forwarded-For enviado pelo cliente alterou o endereço registrado"
+ok "o nginx vê o endereço do cliente ($client), não o do proxy nem o X-Forwarded-For forjado"
+[[ $(docker network inspect -f '{{.EnableIPv6}}' "$edge") == true ]] || die "rede $edge sem IPv6"
+proxy_ip6=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$edge\").GlobalIPv6Address}}" "$proxy_id")
+[[ -n $proxy_ip6 ]] || die "proxy sem endereço IPv6 na rede $edge"
+# Cliente IPv6 na rede edge, falando com o proxy pelo IPv6: o nginx precisa
+# registrar o IPv6 do cliente.
+probe=$project-probe
+docker run --rm --name "$probe" --network "$edge" "$curl_image" -sk -o /dev/null --max-time 20 \
+  --resolve "$app:443:[$proxy_ip6]" "https://$app/clientes-ipv6" ||
+  die "cliente IPv6 não alcançou o proxy em $proxy_ip6"
+client6=$(logged_client /clientes-ipv6)
+[[ $client6 == *:* && $proxy_ips != *" $client6 "* ]] || die "por IPv6, o nginx registrou $client6 (proxy: $proxy_ip6)"
+ok "por IPv6, o nginx vê o endereço do cliente ($client6), não o do proxy ($proxy_ip6)"
+# Outro container da rede edge, direto no nginx com X-Forwarded-For forjado.
+docker run --rm --name "$probe" --network "$edge" "$curl_image" -s -o /dev/null --max-time 20 \
+  -H 'X-Forwarded-For: 203.0.113.8' http://web:8080/clientes-direto || die "o container de teste não alcançou o nginx"
+direct=$(logged_client /clientes-direto)
+[[ -n $direct && $direct != 203.0.113.8 ]] || die "o nginx aceitou o X-Forwarded-For de um remetente que não é o proxy ($direct)"
+ok "X-Forwarded-For de outro remetente ignorado (registrado $direct)"
 
 log "5. login"
 jar=$work/cookies
@@ -285,11 +335,31 @@ for path in /metrics /health/ready; do
   ! grep -qE '^# TYPE |"status": *"UP"' "$work/kc" || die "$path do Keycloak exposto pelo proxy ($code)"
 done
 ok "métricas da API e saúde e métricas do Keycloak fora do proxy"
-code=$(c -o /dev/null -w '%{http_code}' "https://$auth/admin/master/console/")
-[[ $code == 403 ]] || die "console de administração do Keycloak respondeu $code fora dos endereços permitidos"
-ok "console de administração do Keycloak recusado fora de KEYCLOAK_ADMIN_ALLOWED_CIDRS (403)"
+for path in /admin /admin/ /admin/master/console/ "/admin;x" "/admin;x/master/console/" /realms/master \
+  /realms/master/ /realms/master/protocol/openid-connect/token /realms/master/.well-known/openid-configuration \
+  "/realms/recorvia/../master/" "/realms/recorvia/%2e%2e/master/" "/realms/recorvia/..%2fmaster/" \
+  "/realms/recorvia;x/../master/" "/realms/recorvia/%252e%252e/master/" "/realms/Master/" "/REALMS/master/" /js/keycloak.js /welcome /; do
+  code=$(c --path-as-is -o /dev/null -w '%{http_code}' "https://$auth$path")
+  [[ $code == 403 ]] || die "$path no domínio do Keycloak respondeu $code (esperado 403)"
+done
+code=$(c --path-as-is -o /dev/null -w '%{http_code}' -X POST -d grant_type=password -d client_id=admin-cli \
+  -d username=x -d password=y "https://$auth/realms/master/protocol/openid-connect/token")
+[[ $code == 403 ]] || die "token do realm master respondeu $code pelo proxy"
+ok "console, API de administração, realm master e variantes de caminho recusados (403) com o padrão fechado"
+for path in /realms/recorvia /realms/recorvia/.well-known/openid-configuration; do
+  code=$(c -o /dev/null -w '%{http_code}' "https://$auth$path")
+  [[ $code == 200 ]] || die "$path no domínio do Keycloak respondeu $code (esperado 200)"
+done
+# O Keycloak 26 não tem robots.txt (404): basta o proxy repassar.
+code=$(c -o /dev/null -w '%{http_code}' "https://$auth/robots.txt")
+[[ $code != 403 ]] || die "/robots.txt recusado pelo proxy"
+resource=$(grep -oE '/resources/[^"]+\.css' <<<"$page" | head -n 1)
+[[ -n $resource ]] || die "página de login sem recurso em /resources"
+code=$(c -o /dev/null -w '%{http_code}' "https://$auth$resource")
+[[ $code == 200 ]] || die "$resource respondeu $code"
+ok "realm recorvia, robots.txt e recursos estáticos do login liberados"
 
-log "8. realm de produção"
+log "8. realms"
 kcadm() { compose exec -T keycloak /opt/keycloak/bin/kcadm.sh "$@" --config /tmp/kcadm.config; }
 kcadm config credentials --server http://localhost:8080 --realm master \
   --user "$(get_env KEYCLOAK_ADMIN_USER)" --password "$(get_env KEYCLOAK_ADMIN_PASSWORD)" >/dev/null 2>&1 ||
@@ -310,11 +380,23 @@ jq -e --arg a "https://$app" '.redirectUris == [$a + "/auth/callback"] and .webO
 secret=$(kcadm get "clients/$(jq -r .id <<<"$client")/client-secret" -r recorvia | jq -r .value)
 [[ $secret == "$(get_env RECORVIA_OIDC_CLIENT_SECRET)" ]] || die "segredo do cliente diferente de RECORVIA_OIDC_CLIENT_SECRET"
 ok "cliente recorvia-web com redirect_uri e origem do domínio e o segredo do .env"
+master=$(kcadm get realms/master)
+jq -e '.bruteForceProtected == true and .failureFactor == 5 and (.passwordPolicy | contains("length(12)"))' <<<"$master" >/dev/null ||
+  die "realm master sem proteção: $(jq -c '{bruteForceProtected, failureFactor, passwordPolicy}' <<<"$master")"
+actions=$(kcadm get authentication/required-actions -r master | jq -r '[.[] | select(.enabled) | .alias] | sort | join(" ")')
+[[ " $actions " == *" CONFIGURE_TOTP "* && " $actions " == *" UPDATE_PASSWORD "* && " $actions " != *" VERIFY_PROFILE "* ]] ||
+  die "ações obrigatórias inesperadas no realm master: $actions"
+admins=$(kcadm get users -r master --fields username | jq -r '[.[].username] | join(" ")')
+[[ $admins == "$(get_env KEYCLOAK_ADMIN_USER)" ]] || die "usuários inesperados no realm master: $admins"
+ok "realm master com proteção contra força bruta, política de senha e segundo fator disponível; só o administrador temporário"
 
 log "9. backup do Keycloak"
 compose exec -T postgres pg_dump -U postgres -Fc keycloak >"$work/keycloak.dump"
-compose exec -T postgres pg_restore --list <"$work/keycloak.dump" | grep -q 'TABLE public user_entity' ||
-  die "dump do banco do Keycloak sem a tabela de usuários"
+# A lista vai para um arquivo antes do grep: com pipefail, o grep -q que sai
+# na primeira linha encontrada interromperia o pg_restore (SIGPIPE).
+compose exec -T postgres pg_restore --list <"$work/keycloak.dump" >"$work/keycloak.list" ||
+  die "pg_restore não leu o dump do banco do Keycloak"
+grep -q 'TABLE public user_entity' "$work/keycloak.list" || die "dump do banco do Keycloak sem a tabela de usuários"
 ok "pg_dump do banco keycloak legível ($(stat -c %s "$work/keycloak.dump") bytes)"
 
 log "verificação do pacote de produção concluída"

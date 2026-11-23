@@ -2,9 +2,11 @@
 #
 # - {$RECORVIA_DOMAIN}: interface e API na mesma origem. Tudo vai para o nginx
 #   da imagem web, que serve a SPA e encaminha /api, /auth, /portal/access,
-#   /webhooks e /readyz à API (web/nginx.conf).
+#   /webhooks e /livez à API (web/nginx.conf).
 # - {$KEYCLOAK_DOMAIN}: Keycloak num subdomínio próprio (o caminho /auth da
-#   origem da aplicação já é do login do Recorvia).
+#   origem da aplicação já é do login do Recorvia), com lista do que é
+#   permitido: o realm recorvia e os recursos estáticos para todos; console,
+#   API de administração e realm master só para KEYCLOAK_ADMIN_ALLOWED_CIDRS.
 #
 # Os certificados são emitidos e renovados automaticamente (ACME, Let's
 # Encrypt ou ZeroSSL) e ficam no volume /data. Nomes que não podem ter
@@ -31,7 +33,7 @@
 	}
 }
 
-(cabecalhos_comuns) {
+(common_headers) {
 	header {
 		# Mantém o valor da aplicação quando ela já define o cabeçalho.
 		?Strict-Transport-Security "max-age=63072000"
@@ -41,7 +43,7 @@
 }
 
 {$RECORVIA_DOMAIN} {
-	import cabecalhos_comuns
+	import common_headers
 	reverse_proxy web:8080 {
 		# O nginx da imagem web passa X-Forwarded-For e X-Forwarded-Proto
 		# adiante e usa o X-Forwarded-For como endereço do cliente.
@@ -51,14 +53,35 @@
 }
 
 {$KEYCLOAK_DOMAIN} {
-	import cabecalhos_comuns
-	# Console e API de administração só a partir dos endereços permitidos
-	# (KEYCLOAK_ADMIN_ALLOWED_CIDRS, separados por espaço). O login dos
-	# usuários (/realms/...) continua aberto.
-	@administracao_bloqueada {
-		path /admin /admin/*
-		not remote_ip {$KEYCLOAK_ADMIN_ALLOWED_CIDRS}
+	import common_headers
+	# Lista do que é permitido; todo o resto recebe 403. Caminhos com "..",
+	# ";", barra invertida ou "%" (já decodificados: %2e, %2f, %3b e %5c viram
+	# esses caracteres, e um "%" restante indica codificação dupla) são
+	# recusados antes de qualquer comparação, para que nenhuma variante alcance
+	# outro realm. A query string não entra (o redirect_uri do login vem
+	# codificado).
+	@unsafe_path expression `{http.request.uri.path}.contains("..") || {http.request.uri.path}.contains(";") || {http.request.uri.path}.contains("\\") || {http.request.uri.path}.contains("%")`
+	# Login, troca de código, conta e recursos estáticos do realm da
+	# aplicação: abertos.
+	@public_realm path /realms/recorvia /realms/recorvia/* /resources/* /robots.txt
+	# Console e API de administração e o realm master (onde ficam os
+	# administradores): só a partir de KEYCLOAK_ADMIN_ALLOWED_CIDRS
+	# (separados por espaço).
+	@admin {
+		path /admin /admin/* /realms/master /realms/master/*
+		remote_ip {$KEYCLOAK_ADMIN_ALLOWED_CIDRS}
 	}
-	respond @administracao_bloqueada "Acesso restrito." 403
-	reverse_proxy keycloak:8080
+	# Blocos handle são exclusivos e avaliados na ordem em que aparecem.
+	handle @unsafe_path {
+		respond "Acesso restrito." 403
+	}
+	handle @public_realm {
+		reverse_proxy keycloak:8080
+	}
+	handle @admin {
+		reverse_proxy keycloak:8080
+	}
+	handle {
+		respond "Acesso restrito." 403
+	}
 }
