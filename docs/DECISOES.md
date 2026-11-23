@@ -2689,3 +2689,68 @@ garantia de compatibilidade das migrations com a versão anterior. O rótulo `en
 continua o mesmo na produção. O Keycloak 26.8.2 traz o Guava com a CVE-2026-102554 (exceção do Trivy até
 2026-12-31), agora também numa imagem de produção. Provedor, Asaas em produção e SMTP transacional continuam
 decisões do dono.
+
+## ADR-088 Teste de carga manual com limites de produção e primeiras correções de vazão
+**Status:** aceita.
+**Contexto:** antes de abrir para clientes faltava saber quanto o Recorvia aguenta num servidor com os
+limites do pacote de produção (ADR-086) e onde está o primeiro gargalo. O teste precisa usar dados
+criados pelas regras da aplicação (não por INSERT), várias organizações ao mesmo tempo e credenciais de
+API, medir latência por percentil, vazão, erros e recursos por container, e ser repetível sem pesar na
+CI de cada pull request.
+**Decisão:**
+- **Ferramenta: programa Go em `tools/carga`, não k6.** Os cenários precisam dos serviços da aplicação
+  (organizações, plano da plataforma e credenciais, como o seed), do HMAC dos webhooks do simulador, do
+  estado do banco para saber quando o processamento assíncrono terminou e do controle do worker (parar
+  e religar no fechamento). Em Go, isso reaproveita o código do repositório, fica fixado pelo `go.mod`
+  e não baixa imagem. Percentis pelo método do posto mais próximo, sobre todas as amostras.
+- **Ambiente isolado com os limites de produção.** `make load-test` (`deploy/carga/carga.sh`) sobe o
+  projeto `recorvia-carga` com `compose.yaml` e `deploy/carga/carga.compose.yaml`: os limites de CPU e
+  memória, o pool e a concorrência do pacote de produção, imagens com a etiqueta `carga`, portas livres
+  só em 127.0.0.1, `pg_stat_statements` e `log_min_duration_statement` só nesse PostgreSQL, rótulo
+  `recorvia.load-test` em containers e volumes (o roteiro recusa um projeto com recursos sem o rótulo)
+  e o projeto derrubado com os volumes no fim. Os limites por credencial de API e por IP dos webhooks
+  sobem no ambiente de carga para medir o sistema e não o limitador; os padrões de produção não mudam.
+  Cada etapa tem prazo (`timeout`) e mostra o progresso; toda espera falha depois de 10 min sem
+  andamento (`RECORVIA_LOAD_STALL`), e consultas e chamadas HTTP têm prazo próprio. O roteiro roda
+  sob `systemd-inhibit` quando houver: uma suspensão da máquina congelou uma execução por quase três
+  horas sem erro (o relógio monotônico para junto), e um cenário em que o relógio de parede se afasta
+  do monotônico por mais de 30 s falha em vez de gravar números.
+- **Dados e cenários.** 20 organizações com perfil B2B (10% grandes, 30% médias, 60% pequenas), 6.600
+  clientes e assinaturas criados pela API, histórico de faturas emitido pelo motor e pagamentos
+  manuais. Cenários por prioridade: (c) fechamento em lote com o worker parado e religado, cobranças no
+  simulador e webhooks de volta; (a) leitura de listas e painel; (b) escrita com Idempotency-Key, com
+  repetições; (e) pico de webhooks com repetições e fora de ordem; (d) ingestão de consumo. O relatório
+  e os números ficam em `docs/operacao/carga.md`.
+- **Fora da CI.** O teste leva de 30 a 40 minutos e depende da máquina; roda sob demanda, antes de
+  versões que mexam em faturamento, consultas ou limites. Sem workflow manual por enquanto: o runner
+  compartilhado da CI teria números ainda menos comparáveis.
+- **Correções baratas, com teste e com a medição antes e depois:**
+  - o motor de recorrência fatura até `RECORVIA_BILLING_CONCURRENCY` tenants ao mesmo tempo (padrão 4,
+    de 1 a 32), cada um em sequência como antes (`FOR UPDATE SKIP LOCKED` já permitia motores em
+    paralelo). A falha de um tenant interrompe a execução como antes: nenhum tenant novo começa, os em
+    andamento terminam e o erro volta com o resultado parcial;
+  - quando um tenant para no limite de 500 assinaturas por execução, a tarefa devolve
+    `scheduler.ErrMoreWork` e volta a vencer na hora, depois das outras tarefas já vencidas (o
+    agendador reivindica por ordem de vencimento), em vez de esperar o intervalo de 1 minuto;
+  - a lista de assinaturas devolve os nomes do cliente e do plano lidos na própria consulta, sem uma
+    transação por item na API (N+1);
+  - a ingestão de consumo grava os eventos do lote em ordem de `external_id` (estável), para que dois
+    lotes simultâneos com `external_id` em comum esperem um pelo outro na mesma ordem em vez de entrar
+    em deadlock; os resultados continuam na ordem do lote;
+  - a criação e a reativação de assinatura não contam as assinaturas ativas quando o plano da
+    plataforma não tem limite de contratos; o bloqueio da linha do plano (ADR-077) continua, para
+    serializar com a troca de plano;
+  - o limite de webhooks de provedores por IP de origem passa a ser configurável
+    (`RECORVIA_WEBHOOK_RATE_LIMIT_PER_MINUTE`, padrão 1200, o valor anterior);
+  - a consulta de reembolsos e chargebacks do painel parte das duas contas (subconsulta com
+    `OFFSET 0`), em vez de percorrer todos os lançamentos do mês no plano genérico da consulta
+    preparada.
+- **Descrito, não corrigido agora** (caro ou com decisão de produto): o custo restante do painel
+  (consultas por mês sobre faturas, itens e ledger), o pool do worker menor que a soma das
+  concorrências das filas, a serialização da criação de assinaturas por tenant no bloqueio do plano da
+  plataforma e o limite de webhooks por IP com um provedor que envia de poucos endereços. As recomendações estão em `docs/operacao/carga.md`.
+**Consequências:** o fechamento deixa de esperar um minuto por organização grande e usa mais de uma
+conexão do worker ao mesmo tempo (até 4 a mais no pool, que já é disputado: ver as recomendações). Os
+números do teste valem para a máquina em que foram medidos, compartilhada com outra frente de
+trabalho; comparações entre versões devem ser feitas na mesma máquina. O histórico sintético é emitido
+no dia da execução, o que deixa o painel do mês mais caro que numa base real do mesmo tamanho.

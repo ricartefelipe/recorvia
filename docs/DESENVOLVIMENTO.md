@@ -22,6 +22,7 @@ Referência rápida de comandos, convenções e decisões. Detalhes em
 | `make pin-check` | falha com action sem SHA, dependência npm sem versão exata, imagem sem tag fixa ou go.mod sem toolchain (`tools/pincheck`) |
 | `make up` / `make down` / `make reset` | ambiente local com Docker Compose |
 | `make up-obs` | ambiente local com Prometheus, Grafana, Jaeger e OTel Collector |
+| `make load-test` | teste de carga manual num projeto isolado (`recorvia-carga`) com os limites de produção; relatório em `backups/carga` (`docs/operacao/carga.md`) |
 
 O checkout pode estar em disco sem permissão de execução (vfat/noexec): as
 ferramentas são instaladas fora do repositório e scripts são chamados com

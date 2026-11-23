@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -278,6 +279,25 @@ func TestRunOnceJobErrorIsRecordedAndRescheduled(t *testing.T) {
 	}
 	if got := obs.snapshot(); len(got) != 1 || !errors.Is(got[0].err, boom) {
 		t.Fatalf("observador deve receber o erro: %+v", got)
+	}
+}
+
+// A tarefa que para no próprio limite com trabalho pendente (ErrMoreWork)
+// volta a vencer na hora e não é registrada como falha.
+func TestRunOnceMoreWorkReschedulesNow(t *testing.T) {
+	store := newFakeStore("billing.run_cycle")
+	obs := &fakeObserver{}
+	s := newScheduler(t, store, clock.NewManual(baseTime), obs, Job{Name: "billing.run_cycle", Interval: time.Minute,
+		Run: func(context.Context) error { return fmt.Errorf("limite por tenant: %w", ErrMoreWork) }})
+	if ran, err := s.RunOnce(context.Background()); err != nil || !ran {
+		t.Fatalf("ran=%v err=%v", ran, err)
+	}
+	_, completions := store.snapshot()
+	if len(completions) != 1 || completions[0].runErr != nil || !completions[0].next.Equal(baseTime) {
+		t.Fatalf("trabalho pendente deve vencer na hora, sem erro: %+v", completions)
+	}
+	if got := obs.snapshot(); len(got) != 1 || got[0].err != nil {
+		t.Fatalf("observador não deve receber falha: %+v", got)
 	}
 }
 

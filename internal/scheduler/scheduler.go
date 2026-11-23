@@ -23,6 +23,13 @@ type Store interface {
 	CompleteJob(ctx context.Context, worker, name string, next time.Time, runErr error) error
 }
 
+// ErrMoreWork é devolvido por uma tarefa que parou num limite próprio de
+// trabalho por execução com trabalho ainda pendente (por exemplo, o motor de
+// recorrência no limite de assinaturas por tenant). Não é falha: a tarefa
+// volta a vencer na hora, em vez de esperar o intervalo, e as outras tarefas
+// já vencidas são reivindicadas antes dela (ordem de vencimento).
+var ErrMoreWork = errors.New("scheduler: há mais trabalho pendente")
+
 // Job é uma tarefa periódica idempotente.
 type Job struct {
 	Name     string
@@ -116,11 +123,14 @@ func (s *Scheduler) RunOnce(ctx context.Context) (bool, error) {
 	jctx, cancel := context.WithTimeout(ctx, job.Timeout)
 	runErr := safeRun(jctx, job)
 	cancel()
+	next := s.clock.Now().Add(job.Interval)
+	if errors.Is(runErr, ErrMoreWork) {
+		next, runErr = s.clock.Now(), nil
+	}
 	s.obs.JobFinished(name, time.Since(start), runErr)
 	if runErr != nil {
 		s.log.ErrorContext(ctx, "tarefa falhou", slog.String("error", runErr.Error()))
 	}
-	next := s.clock.Now().Add(job.Interval)
 	return true, s.store.CompleteJob(context.WithoutCancel(ctx), s.worker, name, next, runErr)
 }
 

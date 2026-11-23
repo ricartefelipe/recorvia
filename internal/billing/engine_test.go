@@ -917,11 +917,16 @@ func TestEngineRunTenantStopsAtMaxSubscriptions(t *testing.T) {
 	for range 3 {
 		f.addSub(t, engineNow, nil)
 	}
-	if res := f.run(t); res.Subscriptions != 2 || res.Invoices != 2 {
-		t.Fatalf("limite por execução: %+v", res)
+	if res := f.run(t); res.Subscriptions != 2 || res.Invoices != 2 || !res.More {
+		t.Fatalf("limite por execução, com aviso de trabalho pendente: %+v", res)
 	}
-	if res := f.run(t); res.Subscriptions != 1 {
-		t.Fatalf("a assinatura restante fica para a próxima execução: %+v", res)
+	if res := f.run(t); res.Subscriptions != 1 || res.More {
+		t.Fatalf("a assinatura restante fica para a próxima execução, sem aviso: %+v", res)
+	}
+	// Exatamente no limite: a última volta não acha assinatura e não avisa.
+	f.engine.MaxSubscriptionsPerRun = 1
+	if res := f.run(t); res.Subscriptions != 0 || res.More {
+		t.Fatalf("sem assinaturas vencidas: %+v", res)
 	}
 }
 

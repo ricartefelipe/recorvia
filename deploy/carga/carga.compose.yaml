@@ -1,0 +1,129 @@
+# Ambiente isolado do teste de carga (make load-test, deploy/carga/carga.sh;
+# ADR-088). Usado sempre junto com o compose.yaml e com um nome de projeto
+# próprio:
+#   docker compose -p recorvia-carga -f compose.yaml -f deploy/carga/carga.compose.yaml ...
+#
+# Diferenças em relação ao ambiente local:
+# - API, worker, PostgreSQL, RabbitMQ e Redis com os limites de CPU e memória
+#   do pacote de produção (deploy/producao/compose.yaml), o tamanho de pool e
+#   a concorrência do worker padrão de produção: os números medidos valem para
+#   um servidor com esses limites;
+# - o PostgreSQL carrega pg_stat_statements e registra consultas acima de
+#   RECORVIA_LOAD_SLOW_MS (somente neste ambiente);
+# - o simulador de pagamentos não grava o estado em arquivo (o arquivo inteiro
+#   seria regravado a cada cobrança, o que mediria o simulador e não o
+#   Recorvia);
+# - os limites por credencial de API e de webhooks de provedores por IP sobem
+#   para não limitar a medição (os padrões de produção, 600 por minuto por
+#   credencial e 1200 por minuto por IP do provedor, continuam valendo fora
+#   daqui; com RECORVIA_LOAD_WEBHOOK_RATE_LIMIT=1200 o teste mede com o limite
+#   de produção);
+# - nenhuma porta fixa: os serviços consultados publicam uma porta livre
+#   escolhida pelo Docker, somente em 127.0.0.1 (lida com "docker compose port");
+# - Keycloak e interface web não sobem (a carga usa credenciais de API);
+# - imagens com a etiqueta "carga", para não substituir as imagens "local";
+# - containers e volumes levam o rótulo recorvia.load-test: antes de derrubar o
+#   projeto com os volumes, o roteiro confere que tudo o que existe nele foi
+#   criado pelo teste de carga.
+# Exige Docker Compose 2.24 ou superior (marcadores !reset e !override).
+x-load-labels: &load-labels
+  recorvia.load-test: "1"
+
+services:
+  postgres:
+    labels: *load-labels
+    ports: !override
+      - "127.0.0.1::5432"
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=top
+      - -c
+      - pg_stat_statements.max=5000
+      - -c
+      - track_io_timing=on
+      - -c
+      - log_min_duration_statement=${RECORVIA_LOAD_SLOW_MS:-200}
+      - -c
+      - log_lock_waits=on
+    shm_size: 256mb
+    deploy:
+      resources:
+        limits: { cpus: "2", memory: 2g }
+
+  migrate-bootstrap:
+    labels: *load-labels
+    image: recorvia-migrate:carga
+
+  migrate:
+    labels: *load-labels
+    image: recorvia-migrate:carga
+
+  redis:
+    labels: *load-labels
+    ports: !reset []
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 384m }
+
+  rabbitmq:
+    labels: *load-labels
+    # Somente a interface de administração (filas e taxas), no loopback.
+    ports: !override
+      - "127.0.0.1::15672"
+    deploy:
+      resources:
+        limits: { cpus: "1", memory: 1g }
+
+  mailpit:
+    labels: *load-labels
+    ports: !reset []
+
+  paysim:
+    labels: *load-labels
+    image: recorvia-paysim:carga
+    environment:
+      PAYSIM_STATE_FILE: ""
+      PAYSIM_LOG_LEVEL: warn
+    ports: !override
+      - "127.0.0.1::8090"
+    volumes: !reset []
+
+  api:
+    labels: *load-labels
+    image: recorvia-api:carga
+    environment:
+      RECORVIA_DATABASE_MAX_CONNS: ${RECORVIA_LOAD_API_MAX_CONNS:-20}
+      RECORVIA_API_CREDENTIAL_RATE_LIMIT_PER_MINUTE: "1000000"
+      RECORVIA_WEBHOOK_RATE_LIMIT_PER_MINUTE: ${RECORVIA_LOAD_WEBHOOK_RATE_LIMIT:-1000000}
+      GOMEMLIMIT: 400MiB
+    ports: !override
+      - "127.0.0.1::8081"
+      - "127.0.0.1::9091"
+    deploy:
+      resources:
+        limits: { cpus: "1.5", memory: 512m }
+
+  worker:
+    labels: *load-labels
+    image: recorvia-worker:carga
+    environment:
+      RECORVIA_DATABASE_MAX_CONNS: ${RECORVIA_LOAD_WORKER_MAX_CONNS:-20}
+      RECORVIA_WORKER_CONCURRENCY: ${RECORVIA_LOAD_WORKER_CONCURRENCY:-8}
+      RECORVIA_WORKER_PREFETCH: ${RECORVIA_LOAD_WORKER_PREFETCH:-16}
+      RECORVIA_BILLING_CONCURRENCY: ${RECORVIA_LOAD_BILLING_CONCURRENCY:-4}
+      GOMEMLIMIT: 400MiB
+    ports:
+      - "127.0.0.1::9091"
+    deploy:
+      resources:
+        limits: { cpus: "1.5", memory: 512m }
+
+volumes:
+  postgres-data: { labels: *load-labels }
+  rabbitmq-data: { labels: *load-labels }
+  paysim-data: { labels: *load-labels }
+  prometheus-data: { labels: *load-labels }
+  grafana-data: { labels: *load-labels }
