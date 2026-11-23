@@ -2568,3 +2568,81 @@ passam a vir do mais recente para o mais antigo; um campo de seleção faz uma r
 de recuperação (`deploy/backup/dr-check.sh`) lê a versão da assinatura antes de trocar o plano. Não há migration:
 todas as tabelas envolvidas já tinham `version`; as listagens do catálogo pela criação não têm índice próprio, como as
 anteriores pelo nome, e cada tenant tem poucos itens.
+
+## ADR-087 Backup contínuo do PostgreSQL com WAL-G, cifrado no cliente, e recuperação para um ponto no tempo
+**Status:** aceita. Completa a ADR-055 (o backup lógico continua) e a ADR-064 (a recuperação de desastre ganha a
+recuperação para um instante).
+**Contexto:** o backup lógico (ADR-055) só recupera o instante do dump: com backup diário, a perda chega a 24 horas, e a
+conciliação com o provedor (ADR-064) precisa cobrir toda essa janela. A pendência registrada era a falta de
+arquivamento contínuo de WAL, de réplicas, de outra região e do backup do Keycloak. O pacote de produção usa a imagem
+oficial do PostgreSQL e precisa receber o backup como um componente que outro compose inclua.
+**Decisão:**
+- **Ferramenta: WAL-G 3.0.10**, compilado do código-fonte num estágio da imagem `recorvia-postgres`
+  (`deploy/postgres/Dockerfile`): o pacote do código é conferido pela soma SHA-256 fixada no Dockerfile e as
+  dependências Go pelo `go.sum` do próprio WAL-G (`-mod=readonly`); o binário é estático, com a libsodium incluída, e
+  roda na imagem oficial `postgres:18.7-alpine`, a mesma base do compose (a cópia física só volta para a mesma versão
+  principal e a mesma biblioteca de ordenação de texto).
+- **Arquivamento contínuo**: `archive_mode=on`, `archive_timeout=60s`, `archive_command` e `restore_command` pelo
+  agente `recorvia-pgbackup` (`cmd/pgbackup`, `internal/infra/pgbackup`), que traduz a configuração
+  `RECORVIA_BACKUP_*` (ou os arquivos `*_FILE`) para o WAL-G e recusa operar sem destino ou sem chave. O
+  `restore_command` devolve erro fatal (126) quando um segmento existe mas não pode ser lido ou decifrado, e 1 só
+  quando ele não existe: um erro de leitura não encerra a recuperação antes do instante pedido. O WAL-G recusa
+  sobrescrever um segmento já arquivado com outro conteúdo (`WALG_PREVENT_WAL_OVERWRITE`).
+- **Cifragem no cliente** com a libsodium (secretstream XChaCha20-Poly1305, autenticada) e uma chave de 32 bytes do
+  backup, obrigatória, guardada como as chaves da aplicação: fora do armazenamento do backup e do repositório (ADR-063 e
+  ADR-064). As chaves da aplicação continuam fora do backup; restaurar exige as duas. Cada backup base leva nos
+  metadados a impressão digital da chave (HMAC-SHA256 truncado, que não revela a chave), e a restauração recusa uma
+  chave diferente antes de baixar qualquer arquivo.
+- **Backup base agendado e retenção** pelo agente (`recorvia-pgbackup serve`, serviço `postgres-backup`, mesma imagem,
+  volume de dados somente para leitura): o agendamento parte da lista de backups do próprio armazenamento (sobrevive a
+  reinícios) e antecipa o backup sem nenhum backup, com o intervalo vencido (padrão 24 h) ou com o servidor numa linha
+  do tempo posterior à do último backup (depois de uma restauração para um instante). A retenção mantém o maior de dois
+  conjuntos, os N mais recentes (padrão 7) e os dos últimos D dias (padrão 7), e remove o WAL anterior ao mais antigo
+  mantido.
+- **Restauração para um instante** (`make pitr-restore`, `deploy/backup/pitr-restore.sh`): só num volume de dados
+  vazio; escolhe o backup base terminado antes do instante, extrai, grava o alvo e a promoção, inicia o servidor, remove
+  o alvo da configuração depois da promoção, confere o banco com as consultas do manifesto lógico (comparadas com um
+  manifesto informado), o ledger e a RLS, e religa o agente. A religação da aplicação segue a regra da ADR-064: chaves
+  conferidas, API sem tráfego, conciliação da janela entre o instante e o incidente e só então o worker; as filas do
+  RabbitMQ são descartadas, porque as mensagens posteriores ao instante pertencem a uma linha do tempo descartada.
+- **Exercício** `make pitr-check` (job `pitr-check` da CI), no estilo do `dr-check` e com as mesmas proteções do projeto
+  e do diretório, com MinIO como S3 local: dados antes de T só no WAL, instante T registrado com a escrita parada, dados
+  depois de T, destruição do servidor, recusa da chave do backup errada e ausente (no roteiro e no próprio WAL-G),
+  restauração até T, conferência do que volta e do que não volta, aplicação religada com a conciliação antes do worker
+  e medição do RPO (atraso do arquivamento) e do RTO.
+- **Keycloak**: o banco dele fica no mesmo servidor PostgreSQL (banco `keycloak`, exercitado pelo `pitr-check`), coberto
+  pelo mesmo backup base e WAL e restaurado no mesmo instante do Recorvia; a exportação do realm (`make keycloak-export`)
+  vai cifrada para o mesmo destino pelo agente.
+- **Métricas e alertas**: o agente exporta a idade do último segmento arquivado (lida de `pg_stat_archiver`), as falhas
+  do arquivamento, os segmentos pendentes, o fim do último backup base (lido do armazenamento) e o intervalo
+  configurado; alertas `RecorviaWALArchiveStale`, `RecorviaWALArchiveFailing`, `RecorviaBaseBackupStale` (proporcional ao
+  intervalo), `RecorviaBackupDependencyUnavailable` e `RecorviaBackupAgentMissing`, com testes no `promtool` e runbook
+  (`docs/operacao/runbooks/backup-continuo.md`). A coleta `recorvia-backup` usa a descoberta pelo DNS do compose: sem o
+  componente (ambiente local), não há alvo nem alerta.
+- **RPO e RTO esperados**: RPO de até cerca de 1 minuto com o arquivamento em dia (o segmento ainda não arquivado se
+  perde), alertado a partir de 10 minutos de atraso; recuperação sem perda até qualquer instante dentro da retenção. RTO
+  do banco igual à extração do backup base mais a reaplicação do WAL desde ele (no máximo um intervalo de escrita), mais
+  as etapas da ADR-064 para a aplicação. Os valores observados ficam no relatório do exercício e em
+  `docs/operacao/backup-e-restauracao.md`.
+
+**Alternativas:** pgBackRest (retenção e verificação mais completas) exigiria, para o backup base fora do container do
+servidor, um servidor TLS do próprio pgBackRest ou acesso pelo soquete, e só fala HTTPS com o S3, o que obrigaria a gerar
+certificados para o MinIO local; os pacotes do Alpine não mantêm versões antigas, e a compilação pede várias bibliotecas
+de sistema. O WAL-G roda como um binário estático, recebe a configuração pelo ambiente, aceita endpoint HTTP e tem
+cifragem autenticada com uma chave simétrica do mesmo tipo das chaves da aplicação. A cifragem OpenPGP do WAL-G (chave
+pública no servidor) foi descartada pela operação de chaves mais complexa e pela biblioteca obsoleta. O binário oficial
+do WAL-G é compilado para glibc e não roda na imagem alpine; trocar a imagem para a variante Debian mudaria a biblioteca
+de ordenação de texto dos volumes existentes. Um agendador externo (cron do host ou do orquestrador) deixaria o backup
+base fora do compose e sem métricas próprias. O backup do volume em nível de disco não oferece recuperação para um
+instante nem cifragem no cliente.
+**Consequências:** o servidor não inicia sem destino e sem chave; um armazenamento indisponível acumula WAL no disco do
+servidor (alertado). A imagem do PostgreSQL passa a ser construída pelo projeto (`make postgres-image`, também em
+`make images`), e a compilação do WAL-G leva alguns minutos sem cache. O Trivy não aponta vulnerabilidades no WAL-G nem
+no agente; as corrigíveis da imagem estão na base oficial `postgres:18.7-alpine` (o `gosu`, compilado com um Go antigo, e a
+`libxml2` do Alpine), a mesma do compose, e por isso a imagem fica fora do `make image-scan` e do job `image-scan` até a
+atualização da base. A troca da chave do backup exige um backup base
+imediato, e um instante entre a troca e o fim desse backup não é recuperável. Restaurações de teste não podem usar o
+destino de produção com o servidor de origem em uso. O agente usa o superusuário e lê o diretório de dados pelo volume
+compartilhado, o que o prende ao mesmo host do servidor. Continuam fora: réplica de leitura ou de espera, cópia e
+restauração em outra região, verificação periódica automática de cópias reais, papel de privilégio mínimo para o agente e
+exportação agendada do realm do Keycloak. O componente ainda não está ligado ao pacote de produção (`deploy/producao`).

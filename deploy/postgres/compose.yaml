@@ -1,0 +1,102 @@
+# Componente de backup contínuo do PostgreSQL (ADR-087): servidor com
+# arquivamento de WAL e agente de backups base, para incluir em outro compose.
+#
+# Uso como sobreposição do compose da aplicação (mesmos nomes de serviço e
+# de volume):
+#   docker compose -f compose.yaml -f deploy/postgres/compose.yaml up -d
+# ou, noutro compose, com extends (os volumes, as redes e o depends_on são
+# declarados no compose que inclui):
+#   services:
+#     postgres:
+#       extends: { file: ../postgres/compose.yaml, service: postgres }
+#     postgres-backup:
+#       extends: { file: ../postgres/compose.yaml, service: postgres-backup }
+#       depends_on:
+#         postgres: { condition: service_healthy }
+#   volumes:
+#     postgres-data:
+#
+# A imagem é construída à parte (make postgres-image, ou
+# docker build -f deploy/postgres/Dockerfile -t recorvia-postgres:<etiqueta> .),
+# por isso este arquivo não tem caminhos relativos.
+#
+# Configuração (no ambiente do compose ou num arquivo --env-file; nunca no
+# repositório). Segredos podem vir de arquivos montados pelo orquestrador,
+# com as variáveis *_FILE no lugar das que trazem o valor:
+#   RECORVIA_BACKUP_S3_PREFIX              destino, s3://bucket[/caminho] (obrigatório)
+#   RECORVIA_BACKUP_S3_ENDPOINT            endereço do serviço compatível com S3 (vazio: AWS)
+#   RECORVIA_BACKUP_S3_REGION              região (padrão us-east-1)
+#   RECORVIA_BACKUP_S3_FORCE_PATH_STYLE    true para MinIO e serviços sem endereçamento por subdomínio
+#   RECORVIA_BACKUP_S3_ACCESS_KEY_ID[_FILE], RECORVIA_BACKUP_S3_SECRET_ACCESS_KEY[_FILE]
+#                                          credencial (vazias: a do ambiente, por exemplo o papel da instância)
+#   RECORVIA_BACKUP_ENCRYPTION_KEY[_FILE]  chave de cifragem do backup, 32 bytes em base64 (obrigatória;
+#                                          guardada como as chaves da aplicação, fora do backup)
+#   RECORVIA_BACKUP_BASE_INTERVAL          intervalo entre backups base (padrão 24h)
+#   RECORVIA_BACKUP_RETAIN_FULL            backups base mantidos, no mínimo (padrão 7)
+#   RECORVIA_BACKUP_RETAIN_DAYS            dias de backups mantidos, no mínimo (padrão 7; 0: só a contagem)
+#   POSTGRES_SUPERUSER_PASSWORD            senha do superusuário, usada pelo agente (backup base e métricas)
+x-recorvia-backup-env: &backup-env
+  RECORVIA_BACKUP_S3_PREFIX: ${RECORVIA_BACKUP_S3_PREFIX:?defina o destino do backup (s3://bucket/caminho)}
+  RECORVIA_BACKUP_S3_ENDPOINT: ${RECORVIA_BACKUP_S3_ENDPOINT:-}
+  RECORVIA_BACKUP_S3_REGION: ${RECORVIA_BACKUP_S3_REGION:-us-east-1}
+  RECORVIA_BACKUP_S3_FORCE_PATH_STYLE: ${RECORVIA_BACKUP_S3_FORCE_PATH_STYLE:-false}
+  RECORVIA_BACKUP_S3_ACCESS_KEY_ID: ${RECORVIA_BACKUP_S3_ACCESS_KEY_ID:-}
+  RECORVIA_BACKUP_S3_ACCESS_KEY_ID_FILE: ${RECORVIA_BACKUP_S3_ACCESS_KEY_ID_FILE:-}
+  RECORVIA_BACKUP_S3_SECRET_ACCESS_KEY: ${RECORVIA_BACKUP_S3_SECRET_ACCESS_KEY:-}
+  RECORVIA_BACKUP_S3_SECRET_ACCESS_KEY_FILE: ${RECORVIA_BACKUP_S3_SECRET_ACCESS_KEY_FILE:-}
+  RECORVIA_BACKUP_ENCRYPTION_KEY: ${RECORVIA_BACKUP_ENCRYPTION_KEY:-}
+  RECORVIA_BACKUP_ENCRYPTION_KEY_FILE: ${RECORVIA_BACKUP_ENCRYPTION_KEY_FILE:-}
+
+services:
+  postgres:
+    image: recorvia-postgres:${RECORVIA_POSTGRES_IMAGE_TAG:-local}
+    environment:
+      <<: *backup-env
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?defina a senha do superusuário}
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # O encerramento espera o checkpoint e o arquivamento do último segmento.
+    stop_grace_period: 2m
+
+  # Agente: backup base agendado, retenção e métricas (porta 9187, coleta
+  # recorvia-backup do Prometheus). Lê o diretório de dados pelo mesmo volume,
+  # somente para leitura, e conecta ao servidor pela rede do compose.
+  postgres-backup:
+    image: recorvia-postgres:${RECORVIA_POSTGRES_IMAGE_TAG:-local}
+    entrypoint: ["recorvia-pgbackup"]
+    command: ["serve"]
+    user: postgres
+    environment:
+      <<: *backup-env
+      RECORVIA_BACKUP_BASE_INTERVAL: ${RECORVIA_BACKUP_BASE_INTERVAL:-24h}
+      RECORVIA_BACKUP_RETAIN_FULL: ${RECORVIA_BACKUP_RETAIN_FULL:-7}
+      RECORVIA_BACKUP_RETAIN_DAYS: ${RECORVIA_BACKUP_RETAIN_DAYS:-7}
+      RECORVIA_BACKUP_PG_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?defina a senha do superusuário}
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGDATABASE: postgres
+      PGSSLMODE: ${RECORVIA_BACKUP_PG_SSLMODE:-prefer}
+    volumes:
+      - postgres-data:/var/lib/postgresql:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "recorvia-pgbackup", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Um backup base em andamento é interrompido no término e refeito na
+    # próxima partida (nada é publicado sem o arquivo de conclusão).
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

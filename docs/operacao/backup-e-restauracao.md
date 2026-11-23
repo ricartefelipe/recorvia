@@ -1,15 +1,18 @@
 # Backup e restauração do PostgreSQL
 
-Procedimento de cópia lógica do banco `recorvia` e de verificação por restauração (ADR-055). Este
-documento separa o que **é exercitado** (onde, como e o que é conferido) do que é
+Procedimento de cópia lógica do banco `recorvia` e de verificação por restauração (ADR-055) e,
+em [Backup contínuo e recuperação para um ponto no tempo](#backup-contínuo-e-recuperação-para-um-ponto-no-tempo),
+o arquivamento contínuo de WAL com backups base cifrados e a restauração até um instante escolhido
+(ADR-087). Este documento separa o que **é exercitado** (onde, como e o que é conferido) do que é
 **recomendação** para ambientes com dados reais e não é exercitado.
 
 O procedimento é exercitado pela CI, a cada push e pull request para `develop` e `main`: pelo job
 `backup-restore` (ambiente do `docker compose`, alvos `make backup` e `make restore-check` e
 recuperação num servidor novo), pelo job `disaster-recovery` (`make dr-check`: recuperação de ponta
 a ponta, com a API e o worker religados sobre o banco restaurado e as chaves de cifragem guardadas
-à parte do backup, ADR-064) e pelo teste de integração `TestBackupAndRestoreCheckScripts` (job
-`go-integration`). Os detalhes estão em [O que é exercitado](#o-que-é-exercitado); a sequência de
+à parte do backup, ADR-064), pelo job `pitr-check` (`make pitr-check`: recuperação para um ponto no
+tempo a partir do backup contínuo, ADR-087) e pelo teste de integração
+`TestBackupAndRestoreCheckScripts` (job `go-integration`). Os detalhes estão em [O que é exercitado](#o-que-é-exercitado); a sequência de
 comandos de uma recuperação real, no [runbook](runbooks/recuperacao-de-desastre.md).
 
 ## Componentes
@@ -25,6 +28,9 @@ comandos de uma recuperação real, no [runbook](runbooks/recuperacao-de-desastr
 | subcomando `keyring-check` da API e do worker | conferência das chaves de cifragem contra o banco, sem alterar dados (ADR-063) |
 | `.github/workflows/ci.yml`, job `backup-restore` | exercício do procedimento completo no ambiente do compose |
 | `.github/workflows/ci.yml`, job `disaster-recovery` | `make dr-check` num runner limpo, com o relatório publicado como artefato |
+| `deploy/postgres/`, `cmd/pgbackup` | backup contínuo do PostgreSQL com o WAL-G: [componente](#componente) (ADR-087) |
+| `deploy/backup/pitr-restore.sh`, `deploy/backup/pitr-check.sh`, `deploy/backup/pitr.compose.yaml` | `make pitr-restore` e `make pitr-check`: [recuperação para um instante](#recuperação-para-um-instante) e o [exercício](#exercício-make-pitr-check-job-pitr-check) |
+| `deploy/backup/keycloak-export.sh` | `make keycloak-export`: exportação cifrada do realm do Keycloak ([Keycloak](#backup-do-keycloak)) |
 | `internal/pgstore/backup_integration_test.go` | exercício dos scripts com escrita concorrente e manifesto adulterado (`make test-integration`) |
 | `internal/pgstore/backup_script_test.go` | `backup.sh` com um `docker` falso: manifesto incompleto (prazo esgotado, sessão encerrada ou linhas ausentes) não é publicado (`make test`) |
 | `internal/pgstore/keyring_integration_test.go`, `internal/app/keyring_integration_test.go` | conferência do keyring contra um banco real (chave ausente, chave com outro valor, rotação, dados fora de uso) e reconfiguração do provedor com a chave perdida (`make test-integration`) |
@@ -54,6 +60,9 @@ make backup                 # backups/recorvia-<instante UTC>.{dump,manifest,sha
 make restore-check          # restaura o backup mais recente num banco novo e confere
 make restore-check DUMP=backups/recorvia-20261118T120000Z.dump
 make dr-check               # exercício de recuperação de desastre num projeto isolado (não usa o ambiente do make up)
+make pitr-check             # exercício de recuperação para um ponto no tempo (backup contínuo, MinIO) num projeto isolado
+make pitr-restore TARGET=2026-11-22T10:15:00Z   # restauração até um instante, com o componente deploy/postgres
+make keycloak-export        # exportação cifrada do realm do Keycloak para o destino do backup contínuo
 ```
 
 ### O que o backup produz
@@ -335,8 +344,10 @@ compartilhadas com outros projetos); a referência para ele é a CI.
   execução; lembretes e suspensão sobre faturas pagas na janela dependem da conciliação feita
   antes de religar o worker, que é exercitada, mas a régua em si não age no exercício.
 - **Escala e infraestrutura**: bancos grandes (tempo, espaço e impacto do `pg_dump` e do
-  `pg_restore`), várias réplicas da API e do worker, arquivamento contínuo de WAL, restauração em
-  outra região, backup do Keycloak e do cofre de chaves, e a troca de DNS ou de balanceador.
+  `pg_restore`), várias réplicas da API e do worker, restauração em outra região, backup do cofre
+  de chaves e a troca de DNS ou de balanceador. O arquivamento contínuo de WAL e o banco do
+  Keycloak são exercitados pelo `make pitr-check`
+  ([seção](#exercício-make-pitr-check-job-pitr-check)), não pelo `dr-check`.
 - **Tempo humano**: obter o backup e as chaves, decidir pela restauração, obter a credencial de
   cada organização e conciliar muitas organizações. No exercício, a conciliação cobre uma
   organização e é automática.
@@ -350,6 +361,11 @@ consultas do runbook de isolamento, que o `restore-check` substitui pela confer�
 ([seção](#exercício-de-recuperação-de-desastre-make-dr-check-job-disaster-recovery)), com os
 dados e os limites descritos em [Não exercitado](#não-exercitado). A sequência de comandos está no
 [runbook](runbooks/recuperacao-de-desastre.md).
+
+Com o backup contínuo, os passos 1 a 6 são substituídos pela
+[recuperação para um instante](#recuperação-para-um-instante) (`make pitr-restore`), sem bootstrap
+nem `pg_restore`: a cópia física traz papéis, privilégios e o esquema. Os passos 7 a 10 continuam,
+com a janela perdida indo do instante restaurado ao incidente.
 
 1. Subir o PostgreSQL na mesma versão principal (18) ou superior.
 2. Executar o bootstrap (`cmd/migrate bootstrap`), que cria os papéis, o banco vazio e os
@@ -527,10 +543,288 @@ Pontos de atenção:
   [Chaves de cifragem](#chaves-de-cifragem-keyring).
 - **Dados fora do PostgreSQL**: sessões e limites de taxa (Redis) são descartáveis (os usuários
   fazem login de novo); filas do RabbitMQ são reconstruídas a partir da outbox e dos provedores; o
-  realm do Keycloak local vem da imagem, mas um Keycloak de produção tem backup próprio.
+  realm do Keycloak local vem da imagem, mas um Keycloak de produção tem o banco dele no mesmo
+  servidor PostgreSQL, coberto pelo backup contínuo ([Keycloak](#backup-do-keycloak)).
 - **Perda máxima**: a janela perdida existe porque o backup lógico só recupera o instante do
-  dump; com arquivamento contínuo de WAL (recomendação abaixo), ela se reduz a minutos, mas a
-  conciliação continua necessária.
+  dump; com o backup contínuo ([seção](#backup-contínuo-e-recuperação-para-um-ponto-no-tempo)),
+  ela se reduz ao segmento de WAL ainda não arquivado (até cerca de 1 minuto), mas a conciliação
+  continua necessária para essa janela e para a que vai do instante escolhido ao incidente.
+
+## Backup contínuo e recuperação para um ponto no tempo
+
+O backup lógico recupera o instante do dump. O backup contínuo (ADR-087) recupera **qualquer
+instante** desde o backup base mais antigo mantido pela retenção, até alguns segundos antes da
+perda do servidor: o PostgreSQL envia cada segmento de WAL completo a um armazenamento
+compatível com S3 e um agente faz backups base no intervalo configurado. Os dois são cifrados no
+cliente, antes de sair do servidor. A ferramenta é o [WAL-G](https://github.com/wal-g/wal-g)
+(justificativa na ADR-087). O backup lógico continua: ele é portável entre versões, serve à
+verificação por manifesto e a cópias para fora do armazenamento do backup contínuo.
+
+### Componente
+
+| Arquivo | Função |
+|---|---|
+| `deploy/postgres/Dockerfile` | imagem `recorvia-postgres`: a oficial `postgres:18.7-alpine` com o WAL-G 3.0.10 compilado do código-fonte (soma SHA-256 do pacote fixada no Dockerfile, dependências conferidas pelo `go.sum` do WAL-G, libsodium estática) e o agente `recorvia-pgbackup`; `make postgres-image` |
+| `deploy/postgres/entrypoint.sh` | confere a configuração do backup antes de iniciar o servidor (sem destino ou sem chave, o servidor não sobe) e segue o entrypoint oficial |
+| `deploy/postgres/compose.yaml` | serviços `postgres` (arquivamento ligado) e `postgres-backup` (agente), para incluir em outro compose |
+| `cmd/pgbackup`, `internal/infra/pgbackup` | agente: `archive_command`, `restore_command`, backup base agendado, retenção, restauração, listagem e métricas |
+| `deploy/backup/pitr-restore.sh` | `make pitr-restore`: restauração até um instante num servidor novo, com conferência |
+| `deploy/backup/pitr-check.sh`, `deploy/backup/pitr.compose.yaml` | `make pitr-check`: exercício com MinIO num projeto isolado do compose |
+| `.github/workflows/ci.yml`, job `pitr-check` | o exercício num runner limpo, com o relatório publicado como artefato |
+
+O servidor roda com `wal_level=replica`, `archive_mode=on`, `archive_timeout=60s`,
+`archive_command='recorvia-pgbackup wal-push %p'` e `restore_command='recorvia-pgbackup wal-fetch
+%f %p'` (CMD da imagem). O `restore_command` só é usado numa recuperação e devolve erro fatal
+(código 126) quando um segmento existe mas não pode ser lido ou decifrado: sem isso, o
+PostgreSQL trataria o erro como fim do WAL e seria promovido antes do instante pedido. O agente
+roda com a mesma imagem, como usuário `postgres`, lê o diretório de dados pelo mesmo volume
+(somente leitura) e conecta ao servidor pela rede do compose com o superusuário.
+
+Comandos do agente (dentro do container `postgres-backup`, que tem a configuração):
+
+| Comando | Uso |
+|---|---|
+| `recorvia-pgbackup list` | backups base no armazenamento: início, fim, linha do tempo, tamanho e se foram cifrados com a chave configurada (`esta chave`, `outra (<impressão digital>)`) |
+| `recorvia-pgbackup backup` | backup base imediato e retenção (depois de trocar a chave, de uma restauração ou antes de uma manutenção) |
+| `recorvia-pgbackup check-config` | confere a configuração e mostra o destino e a impressão digital da chave |
+| `recorvia-pgbackup restore (--target-time <instante> \| --latest) [--backup <nome>]` | prepara um servidor novo (usado por `pitr-restore.sh`) |
+| `recorvia-pgbackup put-object <nome>` / `get-object <nome>` | envia a entrada padrão, compactada e cifrada com a chave do backup, para `extra/<nome>` no destino, e a lê de volta decifrada (exportação do Keycloak); entrada vazia não é enviada |
+
+#### Como incluir noutro compose
+
+O arquivo não tem caminhos relativos (a imagem é construída à parte, com `make postgres-image` ou
+`docker build -f deploy/postgres/Dockerfile -t recorvia-postgres:<etiqueta> .` na raiz do
+repositório) e usa os mesmos nomes de serviço e de volume do compose da aplicação. Duas formas:
+
+```bash
+# Sobreposição: o serviço postgres do compose passa a usar a imagem e a configuração do componente,
+# e o agente é acrescentado.
+docker compose -f compose.yaml -f deploy/postgres/compose.yaml up -d
+```
+```yaml
+# extends, num compose próprio (por exemplo, o de produção). Volumes, redes e depends_on ficam no
+# compose que inclui; a coleta recorvia-backup do Prometheus encontra o agente pelo nome
+# postgres-backup na mesma rede.
+services:
+  postgres:
+    extends: { file: ../postgres/compose.yaml, service: postgres }
+  postgres-backup:
+    extends: { file: ../postgres/compose.yaml, service: postgres-backup }
+    depends_on:
+      postgres: { condition: service_healthy }
+volumes:
+  postgres-data:
+```
+
+A imagem precisa ser a mesma (versão e variante alpine) no servidor de origem e no de
+restauração: o backup base é uma cópia física, que só volta para a mesma versão principal do
+PostgreSQL e a mesma biblioteca de ordenação de texto. Trocar a imagem de um servidor existente
+(por exemplo, da oficial para a `recorvia-postgres`) não exige migração dos dados, porque a base
+é a mesma `postgres:18.7-alpine`.
+
+### Configuração
+
+Os segredos ficam fora do código e do repositório: no ambiente do compose (`--env-file` fora do
+repositório) ou em arquivos montados pelo orquestrador, com as variáveis `*_FILE` no lugar das que
+trazem o valor.
+
+| Variável | Padrão | Uso |
+|---|---|---|
+| `RECORVIA_BACKUP_S3_PREFIX` | obrigatória | destino, `s3://bucket[/caminho]`; um prefixo por servidor (dois servidores no mesmo prefixo são recusados pelo WAL-G na primeira colisão) |
+| `RECORVIA_BACKUP_S3_ENDPOINT` | vazio (AWS) | endereço do serviço compatível com S3 (MinIO, provedores de nuvem) |
+| `RECORVIA_BACKUP_S3_REGION` | `us-east-1` | região |
+| `RECORVIA_BACKUP_S3_FORCE_PATH_STYLE` | `false` | `true` para MinIO e serviços sem endereçamento por subdomínio |
+| `RECORVIA_BACKUP_S3_ACCESS_KEY_ID[_FILE]`, `RECORVIA_BACKUP_S3_SECRET_ACCESS_KEY[_FILE]` | vazias | credencial do armazenamento; vazias, vale a do ambiente (papel da instância) |
+| `RECORVIA_BACKUP_ENCRYPTION_KEY[_FILE]` | obrigatória | chave de cifragem do backup: 32 bytes aleatórios em base64 (`openssl rand -base64 32`) |
+| `RECORVIA_BACKUP_BASE_INTERVAL` | `24h` | intervalo entre backups base (agente) |
+| `RECORVIA_BACKUP_RETRY_INTERVAL` | `15m` | espera depois de uma tentativa (agente) |
+| `RECORVIA_BACKUP_RETAIN_FULL` | `7` | backups base mantidos, no mínimo (agente) |
+| `RECORVIA_BACKUP_RETAIN_DAYS` | `7` | dias de backups mantidos, no mínimo; `0` usa só a contagem (agente) |
+| `RECORVIA_BACKUP_PG_PASSWORD[_FILE]` | a de `POSTGRES_SUPERUSER_PASSWORD` no compose | senha do superusuário usada pelo agente |
+| `RECORVIA_BACKUP_METRICS_ADDR` | `:9187` | endereço das métricas e do `/healthz` do agente |
+
+Ajustes avançados do WAL-G (`WALG_UPLOAD_CONCURRENCY`, `WALG_COMPRESSION_METHOD`, limites de
+banda) podem ser passados no ambiente dos dois serviços; as variáveis de destino, credencial e
+cifragem são sempre as traduzidas da configuração acima.
+
+<a id="chave-de-cifragem-do-backup"></a>
+
+### Chave de cifragem do backup
+
+- **Cifragem no cliente.** Backup base e WAL são compactados e cifrados no servidor, antes do
+  envio, com a libsodium (secretstream XChaCha20-Poly1305, cifragem autenticada). O armazenamento
+  e quem tiver acesso a ele só veem dados cifrados; um arquivo alterado não decifra.
+- **Obrigatória.** Sem chave, o servidor não inicia, o `archive_command` falha (o WAL fica no
+  servidor e o alerta dispara) e a restauração é recusada: nada é enviado sem cifragem.
+- **Guarda.** A chave do backup é guardada como as chaves de cifragem da aplicação
+  ([Guarda](#guarda)): fora do armazenamento do backup, em conta e controle de acesso diferentes,
+  com cópia que não dependa da infraestrutura do banco. O backup contínuo contém o banco inteiro,
+  inclusive os dados cifrados pela aplicação; as chaves da aplicação
+  (`RECORVIA_ENCRYPTION_KEYS`) continuam fora dele e são outro segredo, guardado à parte.
+  Restaurar exige as duas.
+- **Impressão digital.** Cada backup base leva, nos metadados, a impressão digital da chave (16
+  dígitos hexadecimais de um HMAC-SHA256, que não revela a chave). A restauração recusa uma chave
+  diferente antes de baixar qualquer arquivo (`chave de cifragem do backup diferente da usada no
+  backup base ...`); sem a conferência, o WAL-G insistiria por vários minutos em arquivos que não
+  decifram. `recorvia-pgbackup list` mostra a situação de cada backup.
+- **Troca da chave.** Configure a chave nova nos dois serviços, recrie-os e faça um backup base
+  imediato (`recorvia-pgbackup backup`). A recuperação usa uma chave por vez: backups base e WAL
+  anteriores à troca exigem a chave anterior, e um instante entre a troca e o fim do backup base
+  novo não é recuperável com nenhuma das duas sozinha. Guarde a chave anterior até a retenção
+  remover os backups cifrados com ela.
+
+### Retenção e backup base agendado
+
+Na partida e a cada 5 minutos, o agente lê a lista de backups do armazenamento. O backup base
+começa imediatamente quando não há nenhum, quando o mais recente está numa linha do tempo
+anterior à do servidor (depois de uma restauração para um instante ou de uma promoção) ou quando
+o intervalo desde o fim do último venceu; senão, no fim do último mais o intervalo. O agendamento
+sobrevive a reinícios do agente, porque se baseia no armazenamento. Depois de cada backup, a
+retenção mantém os `RECORVIA_BACKUP_RETAIN_FULL` mais recentes e todos os terminados nos últimos
+`RECORVIA_BACKUP_RETAIN_DAYS` dias (o maior dos dois conjuntos) e remove o WAL anterior ao mais
+antigo mantido. A janela de recuperação vai do fim do backup base mais antigo mantido até o
+último segmento arquivado. Com os padrões, ao menos 7 dias.
+
+### Recuperação para um instante
+
+Num servidor novo, com a imagem `recorvia-postgres`, a configuração do backup e o volume de
+dados vazio (a sequência completa, com a aplicação, está no
+[runbook](runbooks/recuperacao-de-desastre.md#recuperação-para-um-ponto-no-tempo)):
+
+```bash
+make pitr-restore TARGET=2026-11-22T10:15:00Z      # ou TARGET=latest: até o último segmento arquivado
+make pitr-restore TARGET=2026-11-22T10:15:00Z MANIFEST=backups/recorvia-20261122T101500Z.manifest
+```
+
+`deploy/backup/pitr-restore.sh`:
+1. recusa se o servidor estiver em execução e para o agente de backup;
+2. num container avulso do serviço `postgres`, recusa um volume com dados (a restauração nunca
+   sobrescreve um servidor), escolhe o backup base mais recente terminado antes do instante,
+   recusa chave ausente ou diferente da usada nele, extrai o backup e grava `recovery.signal`, o
+   instante (`recovery_target_time`) e a promoção ao alcançá-lo;
+3. inicia o servidor, que busca o WAL no armazenamento, para antes do primeiro commit posterior
+   ao instante e é promovido numa linha do tempo nova; registra o último commit aplicado (log
+   `last completed transaction was at log time ...`). Se o WAL até o instante não existir ou não
+   decifrar, o servidor termina com erro em vez de subir num ponto anterior;
+4. remove o alvo da recuperação da configuração (`ALTER SYSTEM RESET`);
+5. confere o banco: grava o manifesto (as mesmas consultas do backup lógico, `common.sh`) em
+   `backups/recorvia-pitr-<instante>.manifest`, compara com `MANIFEST` se informado, confere o
+   ledger balanceado e a RLS para `recorvia_app`;
+6. religa o agente, que faz o backup base da linha do tempo nova.
+
+Conferência com o manifesto lógico: o manifesto de `make backup` descreve o banco no instante do
+snapshot do dump. Restaurado até esse instante, o banco é idêntico ao manifesto se nada foi gravado
+perto dele; com escrita concorrente, as tabelas gravadas nos milissegundos em volta podem
+divergir, e o resultado da comparação deve ser lido tabela a tabela. O exercício registra T com a
+escrita parada e exige o manifesto idêntico.
+
+Depois da recuperação, a linha do tempo é a nova: o WAL e os backups seguintes vão para o mesmo
+destino, e o WAL-G distingue as linhas do tempo. Uma restauração **de teste** com o servidor de
+origem ainda em uso nunca deve usar o mesmo destino: configure outro `RECORVIA_BACKUP_S3_PREFIX`
+com leitura do original (ou uma cópia), ou não inicie o servidor restaurado com arquivamento.
+
+<a id="exercicio-pitr"></a>
+
+### Exercício (`make pitr-check`, job `pitr-check`)
+
+`make pitr-check` (`deploy/backup/pitr-check.sh`) executa a recuperação para um instante de ponta a
+ponta num projeto do compose separado do ambiente local (padrão `recorvia-pitrcheck`), com as
+mesmas proteções do `dr-check` (rótulo `recorvia.dr-check`, diretório próprio, projeto `recorvia`
+recusado) e o MinIO como armazenamento compatível com S3. O MinIO e o simulador de pagamentos
+fazem o papel de serviços externos e sobrevivem ao desastre. O Keycloak usa um banco no mesmo
+servidor PostgreSQL, coberto pelo mesmo backup.
+
+1. **Origem.** Imagem `recorvia-postgres` com a etiqueta `pitr`, agente com retenção de 2 backups
+   base; o primeiro backup base é feito pelo agente na partida. Depois do seed, dois backups base
+   pedidos ao agente: a retenção remove o primeiro. Os backups levam a impressão digital da chave.
+2. **Dados antes de T**, todos depois do último backup base (só existem no WAL): credencial de API
+   da organização beta (login OIDC real), fatura em aberto e cobrança criada no provedor pelo
+   worker, usuário `pitr-antes-de-t` no Keycloak e a marca `antes-de-t` num banco de conferência.
+3. **Instante T**, com o worker parado e a API sem requisições: o manifesto do banco é calculado
+   antes e depois de registrar T (relógio do servidor) e precisa ser igual.
+4. **Depois de T**: marca `depois-de-t`, pagamento da cobrança no provedor confirmado pelo webhook
+   e usuário `pitr-depois-de-t`. O exercício espera o segmento de WAL de T e o da marca seguinte
+   chegarem ao armazenamento e mede o atraso do arquivamento; no instante do desastre, lê nas
+   métricas do agente a idade do último segmento arquivado e os segmentos pendentes.
+5. **Desastre**: PostgreSQL com o volume (e o banco do Keycloak), agente, Keycloak, API, worker,
+   Redis e RabbitMQ removidos.
+6. **Chave do backup errada e ausente**: `pitr-restore.sh` recusa as duas antes de baixar qualquer
+   arquivo, com o volume vazio depois de cada tentativa; sem a conferência da impressão digital,
+   o WAL-G com outra chave não extrai o backup base (`failed to extract files`) e o
+   `restore_command` devolve 126 (fatal) para um segmento existente, enquanto um segmento
+   inexistente devolve 1 (fim do WAL).
+7. **Restauração até T** com a chave do cofre: manifesto idêntico ao de T, ledger balanceado, RLS,
+   marca `antes-de-t` presente e `depois-de-t` ausente, fatura em aberto, credencial de API
+   presente, linha do tempo nova e backup base dela feito pelo agente ao religar.
+8. **Aplicação religada** como na recuperação de desastre: `keyring-check` com as chaves do cofre,
+   Keycloak sobre o banco restaurado (usuário de antes de T presente, o de depois ausente), API
+   com o worker parado, conciliação pela API e `reconcile-pending` (o pagamento feito depois de T
+   volta como `payment_not_reflected` e é adotado do provedor) e só então o worker; outbox
+   publicada, ledger balanceado, sem pagamento duplicado nem dead letters.
+
+Ao final, o projeto é derrubado com os volumes e o cofre é apagado; ficam em `backups/pitr-check/`
+(fora do Git) o relatório com os tempos, os manifestos, as listas de backups, as saídas das
+recusas e da restauração e os logs. Na CI, esses arquivos são publicados como artefato
+`pitr-check` por 14 dias; nenhum dado nem chave é publicado.
+
+| Variável | Padrão | Uso |
+|---|---|---|
+| `RECORVIA_PITR_PROJECT` | `recorvia-pitrcheck` | projeto do compose, **derrubado com os volumes** no início e no fim |
+| `RECORVIA_PITR_REUSE_PROJECT` | `0` | `1` confirma a remoção de um projeto existente que o exercício não criou |
+| `RECORVIA_PITR_DIR` | `backups/pitr-check` | relatório, manifestos e logs, num diretório próprio do exercício |
+| `RECORVIA_PITR_IMAGE_TAG` | `pitr` | etiqueta das imagens construídas |
+| `RECORVIA_PITR_BUILD` | `1` | `0` reutiliza as imagens já construídas |
+| `RECORVIA_PITR_KEEP` | `0` | `1` mantém o ambiente e o cofre para inspeção |
+| `RECORVIA_PITR_TIMEOUT` | `300` | espera máxima, em segundos, de cada condição |
+
+<a id="backup-do-keycloak"></a>
+
+### Keycloak
+
+O Keycloak de produção guarda usuários, credenciais, clientes e a configuração do realm no banco
+dele. Duas cópias complementares:
+
+- **Banco do Keycloak no mesmo servidor PostgreSQL** (banco `keycloak`, papel `keycloak`,
+  `KC_DB=postgres`): fica coberto pelo mesmo backup base e pelo mesmo WAL, e a recuperação para um
+  instante traz o Keycloak e o Recorvia **no mesmo instante** (os `sub` das sessões e dos membros
+  continuam coerentes). É o arranjo recomendado e o exercitado pelo `make pitr-check`. Com o
+  Keycloak num servidor PostgreSQL separado, aplique o mesmo componente a ele, com outro prefixo
+  de destino, e restaure os dois no mesmo instante.
+- **Exportação do realm** (`make keycloak-export`, `deploy/backup/keycloak-export.sh`): cópia
+  lógica, para inspeção, recuperação seletiva ou migração entre versões do Keycloak. Executa
+  `kc.sh export --realm recorvia --users same_file` num container avulso do serviço do Keycloak
+  (mesma configuração e mesmo banco do servidor em execução) e envia o arquivo pelo agente
+  (`recorvia-pgbackup put-object`), que o compacta e cifra com a chave do backup em
+  `extra/keycloak/realm-recorvia-<instante>.json` no mesmo destino. O arquivo contém hashes de
+  senha e segredos de clientes e não fica no host. Para ler:
+  `docker compose exec -T postgres-backup recorvia-pgbackup get-object keycloak/realm-recorvia-<instante>.json > realm.json`;
+  a importação, num Keycloak novo, usa `kc.sh import --file` ou o `--import-realm` da imagem.
+  A exportação não é agendada (fica fora do agente, que não executa comandos no container do
+  Keycloak) e não é removida pela retenção.
+
+### RPO e RTO esperados
+
+| Medida | Esperado | Do que depende |
+|---|---|---|
+| RPO (perda máxima numa destruição do servidor) | até ~1 min com o arquivamento em dia | `archive_timeout` (60 s) mais o envio do segmento; o que estiver no segmento ainda não arquivado se perde. Um atraso do arquivamento aumenta a perda e é alertado a partir de 10 min (`RecorviaWALArchiveStale`) |
+| RPO de uma recuperação para um instante escolhido | zero até o instante | o instante precisa estar na janela da retenção e o WAL até ele, arquivado |
+| RTO do banco | extração do backup base mais a reaplicação do WAL desde ele | tamanho do banco, banda até o armazenamento e volume de escrita desde o último backup base (no máximo um intervalo, 24 h por padrão) |
+| RTO da aplicação | o do banco mais as etapas da [recuperação de desastre](#recuperação-de-desastre) | conferência das chaves, conciliação da janela entre o instante e o incidente (por organização) e religação do worker |
+
+Os valores observados no exercício estão em [RPO e RTO observados](#rpo-e-rto-observados).
+
+### Fora do backup contínuo
+
+- **Réplica de leitura ou de espera** (*standby*): não há réplica; a recuperação é sempre uma
+  restauração. Uma réplica reduziria o RTO a segundos, mas não substitui o backup (erros lógicos
+  se replicam).
+- **Outra região**: o destino é um único bucket. A cópia para outra região (replicação do bucket
+  pelo provedor ou `wal-g copy`) e a restauração lá não são feitas nem exercitadas.
+- **Verificação periódica automática das cópias de produção**: o exercício usa dados de
+  demonstração; a restauração de uma cópia real num servidor novo continua um procedimento
+  periódico manual ([Recomendações](#recomendações-para-produção-não-exercitadas)).
+- **Papel de banco com privilégio mínimo para o agente**: o agente usa o superusuário.
+- **Exportação periódica do realm do Keycloak**: documentada acima, não agendada.
 
 ## Chaves de cifragem (keyring)
 
@@ -756,8 +1050,9 @@ e-mail e do RabbitMQ ficarem saudáveis.
 Como ler os números:
 - **RPO.** O backup lógico recupera o instante do dump: a perda é tudo o que aconteceu desde o
   último backup. No exercício, a janela é a que o roteiro produz (segundos); em produção, é o
-  intervalo entre backups mais o tempo até o incidente (com backup diário, até 24 horas). Só o
-  arquivamento contínuo de WAL reduz essa perda a minutos, e ele não é exercitado. O que se perde
+  intervalo entre backups mais o tempo até o incidente (com backup diário, até 24 horas). O
+  backup contínuo reduz essa perda ao segmento de WAL ainda não arquivado (até cerca de 1 minuto),
+  como medido acima. O que se perde
   localmente não se perde no provedor: a conciliação recupera os pagamentos e identifica as
   cobranças da janela.
 - **RTO.** O tempo medido vai da remoção do banco até o worker pronto sobre o banco restaurado,
@@ -767,14 +1062,32 @@ Como ler os números:
   banco (aqui, poucas centenas de linhas); a conferência do keyring e a conciliação crescem com o
   número de organizações.
 
+### Recuperação para um ponto no tempo (`make pitr-check`)
+
+Execução local de 2026-11-23 (02:55 UTC), na mesma estação, com carga média em torno de 20 e as
+imagens construídas na execução (exercício completo, da construção à remoção do ambiente, em 14
+min; relatório em `backups/pitr-check/relatorio.md`):
+
+| Medida | Valor observado |
+|---|---|
+| Atraso do arquivamento do WAL de T (de T ao segmento no armazenamento) | 14 s (em execuções anteriores, de 10 s a 56 s; o limite é o `archive_timeout` de 60 s) |
+| Idade do último segmento arquivado no desastre (RPO observado) | 3 s, sem segmentos pendentes |
+| Gravado depois de T e descartado pela restauração | 10 tabelas (pagamento, 3 lançamentos no ledger, eventos, inbox e notificações) |
+| Extração do backup base (9 MB compactados, MinIO local) | 11 s |
+| Recuperação até T (WAL do armazenamento e promoção) | 4 s |
+| Roteiro de restauração completo (extração, recuperação e conferências) | 20 s |
+| Etapa: conciliação da janela pela API | 3 s |
+| **Do desastre ao worker pronto, com a janela conciliada (RTO observado)** | **204 s**, dos quais a maior parte nas tentativas com a chave errada e ausente e na subida do Keycloak sobre o banco restaurado |
+
 ## Recomendações para produção (não exercitadas)
 
 - **Frequência e retenção**: backup lógico diário, com retenção definida pela organização (por
   exemplo, 7 diários, 4 semanais e 12 mensais) e `make restore-check` (ou equivalente) em cada
   cópia ou ao menos semanalmente, com registro do resultado.
-- **Recuperação para um instante**: o backup lógico só recupera o instante do dump. Para perda
-  máxima de minutos, use arquivamento contínuo de WAL com backup físico (por exemplo,
-  `pg_basebackup` e uma ferramenta de gestão de WAL) ou o serviço gerenciado do provedor de nuvem.
+- **Recuperação para um instante**: use o componente de backup contínuo (`deploy/postgres`,
+  ADR-087) e mantenha o backup lógico diário como segunda cópia, independente do formato físico e
+  do mesmo armazenamento. Repita a restauração para um instante com uma cópia real ao menos uma vez
+  por semestre, com as chaves (do backup e da aplicação) vindas do cofre.
 - **Armazenamento**: cópias fora do servidor do banco, cifradas em repouso, com acesso restrito a
   quem opera o banco (os arquivos contêm dados pessoais e financeiros de todos os tenants) e
   registro de acesso.

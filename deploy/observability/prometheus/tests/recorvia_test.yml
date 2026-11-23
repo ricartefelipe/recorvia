@@ -967,3 +967,187 @@ tests:
               summary: "Coleta de métricas falhando para alertmanager"
               description: "O Prometheus não consegue coletar alertmanager:9093 há 2 minutos: processo parado, reiniciando ou inacessível."
               runbook: docs/operacao/runbooks/filas-e-dlq.md#processo-ou-broker-indisponivel
+
+  # Backup contínuo (ADR-087). Último segmento de WAL arquivado a cada
+  # minuto até 10 min; depois o arquivamento para: aviso com mais de 10 min
+  # por 5 min e crítico com mais de 30 min por 5 min.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_backup_wal_last_archived_timestamp_seconds{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '0+60x10 600x40'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: RecorviaWALArchiveStale
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: RecorviaWALArchiveStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: backup
+            exp_annotations:
+              summary: "Último segmento de WAL arquivado há 17m 0s"
+              description: "Nenhum segmento de WAL chegou ao armazenamento há mais de 10 minutos: o que foi gravado desde então se perde se o servidor for destruído."
+              runbook: docs/operacao/runbooks/backup-continuo.md#arquivamento-de-wal-atrasado
+      - eval_time: 47m
+        alertname: RecorviaWALArchiveStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: backup
+            exp_annotations:
+              summary: "Último segmento de WAL arquivado há 37m 0s"
+              description: "Nenhum segmento de WAL chegou ao armazenamento há mais de 10 minutos: o que foi gravado desde então se perde se o servidor for destruído."
+              runbook: docs/operacao/runbooks/backup-continuo.md#arquivamento-de-wal-atrasado
+          - exp_labels:
+              severity: critical
+              area: backup
+            exp_annotations:
+              summary: "Último segmento de WAL arquivado há 37m 0s"
+              description: "O arquivamento de WAL está parado há mais de 30 minutos: a perda numa destruição do servidor cresce a cada minuto e o WAL se acumula no disco do servidor."
+              runbook: docs/operacao/runbooks/backup-continuo.md#arquivamento-de-wal-atrasado
+
+  # Arquivamento em dia: nenhum alerta do backup.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_backup_wal_last_archived_timestamp_seconds{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '0+60x60'
+      - series: 'recorvia_backup_wal_archive_failures_total{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '2x60'
+      - series: 'recorvia_backup_base_last_success_timestamp_seconds{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '0x60'
+      - series: 'recorvia_backup_base_interval_seconds{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '86400x60'
+      - series: 'recorvia_backup_dependency_up{service="pgbackup", dependency="storage", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '1x60'
+      - series: 'up{instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: RecorviaWALArchiveStale
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: RecorviaWALArchiveFailing
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: RecorviaBaseBackupStale
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: RecorviaBackupDependencyUnavailable
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: RecorviaBackupAgentMissing
+        exp_alerts: []
+
+  # archive_command falhando: aviso depois de 10 min de falhas contínuas.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_backup_wal_archive_failures_total{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '0x5 1+1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: RecorviaWALArchiveFailing
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: RecorviaWALArchiveFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: backup
+            exp_annotations:
+              summary: "archive_command falhando há mais de 10 minutos"
+              description: "O envio de segmentos de WAL ao armazenamento falha repetidamente (credencial, rede, chave de cifragem ou espaço); o PostgreSQL mantém os segmentos e tenta de novo."
+              runbook: docs/operacao/runbooks/backup-continuo.md#arquivamento-de-wal-atrasado
+
+  # Backup base proporcional ao intervalo (1 h neste teste): aviso depois de
+  # 1 h + 2 h sem backup novo, crítico depois de 2 h + 2 h, ambos por 15 min.
+  - interval: 5m
+    input_series:
+      - series: 'recorvia_backup_base_last_success_timestamp_seconds{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '0x60'
+      - series: 'recorvia_backup_base_interval_seconds{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '3600x60'
+    alert_rule_test:
+      - eval_time: 3h15m
+        alertname: RecorviaBaseBackupStale
+        exp_alerts: []
+      - eval_time: 3h25m
+        alertname: RecorviaBaseBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: backup
+            exp_annotations:
+              summary: "Último backup base há 3h 25m 0s"
+              description: "Nenhum backup base novo no intervalo configurado mais 2 horas: a restauração precisa reaplicar mais WAL (mais lenta) e a retenção deixa de renovar os pontos de restauração."
+              runbook: docs/operacao/runbooks/backup-continuo.md#backup-base-atrasado
+      - eval_time: 4h25m
+        alertname: RecorviaBaseBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: backup
+            exp_annotations:
+              summary: "Último backup base há 4h 25m 0s"
+              description: "Nenhum backup base novo no intervalo configurado mais 2 horas: a restauração precisa reaplicar mais WAL (mais lenta) e a retenção deixa de renovar os pontos de restauração."
+              runbook: docs/operacao/runbooks/backup-continuo.md#backup-base-atrasado
+          - exp_labels:
+              severity: critical
+              area: backup
+            exp_annotations:
+              summary: "Último backup base há 4h 25m 0s"
+              description: "Dois intervalos sem backup base (ou nenhum backup no armazenamento): sem backup base recente, a recuperação para um instante depende de backups antigos que a retenção pode remover."
+              runbook: docs/operacao/runbooks/backup-continuo.md#backup-base-atrasado
+
+  # Agente sem acesso ao armazenamento por 10 min.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_backup_dependency_up{service="pgbackup", dependency="storage", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '1 1 0x20'
+      - series: 'recorvia_backup_dependency_up{service="pgbackup", dependency="postgres", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '1x22'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: RecorviaBackupDependencyUnavailable
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: RecorviaBackupDependencyUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: backup
+              dependency: storage
+            exp_annotations:
+              summary: "Agente de backup sem acesso a storage"
+              description: "O agente não lê o armazenamento (storage) ou o estado do arquivamento no PostgreSQL (postgres) há 10 minutos: os backups base e as métricas do backup param."
+              runbook: docs/operacao/runbooks/backup-continuo.md#agente-de-backup-com-falha
+
+  # Agente coletado por 30 min e removido: ausente há 10 min dispara. Uma
+  # coleta sem o agente desde sempre (ambiente local) não dispara.
+  - interval: 1m
+    input_series:
+      - series: 'up{instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '1x30 _x30'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: RecorviaBackupAgentMissing
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: RecorviaBackupAgentMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: backup
+              job: recorvia-backup
+            exp_annotations:
+              summary: "Agente de backup ausente há 10 minutos"
+              description: "O container do agente de backup (postgres-backup) não existe mais ou não resolve no DNS: não há backups base nem métricas do arquivamento."
+              runbook: docs/operacao/runbooks/backup-continuo.md#agente-de-backup-com-falha
+  - interval: 1m
+    input_series:
+      - series: 'up{instance="worker:9091", job="recorvia-worker"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: RecorviaBackupAgentMissing
+        exp_alerts: []

@@ -288,6 +288,32 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # Recuperação para um ponto no tempo (ADR-087): arquivamento contínuo de WAL
+  # e backups base cifrados no MinIO, destruição do servidor, recusa da chave
+  # do backup errada ou ausente, restauração até o instante T num servidor
+  # novo e aplicação religada com a conciliação antes do worker.
+  pitr-check:
+    name: pitr-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Exercício de recuperação para um ponto no tempo (make pitr-check)
+        run: make pitr-check
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: pitr-check
+          # Relatório com os tempos medidos, manifestos (contagens e somas de
+          # verificação), listas de backups e logs: nenhum dado nem chave.
+          path: |
+            backups/pitr-check/relatorio.md
+            backups/pitr-check/*.manifest
+            backups/pitr-check/*.txt
+            backups/pitr-check/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
   # Construção das imagens e análise de vulnerabilidades. Nenhuma imagem é
   # publicada e não há deploy: as imagens existem apenas no runner.
   image-scan:

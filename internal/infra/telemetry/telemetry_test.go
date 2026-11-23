@@ -68,6 +68,15 @@ func declared(t *testing.T) map[string][]string {
 	}
 	// Coletor registrado à parte (pool de conexões).
 	add(newDBPoolCollector("test", func() DBPoolStats { return DBPoolStats{} }))
+	// Agente de backup contínuo (cmd/pgbackup): coletores e o arquivamento.
+	b := NewBackupMetrics()
+	bv := reflect.ValueOf(b).Elem()
+	for i := range bv.NumField() {
+		if c, ok := bv.Field(i).Interface().(prometheus.Collector); ok && bv.Type().Field(i).Name != "Registry" {
+			add(c)
+		}
+	}
+	add(newArchiverCollector(b, time.Second, func(context.Context) (ArchiverStats, error) { return ArchiverStats{}, nil }))
 	return out
 }
 
@@ -627,7 +636,9 @@ func TestAlertRulesAndDashboardsUseDeclaredMetrics(t *testing.T) {
 		"recorvia_dead_letters_open", "recorvia_dead_letters_oldest_open_seconds",
 		"recorvia_notifications_backlog", "recorvia_notifications_backlog_oldest_seconds",
 		"recorvia_webhook_deliveries_backlog", "recorvia_webhook_deliveries_backlog_oldest_due_seconds",
-		"recorvia_retention_purged_total", "recorvia_retention_purge_incomplete_total"} {
+		"recorvia_retention_purged_total", "recorvia_retention_purge_incomplete_total",
+		"recorvia_backup_wal_last_archived_timestamp_seconds", "recorvia_backup_wal_archive_failures_total",
+		"recorvia_backup_base_last_success_timestamp_seconds", "recorvia_backup_base_interval_seconds", "recorvia_backup_dependency_up"} {
 		if !used[required] {
 			t.Errorf("métrica %s sem alerta ou painel", required)
 		}
@@ -681,6 +692,8 @@ func TestMetricsCatalogDocumentsEveryMetricAndLabelValue(t *testing.T) {
 		"recorvia_retention_purged_total":                        RetentionKinds,
 		"recorvia_retention_purge_failures_total":                RetentionKinds,
 		"recorvia_retention_purge_incomplete_total":              RetentionKinds,
+		"recorvia_backup_base_runs_total":                        BackupRunOutcomes,
+		"recorvia_backup_dependency_up":                          BackupDependencies,
 	}
 	for name, want := range values {
 		for _, v := range want {

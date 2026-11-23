@@ -1,11 +1,12 @@
 # Runbook: recuperação de desastre e chaves de cifragem
 
-Cobre a perda do banco de dados (restauração do backup lógico num servidor novo, ADR-055), a
-conferência das chaves de cifragem contra o banco (ADR-063) e a retomada da aplicação com a
-janela perdida conciliada. O procedimento completo, com as justificativas, está em
+Cobre a perda do banco de dados (restauração do backup lógico num servidor novo, ADR-055, ou do
+backup contínuo até um instante escolhido, ADR-087), a conferência das chaves de cifragem contra
+o banco (ADR-063) e a retomada da aplicação com a janela perdida conciliada. O procedimento completo, com as justificativas, está em
 [Backup e restauração](../backup-e-restauracao.md); este runbook é a sequência de comandos e de
 verificações. A sequência é exercitada de ponta a ponta por `make dr-check` (job
-`disaster-recovery` da CI, ADR-064).
+`disaster-recovery` da CI, ADR-064) e, com o backup contínuo, por `make pitr-check` (job
+`pitr-check`).
 
 Regras que valem em todos os passos:
 - **o worker só é religado depois da conciliação**: ele publica a outbox, emite as faturas vencidas
@@ -23,6 +24,9 @@ Regras que valem em todos os passos:
 ### Sintomas
 - PostgreSQL indisponível sem recuperação (volume perdido ou corrompido); `GET /readyz` da API e
   do worker com `postgres: unavailable`.
+- Com o backup contínuo em uso, prefira a [recuperação para um ponto no tempo](#recuperação-para-um-ponto-no-tempo):
+  a perda fica limitada ao segmento de WAL ainda não arquivado, em vez de tudo desde o último
+  backup lógico. Os passos 3 a 6 abaixo valem para as duas.
 
 ### Métricas e alertas
 - `RecorviaDependencyUnavailable` (`recorvia_dependency_up{dependency="postgres"} == 0`) e
@@ -122,6 +126,81 @@ HAVING sum(amount) FILTER (WHERE direction = 'debit') IS DISTINCT FROM sum(amoun
 - `RecorviaPaymentOperationsUnknown` e `RecorviaPaymentOperationsExhausted` não disparam; não há
   dead letters novas (`GET /api/v1/dead-letters`).
 - No provedor, cada fatura em aberto tem uma única cobrança ativa.
+
+<a id="recuperacao-pitr"></a>
+
+## Recuperação para um ponto no tempo
+
+Com o componente de backup contínuo (`deploy/postgres`): restaura o banco até um instante
+escolhido, num servidor novo, a partir do backup base e do WAL arquivado. Serve à perda do
+servidor (instante: o mais recente possível, `TARGET=latest`) e a um erro lógico (exclusão ou
+alteração indevida: o instante imediatamente anterior a ele). Detalhes em
+[Backup e restauração](../backup-e-restauracao.md#recuperação-para-um-instante).
+
+### Sintomas
+- Servidor perdido, como em [Banco de dados perdido](#banco-perdido), com o backup contínuo em
+  uso; ou dados destruídos por erro de operação ou de aplicação num instante conhecido.
+
+### Métricas e alertas
+- Os da seção [Banco de dados perdido](#banco-perdido); antes de decidir, confira
+  `RecorviaWALArchiveStale` e `RecorviaBaseBackupStale`
+  ([runbook do backup contínuo](backup-continuo.md)): o instante precisa estar coberto pelo WAL
+  arquivado.
+
+### Diagnóstico
+```bash
+# Backups base, linha do tempo e a chave de cada um (com o agente, ou num container avulso do serviço postgres).
+docker compose exec -T postgres-backup recorvia-pgbackup list
+docker compose run --rm --no-deps -T --entrypoint recorvia-pgbackup postgres list
+```
+- Escolha o instante em UTC (RFC 3339). Para um erro lógico, use o último instante antes dele
+  (`audit_log`, logs da API); tudo o que foi gravado depois, em qualquer banco do servidor
+  (inclusive o do Keycloak), deixa de existir no servidor restaurado.
+- O instante precisa ser posterior ao fim de algum backup base da lista e anterior ao último
+  segmento arquivado (`pg_stat_archiver.last_archived_time` da origem, ou as métricas do agente).
+- Separe a chave de cifragem do backup e as chaves da aplicação, do cofre.
+
+### Ações
+1. Pare o worker e tire a API do tráfego. Se a origem ainda existe (erro lógico), pare-a também e
+   preserve o volume dela: a restauração é feita num volume **vazio**, e nunca sobre o atual.
+   Restaurar com a origem ainda gravando no mesmo destino mistura linhas do tempo.
+2. Restaure o servidor até o instante (o roteiro para o agente, extrai o backup base, reaplica o
+   WAL, promove o servidor, confere manifesto, ledger e RLS e religa o agente):
+   ```bash
+   docker compose stop postgres postgres-backup
+   docker compose rm -f postgres postgres-backup
+   # O roteiro só restaura num volume de dados vazio. Servidor perdido: remova o volume que sobrou
+   # (decisão registrada no incidente). Erro lógico: antes, copie o volume da origem para outro
+   # volume, para inspeção, e só então o remova.
+   docker run --rm -v <projeto>_postgres-data:/de:ro -v recorvia-origem-copia:/para alpine:3.24 cp -a /de/. /para/
+   docker volume rm <projeto>_postgres-data
+   make pitr-restore TARGET=2026-11-22T10:15:00Z    # ou TARGET=latest
+   # Com um manifesto do backup lógico do mesmo instante, a comparação é exigida:
+   make pitr-restore TARGET=<instante do snapshot> MANIFEST=backups/recorvia-<instante>.manifest
+   ```
+   Recusas, sem nada alterado: `chave de cifragem do backup ausente`, `chave de cifragem do backup
+   diferente da usada no backup base` (use a chave do cofre com a impressão digital mostrada por
+   `recorvia-pgbackup list`), `não está vazio` (volume com dados) e `nenhum backup base terminado
+   antes do instante pedido`. Se o servidor terminar durante a recuperação (`o servidor terminou
+   durante a recuperação`), o WAL até o instante falta ou não decifra: confira o log do
+   PostgreSQL e o arquivamento da origem; um servidor nunca sobe num ponto anterior ao pedido.
+3. Registre no incidente o último commit aplicado (`último commit aplicado: ...` na saída) e a
+   linha do tempo nova: eles delimitam a janela perdida, do instante ao incidente.
+4. Descarte as filas do RabbitMQ (volume do broker) antes de religar o worker: as mensagens
+   publicadas depois do instante pertencem à linha do tempo descartada, e a outbox restaurada
+   republica o que estava pendente no instante. O Redis (sessões) também é descartável.
+5. Siga os passos 3 a 6 da seção [Banco de dados perdido](#banco-perdido): chaves conferidas
+   (`keyring-check`), API sem tráfego, conciliação da janela perdida por organização e só então o
+   worker. Com o banco do Keycloak no mesmo servidor, reinicie o Keycloak depois da restauração: ele
+   volta ao mesmo instante (usuários criados depois dele deixam de existir).
+6. Confira que o agente fez o backup base da linha do tempo nova (`recorvia-pgbackup list`, linha
+   do tempo maior que a anterior) e que `RecorviaWALArchiveStale` não dispara.
+
+### Verificação
+- As consultas da [verificação da seção anterior](#banco-perdido) (outbox, cobranças duplicadas,
+  ledger) e `GET /readyz` da API e do worker.
+- `SELECT pg_is_in_recovery()` devolve `f`; `SELECT timeline_id FROM pg_control_checkpoint()`
+  mostra a linha do tempo nova; o `postgresql.auto.conf` não tem mais `recovery_target_time`.
 
 <a id="chaves-de-cifragem"></a>
 

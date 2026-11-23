@@ -167,19 +167,41 @@ restore-check: ## Restaura o último backup (ou DUMP=arquivo) num banco novo e c
 dr-check: ## Exercício de recuperação de desastre de ponta a ponta num projeto isolado do compose (relatório em backups/dr-check)
 	bash deploy/backup/dr-check.sh
 
+.PHONY: postgres-image
+postgres-image: ## Imagem do PostgreSQL com arquivamento contínuo de WAL e agente de backup (deploy/postgres, ADR-087)
+	docker build -f deploy/postgres/Dockerfile -t recorvia-postgres:$(IMAGE_TAG) .
+
+.PHONY: pitr-restore
+pitr-restore: ## Restaura o PostgreSQL até TARGET (RFC 3339 ou latest) num servidor novo, a partir do backup contínuo [BACKUP=nome] [MANIFEST=arquivo]
+	@test -n "$(TARGET)" || { echo "informe TARGET=<instante RFC 3339> ou TARGET=latest"; exit 2; }
+	bash deploy/backup/pitr-restore.sh $(if $(filter latest,$(TARGET)),--latest,--target-time '$(TARGET)') \
+	  $(if $(BACKUP),--backup '$(BACKUP)') $(if $(MANIFEST),--manifest '$(MANIFEST)')
+
+.PHONY: keycloak-export
+keycloak-export: ## Exporta o realm do Keycloak, cifrado pelo agente, para o destino do backup contínuo
+	bash deploy/backup/keycloak-export.sh
+
+.PHONY: pitr-check
+pitr-check: ## Exercício de recuperação para um ponto no tempo com MinIO num projeto isolado do compose (relatório em backups/pitr-check)
+	bash deploy/backup/pitr-check.sh
+
 ## ---------- Imagens ----------
 GO_IMAGES := api worker migrate seed paysim
+# recorvia-postgres (make postgres-image) fica fora da análise por enquanto: as
+# vulnerabilidades corrigíveis estão na imagem oficial postgres:18.7-alpine
+# (gosu e pacotes do Alpine), também usada pelo compose sem análise (ADR-087).
 IMAGES    := $(addprefix recorvia-,$(GO_IMAGES)) recorvia-web recorvia-keycloak
 # Etiqueta das imagens construídas e analisadas (as do compose usam "local").
 IMAGE_TAG ?= local
 
 .PHONY: images
-images: ## Constrói as imagens da aplicação (api, worker, migrate, seed, paysim, web, keycloak)
+images: ## Constrói as imagens da aplicação (api, worker, migrate, seed, paysim, web, keycloak, postgres)
 	@for cmd in $(GO_IMAGES); do \
 	  docker build -f deploy/docker/go.Dockerfile --build-arg CMD=$$cmd -t recorvia-$$cmd:$(IMAGE_TAG) . ; \
 	done
 	docker build -t recorvia-web:$(IMAGE_TAG) web
 	docker build -t recorvia-keycloak:$(IMAGE_TAG) deploy/keycloak
+	docker build -f deploy/postgres/Dockerfile -t recorvia-postgres:$(IMAGE_TAG) .
 
 .PHONY: image-scan
 image-scan: ## Analisa as imagens com Trivy (falha em HIGH/CRITICAL com correção disponível)
