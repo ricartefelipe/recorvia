@@ -109,6 +109,36 @@ func TestProductionSafetyRules(t *testing.T) {
 	}
 }
 
+// As origens permitidas recebem CORS com credenciais e valem na conferência
+// de origem do CSRF: só origens bem formadas, nunca "null" nem "*", e só
+// https em produção.
+func TestAllowedOriginsValidation(t *testing.T) {
+	for _, bad := range []string{"null", "*", "https://app.example/", "https://app.example/path", "app.example", "ftp://app.example",
+		"https://user@app.example", "https://app.example?x=1", "https://app.example#x", "https://APP.example", "https://"} {
+		m := baseEnv()
+		m["RECORVIA_ALLOWED_ORIGINS"] = "http://localhost:5173," + bad
+		if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), "RECORVIA_ALLOWED_ORIGINS") {
+			t.Errorf("origem %q aceita: %v", bad, err)
+		}
+	}
+	m := baseEnv()
+	m["RECORVIA_ALLOWED_ORIGINS"] = "http://localhost:5173, https://app.example:8443"
+	c, err := Load(env(m))
+	if err != nil || !slices.Equal(c.AllowedOrigins, []string{"http://localhost:5173", "https://app.example:8443"}) {
+		t.Fatalf("origens válidas: %v %v", c.AllowedOrigins, err)
+	}
+	m["RECORVIA_ENV"] = "production"
+	m["RECORVIA_PUBLIC_URL"] = "https://recorvia.example"
+	m["RECORVIA_COOKIE_SECURE"] = "true"
+	m["RECORVIA_COOKIE_NAME"] = "__Host-recorvia_session"
+	if c, err = Load(env(m)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ValidateAPI(); err == nil || !strings.Contains(err.Error(), "http://localhost:5173") || strings.Contains(err.Error(), "app.example:8443") {
+		t.Fatalf("produção deveria recusar só a origem http: %v", err)
+	}
+}
+
 func TestHostCookieRequiresSecure(t *testing.T) {
 	m := baseEnv()
 	m["RECORVIA_COOKIE_NAME"] = "__Host-recorvia_session"

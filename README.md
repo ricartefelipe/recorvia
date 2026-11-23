@@ -25,6 +25,7 @@ tenant, RabbitMQ para eventos, Redis para sessões, Keycloak para identidade. De
 - [Matriz de permissões](docs/arquitetura/permissoes.md)
 - [Operação: observabilidade, runbooks, backup e retenção](docs/operacao/observabilidade.md)
 - [Implantação em produção](docs/operacao/implantacao.md)
+- [Segurança: modelo de ameaças e revisão](docs/operacao/seguranca.md)
 - [Decisões arquiteturais](docs/DECISOES.md) · [Requisitos](docs/REQUISITOS.md)
 - [Modelo comercial (hipóteses)](docs/negocio/modelo-comercial.md)
 - [Roteiro demonstrativo](docs/roteiro-demo.md)
@@ -70,8 +71,9 @@ make lint vulncheck sqlc-check secrets-scan
 
 Guias em [`docs/operacao/`](docs/operacao): [implantação em produção](docs/operacao/implantacao.md),
 [observabilidade](docs/operacao/observabilidade.md), [runbooks](docs/operacao/runbooks/README.md),
-[backup e restauração](docs/operacao/backup-e-restauracao.md) e
-[retenção e anonimização](docs/operacao/retencao-e-anonimizacao.md).
+[backup e restauração](docs/operacao/backup-e-restauracao.md),
+[retenção e anonimização](docs/operacao/retencao-e-anonimizacao.md) e
+[segurança](docs/operacao/seguranca.md).
 
 A produção sobe num servidor com Docker Compose (`deploy/producao/`, ADR-086): Caddy com HTTPS
 automático na frente da interface e da API (mesma origem) e do Keycloak (subdomínio próprio),

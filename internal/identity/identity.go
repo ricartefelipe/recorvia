@@ -11,8 +11,10 @@ package identity
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"net/url"
 	"strings"
@@ -80,6 +82,41 @@ type LoginFlow struct {
 	PKCEVerifier string
 	ReturnTo     string
 	CreatedAt    time.Time
+	// BindingHash é o SHA-256 (hexadecimal) do vínculo do navegador que
+	// iniciou o login: o callback só é aceito no mesmo navegador.
+	BindingHash string
+}
+
+// browserBindingBytes é o tamanho do vínculo do navegador antes da
+// codificação base64url (43 caracteres codificados).
+const browserBindingBytes = 32
+
+// NewBrowserBinding gera o vínculo aleatório que o navegador guarda em
+// cookie durante o login.
+func NewBrowserBinding() string { return RandomToken(browserBindingBytes) }
+
+// ValidBrowserBinding informa se o valor tem o formato de um vínculo gerado
+// por NewBrowserBinding (o cookie vem do cliente e pode ter sido alterado).
+func ValidBrowserBinding(v string) bool {
+	if len(v) != base64.RawURLEncoding.EncodedLen(browserBindingBytes) {
+		return false
+	}
+	_, err := base64.RawURLEncoding.DecodeString(v)
+	return err == nil
+}
+
+func bindingHash(binding string) string {
+	sum := sha256.Sum256([]byte(binding))
+	return hex.EncodeToString(sum[:])
+}
+
+// boundTo informa, em tempo constante, se o fluxo foi iniciado pelo
+// navegador que apresenta o vínculo.
+func (f LoginFlow) boundTo(binding string) bool {
+	if f.BindingHash == "" || !ValidBrowserBinding(binding) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(f.BindingHash), []byte(bindingHash(binding))) == 1
 }
 
 // Session é a sessão do navegador mantida no servidor.

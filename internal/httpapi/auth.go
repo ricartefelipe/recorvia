@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -97,6 +98,33 @@ func (a *API) setSessionCookie(w http.ResponseWriter, s identity.Session) {
 	// inicialização) e desligado apenas no ambiente local em HTTP.
 	http.SetCookie(w, &http.Cookie{Name: a.cookieName(), Value: s.ID, Path: "/", HttpOnly: true, Secure: secure, //nolint:gosec // ver comentário acima
 		SameSite: http.SameSiteLaxMode, MaxAge: max(maxAge, 1)})
+}
+
+// loginCookieName é o cookie que vincula o fluxo de login ao navegador que o
+// iniciou; herda o prefixo __Host- do cookie de sessão.
+func (a *API) loginCookieName() string { return a.cookieName() + "_login" }
+
+// setLoginCookie grava o vínculo do login. SameSite=Lax porque o callback
+// chega por navegação vinda do provedor de identidade (outro site); dura o
+// mesmo que o fluxo de login.
+func (a *API) setLoginCookie(w http.ResponseWriter, binding string, ttl time.Duration) {
+	secure := a.Config == nil || a.Config.CookieSecure
+	http.SetCookie(w, &http.Cookie{Name: a.loginCookieName(), Value: binding, Path: "/", HttpOnly: true, Secure: secure, //nolint:gosec // Secure segue a configuração
+		SameSite: http.SameSiteLaxMode, MaxAge: max(int(ttl.Seconds()), 1)})
+}
+
+func (a *API) clearLoginCookie(w http.ResponseWriter) {
+	secure := a.Config == nil || a.Config.CookieSecure
+	http.SetCookie(w, &http.Cookie{Name: a.loginCookieName(), Value: "", Path: "/", HttpOnly: true, Secure: secure, //nolint:gosec // Secure segue a configuração
+		SameSite: http.SameSiteLaxMode, MaxAge: -1})
+}
+
+// loginBinding devolve o vínculo de login do cookie, quando bem formado.
+func (a *API) loginBinding(r *http.Request) string {
+	if c, err := r.Cookie(a.loginCookieName()); err == nil && identity.ValidBrowserBinding(c.Value) {
+		return c.Value
+	}
+	return ""
 }
 
 func (a *API) clearSessionCookie(w http.ResponseWriter) {
@@ -275,12 +303,20 @@ func (a *API) requireStaff(next http.Handler) http.Handler {
 	})
 }
 
+// authLogin inicia o login vinculado ao navegador: o cookie de vínculo é
+// reaproveitado enquanto vale, para que logins em abas simultâneas do mesmo
+// navegador continuem válidos.
 func (a *API) authLogin(w http.ResponseWriter, r *http.Request) {
-	target, err := a.Identity.BeginLogin(r.Context(), r.URL.Query().Get("return_to"))
+	binding := a.loginBinding(r)
+	if binding == "" {
+		binding = identity.NewBrowserBinding()
+	}
+	target, err := a.Identity.BeginLogin(r.Context(), r.URL.Query().Get("return_to"), binding)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
+	a.setLoginCookie(w, binding, a.Identity.LoginFlowTTL())
 	// O destino é a URL de autorização montada pelo próprio adaptador OIDC.
 	http.Redirect(w, r, target, http.StatusFound) //nolint:gosec // destino gerado pelo servidor
 }
@@ -291,11 +327,12 @@ func (a *API) authCallback(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, apperr.Unauthenticated("login_denied", "Login cancelado ou recusado pelo provedor de identidade."))
 		return
 	}
-	sess, user, returnTo, err := a.Identity.CompleteLogin(r.Context(), q.Get("state"), q.Get("code"))
+	sess, user, returnTo, err := a.Identity.CompleteLogin(r.Context(), q.Get("state"), q.Get("code"), a.loginBinding(r))
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
+	a.clearLoginCookie(w)
 	// Com uma única organização, ela já fica ativa (sessão rotacionada).
 	orgs, err := a.Tenancy.UserOrganizations(r.Context(), user.ID)
 	if err == nil && len(orgs) == 1 {

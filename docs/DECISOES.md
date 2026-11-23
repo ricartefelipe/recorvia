@@ -2689,3 +2689,57 @@ garantia de compatibilidade das migrations com a versão anterior. O rótulo `en
 continua o mesmo na produção. O Keycloak 26.8.2 traz o Guava com a CVE-2026-102554 (exceção do Trivy até
 2026-12-31), agora também numa imagem de produção. Provedor, Asaas em produção e SMTP transacional continuam
 decisões do dono.
+
+## ADR-089 Revisão de segurança antes da abertura: login vinculado ao navegador, origens CORS validadas, CSP na API e IPv4 embutido em IPv6
+**Status:** aceita.
+**Contexto:** antes de abrir o Recorvia na internet (pacote de produção da ADR-086), a aplicação foi revista
+como um atacante a veria: isolamento entre organizações, autenticação e sessão, borda HTTP, entrada e saída,
+webhooks recebidos, dependências e segredos. O resultado completo, o modelo de ameaças e os riscos que
+continuam abertos estão em `docs/operacao/seguranca.md`. A revisão achou um problema explorável (login CSRF)
+e três pontos de endurecimento; o isolamento entre organizações não teve achado, mas não havia teste de
+acesso cruzado por referência direta para a maior parte das rotas.
+**Decisão:**
+- **Login vinculado ao navegador.** O `state` do OIDC era guardado só no servidor (Redis), sem ligação com o
+  navegador que iniciou o login. Quem atacava podia iniciar um login, entrar no provedor com a própria conta e
+  levar outra pessoa ao `/auth/callback` com o `state` e o código dele: o navegador da vítima recebia uma sessão
+  na conta de quem atacou (login CSRF), e o que ela cadastrasse ficaria com ele. Agora `/auth/login` grava um
+  cookie de vínculo (nome do cookie de sessão com o sufixo `_login`, portanto `__Host-` em produção; HttpOnly,
+  Secure conforme a configuração, `SameSite=Lax` porque o callback chega por navegação vinda do provedor, e
+  validade do fluxo de login, 10 minutos) com 256 bits aleatórios; o fluxo guarda só o SHA-256 do vínculo, e o
+  callback exige o mesmo valor (comparação em tempo constante). O fluxo é consumido antes da conferência: um
+  callback em outro navegador inutiliza o `state` sem trocar o código no provedor. O vínculo válido é
+  reaproveitado por logins seguintes do mesmo navegador (abas simultâneas continuam funcionando) e removido
+  quando o login conclui. Fluxos gravados antes da mudança, sem vínculo, são recusados (o usuário entra de novo).
+- **Origens CORS validadas.** `RECORVIA_ALLOWED_ORIGINS` recebe CORS com credenciais e vale na conferência de
+  origem do CSRF; qualquer texto era aceito. Agora cada origem precisa estar na forma serializada que o
+  navegador envia (`esquema://host[:porta]`, minúsculas, sem caminho, query, fragmento nem credenciais), `null`
+  e `*` são recusados na partida e, em produção, só origens `https` valem.
+- **CSP também na API.** As respostas da API passam a levar `Content-Security-Policy: default-src 'none';
+  frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, além dos cabeçalhos que já tinham, também
+  quando ela é alcançada sem o nginx à frente. O documento HTML da fatura continua com a própria política.
+- **IPv4 embutido em IPv6 nos webhooks enviados.** A proteção contra SSRF (ADR-045) passa a recusar `::/96`
+  (endereços compatíveis com IPv4, obsoletos, além de `::` e `::1`), `::ffff:0:0:0/96` (IPv4 traduzido, SIIT),
+  `3fff::/20` (documentação) e `5f00::/16` (SRv6), que um tradutor na rede poderia levar a um IPv4 interno.
+  O mapeamento `::ffff:a.b.c.d` e o NAT64 já eram convertidos para o IPv4 antes da conferência.
+- **Testes de acesso cruzado.** `TestCrossTenantReferencesOverHTTP` e `TestCrossTenantReceivablesOverHTTP`
+  tentam, com a sessão do dono de outra organização, alcançar por identificador os recursos de uma organização
+  (clientes, contatos, endereço, créditos, links do portal, produtos, planos e preços, assinaturas e o ciclo de
+  vida delas, faturas, documento, pagamento manual, cobrança, membros, convites, credenciais, endpoints e
+  entregas de webhook, régua, cobranças, reembolsos, disputas, baixas e operações), por referência no corpo
+  (assinatura com cliente ou plano de outra organização, troca para plano alheio, consumo com assinatura
+  alheia), por cursor de listagem e por credencial de API; todas respondem como recurso inexistente e nada da
+  outra organização muda.
+
+**Alternativas:** guardar o `state` num cookie em vez do Redis dispensaria o armazenamento, mas o fluxo
+continuaria precisando do verificador PKCE e do nonce no servidor; o vínculo por cookie com hash no fluxo
+mantém o desenho da ADR-012. Um cookie por login (com o `state` no nome) permitiria abas simultâneas sem
+reaproveitar o vínculo, ao custo de cookies acumulados; reaproveitar é seguro porque o cookie é `__Host-` e
+HttpOnly (outro subdomínio não o define e nenhum script o lê). Confirmar no provedor todo evento do Asaas antes
+de aplicá-lo (o webhook do Asaas é autenticado só por token, ADR-013) foi deixado como recomendação: muda o
+ciclo do pagamento (ADR-080) e custa uma chamada por evento; a conciliação (ADR-038) já detecta divergências.
+**Consequências:** logins em andamento na implantação desta versão falham uma vez (`login_invalid`) e o usuário
+entra de novo. Uma configuração com origem malformada, `null`, `*` ou `http` em produção deixa a API sem subir,
+com a variável no erro. As respostas da API que passam pelo nginx levam duas políticas de CSP (a da interface e
+a da API); o navegador aplica as duas, e a da API é a mais restritiva. Os riscos que continuam abertos (token
+do Asaas, limites por IP que confiam no `X-Real-IP`, ausência de limite de tentativas na borda para o
+Keycloak, e-mails de destinatários recusados nos registros de erro) estão em `docs/operacao/seguranca.md`.

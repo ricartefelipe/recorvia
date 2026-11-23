@@ -52,11 +52,22 @@ func NewService(idp IdentityProvider, sessions SessionStore, users UserStore, c 
 	return &Service{idp: idp, sessions: sessions, users: users, clock: c, policy: p}
 }
 
-// BeginLogin cria o estado de login e retorna a URL de autorização.
-func (s *Service) BeginLogin(ctx context.Context, returnTo string) (string, error) {
+// LoginFlowTTL é a validade do fluxo de login (e do cookie que o vincula
+// ao navegador).
+func (s *Service) LoginFlowTTL() time.Duration { return s.policy.LoginFlowTTL }
+
+// BeginLogin cria o estado de login e retorna a URL de autorização. O fluxo
+// fica vinculado ao navegador pelo binding (NewBrowserBinding), guardado pelo
+// chamador num cookie HttpOnly: sem ele, quem iniciasse um login e enviasse a
+// outra pessoa o endereço de callback com o próprio código faria o navegador
+// dela entrar na conta de quem atacou (login CSRF).
+func (s *Service) BeginLogin(ctx context.Context, returnTo, binding string) (string, error) {
+	if !ValidBrowserBinding(binding) {
+		return "", errors.New("identity: vínculo do navegador inválido")
+	}
 	f := LoginFlow{
 		State: RandomToken(32), Nonce: RandomToken(32), PKCEVerifier: s.idp.NewPKCEVerifier(),
-		ReturnTo: SafeReturnPath(returnTo), CreatedAt: s.clock.Now(),
+		ReturnTo: SafeReturnPath(returnTo), CreatedAt: s.clock.Now(), BindingHash: bindingHash(binding),
 	}
 	target := s.idp.AuthCodeURL(f.State, f.Nonce, f.PKCEVerifier)
 	if target == "" {
@@ -68,10 +79,11 @@ func (s *Service) BeginLogin(ctx context.Context, returnTo string) (string, erro
 	return target, nil
 }
 
-// CompleteLogin valida o callback, troca o código com o verificador PKCE,
-// valida o ID token e cria uma sessão nova (rotação: nenhum identificador
-// anterior é reaproveitado).
-func (s *Service) CompleteLogin(ctx context.Context, state, code string) (Session, User, string, error) {
+// CompleteLogin valida o callback, confere que ele chega ao navegador que
+// iniciou o login (binding), troca o código com o verificador PKCE, valida o
+// ID token e cria uma sessão nova (rotação: nenhum identificador anterior é
+// reaproveitado).
+func (s *Service) CompleteLogin(ctx context.Context, state, code, binding string) (Session, User, string, error) {
 	invalid := apperr.Unauthenticated("login_invalid", "Não foi possível concluir o login. Tente novamente.")
 	if state == "" || code == "" {
 		return Session{}, User{}, "", invalid
@@ -82,6 +94,11 @@ func (s *Service) CompleteLogin(ctx context.Context, state, code string) (Sessio
 			return Session{}, User{}, "", invalid
 		}
 		return Session{}, User{}, "", err
+	}
+	// O fluxo já foi consumido: um callback em outro navegador inutiliza o
+	// state e não troca o código.
+	if !flow.boundTo(binding) {
+		return Session{}, User{}, "", invalid
 	}
 	tokens, err := s.idp.Exchange(ctx, code, flow.PKCEVerifier)
 	if err != nil {

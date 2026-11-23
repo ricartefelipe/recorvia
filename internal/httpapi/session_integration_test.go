@@ -102,9 +102,16 @@ type browserResp struct {
 
 // get faz a requisição como o navegador simulado, sem seguir
 // redirecionamentos, para que o teste confira o destino e os cookies.
-func (a *apiEnv) get(t *testing.T, path string) browserResp {
+func (a *apiEnv) get(t *testing.T, path string, cookies ...*http.Cookie) browserResp {
 	t.Helper()
-	resp, err := noRedirect.Get(a.srv.URL + path)
+	req, err := http.NewRequest(http.MethodGet, a.srv.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	resp, err := noRedirect.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,21 +120,27 @@ func (a *apiEnv) get(t *testing.T, path string) browserResp {
 	return browserResp{StatusCode: resp.StatusCode, Header: resp.Header}
 }
 
-// sessionCookie extrai o cookie de sessão do painel dos headers da resposta.
-func sessionCookie(r browserResp) *http.Cookie {
+// responseCookie extrai um cookie dos headers da resposta.
+func responseCookie(r browserResp, name string) *http.Cookie {
 	for _, c := range (&http.Response{Header: r.Header}).Cookies() {
-		if c.Name == "recorvia_session" {
+		if c.Name == name {
 			return c
 		}
 	}
 	return nil
 }
 
-// browserLogin percorre /auth/login e /auth/callback e devolve a resposta
-// do callback.
-func (a *apiEnv) browserLogin(t *testing.T, code, returnTo string) browserResp {
+// sessionCookie extrai o cookie de sessão do painel dos headers da resposta.
+func sessionCookie(r browserResp) *http.Cookie { return responseCookie(r, "recorvia_session") }
+
+// loginCookie extrai o cookie que vincula o login ao navegador.
+func loginCookie(r browserResp) *http.Cookie { return responseCookie(r, "recorvia_session_login") }
+
+// startLogin percorre /auth/login e devolve o state enviado ao provedor e o
+// cookie de vínculo do navegador.
+func (a *apiEnv) startLogin(t *testing.T, returnTo string, cookies ...*http.Cookie) (string, *http.Cookie) {
 	t.Helper()
-	resp := a.get(t, "/auth/login?return_to="+url.QueryEscape(returnTo))
+	resp := a.get(t, "/auth/login?return_to="+url.QueryEscape(returnTo), cookies...)
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("login: %d", resp.StatusCode)
 	}
@@ -135,7 +148,25 @@ func (a *apiEnv) browserLogin(t *testing.T, code, returnTo string) browserResp {
 	if err != nil || loc.Host != "idp.test" || loc.Query().Get("state") == "" || loc.Query().Get("nonce") == "" {
 		t.Fatalf("redirecionamento ao provedor inesperado: %s", resp.Header.Get("Location"))
 	}
-	return a.get(t, "/auth/callback?state="+url.QueryEscape(loc.Query().Get("state"))+"&code="+url.QueryEscape(code))
+	ck := loginCookie(resp)
+	if ck == nil || ck.Value == "" {
+		t.Fatal("o login deve gravar o cookie de vínculo do navegador")
+	}
+	return loc.Query().Get("state"), ck
+}
+
+// callback chama /auth/callback com o state, o código e os cookies dados.
+func (a *apiEnv) callback(t *testing.T, state, code string, cookies ...*http.Cookie) browserResp {
+	t.Helper()
+	return a.get(t, "/auth/callback?state="+url.QueryEscape(state)+"&code="+url.QueryEscape(code), cookies...)
+}
+
+// browserLogin percorre /auth/login e /auth/callback no mesmo navegador e
+// devolve a resposta do callback.
+func (a *apiEnv) browserLogin(t *testing.T, code, returnTo string) browserResp {
+	t.Helper()
+	state, ck := a.startLogin(t, returnTo)
+	return a.callback(t, state, code, &http.Cookie{Name: ck.Name, Value: ck.Value})
 }
 
 // cookieClient monta o cliente da API para o cookie recebido, com o CSRF e
@@ -264,6 +295,69 @@ func TestSessionCookieSecureFollowsConfiguration(t *testing.T) {
 	ck := sessionCookie(a.browserLogin(t, "dono", "/"))
 	if ck == nil || !ck.Secure || !ck.HttpOnly || ck.SameSite != http.SameSiteLaxMode {
 		t.Fatalf("cookie com Secure: %+v", ck)
+	}
+	if _, lc := a.startLogin(t, "/"); !lc.Secure || !lc.HttpOnly {
+		t.Fatalf("cookie de vínculo do login com Secure: %+v", lc)
+	}
+}
+
+// Login CSRF: quem ataca inicia um login, entra no provedor com a própria
+// conta e leva outra pessoa ao callback com o state e o código dele. Sem o
+// cookie de vínculo do navegador que iniciou o login, o callback é recusado,
+// nenhuma sessão é criada e o state fica inutilizado.
+func TestLoginCallbackRequiresTheBrowserThatStartedIt(t *testing.T) {
+	idp := newFlowIDP(time.Now().Add(24 * time.Hour))
+	a := newAPI(t, func(s *apiSetup) { s.idp = idp })
+	idp.expiry = a.env.Clock.Now().Add(24 * time.Hour)
+	attacker := a.env.NewTenant(t, "atacante")
+	idp.user("atacante", claimsOf(attacker.Owner))
+
+	state, attackerCookie := a.startLogin(t, "/")
+	if !attackerCookie.HttpOnly || attackerCookie.SameSite != http.SameSiteLaxMode || attackerCookie.Path != "/" ||
+		attackerCookie.MaxAge <= 0 || attackerCookie.MaxAge > int((10*time.Minute).Seconds()) {
+		t.Fatalf("atributos do cookie de vínculo: %+v", attackerCookie)
+	}
+	// O navegador da vítima: sem cookie de vínculo, ou com o vínculo de um
+	// login que ela mesma iniciou.
+	_, victimCookie := a.startLogin(t, "/")
+	for name, cookies := range map[string][]*http.Cookie{
+		"sem vínculo":           nil,
+		"vínculo da vítima":     {{Name: victimCookie.Name, Value: victimCookie.Value}},
+		"vínculo malformado":    {{Name: victimCookie.Name, Value: "forjado"}},
+		"só a sessão da vítima": {{Name: "recorvia_session", Value: "x"}},
+	} {
+		st, _ := a.startLogin(t, "/")
+		resp := a.callback(t, st, "atacante", cookies...)
+		if resp.StatusCode != http.StatusUnauthorized || sessionCookie(resp) != nil {
+			t.Fatalf("%s: callback de outro navegador aceito: %d", name, resp.StatusCode)
+		}
+	}
+	resp := a.callback(t, state, "atacante", &http.Cookie{Name: victimCookie.Name, Value: victimCookie.Value})
+	if resp.StatusCode != http.StatusUnauthorized || sessionCookie(resp) != nil {
+		t.Fatalf("state do atacante no navegador da vítima: %d", resp.StatusCode)
+	}
+	// O state recusado foi consumido: nem o próprio navegador que o iniciou o
+	// reaproveita.
+	if resp := a.callback(t, state, "atacante", &http.Cookie{Name: attackerCookie.Name, Value: attackerCookie.Value}); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("state reaproveitado: %d", resp.StatusCode)
+	}
+
+	// Abas simultâneas do mesmo navegador: o vínculo é reaproveitado e os
+	// dois logins concluem; o callback bem-sucedido remove o cookie.
+	jar := &http.Cookie{Name: attackerCookie.Name, Value: attackerCookie.Value}
+	first, again := a.startLogin(t, "/", jar)
+	second, _ := a.startLogin(t, "/", jar)
+	if again.Value != jar.Value {
+		t.Fatal("o vínculo válido do navegador deve ser reaproveitado")
+	}
+	for _, st := range []string{first, second} {
+		resp := a.callback(t, st, "atacante", jar)
+		if resp.StatusCode != http.StatusFound || sessionCookie(resp) == nil {
+			t.Fatalf("login no navegador que o iniciou: %d", resp.StatusCode)
+		}
+		if lc := loginCookie(resp); lc == nil || lc.MaxAge >= 0 {
+			t.Fatalf("o callback concluído deve remover o cookie de vínculo: %+v", lc)
+		}
 	}
 }
 

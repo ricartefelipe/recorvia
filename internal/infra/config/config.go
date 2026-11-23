@@ -318,9 +318,14 @@ func Load(get Getenv) (*Config, error) {
 		}
 	}
 	for _, o := range strings.Split(l.str("RECORVIA_ALLOWED_ORIGINS", ""), ",") {
-		if o = strings.TrimSpace(o); o != "" {
-			c.AllowedOrigins = append(c.AllowedOrigins, o)
+		if o = strings.TrimSpace(o); o == "" {
+			continue
 		}
+		if !validOrigin(o) {
+			l.errs = append(l.errs, fmt.Errorf("RECORVIA_ALLOWED_ORIGINS: origem inválida %q (use esquema://host[:porta], sem caminho; \"null\" e \"*\" não são aceitos)", o))
+			continue
+		}
+		c.AllowedOrigins = append(c.AllowedOrigins, o)
 	}
 	c.EncryptionKeys = parseKeys(l, l.str("RECORVIA_ENCRYPTION_KEYS", ""))
 	c.EncryptionLostKeys = parseLostKeys(l, l.str("RECORVIA_ENCRYPTION_LOST_KEYS", ""), c.EncryptionKeys)
@@ -450,6 +455,11 @@ func (c *Config) ValidateAPI() error {
 		if !strings.HasPrefix(c.CookieName, "__Host-") {
 			errs = append(errs, errors.New("em produção o cookie de sessão deve usar o prefixo __Host-"))
 		}
+		for _, o := range c.AllowedOrigins {
+			if !strings.HasPrefix(o, "https://") {
+				errs = append(errs, fmt.Errorf("em produção RECORVIA_ALLOWED_ORIGINS aceita só origens https (recebido %q)", o))
+			}
+		}
 	}
 	if strings.HasPrefix(c.CookieName, "__Host-") && !c.CookieSecure {
 		errs = append(errs, errors.New("cookies __Host- exigem RECORVIA_COOKIE_SECURE=true"))
@@ -531,4 +541,18 @@ func (c *Config) validateRetention() []error {
 // ValidateMigrations valida o executável de migrations.
 func (c *Config) ValidateMigrations() error {
 	return errors.Join(require(nil, "RECORVIA_MIGRATIONS_DATABASE_URL", c.MigrationsDBURL)...)
+}
+
+// validOrigin aceita somente uma origem serializada como o navegador a envia
+// no cabeçalho Origin (esquema http ou https, host e porta opcional, sem
+// caminho, query, fragmento nem credenciais). As origens permitidas recebem
+// CORS com credenciais e passam na conferência de origem do CSRF: "null"
+// (iframes em sandbox, documentos locais) e "*" nunca são aceitos.
+func validOrigin(o string) bool {
+	u, err := url.Parse(o)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Hostname() == "" || u.User != nil ||
+		u.Opaque != "" || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery || u.Path != "" {
+		return false
+	}
+	return o == u.Scheme+"://"+u.Host && strings.ToLower(o) == o
 }

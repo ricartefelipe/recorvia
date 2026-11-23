@@ -17,6 +17,9 @@ import (
 
 var testNow = time.Date(2026, time.November, 16, 15, 0, 0, 0, time.UTC)
 
+// testBinding é o vínculo do navegador dos logins dos testes.
+var testBinding = NewBrowserBinding()
+
 type identEnv struct {
 	idp      *fakeIDP
 	sessions *fakeSessions
@@ -59,7 +62,7 @@ func assertKind(t testing.TB, err error, kind apperr.Kind, code string) {
 // begin inicia um login e devolve o state salvo.
 func (e *identEnv) begin(t *testing.T, returnTo string) string {
 	t.Helper()
-	if _, err := e.svc.BeginLogin(context.Background(), returnTo); err != nil {
+	if _, err := e.svc.BeginLogin(context.Background(), returnTo, testBinding); err != nil {
 		t.Fatalf("BeginLogin: %v", err)
 	}
 	return e.idp.gotState
@@ -68,7 +71,7 @@ func (e *identEnv) begin(t *testing.T, returnTo string) string {
 // login conclui um login completo e devolve a sessão e o usuário.
 func (e *identEnv) login(t *testing.T) (Session, User) {
 	t.Helper()
-	sess, user, _, err := e.svc.CompleteLogin(context.Background(), e.begin(t, "/"), "codigo")
+	sess, user, _, err := e.svc.CompleteLogin(context.Background(), e.begin(t, "/"), "codigo", testBinding)
 	if err != nil {
 		t.Fatalf("CompleteLogin: %v", err)
 	}
@@ -79,7 +82,7 @@ func (e *identEnv) login(t *testing.T) (Session, User) {
 
 func TestBeginLogin(t *testing.T) {
 	e := newIdentEnv()
-	target, err := e.svc.BeginLogin(context.Background(), "/faturas?status=open")
+	target, err := e.svc.BeginLogin(context.Background(), "/faturas?status=open", testBinding)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,6 +116,53 @@ func TestBeginLogin(t *testing.T) {
 	}
 }
 
+// O fluxo guarda só o hash do vínculo do navegador; vínculo malformado não
+// inicia login.
+func TestBeginLoginBindsBrowser(t *testing.T) {
+	e := newIdentEnv()
+	f := e.sessions.flows[e.begin(t, "/")]
+	if f.BindingHash == "" || f.BindingHash == testBinding || strings.Contains(f.BindingHash, testBinding) {
+		t.Fatalf("o fluxo deve guardar o hash do vínculo, não o valor: %q", f.BindingHash)
+	}
+	for _, b := range []string{"", "curto", testBinding + "x", strings.Repeat("*", len(testBinding))} {
+		if target, err := e.svc.BeginLogin(context.Background(), "/", b); err == nil || target != "" {
+			t.Errorf("vínculo %q aceito", b)
+		}
+	}
+	if len(e.sessions.flows) != 1 {
+		t.Fatalf("vínculo inválido não deve salvar fluxo: %d", len(e.sessions.flows))
+	}
+	if e.svc.LoginFlowTTL() != e.policy.LoginFlowTTL {
+		t.Fatal("LoginFlowTTL deve refletir a política")
+	}
+}
+
+// Login CSRF: o state e o código de quem iniciou o login não valem em outro
+// navegador, e a tentativa consome o state sem trocar o código.
+func TestCompleteLoginRequiresSameBrowser(t *testing.T) {
+	for _, other := range []string{"", NewBrowserBinding(), "malformado"} {
+		e := newIdentEnv()
+		state := e.begin(t, "/")
+		_, _, _, err := e.svc.CompleteLogin(context.Background(), state, "codigo-do-atacante", other)
+		assertKind(t, err, apperr.KindUnauthenticated, "login_invalid")
+		if e.idp.gotCode != "" || len(e.sessions.sessions) != 0 {
+			t.Fatalf("vínculo %q: código trocado (%q) ou sessão criada", other, e.idp.gotCode)
+		}
+		if _, _, _, err := e.svc.CompleteLogin(context.Background(), state, "codigo-do-atacante", testBinding); err == nil {
+			t.Fatal("o state recusado deve ficar consumido")
+		}
+	}
+	// Fluxo gravado antes do vínculo existir (sem hash) também é recusado.
+	e := newIdentEnv()
+	state := e.begin(t, "/")
+	f := e.sessions.flows[state]
+	f.BindingHash = ""
+	e.sessions.flows[state] = f
+	if _, _, _, err := e.svc.CompleteLogin(context.Background(), state, "codigo", testBinding); err == nil {
+		t.Fatal("fluxo sem vínculo aceito")
+	}
+}
+
 func TestBeginLoginSanitizesReturnPath(t *testing.T) {
 	e := newIdentEnv()
 	state := e.begin(t, "https://evil.example/")
@@ -124,7 +174,7 @@ func TestBeginLoginSanitizesReturnPath(t *testing.T) {
 func TestBeginLoginProviderUnavailable(t *testing.T) {
 	e := newIdentEnv()
 	e.idp.authURL = ""
-	target, err := e.svc.BeginLogin(context.Background(), "/")
+	target, err := e.svc.BeginLogin(context.Background(), "/", testBinding)
 	assertKind(t, err, apperr.KindUnavailable, "identity_provider_unavailable")
 	if target != "" || len(e.sessions.flows) != 0 {
 		t.Fatal("nenhum fluxo deveria ser salvo com o provedor indisponível")
@@ -134,7 +184,7 @@ func TestBeginLoginProviderUnavailable(t *testing.T) {
 func TestBeginLoginStoreFailure(t *testing.T) {
 	e := newIdentEnv()
 	e.sessions.fail["SaveLoginFlow"] = errBoom
-	target, err := e.svc.BeginLogin(context.Background(), "/")
+	target, err := e.svc.BeginLogin(context.Background(), "/", testBinding)
 	if !errors.Is(err, errBoom) || target != "" {
 		t.Fatalf("esperado erro encadeado sem URL, obtido %q, %v", target, err)
 	}
@@ -147,7 +197,7 @@ func TestCompleteLogin(t *testing.T) {
 	state := e.begin(t, "/clientes")
 	flow := e.sessions.flows[state]
 
-	sess, user, returnTo, err := e.svc.CompleteLogin(context.Background(), state, "codigo-1")
+	sess, user, returnTo, err := e.svc.CompleteLogin(context.Background(), state, "codigo-1", testBinding)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,11 +231,11 @@ func TestCompleteLogin(t *testing.T) {
 	}
 
 	// O state é de uso único.
-	_, _, _, err = e.svc.CompleteLogin(context.Background(), state, "codigo-1")
+	_, _, _, err = e.svc.CompleteLogin(context.Background(), state, "codigo-1", testBinding)
 	assertKind(t, err, apperr.KindUnauthenticated, "login_invalid")
 
 	// Um novo login cria outra sessão, sem reaproveitar identificadores.
-	sess2, _, _, err := e.svc.CompleteLogin(context.Background(), e.begin(t, "/"), "codigo-2")
+	sess2, _, _, err := e.svc.CompleteLogin(context.Background(), e.begin(t, "/"), "codigo-2", testBinding)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +248,7 @@ func TestCompleteLoginTTLLimitedByAbsoluteExpiry(t *testing.T) {
 	e := newIdentEnv()
 	e.policy.Absolute = 30 * time.Minute
 	e.rebuild()
-	sess, _, _, err := e.svc.CompleteLogin(context.Background(), e.begin(t, "/"), "c")
+	sess, _, _, err := e.svc.CompleteLogin(context.Background(), e.begin(t, "/"), "c", testBinding)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +289,7 @@ func TestCompleteLoginRejected(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newIdentEnv()
 			state, code := tc.setup(e, e.begin(t, "/"))
-			sess, user, returnTo, err := e.svc.CompleteLogin(context.Background(), state, code)
+			sess, user, returnTo, err := e.svc.CompleteLogin(context.Background(), state, code, testBinding)
 			assertKind(t, err, tc.kind, tc.code)
 			if tc.cause != nil && !errors.Is(err, tc.cause) {
 				t.Errorf("a causa original deve ser encadeada: %v", err)
@@ -259,7 +309,7 @@ func TestCompleteLoginUnverifiedEmailAllowedByPolicy(t *testing.T) {
 	e.policy.RequireVerifiedEmail = false
 	e.rebuild()
 	e.idp.claims.EmailVerified = false
-	if _, _, _, err := e.svc.CompleteLogin(context.Background(), e.begin(t, "/"), "codigo"); err != nil {
+	if _, _, _, err := e.svc.CompleteLogin(context.Background(), e.begin(t, "/"), "codigo", testBinding); err != nil {
 		t.Fatalf("política sem exigência de verificação deveria aceitar: %v", err)
 	}
 }
@@ -269,7 +319,7 @@ func TestCompleteLoginInfrastructureErrors(t *testing.T) {
 		e := newIdentEnv()
 		state := e.begin(t, "/")
 		e.sessions.fail["TakeLoginFlow"] = errBoom
-		_, _, _, err := e.svc.CompleteLogin(context.Background(), state, "codigo")
+		_, _, _, err := e.svc.CompleteLogin(context.Background(), state, "codigo", testBinding)
 		if !errors.Is(err, errBoom) || apperr.IsKind(err, apperr.KindUnauthenticated) {
 			t.Fatalf("falha de armazenamento não pode virar login inválido: %v", err)
 		}
@@ -277,7 +327,7 @@ func TestCompleteLoginInfrastructureErrors(t *testing.T) {
 	t.Run("falha ao gravar o usuário", func(t *testing.T) {
 		e := newIdentEnv()
 		e.users.upsertErr = errBoom
-		if _, _, _, err := e.svc.CompleteLogin(context.Background(), e.begin(t, "/"), "codigo"); !errors.Is(err, errBoom) {
+		if _, _, _, err := e.svc.CompleteLogin(context.Background(), e.begin(t, "/"), "codigo", testBinding); !errors.Is(err, errBoom) {
 			t.Fatalf("esperado erro propagado, obtido %v", err)
 		}
 	})
@@ -286,7 +336,7 @@ func TestCompleteLoginInfrastructureErrors(t *testing.T) {
 			e := newIdentEnv()
 			state := e.begin(t, "/")
 			e.sessions.fail[op] = errBoom
-			if _, _, _, err := e.svc.CompleteLogin(context.Background(), state, "codigo"); !errors.Is(err, errBoom) {
+			if _, _, _, err := e.svc.CompleteLogin(context.Background(), state, "codigo", testBinding); !errors.Is(err, errBoom) {
 				t.Fatalf("esperado erro propagado, obtido %v", err)
 			}
 		})
