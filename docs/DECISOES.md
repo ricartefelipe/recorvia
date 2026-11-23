@@ -2569,6 +2569,127 @@ de recuperação (`deploy/backup/dr-check.sh`) lê a versão da assinatura antes
 todas as tabelas envolvidas já tinham `version`; as listagens do catálogo pela criação não têm índice próprio, como as
 anteriores pelo nome, e cada tenant tem poucos itens.
 
+## ADR-086 Implantação de produção num servidor com Docker Compose, Caddy, segredos no .env e realm de produção
+**Status:** aceita.
+**Contexto:** o Recorvia só tinha o ambiente local (`compose.yaml`), com simulador de pagamentos, Mailpit, seed,
+realm de demonstração, Keycloak em `start-dev` e portas no loopback. O provedor de hospedagem ainda não foi
+escolhido: o pacote de produção não pode depender de serviços próprios de um provedor (balanceador, cofre,
+banco gerenciado, registro de imagens). A outra frente cuida do backup contínuo do PostgreSQL e vai estender o
+serviço do banco depois.
+**Decisão:**
+- **Um servidor primeiro, com Docker Compose.** `deploy/producao/compose.yaml` sobe PostgreSQL, RabbitMQ,
+  Redis, Keycloak, migrations, API, worker, web e o proxy num único servidor Linux com Docker, e o perfil
+  `observability` opcional com as mesmas imagens de `deploy/observability`. As imagens da aplicação são
+  construídas no servidor a partir do checkout da tag (etiqueta `RECORVIA_VERSION`); as externas têm tag fixa
+  (`make pin-check`). A migration roda antes da API e do worker, como no compose local. Todo serviço contínuo
+  tem healthcheck, `restart: unless-stopped`, limites de CPU e memória e rotação de logs; os serviços sem
+  estado rodam com sistema de arquivos somente leitura, sem capabilities e com `no-new-privileges`. Três redes:
+  `edge` (proxy, web, Keycloak), `app` (com saída para a internet: provedor de pagamento, SMTP, webhooks) e
+  `data` (PostgreSQL, Redis, RabbitMQ, sem saída para a internet). O banco usa a imagem oficial,
+  com o volume `postgres-data` e um banco `keycloak` no mesmo servidor, criado por um serviço de bootstrap
+  idempotente. Extensões (como o backup contínuo) entram por um arquivo compose adicional (`COMPOSE_FILE`), sem
+  editar o arquivo base.
+- **Proxy: Caddy.** HTTPS automático (ACME) com renovação, redirecionamento de HTTP, HTTP/3 e configuração
+  curta, embutida na imagem `recorvia-proxy` (ADR-020). O binário é compilado na imagem (xcaddy, imagem
+  oficial de build) com as dependências corrigidas que a versão do Caddy ainda não trazia, e roda como
+  usuário sem privilégios, com `cap_net_bind_service` no binário, `/data` e `/config` do usuário e, no
+  compose, `cap_drop: ALL` com `cap_add: NET_BIND_SERVICE`; o Keycloak declara `USER 1000`. A aplicação fica em `RECORVIA_DOMAIN`, toda
+  encaminhada ao nginx da imagem web, que já serve a SPA e a API na mesma origem. O Keycloak fica em
+  `KEYCLOAK_DOMAIN`, um subdomínio próprio, porque o caminho `/auth` da origem da aplicação já é do login do
+  Recorvia. Nesse domínio o proxy repassa só o que está numa lista do que é permitido: `/realms/recorvia/*`
+  (login, troca do código, conta), `/resources/*` e `/robots.txt`. O console e a API de administração
+  (`/admin`) e o realm `master` (`/realms/master`, onde ficam os administradores) só abrem para
+  `KEYCLOAK_ADMIN_ALLOWED_CIDRS`, que ausente ou vazia vale o loopback do container (ninguém alcança); abrir para
+  todos exige escrever `0.0.0.0/0 ::/0`. Tudo o mais recebe 403, e caminhos que, já decodificados, contenham `..`,
+  `;`, barra invertida ou `%` (de `%2e`, `%2f`, `%3b`, `%5c` ou codificação dupla) são recusados antes de
+  qualquer comparação, para que nenhuma variante de caminho alcance outro realm pelo Keycloak; a query string
+  não entra na conferência (o `redirect_uri` do login vem codificado). O Caddy não grava log de acesso: a URI de `/portal/access` traz o token de uso único, e o log do nginx já a
+  registra sem a query string. Só o proxy publica portas (80 e 443); as interfaces de observabilidade ficam em
+  127.0.0.1, acessadas por túnel SSH.
+- **Endereço do cliente no nginx.** Atrás do proxy, o nginx via sempre o endereço do Caddy e o repassava em
+  `X-Real-IP`: os limites por IP da API (login, webhooks, anônimos) seriam compartilhados por todos os
+  clientes. O proxy passa a ter endereços fixos na rede `edge` (`RECORVIA_PROXY_IPV4` e `RECORVIA_PROXY_IPV6`,
+  em sub-redes fixas fora das faixas automáticas do Docker), e só eles são confiáveis: a imagem web gera, na
+  partida (`web/real-ip.sh`), a lista `set_real_ip_from` a partir de `RECORVIA_TRUSTED_PROXIES`, e usa o último
+  endereço do `X-Forwarded-For`, o que o proxy acrescentou (o Caddy descarta o recebido do cliente). O Keycloak
+  confia nos mesmos endereços (`KC_PROXY_TRUSTED_ADDRESSES`). Sem a variável, como no ambiente local, a lista
+  fica vazia e o `X-Forwarded-For` enviado pelo cliente não altera o endereço registrado nem o `X-Real-IP`; a
+  versão anterior desta decisão confiava em qualquer endereço privado, o que deixava o próprio cliente escolher
+  o IP no ambiente local, numa LAN ou atrás de um balanceador interno.
+- **IPv6.** Sem IPv6 na rede do proxy, o Docker atende as conexões IPv6 publicadas pelo `docker-proxy`, e o
+  Caddy vê o gateway da bridge como cliente: os limites por IP e a restrição do console quebrariam para quem
+  chega por IPv6. A rede `edge` tem IPv6 com sub-rede ULA fixa (`enable_ipv6`); com o `ip6tables` do daemon
+  (padrão do Docker 27 em diante), as conexões IPv6 externas são encaminhadas direto ao container e o Caddy vê
+  o endereço real, como no IPv4. A verificação confere a rede IPv6, o endereço IPv6 fixo do proxy e a cadeia
+  Caddy e nginx por IPv6 a partir de um cliente na rede `edge`; o encaminhamento das conexões externas pelo
+  daemon não é exercitável a partir do loopback, então o guia manda conferir o endereço registrado a partir de
+  uma rede IPv6 externa antes de publicar o `AAAA` (e não publicá-lo com o `ip6tables` desligado). Desligar o
+  `userland-proxy` do daemon foi descartado: muda o comportamento de todos os containers do servidor e não
+  resolve o IPv6 sem a rede IPv6.
+- **Prontidão só na rede interna.** `/readyz` consulta o PostgreSQL e o Redis a cada chamada e não tem limite
+  de requisições: exposto, permitiria esgotar o pool de conexões. Ele fica só na rede interna (a verificação e
+  o guia o consultam de dentro do container web); a origem pública expõe `/livez`, que não toca nas
+  dependências, para o monitoramento externo. A prontidão das dependências chega ao monitoramento pela métrica
+  `recorvia_dependency_up`.
+- **Segredos no `.env` de produção.** Os segredos ficam em `deploy/producao/.env`, fora do Git (`.gitignore`)
+  e do contexto de build das imagens (`.dockerignore`), com permissão 600. `gerar-segredos.sh` preenche toda
+  variável marcada `GERAR` com 32 bytes de `/dev/urandom` (hexadecimal, sem escape em URLs) e a chave de
+  cifragem com identificador da data; não troca valores já preenchidos e não imprime nada no preenchimento. O
+  `.env` e, à parte, as chaves de cifragem vão para o cofre da operação. A configuração de produção já é
+  validada pela aplicação (`RECORVIA_ENV=production`: HTTPS na URL pública, cookies `Secure` com prefixo
+  `__Host-`, SMTP com TLS, sem destinos privados de webhook, simulador desligado sem `RECORVIA_PAYSIM_URL`).
+- **Realm de produção.** `deploy/producao/keycloak` constrói o Keycloak em modo de produção (`kc.sh build` com
+  PostgreSQL, saúde e métricas; `start --optimized`), com hostname público, backchannel pela rede interna
+  (`KC_HOSTNAME_BACKCHANNEL_DYNAMIC`), TLS terminado no proxy e cabeçalhos `X-Forwarded-*` aceitos só dos
+  endereços fixos do proxy. O realm `recorvia` de produção não tem usuários nem autocadastro e exige verificação de e-mail,
+  senha de 12 a 128 caracteres diferente do usuário, do e-mail e das 5 anteriores, bloqueio temporário depois
+  de 5 falhas (de 1 a 15 minutos) e registra eventos de login e de administração. O cliente `recorvia-web`
+  recebe as URLs de redirecionamento, a origem e o segredo dos marcadores `${...}` resolvidos na importação, e
+  o SMTP do realm vem das mesmas variáveis do worker. O realm `master` também vem da importação (`realm-master.json`, copiado como
+  `master-realm.json`): com esse nome, o Keycloak importa o master primeiro e o cria a partir do arquivo na
+  primeira partida, com proteção contra força bruta, a mesma política de senha e eventos de login e de
+  administração, em vez do master padrão sem proteção. O arquivo traz a lista completa de ações obrigatórias
+  (só as listadas existem no realm importado), com a verificação de perfil desligada como no master padrão:
+  ligada, o administrador temporário, sem e-mail nem nome, não conseguiria entrar. Um passo de configuração
+  pela API de administração a cada subida foi descartado: depende das credenciais do administrador temporário,
+  que o guia manda apagar. O primeiro administrador é o administrador temporário do realm master (`KEYCLOAK_ADMIN_USER` e
+  `KEYCLOAK_ADMIN_PASSWORD`), trocado por um definitivo com segundo fator no primeiro acesso. O backup do Keycloak é o `pg_dump` do banco `keycloak`.
+- **Verificação.** `make prod-check` (`deploy/producao/verificar.sh`, job `production-stack`) sobe o compose
+  de produção num projeto isolado com `localhost` e `auth.localhost` (certificados da autoridade interna do
+  Caddy), segredos gerados pelo script e o proxy publicado só em 127.0.0.1, e confere a configuração (portas,
+  serviços de demonstração, healthchecks, restart e limites), HTTPS e HSTS, `/livez` público e `/readyz` só
+  interno, a interface, o endereço do cliente visto pelo nginx (também por IPv6, e sem aceitar `X-Forwarded-For`
+  forjado pelo cliente ou por outro container), o redirecionamento do login ao Keycloak e o formulário de
+  login, problem+json numa rota inexistente, as portas dos containers em execução, a lista do que o proxy
+  repassa no domínio do Keycloak (403 para console, API de administração, realm master e variantes de caminho
+  com o padrão fechado), os realms `recorvia` (sem usuários, proteções, cliente com o domínio e o segredo) e
+  `master` (força bruta) e o `pg_dump` do banco do Keycloak. O ambiente de quem chama não entra: as variáveis
+  do Compose e as que o compose interpola são removidas antes.
+
+**Alternativas:** Kubernetes (ou um serviço gerenciado de containers) foi descartado agora: para um servidor
+e uma réplica de cada processo, acrescenta plano de controle, manifests, ingress e gestão de segredos sem
+ganho de disponibilidade, e amarraria a escolha do provedor. A migração continua simples: as imagens, as
+variáveis e os healthchecks são os mesmos, e o worker e a API já drenam no SIGTERM (ADR-082). Nginx ou Traefik
+como proxy de borda exigiriam certbot ou configuração dinâmica para o ACME; o Caddy faz isso sozinho. O Keycloak
+num caminho da origem da aplicação (`/auth`) conflitaria com o login do Recorvia, e outro caminho exigiria
+reescritas no proxy e no `KC_HTTP_RELATIVE_PATH`. Docker secrets em arquivos protegeriam os valores do
+`docker inspect`, mas a aplicação lê variáveis de ambiente, e quem tem acesso ao Docker do servidor já tem
+acesso aos volumes; um cofre externo fica para quando o provedor for escolhido. Publicar imagens num registro
+dependeria de um provedor e de credenciais; construir no servidor a partir da tag mantém a origem verificável.
+O realm de demonstração com usuários removidos depois foi descartado: um esquecimento deixaria senhas
+conhecidas em produção.
+**Consequências:** as sub-redes fixas da rede `edge` (`10.86.86.0/24` e `fd52:6563:6f72:86::/64`) podem colidir
+com a rede de um servidor; trocam-se no `.env`. O console do Keycloak exige liberar o IP da operação antes de
+cada administração. Um servidor é ponto único de falha (sem réplicas nem failover); a recuperação segue o backup
+e a restauração (ADR-055, ADR-064) e o guia `docs/operacao/implantacao.md`. Os segredos aparecem no `docker
+inspect` para quem administra o Docker do servidor. O realm só é importado na primeira partida: mudar o
+domínio, o SMTP ou o segredo do cliente depois exige o console de administração (passos no guia). A atualização
+de versão para a API e o worker antes das migrations (indisponibilidade de alguns minutos), porque não há
+garantia de compatibilidade das migrations com a versão anterior. O rótulo `environment: local` do Prometheus
+continua o mesmo na produção. O Keycloak 26.8.2 traz o Guava com a CVE-2026-102554 (exceção do Trivy até
+2026-12-31), agora também numa imagem de produção. Provedor, Asaas em produção e SMTP transacional continuam
+decisões do dono.
+
 ## ADR-087 Backup contínuo do PostgreSQL com WAL-G, cifrado no cliente, e recuperação para um ponto no tempo
 **Status:** aceita. Completa a ADR-055 (o backup lógico continua) e a ADR-064 (a recuperação de desastre ganha a
 recuperação para um instante).

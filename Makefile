@@ -167,6 +167,10 @@ restore-check: ## Restaura o último backup (ou DUMP=arquivo) num banco novo e c
 dr-check: ## Exercício de recuperação de desastre de ponta a ponta num projeto isolado do compose (relatório em backups/dr-check)
 	bash deploy/backup/dr-check.sh
 
+.PHONY: prod-check
+prod-check: ## Sobe o compose de produção num projeto isolado (localhost, certificado interno) e confere HTTPS, readyz, interface, login, problem+json e portas
+	bash deploy/producao/verificar.sh
+
 .PHONY: postgres-image
 postgres-image: ## Imagem do PostgreSQL com arquivamento contínuo de WAL e agente de backup (deploy/postgres, ADR-087)
 	docker build -f deploy/postgres/Dockerfile -t recorvia-postgres:$(IMAGE_TAG) .

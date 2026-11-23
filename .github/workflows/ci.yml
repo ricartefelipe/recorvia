@@ -288,6 +288,24 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # Pacote de produção (ADR-086): o compose de deploy/producao num projeto
+  # isolado, com os domínios localhost e auth.localhost (certificados da
+  # autoridade interna do Caddy) e o proxy só em 127.0.0.1. Confere a
+  # configuração (portas, serviços de demonstração, healthchecks, restart e
+  # limites), HTTPS, /readyz, a interface, o redirecionamento do login ao
+  # Keycloak, problem+json numa rota inexistente, as portas dos containers,
+  # o realm de produção e o backup do banco do Keycloak.
+  production-stack:
+    name: production-stack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Scripts do pacote de produção (shellcheck)
+        run: shellcheck deploy/producao/*.sh web/real-ip.sh
+      - name: Verificação do pacote de produção (make prod-check)
+        run: make prod-check
+
   # Recuperação para um ponto no tempo (ADR-087): arquivamento contínuo de WAL
   # e backups base cifrados no MinIO, destruição do servidor, recusa da chave
   # do backup errada ou ausente, restauração até o instante T num servidor
@@ -331,6 +349,8 @@ jobs:
           - { image: paysim, context: ., dockerfile: deploy/docker/go.Dockerfile, cmd: paysim }
           - { image: web, context: web, dockerfile: web/Dockerfile, cmd: "" }
           - { image: keycloak, context: deploy/keycloak, dockerfile: deploy/keycloak/Dockerfile, cmd: "" }
+          - { image: keycloak-producao, context: deploy/producao/keycloak, dockerfile: deploy/producao/keycloak/Dockerfile, cmd: "" }
+          - { image: proxy, context: deploy/producao/caddy, dockerfile: deploy/producao/caddy/Dockerfile, cmd: "" }
     env:
       IMAGE: recorvia-${{ matrix.image }}:ci
       BUILD_CONTEXT: ${{ matrix.context }}

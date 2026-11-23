@@ -21,7 +21,10 @@ verificação.
 ## Convenções dos comandos
 
 Os exemplos usam o ambiente local (`docker compose`, projeto `recorvia`). Em outros ambientes,
-substitua pelo acesso equivalente ao banco e ao broker.
+substitua pelo acesso equivalente ao banco e ao broker. Na produção com o pacote de
+`deploy/producao` ([implantação](../implantacao.md)), os mesmos comandos `docker compose` valem
+executados dentro de `deploy/producao`; a API fica em `https://RECORVIA_DOMAIN` e as interfaces
+de observabilidade, no loopback do servidor (túnel SSH).
 
 - **Consultas globais** (sem dados de tenant: outbox agregada, agendamentos, catálogo do banco):
   `docker compose exec postgres psql -U postgres -d recorvia`.

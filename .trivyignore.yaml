@@ -8,5 +8,6 @@ vulnerabilities:
     statement: >-
       Guava 33.6.0 embutido na distribuição do Keycloak 26.8.2, a versão mais recente publicada
       (imagem de 2026-11-12); a correção (33.7.2) depende de nova versão do Keycloak. A imagem
-      recorvia-keycloak é usada somente no ambiente local e nos testes E2E da CI.
+      recorvia-keycloak é usada no ambiente local e nos testes E2E da CI; a
+      recorvia-keycloak-producao (deploy/producao, ADR-086) tem a mesma base e a mesma exceção.
     expired_at: 2026-12-31
