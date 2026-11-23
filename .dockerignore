@@ -7,8 +7,14 @@ dist
 coverage*
 *.out
 .env
+# .env de produção (deploy/producao/.env) e cópias: segredos fora do contexto de build.
+**/.env
+**/.env.*
+!**/.env.example
 web/node_modules
 web/dist
 web/playwright-report
 web/test-results
 backups
+# Chave de cifragem do backup contínuo da produção (gerar-segredos.sh).
+deploy/producao/segredos

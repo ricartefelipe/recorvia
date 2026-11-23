@@ -12,6 +12,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/ricartefelipe/recorvia/internal/infra/config"
 	"github.com/ricartefelipe/recorvia/internal/infra/telemetry"
 	"github.com/ricartefelipe/recorvia/internal/kernel/clock"
 	"github.com/ricartefelipe/recorvia/internal/payments"
@@ -57,5 +58,25 @@ func TestProviderWebhookRejectsOversizedBody(t *testing.T) {
 				t.Fatalf("métrica %s/%s = %v", c.label, c.outcome, got)
 			}
 		})
+	}
+}
+
+// O limite por IP da rota de webhooks de provedores vem da configuração
+// (RECORVIA_WEBHOOK_RATE_LIMIT_PER_MINUTE, ADR-088), com o padrão de 1200 por
+// minuto sem configuração.
+func TestProviderWebhookRateLimitFromConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  *config.Config
+		want int
+	}{
+		{"sem configuração", nil, config.DefaultWebhookRateLimitPerMinute},
+		{"valor zero usa o padrão", &config.Config{}, config.DefaultWebhookRateLimitPerMinute},
+		{"configurado", &config.Config{WebhookRateLimitPerMinute: 6000}, 6000},
+	}
+	for _, c := range cases {
+		if got := (&API{Config: c.cfg}).webhookRateLimit(); got != c.want {
+			t.Errorf("%s: %d, esperado %d", c.name, got, c.want)
+		}
 	}
 }

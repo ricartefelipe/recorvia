@@ -15,12 +15,16 @@ verificação.
 | [Encaminhamento de alertas](alertas.md) | `RecorviaWatchdog`, `RecorviaAlertDeliveryFailing`, `RecorviaAlertNotificationsFailing` |
 | [Isolamento de dados](isolamento-de-dados.md) | sem alerta automático (incidente aberto por suspeita ou relato) |
 | [Equipe da plataforma](equipe-da-plataforma.md) | sem alerta automático (inclusão e remoção de integrantes da equipe) |
-| [Recuperação de desastre e chaves de cifragem](recuperacao-de-desastre.md) | sem alerta próprio (`RecorviaDependencyUnavailable` e `RecorviaTargetDown` acompanham a perda do banco e a recusa de inicialização por chave errada) |
+| [Backup contínuo do PostgreSQL](backup-continuo.md) | `RecorviaWALArchiveStale`, `RecorviaWALArchiveFailing`, `RecorviaBaseBackupStale`, `RecorviaBackupDependencyUnavailable`, `RecorviaBackupAgentMissing` |
+| [Recuperação de desastre e chaves de cifragem](recuperacao-de-desastre.md) (inclui a recuperação para um ponto no tempo) | sem alerta próprio (`RecorviaDependencyUnavailable` e `RecorviaTargetDown` acompanham a perda do banco e a recusa de inicialização por chave errada) |
 
 ## Convenções dos comandos
 
 Os exemplos usam o ambiente local (`docker compose`, projeto `recorvia`). Em outros ambientes,
-substitua pelo acesso equivalente ao banco e ao broker.
+substitua pelo acesso equivalente ao banco e ao broker. Na produção com o pacote de
+`deploy/producao` ([implantação](../implantacao.md)), os mesmos comandos `docker compose` valem
+executados dentro de `deploy/producao`; a API fica em `https://RECORVIA_DOMAIN` e as interfaces
+de observabilidade, no loopback do servidor (túnel SSH).
 
 - **Consultas globais** (sem dados de tenant: outbox agregada, agendamentos, catálogo do banco):
   `docker compose exec postgres psql -U postgres -d recorvia`.

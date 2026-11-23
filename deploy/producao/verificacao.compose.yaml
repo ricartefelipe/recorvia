@@ -1,0 +1,68 @@
+# Ajustes da verificação automatizada do pacote de produção (make
+# prod-check, deploy/producao/verificar.sh). Usado sempre junto com o
+# compose.yaml desta pasta e com um nome de projeto próprio:
+#   docker compose -p recorvia-prodcheck -f compose.yaml -f verificacao.compose.yaml ...
+#
+# Diferenças em relação à produção:
+# - o proxy publica 80 e 443 somente em 127.0.0.1 (a máquina que verifica não
+#   fica exposta na rede);
+# - o MinIO faz o papel do armazenamento S3 do backup contínuo (ADR-087),
+#   só aqui, nunca no compose de produção; fica na rede storage, como o
+#   serviço externo que ele representa, e o bucket é criado na partida;
+# - containers e volumes levam o rótulo recorvia.prod-check: antes de
+#   derrubar o projeto com os volumes, o roteiro confere que tudo o que existe
+#   nele foi criado pela verificação.
+# Exige Docker Compose 2.24 ou superior (marcador !override).
+x-check-labels: &check-labels
+  recorvia.prod-check: "1"
+
+services:
+  minio:
+    labels: *check-labels
+    # Fork mantido do MinIO (a distribuição oficial de imagens foi encerrada),
+    # versão fixa e digest do índice, como no pitr-check.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
+    entrypoint: ["bash", "-c", "mkdir -p /data/recorvia-backup && exec minio server /data --address :9000"]
+    environment:
+      MINIO_ROOT_USER: ${RECORVIA_BACKUP_S3_ACCESS_KEY_ID:?defina no .env}
+      MINIO_ROOT_PASSWORD: ${RECORVIA_BACKUP_S3_SECRET_ACCESS_KEY:?defina no .env}
+    volumes:
+      - minio-data:/data
+    networks: [storage]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: "no"
+  postgres:
+    labels: *check-labels
+    depends_on:
+      minio: { condition: service_healthy }
+  postgres-backup: { labels: *check-labels }
+  migrate-bootstrap: { labels: *check-labels }
+  migrate: { labels: *check-labels }
+  keycloak-db-bootstrap: { labels: *check-labels }
+  redis: { labels: *check-labels }
+  rabbitmq: { labels: *check-labels }
+  keycloak: { labels: *check-labels }
+  api: { labels: *check-labels }
+  worker: { labels: *check-labels }
+  web: { labels: *check-labels }
+  proxy:
+    labels: *check-labels
+    ports: !override
+      - "127.0.0.1:80:80"
+      - "127.0.0.1:443:443"
+      - "127.0.0.1:443:443/udp"
+
+volumes:
+  minio-data: { labels: *check-labels }
+  postgres-data: { labels: *check-labels }
+  redis-data: { labels: *check-labels }
+  rabbitmq-data: { labels: *check-labels }
+  caddy-data: { labels: *check-labels }
+  caddy-config: { labels: *check-labels }
+  prometheus-data: { labels: *check-labels }
+  alertmanager-data: { labels: *check-labels }
+  grafana-data: { labels: *check-labels }

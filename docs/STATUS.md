@@ -20,6 +20,8 @@ resultado real) e as pendências.
 | 11 | Release `0.2.0` | `release/0.2.0` | integrada em `main` com a tag `v0.2.0` |
 | 12 | Auditoria de todos os requisitos (RF-01 a RF-17, RNF-01 a RNF-12) e correção do que ela encontrou | nove branches `feature/*` | integradas em `develop` (PRs #21 a #29) |
 | 13 | Release `0.3.0` | `release/0.3.0` | integrada em `main` com a tag `v0.3.0` |
+| 14 | Preparação para produção: pacote de implantação, backup contínuo, revisão de segurança e teste de carga | quatro branches `feature/*` | integradas em `develop` (PRs #32 a #35) |
+| 15 | Release `0.4.0` | `release/0.4.0` | integrada em `main` com a tag `v0.4.0` |
 
 A autoria das operações feitas por credencial de API foi corrigida depois das etapas 6 e 7
 (`feature/autoria-credenciais-api`, PR #9).
@@ -150,6 +152,21 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
   novos (ADR-084).
 - **API:** 142 operações no contrato, todas implementadas; migrations até a `00024`.
 
+### Etapa 14: preparação para produção
+- **Implantação** (ADR-086): `deploy/producao` sobe o Recorvia num servidor com Docker Compose, Caddy
+  com HTTPS automático, Keycloak de produção sem usuários de demonstração, segredos gerados por
+  `gerar-segredos.sh` e somente as portas 80 e 443. `make prod-check` e o job `production-stack`
+  conferem o pacote em cada PR. Guia em `docs/operacao/implantacao.md`.
+- **Backup contínuo** (ADR-087): WAL-G com arquivamento de WAL e backups base cifrados no cliente
+  para um armazenamento S3, restauração para um ponto no tempo (`make pitr-restore`) e exercício na
+  CI (`make pitr-check`); o banco do Keycloak entra no mesmo backup.
+- **Segurança** (ADR-089): login vinculado ao navegador (login CSRF), origens validadas, CSP na API,
+  SSRF por IPv6 e testes de acesso cruzado entre organizações em cerca de 40 rotas. Modelo de ameaças
+  em `docs/operacao/seguranca.md`.
+- **Carga** (ADR-088): `make load-test` mediu fechamento, leitura, escrita, webhooks e consumo; as
+  correções reduziram a primeira fatura do fechamento de 20 a 88 s para 6 s e a lista de assinaturas
+  com 64 usuários de 2,4 a 3,6 s para 0,3 a 0,5 s. Números em `docs/operacao/carga.md`.
+
 ## Verificações executadas
 
 | Data | Comando | Resultado |
@@ -195,13 +212,18 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
 | 2026-11-21 | Revisão independente dos PRs #27, #28 e #29 (focos distintos e 1 verificador por achado) | #27: 3 defeitos confirmados e corrigidos (versão da conta que perde o padrão do provedor, modais presos depois do 412, página vazia que escondia o paginador); #28: 2; #29: nenhum; cada correção com teste que falha sem ela |
 | 2026-11-21 | Integração local de cada frente depois de integrar `develop` (`internal/httpapi` completo, com o validador de contrato) | aprovada; conflitos de sentido entre frentes corrigidos (sessões com gerações, CSV no validador, `If-Match` no exercício de recuperação de desastre) |
 | 2026-11-21 | CI dos PRs #21 a #29 | todos os checks aprovados, inclusive `e2e` com os roteiros 06 a 09 e `disaster-recovery`; no #28, o roteiro 07 falhou na primeira execução por um seletor do interruptor (corrigido) |
+| 2026-11-23 | `make prod-check`, `make pitr-check` e CI dos PRs #32 a #35 | aprovados; `pitr-check` com RPO observado de 0 a 3 s e RTO de 134 a 204 s em dados de demonstração |
+| 2026-11-23 | `/code-review` de cada frente e SonarCloud | 8 (implantação), 9 (backup), 7 (segurança) e 8 (carga) apontamentos corrigidos com teste; SonarCloud aprovado depois de compilar o Caddy com dependências corrigidas e tirar o root das imagens |
+| 2026-11-23 | Teste de carga antes (3 execuções) e depois (4 execuções), máquina compartilhada de 12 núcleos | fechamento de 3.287 faturas de 3m18s–8m3s para 1m23s–2m30s; leitura limitada pela CPU do PostgreSQL a partir de 32 usuários |
 
 ## Pendências reais
 
 - **Asaas**: o adaptador segue a documentação oficial e é coberto por testes de contrato, mas **não
   foi exercitado no sandbox**: exige chave de API do sandbox e URL pública para receber webhooks. O
   passo a passo está em `docs/integracoes/asaas.md`.
-- **Produção**: hospedagem, domínio, HTTPS e o Keycloak de produção dependem da escolha do dono.
+- **Produção**: o pacote de um servidor existe e é verificado na CI (`deploy/producao`, ADR-086);
+  falta escolher o provedor, o domínio e o SMTP transacional e fazer a primeira implantação real. Um
+  servidor é ponto único de falha; a atualização de versão para api e worker durante as migrations.
 - **Plano da plataforma**: cobrança real e emissão de NFS-e dos demonstrativos; valores comerciais dos
   planos e tela para editá-los.
 - **Decisões do dono**: guardar os valores anterior e novo das alterações no histórico do cliente
@@ -210,9 +232,11 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
 - **Retenção e anonimização**: os dados pessoais copiados nas faturas já emitidas permanecem (a
   fatura emitida é imutável, ADR-061); o cadastro do cliente no provedor de pagamento não é alterado;
   não há anonimização de usuários, membros e organizações.
-- **Recuperação de desastre**: o exercício usa um servidor e dados de demonstração; réplicas,
-  arquivamento contínuo de WAL, outra região e backup do Keycloak ficam fora. Não há meio de
-  plataforma para pedir a conciliação de todas as organizações de uma vez.
+- **Recuperação de desastre**: os exercícios usam um servidor e dados de demonstração. O backup
+  contínuo com recuperação para um ponto no tempo cobre o banco da aplicação e o do Keycloak
+  (ADR-087); réplica de leitura, cópia em outra região, papel de privilégio mínimo para o agente de
+  backup e exportação agendada do realm ficam fora. Não há meio de plataforma para pedir a
+  conciliação de todas as organizações de uma vez.
 - **Alertmanager**: instância única; nada alerta pela ausência do sinal diário `RecorviaWatchdog`
   fora do ambiente local.
 - **Valor a recuperar**: não há estorno de baixa nem registro de recebimento depois de uma baixa
@@ -226,7 +250,17 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
   retentativas) seguem protegidas pela situação atual (409), sem `If-Match`; parâmetros de consulta
   desconhecidos são ignorados, exceto `sort`; os campos de seleção do catálogo carregam todas as
   páginas, sem busca no servidor (ADR-083 e ADR-085).
-- **Imagens**: fixadas por tag exata e verificadas na CI (`make pin-check`), sem digest (ADR-082).
+- **Imagens**: fixadas por tag exata e verificadas na CI (`make pin-check`), sem digest (ADR-082). A
+  imagem `recorvia-postgres` fica fora do `image-scan` enquanto a base oficial tiver vulnerabilidades
+  corrigíveis (`gosu`, `libxml2`); o Guava do Keycloak tem exceção até 2026-12-31.
+- **Segurança** (`docs/operacao/seguranca.md`): os webhooks do Asaas são autenticados só por token
+  (recomenda-se consultar o Asaas antes de aplicar eventos financeiros); a API confia no `X-Real-IP`
+  porque só o nginx a alcança; sem limite de requisições na borda do domínio do Keycloak; o link do
+  portal é consumido por um GET simples, que um verificador de links de e-mail pode gastar.
+- **Desempenho** (`docs/operacao/carga.md`): o primeiro limite é a CPU do PostgreSQL no painel e nas
+  listas a partir de 32 usuários; o pool do worker espera conexão em 44% a 61% das aquisições no
+  fechamento; a criação de assinaturas é serializada por organização; repetir a medição numa máquina
+  dedicada antes de abrir para muitos clientes.
 - **Migrations com índices sem `CONCURRENTLY`** (00014, 00015, 00019 e 00023): em bancos grandes,
   a criação bloqueia escritas durante a aplicação.
 - **Revisão independente**: o repositório tem um único mantenedor; a proteção de branches exige os
@@ -235,6 +269,7 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
 
 ## Ponto de retomada
 
-Versão `0.3.0` publicada (tag `v0.3.0` em `main`), com todos os requisitos auditados. Próximos passos
-sugeridos: validar o adaptador do Asaas no sandbox (`docs/integracoes/asaas.md`), escolher onde
-hospedar a produção e calibrar os limites dos alertas com o volume real.
+Versão `0.4.0` publicada (tag `v0.4.0` em `main`), pronta para a primeira implantação. Próximos passos
+dependem do dono: escolher o provedor e o domínio e seguir `docs/operacao/implantacao.md`, configurar
+o SMTP transacional, validar o adaptador do Asaas no sandbox (`docs/integracoes/asaas.md`) e calibrar
+os limites dos alertas com o volume real.

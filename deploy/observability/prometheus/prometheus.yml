@@ -36,6 +36,19 @@ scrape_configs:
       family: [queue_coarse_metrics, queue_consumer_count, queue_metrics]
     static_configs:
       - targets: ["rabbitmq:15692"]
+  # Agente de backup contínuo do PostgreSQL (deploy/postgres, ADR-087). O
+  # alvo é descoberto pelo DNS do compose: sem o serviço postgres-backup (o
+  # ambiente local não o inclui), a coleta não tem alvos e não aparece como
+  # indisponível. RecorviaBackupAgentMissing cobre o agente que deixa de
+  # existir depois de ter sido coletado.
+  - job_name: recorvia-backup
+    dns_sd_configs:
+      - names: ["postgres-backup"]
+        type: A
+        port: 9187
+    relabel_configs:
+      - target_label: instance
+        replacement: postgres-backup:9187
   - job_name: otel-collector
     static_configs:
       - targets: ["otel-collector:8888"]

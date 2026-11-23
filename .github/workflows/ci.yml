@@ -288,6 +288,50 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # Pacote de produção (ADR-086): o compose de deploy/producao num projeto
+  # isolado, com os domínios localhost e auth.localhost (certificados da
+  # autoridade interna do Caddy) e o proxy só em 127.0.0.1. Confere a
+  # configuração (portas, serviços de demonstração, healthchecks, restart e
+  # limites), HTTPS, /readyz, a interface, o redirecionamento do login ao
+  # Keycloak, problem+json numa rota inexistente, as portas dos containers,
+  # o realm de produção e o backup do banco do Keycloak.
+  production-stack:
+    name: production-stack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Scripts do pacote de produção (shellcheck)
+        run: shellcheck deploy/producao/*.sh web/real-ip.sh
+      - name: Verificação do pacote de produção (make prod-check)
+        run: make prod-check
+
+  # Recuperação para um ponto no tempo (ADR-087): arquivamento contínuo de WAL
+  # e backups base cifrados no MinIO, destruição do servidor, recusa da chave
+  # do backup errada ou ausente, restauração até o instante T num servidor
+  # novo e aplicação religada com a conciliação antes do worker.
+  pitr-check:
+    name: pitr-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Exercício de recuperação para um ponto no tempo (make pitr-check)
+        run: make pitr-check
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: pitr-check
+          # Relatório com os tempos medidos, manifestos (contagens e somas de
+          # verificação), listas de backups e logs: nenhum dado nem chave.
+          path: |
+            backups/pitr-check/relatorio.md
+            backups/pitr-check/*.manifest
+            backups/pitr-check/*.txt
+            backups/pitr-check/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
   # Construção das imagens e análise de vulnerabilidades. Nenhuma imagem é
   # publicada e não há deploy: as imagens existem apenas no runner.
   image-scan:
@@ -305,6 +349,8 @@ jobs:
           - { image: paysim, context: ., dockerfile: deploy/docker/go.Dockerfile, cmd: paysim }
           - { image: web, context: web, dockerfile: web/Dockerfile, cmd: "" }
           - { image: keycloak, context: deploy/keycloak, dockerfile: deploy/keycloak/Dockerfile, cmd: "" }
+          - { image: keycloak-producao, context: deploy/producao/keycloak, dockerfile: deploy/producao/keycloak/Dockerfile, cmd: "" }
+          - { image: proxy, context: deploy/producao/caddy, dockerfile: deploy/producao/caddy/Dockerfile, cmd: "" }
     env:
       IMAGE: recorvia-${{ matrix.image }}:ci
       BUILD_CONTEXT: ${{ matrix.context }}

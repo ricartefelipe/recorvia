@@ -74,6 +74,14 @@ func (a *API) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]subscriptionDTO, 0, len(pg.Items))
 	for _, s := range pg.Items {
+		// Os nomes vêm da própria consulta da lista; a leitura por item (uma
+		// transação por assinatura) fica só para quem não os fornece.
+		if n, ok := pg.Names[s.ID]; ok {
+			d := subDTO(s)
+			d.CustomerName, d.PlanName = n.Customer, n.Plan
+			out = append(out, d)
+			continue
+		}
 		out = append(out, a.subscriptionView(r, s))
 	}
 	a.writeJSON(w, r, http.StatusOK, newPage(out, pg.NextCursor))

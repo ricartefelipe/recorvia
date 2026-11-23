@@ -52,26 +52,46 @@ func NewService(idp IdentityProvider, sessions SessionStore, users UserStore, c 
 	return &Service{idp: idp, sessions: sessions, users: users, clock: c, policy: p}
 }
 
-// BeginLogin cria o estado de login e retorna a URL de autorização.
-func (s *Service) BeginLogin(ctx context.Context, returnTo string) (string, error) {
+// LoginFlowTTL é a validade do fluxo de login (e do cookie que o vincula
+// ao navegador).
+func (s *Service) LoginFlowTTL() time.Duration { return s.policy.LoginFlowTTL }
+
+// LoginStart é o início de um login: o endereço de autorização no provedor e
+// o state do fluxo, que o chamador usa para nomear o cookie de vínculo.
+type LoginStart struct {
+	URL   string
+	State string
+}
+
+// BeginLogin cria o estado de login e retorna a URL de autorização. O fluxo
+// fica vinculado ao navegador pelo binding (NewBrowserBinding, um por
+// fluxo), guardado pelo chamador num cookie HttpOnly: sem ele, quem
+// iniciasse um login e enviasse a outra pessoa o endereço de callback com o
+// próprio código faria o navegador dela entrar na conta de quem atacou
+// (login CSRF).
+func (s *Service) BeginLogin(ctx context.Context, returnTo, binding string) (LoginStart, error) {
+	if !ValidBrowserBinding(binding) {
+		return LoginStart{}, apperr.Invalid("login_binding_invalid", "Não foi possível iniciar o login. Tente novamente.")
+	}
 	f := LoginFlow{
 		State: RandomToken(32), Nonce: RandomToken(32), PKCEVerifier: s.idp.NewPKCEVerifier(),
-		ReturnTo: SafeReturnPath(returnTo), CreatedAt: s.clock.Now(),
+		ReturnTo: SafeReturnPath(returnTo), CreatedAt: s.clock.Now(), BindingHash: bindingHash(binding),
 	}
 	target := s.idp.AuthCodeURL(f.State, f.Nonce, f.PKCEVerifier)
 	if target == "" {
-		return "", apperr.Unavailable("identity_provider_unavailable", "Provedor de identidade indisponível. Tente novamente em instantes.")
+		return LoginStart{}, apperr.Unavailable("identity_provider_unavailable", "Provedor de identidade indisponível. Tente novamente em instantes.")
 	}
 	if err := s.sessions.SaveLoginFlow(ctx, f, s.policy.LoginFlowTTL); err != nil {
-		return "", fmt.Errorf("identity: estado de login: %w", err)
+		return LoginStart{}, fmt.Errorf("identity: estado de login: %w", err)
 	}
-	return target, nil
+	return LoginStart{URL: target, State: f.State}, nil
 }
 
-// CompleteLogin valida o callback, troca o código com o verificador PKCE,
-// valida o ID token e cria uma sessão nova (rotação: nenhum identificador
-// anterior é reaproveitado).
-func (s *Service) CompleteLogin(ctx context.Context, state, code string) (Session, User, string, error) {
+// CompleteLogin valida o callback, confere que ele chega ao navegador que
+// iniciou o login (binding), troca o código com o verificador PKCE, valida o
+// ID token e cria uma sessão nova (rotação: nenhum identificador anterior é
+// reaproveitado).
+func (s *Service) CompleteLogin(ctx context.Context, state, code, binding string) (Session, User, string, error) {
 	invalid := apperr.Unauthenticated("login_invalid", "Não foi possível concluir o login. Tente novamente.")
 	if state == "" || code == "" {
 		return Session{}, User{}, "", invalid
@@ -82,6 +102,11 @@ func (s *Service) CompleteLogin(ctx context.Context, state, code string) (Sessio
 			return Session{}, User{}, "", invalid
 		}
 		return Session{}, User{}, "", err
+	}
+	// O fluxo já foi consumido: um callback em outro navegador inutiliza o
+	// state e não troca o código.
+	if !flow.boundTo(binding) {
+		return Session{}, User{}, "", invalid
 	}
 	tokens, err := s.idp.Exchange(ctx, code, flow.PKCEVerifier)
 	if err != nil {

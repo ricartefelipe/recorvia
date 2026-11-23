@@ -181,7 +181,7 @@ func NewRouter(d Deps) (*API, http.Handler) {
 
 	// Webhooks de provedores: limite próprio de corpo, sem sessão.
 	r.Group(func(r chi.Router) {
-		r.Use(a.limitBody(payments.MaxWebhookBody), a.timeout(10*time.Second), a.rateLimitIP(1200))
+		r.Use(a.limitBody(payments.MaxWebhookBody), a.timeout(10*time.Second), a.rateLimitIP(a.webhookRateLimit()))
 		a.handle(r, http.MethodPost, "/webhooks/providers/{provider}/{token}", Public, "", a.receiveProviderWebhook)
 	})
 
@@ -404,9 +404,17 @@ func requestedTenant(r *http.Request) (string, bool) {
 	return id.String(), true
 }
 
+// apiCSP é a política de conteúdo das respostas da API: nenhuma delas é um
+// documento que carregue recursos, e nenhuma pode ser exibida em frame. O
+// documento HTML da fatura define a própria política (estilos inline).
+const apiCSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+
+// securityHeaders aplica os cabeçalhos de segurança a todas as respostas da
+// API, inclusive quando ela é alcançada sem o nginx da interface à frente.
 func (a *API) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
+		h.Set("Content-Security-Policy", apiCSP)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cache-Control", "no-store")
@@ -486,6 +494,15 @@ func clientIP(r *http.Request) string {
 		}
 	}
 	return host
+}
+
+// webhookRateLimit é o limite por minuto de webhooks de provedores por IP de
+// origem (RECORVIA_WEBHOOK_RATE_LIMIT_PER_MINUTE).
+func (a *API) webhookRateLimit() int {
+	if a.Config != nil && a.Config.WebhookRateLimitPerMinute > 0 {
+		return a.Config.WebhookRateLimitPerMinute
+	}
+	return config.DefaultWebhookRateLimitPerMinute
 }
 
 // rateLimitIP limita requisições por IP (por minuto). Falha do Redis libera

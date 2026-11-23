@@ -1,0 +1,87 @@
+# Proxy reverso de produção do Recorvia (ADR-086).
+#
+# - {$RECORVIA_DOMAIN}: interface e API na mesma origem. Tudo vai para o nginx
+#   da imagem web, que serve a SPA e encaminha /api, /auth, /portal/access,
+#   /webhooks e /livez à API (web/nginx.conf).
+# - {$KEYCLOAK_DOMAIN}: Keycloak num subdomínio próprio (o caminho /auth da
+#   origem da aplicação já é do login do Recorvia), com lista do que é
+#   permitido: o realm recorvia e os recursos estáticos para todos; console,
+#   API de administração e realm master só para KEYCLOAK_ADMIN_ALLOWED_CIDRS.
+#
+# Os certificados são emitidos e renovados automaticamente (ACME, Let's
+# Encrypt ou ZeroSSL) e ficam no volume /data. Nomes que não podem ter
+# certificado público (localhost, *.localhost, *.internal) recebem
+# certificado da autoridade interna do Caddy: é o que a verificação
+# automatizada usa (deploy/producao/verificar.sh).
+#
+# Sem log de acesso aqui: a URI completa traria o token de uso único de
+# /portal/access na query string. O log de acesso fica no nginx da imagem web,
+# que registra essa rota sem a query string.
+{
+	email {$ACME_EMAIL}
+	# A autoridade interna só é usada nos nomes locais; o container não tem
+	# repositório de confiança do sistema a atualizar.
+	skip_install_trust
+	servers {
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		# Nenhum proxy confiável à frente: X-Forwarded-For e
+		# X-Forwarded-Proto recebidos do cliente são descartados e refeitos.
+		# Com um balanceador ou CDN à frente, declare-o em trusted_proxies.
+	}
+}
+
+(common_headers) {
+	header {
+		# Mantém o valor da aplicação quando ela já define o cabeçalho.
+		?Strict-Transport-Security "max-age=63072000"
+		-Server
+		-Via
+	}
+}
+
+{$RECORVIA_DOMAIN} {
+	import common_headers
+	reverse_proxy web:8080 {
+		# O nginx da imagem web passa X-Forwarded-For e X-Forwarded-Proto
+		# adiante e usa o X-Forwarded-For como endereço do cliente.
+		health_uri /healthz
+		health_interval 15s
+	}
+}
+
+{$KEYCLOAK_DOMAIN} {
+	import common_headers
+	# Lista do que é permitido; todo o resto recebe 403. Caminhos com "..",
+	# ";", barra invertida ou "%" (já decodificados: %2e, %2f, %3b e %5c viram
+	# esses caracteres, e um "%" restante indica codificação dupla) são
+	# recusados antes de qualquer comparação, para que nenhuma variante alcance
+	# outro realm. A query string não entra (o redirect_uri do login vem
+	# codificado).
+	@unsafe_path expression `{http.request.uri.path}.contains("..") || {http.request.uri.path}.contains(";") || {http.request.uri.path}.contains("\\") || {http.request.uri.path}.contains("%")`
+	# Login, troca de código, conta e recursos estáticos do realm da
+	# aplicação: abertos.
+	@public_realm path /realms/recorvia /realms/recorvia/* /resources/* /robots.txt
+	# Console e API de administração e o realm master (onde ficam os
+	# administradores): só a partir de KEYCLOAK_ADMIN_ALLOWED_CIDRS
+	# (separados por espaço).
+	@admin {
+		path /admin /admin/* /realms/master /realms/master/*
+		remote_ip {$KEYCLOAK_ADMIN_ALLOWED_CIDRS}
+	}
+	# Blocos handle são exclusivos e avaliados na ordem em que aparecem.
+	handle @unsafe_path {
+		respond "Acesso restrito." 403
+	}
+	handle @public_realm {
+		reverse_proxy keycloak:8080
+	}
+	handle @admin {
+		reverse_proxy keycloak:8080
+	}
+	handle {
+		respond "Acesso restrito." 403
+	}
+}

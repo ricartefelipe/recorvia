@@ -229,7 +229,16 @@ func (s *Service) Ingest(ctx context.Context, tenantID uuid.UUID, batch []EventI
 				return err
 			}
 		}
-		for i, in := range batch {
+		// Os eventos são gravados em ordem de external_id (estável: entre
+		// repetições do mesmo external_id vale a ordem do lote). Dois lotes
+		// concorrentes com external_ids em comum, como a nova tentativa de
+		// um cliente enquanto o primeiro envio ainda é processado, esperam
+		// um pelo outro na unicidade de external_id sempre na mesma ordem, em
+		// vez de se bloquearem em ordens opostas (deadlock medido no teste de
+		// carga, ADR-088). O resultado de cada evento fica na posição dele no
+		// lote.
+		for _, i := range insertOrder(batch) {
+			in := batch[i]
 			// external_id repetido no lote passa pelo mesmo caminho: a
 			// consulta por external_id enxerga o evento gravado antes na
 			// mesma transação e compara o conteúdo; se o primeiro foi
@@ -246,6 +255,20 @@ func (s *Service) Ingest(ctx context.Context, tenantID uuid.UUID, batch []EventI
 		return nil, err
 	}
 	return results, nil
+}
+
+// insertOrder devolve as posições do lote em ordem de external_id (como
+// gravado, sem espaços nas pontas), mantendo a ordem do lote entre
+// external_ids iguais.
+func insertOrder(batch []EventInput) []int {
+	order := make([]int, len(batch))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int {
+		return strings.Compare(strings.TrimSpace(batch[a].ExternalID), strings.TrimSpace(batch[b].ExternalID))
+	})
+	return order
 }
 
 // batchSubscriptions devolve as assinaturas distintas do lote em ordem

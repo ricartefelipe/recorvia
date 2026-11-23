@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/ricartefelipe/recorvia/internal/infra/logging"
@@ -22,6 +23,25 @@ type Store interface {
 	ClaimJob(ctx context.Context, worker string, lease time.Duration) (name string, ok bool, err error)
 	CompleteJob(ctx context.Context, worker, name string, next time.Time, runErr error) error
 }
+
+// ErrMoreWork é devolvido por uma tarefa que parou num limite próprio de
+// trabalho por execução com trabalho ainda pendente (por exemplo, o motor de
+// recorrência no limite de assinaturas por tenant). Não é falha: a tarefa
+// volta a vencer depois de MoreWorkDelay, em vez de esperar o intervalo, e
+// as outras tarefas já vencidas são reivindicadas antes dela (ordem de
+// vencimento). Depois de MaxMoreWorkRuns execuções seguidas com trabalho
+// pendente nesta instância, a tarefa espera o intervalo normal: uma tarefa
+// que avisa trabalho pendente sem avançar não pode rodar sem parar.
+var ErrMoreWork = errors.New("scheduler: há mais trabalho pendente")
+
+const (
+	// MoreWorkDelay é a espera mínima antes de repetir uma tarefa que
+	// devolveu ErrMoreWork.
+	MoreWorkDelay = 5 * time.Second
+	// MaxMoreWorkRuns é o número máximo de repetições seguidas de uma tarefa
+	// por ErrMoreWork antes de voltar ao intervalo normal.
+	MaxMoreWorkRuns = 20
+)
 
 // Job é uma tarefa periódica idempotente.
 type Job struct {
@@ -48,6 +68,10 @@ type Scheduler struct {
 	log    *slog.Logger
 	obs    Observer
 	clock  Clock
+
+	mu sync.Mutex
+	// moreRuns conta, por tarefa, as repetições seguidas por ErrMoreWork.
+	moreRuns map[string]int
 }
 
 // New cria o agendador.
@@ -62,7 +86,8 @@ func New(store Store, worker string, tick time.Duration, c Clock, log *slog.Logg
 		}
 		m[j.Name] = j
 	}
-	return &Scheduler{store: store, jobs: m, worker: worker, tick: tick, log: log.With("component", "scheduler"), obs: obs, clock: c}, nil
+	return &Scheduler{store: store, jobs: m, worker: worker, tick: tick, log: log.With("component", "scheduler"), obs: obs, clock: c,
+		moreRuns: map[string]int{}}, nil
 }
 
 // Run registra as tarefas e executa o laço de reivindicação até ctx terminar.
@@ -116,12 +141,42 @@ func (s *Scheduler) RunOnce(ctx context.Context) (bool, error) {
 	jctx, cancel := context.WithTimeout(ctx, job.Timeout)
 	runErr := safeRun(jctx, job)
 	cancel()
+	next := s.clock.Now().Add(job.Interval)
+	if errors.Is(runErr, ErrMoreWork) {
+		runErr = nil
+		if s.countMoreWork(name) {
+			next = s.clock.Now().Add(min(MoreWorkDelay, job.Interval))
+		} else {
+			s.log.WarnContext(ctx, "tarefa com trabalho pendente repetida no limite; volta ao intervalo normal",
+				slog.Int("repeticoes", MaxMoreWorkRuns))
+		}
+	} else {
+		s.resetMoreWork(name)
+	}
 	s.obs.JobFinished(name, time.Since(start), runErr)
 	if runErr != nil {
 		s.log.ErrorContext(ctx, "tarefa falhou", slog.String("error", runErr.Error()))
 	}
-	next := s.clock.Now().Add(job.Interval)
 	return true, s.store.CompleteJob(context.WithoutCancel(ctx), s.worker, name, next, runErr)
+}
+
+// countMoreWork registra uma repetição por ErrMoreWork e informa se ainda
+// cabe repetir antes do intervalo; no limite, zera a contagem.
+func (s *Scheduler) countMoreWork(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.moreRuns[name]++
+	if s.moreRuns[name] > MaxMoreWorkRuns {
+		delete(s.moreRuns, name)
+		return false
+	}
+	return true
+}
+
+func (s *Scheduler) resetMoreWork(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.moreRuns, name)
 }
 
 // safeRun converte pânicos inesperados da tarefa em erro, para que o lease

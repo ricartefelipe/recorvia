@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ricartefelipe/recorvia/internal/infra/redact"
 )
 
 // Environment identifica o ambiente de execução.
@@ -40,13 +42,16 @@ type Config struct {
 	AllowedOrigins  []string
 	ShutdownTimeout time.Duration
 
-	DatabaseURL         string
-	DatabaseMaxConns    int32
-	MigrationsDBURL     string
-	RedisURL            string
-	AMQPURL             string
-	WorkerConcurrency   int
-	WorkerPrefetch      int
+	DatabaseURL       string
+	DatabaseMaxConns  int32
+	MigrationsDBURL   string
+	RedisURL          string
+	AMQPURL           string
+	WorkerConcurrency int
+	WorkerPrefetch    int
+	// BillingConcurrency é o número de tenants faturados ao mesmo tempo pelo
+	// motor de recorrência (ADR-088).
+	BillingConcurrency  int
 	WorkerID            string
 	OutboxBatchSize     int
 	OutboxLease         time.Duration
@@ -97,6 +102,9 @@ type Config struct {
 	RateLimitPerMinute int
 	// APICredentialRateLimitPerMinute limita requisições por credencial de API.
 	APICredentialRateLimitPerMinute int
+	// WebhookRateLimitPerMinute limita os webhooks de provedores recebidos
+	// por IP de origem (ADR-088).
+	WebhookRateLimitPerMinute int
 
 	// Retention são os prazos do expurgo automático executado pelo worker.
 	Retention Retention
@@ -230,6 +238,16 @@ func (l *loader) boolv(key string, def bool) bool {
 	return b
 }
 
+// BillingConcurrencyLimit é o máximo de tenants faturados ao mesmo tempo
+// para um pool de maxConns conexões: metade do pool, ao menos 1.
+func BillingConcurrencyLimit(maxConns int32) int {
+	return max(1, int(maxConns)/2)
+}
+
+// DefaultWebhookRateLimitPerMinute é o limite padrão de webhooks de
+// provedores por IP de origem: 20 por segundo em média.
+const DefaultWebhookRateLimitPerMinute = 1200
+
 // Load lê a configuração. Erros de formato são acumulados e retornados
 // juntos para facilitar o diagnóstico.
 func Load(get Getenv) (*Config, error) {
@@ -250,6 +268,7 @@ func Load(get Getenv) (*Config, error) {
 		AMQPURL:                l.str("RECORVIA_AMQP_URL", ""),
 		WorkerConcurrency:      l.intv("RECORVIA_WORKER_CONCURRENCY", 8),
 		WorkerPrefetch:         l.intv("RECORVIA_WORKER_PREFETCH", 16),
+		BillingConcurrency:     l.intv("RECORVIA_BILLING_CONCURRENCY", 4),
 		WorkerID:               l.str("RECORVIA_WORKER_ID", hostnameOr("worker")),
 		OutboxBatchSize:        l.intv("RECORVIA_OUTBOX_BATCH_SIZE", 100),
 		OutboxLease:            l.dur("RECORVIA_OUTBOX_LEASE", 30*time.Second),
@@ -282,6 +301,7 @@ func Load(get Getenv) (*Config, error) {
 		PortalSessionIdleTTL: l.dur("RECORVIA_PORTAL_SESSION_IDLE_TTL", 30*time.Minute),
 
 		APICredentialRateLimitPerMinute: l.intv("RECORVIA_API_CREDENTIAL_RATE_LIMIT_PER_MINUTE", 600),
+		WebhookRateLimitPerMinute:       l.intv("RECORVIA_WEBHOOK_RATE_LIMIT_PER_MINUTE", DefaultWebhookRateLimitPerMinute),
 
 		Retention: Retention{
 			InboxDays:                   l.intv("RECORVIA_RETENTION_INBOX_DAYS", 90),
@@ -318,9 +338,17 @@ func Load(get Getenv) (*Config, error) {
 		}
 	}
 	for _, o := range strings.Split(l.str("RECORVIA_ALLOWED_ORIGINS", ""), ",") {
-		if o = strings.TrimSpace(o); o != "" {
-			c.AllowedOrigins = append(c.AllowedOrigins, o)
+		if o = strings.TrimSpace(o); o == "" {
+			continue
 		}
+		if !validOrigin(o) {
+			// O valor pode trazer credenciais (https://usuario:senha@host):
+			// a senha não vai para a mensagem.
+			l.errs = append(l.errs, fmt.Errorf("RECORVIA_ALLOWED_ORIGINS: origem inválida %q (use esquema://host[:porta] como o navegador envia, "+
+				"sem caminho e sem a porta padrão do esquema; \"null\" e \"*\" não são aceitos)", redact.URL(o)))
+			continue
+		}
+		c.AllowedOrigins = append(c.AllowedOrigins, o)
 	}
 	c.EncryptionKeys = parseKeys(l, l.str("RECORVIA_ENCRYPTION_KEYS", ""))
 	c.EncryptionLostKeys = parseLostKeys(l, l.str("RECORVIA_ENCRYPTION_LOST_KEYS", ""), c.EncryptionKeys)
@@ -340,6 +368,24 @@ func Load(get Getenv) (*Config, error) {
 	}
 	if c.WorkerPrefetch < c.WorkerConcurrency {
 		c.WorkerPrefetch = c.WorkerConcurrency
+	}
+	if c.WebhookRateLimitPerMinute < 1 {
+		l.errs = append(l.errs, errors.New("RECORVIA_WEBHOOK_RATE_LIMIT_PER_MINUTE deve ser positivo"))
+	}
+	// Cada tenant faturado ao mesmo tempo ocupa uma conexão do pool durante
+	// toda a transação de cada assinatura; os consumidores, a outbox e as
+	// outras tarefas do worker usam o mesmo pool. O motor fica com no máximo
+	// metade dele (ADR-088, runbook de faturamento).
+	maxBilling := BillingConcurrencyLimit(c.DatabaseMaxConns)
+	switch {
+	case c.BillingConcurrency < 1 || c.BillingConcurrency > 32:
+		l.errs = append(l.errs, errors.New("RECORVIA_BILLING_CONCURRENCY deve ficar entre 1 e 32"))
+	case c.BillingConcurrency > maxBilling && get("RECORVIA_BILLING_CONCURRENCY") != "":
+		l.errs = append(l.errs, fmt.Errorf("RECORVIA_BILLING_CONCURRENCY (%d) passa de metade de RECORVIA_DATABASE_MAX_CONNS (%d): no máximo %d",
+			c.BillingConcurrency, c.DatabaseMaxConns, maxBilling))
+	case c.BillingConcurrency > maxBilling:
+		// Padrão com um pool pequeno: o padrão se ajusta ao pool.
+		c.BillingConcurrency = maxBilling
 	}
 	return c, errors.Join(l.errs...)
 }
@@ -450,6 +496,11 @@ func (c *Config) ValidateAPI() error {
 		if !strings.HasPrefix(c.CookieName, "__Host-") {
 			errs = append(errs, errors.New("em produção o cookie de sessão deve usar o prefixo __Host-"))
 		}
+		for _, o := range c.AllowedOrigins {
+			if !strings.HasPrefix(o, "https://") {
+				errs = append(errs, fmt.Errorf("em produção RECORVIA_ALLOWED_ORIGINS aceita só origens https (recebido %q)", o))
+			}
+		}
 	}
 	if strings.HasPrefix(c.CookieName, "__Host-") && !c.CookieSecure {
 		errs = append(errs, errors.New("cookies __Host- exigem RECORVIA_COOKIE_SECURE=true"))
@@ -531,4 +582,30 @@ func (c *Config) validateRetention() []error {
 // ValidateMigrations valida o executável de migrations.
 func (c *Config) ValidateMigrations() error {
 	return errors.Join(require(nil, "RECORVIA_MIGRATIONS_DATABASE_URL", c.MigrationsDBURL)...)
+}
+
+// validOrigin aceita somente uma origem serializada como o navegador a envia
+// no cabeçalho Origin (esquema http ou https, host e porta opcional, sem
+// caminho, query, fragmento nem credenciais). As origens permitidas recebem
+// CORS com credenciais e passam na conferência de origem do CSRF: "null"
+// (iframes em sandbox, documentos locais) e "*" nunca são aceitos.
+func validOrigin(o string) bool {
+	u, err := url.Parse(o)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Hostname() == "" || u.User != nil ||
+		u.Opaque != "" || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery || u.Path != "" {
+		return false
+	}
+	if o != u.Scheme+"://"+u.Host || strings.ToLower(o) != o || strings.HasSuffix(u.Host, ":") {
+		return false
+	}
+	// O navegador omite a porta padrão do esquema e nunca envia porta vazia
+	// ou com zeros à esquerda: "https://app:443" jamais coincidiria com o
+	// Origin recebido, e o CORS e a conferência do CSRF falhariam sem aviso.
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port || (u.Scheme == "https" && n == 443) || (u.Scheme == "http" && n == 80) {
+			return false
+		}
+	}
+	return true
 }

@@ -1,6 +1,8 @@
 # Binários e artefatos de build
 /bin/
 /dist/
+# go build ./tools/carga na raiz (o roteiro compila fora do repositório)
+/carga
 *.test
 *.out
 coverage*.txt
@@ -40,3 +42,6 @@ web/.eslintcache
 # Dados locais
 /tmp/
 /backups/
+
+# Chave de cifragem do backup contínuo da produção (gerar-segredos.sh).
+deploy/producao/segredos/

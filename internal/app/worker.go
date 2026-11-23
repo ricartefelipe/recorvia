@@ -286,6 +286,12 @@ func (w *Worker) Jobs() []scheduler.Job {
 		{Name: "billing.run_cycle", Interval: time.Minute, Timeout: 10 * time.Minute, Run: func(ctx context.Context) error {
 			res, err := c.Engine.RunAll(ctx)
 			w.Metrics.InvoicesIssued.Add(float64(res.Invoices))
+			if err == nil && res.More {
+				// Tenant no limite de assinaturas distintas por execução: a
+				// próxima execução vem depois da espera mínima do agendador,
+				// em vez de esperar o intervalo (ADR-088).
+				return scheduler.ErrMoreWork
+			}
 			return err
 		}},
 		{Name: "billing.correct_late_usage", Interval: 5 * time.Minute, Timeout: 10 * time.Minute, Run: func(ctx context.Context) error {

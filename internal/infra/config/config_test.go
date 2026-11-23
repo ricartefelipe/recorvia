@@ -109,12 +109,112 @@ func TestProductionSafetyRules(t *testing.T) {
 	}
 }
 
+// As origens permitidas recebem CORS com credenciais e valem na conferência
+// de origem do CSRF: só origens bem formadas, nunca "null" nem "*", e só
+// https em produção.
+func TestAllowedOriginsValidation(t *testing.T) {
+	for _, bad := range []string{"null", "*", "https://app.example/", "https://app.example/path", "app.example", "ftp://app.example",
+		"https://user@app.example", "https://app.example?x=1", "https://app.example#x", "https://APP.example", "https://",
+		// Porta padrão explícita, vazia, zero ou com zeros à esquerda: o
+		// navegador nunca as envia no Origin.
+		"https://app.example:443", "http://app.example:80", "https://app.example:", "https://app.example:0", "https://app.example:08443",
+		"https://app.example:65536", "http://[::1]:80"} {
+		m := baseEnv()
+		m["RECORVIA_ALLOWED_ORIGINS"] = "http://localhost:5173," + bad
+		if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), "RECORVIA_ALLOWED_ORIGINS") {
+			t.Errorf("origem %q aceita: %v", bad, err)
+		}
+	}
+	// A mensagem de erro não repete a senha de uma origem com credenciais.
+	m := baseEnv()
+	m["RECORVIA_ALLOWED_ORIGINS"] = "https://usuario:senha-secreta-da-origem@app.example"
+	if _, err := Load(env(m)); err == nil || strings.Contains(err.Error(), "senha-secreta-da-origem") || !strings.Contains(err.Error(), "app.example") {
+		t.Fatalf("erro de origem com credenciais: %v", err)
+	}
+	m = baseEnv()
+	m["RECORVIA_ALLOWED_ORIGINS"] = "http://localhost:5173, https://app.example:8443, http://[::1]:8080, https://app.example:80"
+	c, err := Load(env(m))
+	if err != nil || !slices.Equal(c.AllowedOrigins, []string{"http://localhost:5173", "https://app.example:8443", "http://[::1]:8080", "https://app.example:80"}) {
+		t.Fatalf("origens válidas: %v %v", c.AllowedOrigins, err)
+	}
+	m["RECORVIA_ENV"] = "production"
+	m["RECORVIA_PUBLIC_URL"] = "https://recorvia.example"
+	m["RECORVIA_COOKIE_SECURE"] = "true"
+	m["RECORVIA_COOKIE_NAME"] = "__Host-recorvia_session"
+	if c, err = Load(env(m)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ValidateAPI(); err == nil || !strings.Contains(err.Error(), "http://localhost:5173") || strings.Contains(err.Error(), "app.example:8443") {
+		t.Fatalf("produção deveria recusar só a origem http: %v", err)
+	}
+}
+
 func TestHostCookieRequiresSecure(t *testing.T) {
 	m := baseEnv()
 	m["RECORVIA_COOKIE_NAME"] = "__Host-recorvia_session"
 	c, _ := Load(env(m))
 	if err := c.ValidateAPI(); err == nil || !strings.Contains(err.Error(), "__Host-") {
 		t.Fatalf("esperava erro de cookie __Host-: %v", err)
+	}
+}
+
+// Tenants faturados ao mesmo tempo pelo motor (ADR-088): 4 por padrão, de 1
+// a 32 e no máximo metade do pool de conexões. Um valor explícito acima da
+// metade do pool é recusado; o padrão se ajusta a um pool pequeno.
+func TestBillingConcurrency(t *testing.T) {
+	cases := []struct {
+		value   string
+		pool    string
+		want    int
+		wantErr bool
+	}{
+		{"", "", 4, false},
+		{"1", "", 1, false},
+		{"10", "", 10, false},
+		{"11", "", 0, true},
+		{"32", "64", 32, false},
+		{"32", "", 0, true},
+		{"", "4", 2, false},
+		{"", "1", 1, false},
+		{"2", "4", 2, false},
+		{"3", "4", 0, true},
+		{"0", "", 0, true},
+		{"33", "100", 0, true},
+		{"dois", "", 0, true},
+	}
+	for _, tc := range cases {
+		m := baseEnv()
+		if tc.value != "" {
+			m["RECORVIA_BILLING_CONCURRENCY"] = tc.value
+		}
+		if tc.pool != "" {
+			m["RECORVIA_DATABASE_MAX_CONNS"] = tc.pool
+		}
+		c, err := Load(env(m))
+		if gotErr := err != nil && strings.Contains(err.Error(), "RECORVIA_BILLING_CONCURRENCY"); gotErr != tc.wantErr {
+			t.Errorf("%q com pool %q: erro %v, esperado erro=%v", tc.value, tc.pool, err, tc.wantErr)
+		}
+		if !tc.wantErr && err == nil && c.BillingConcurrency != tc.want {
+			t.Errorf("%q com pool %q: concorrência %d, esperada %d", tc.value, tc.pool, c.BillingConcurrency, tc.want)
+		}
+	}
+}
+
+// Webhooks de provedores por IP de origem (ADR-088): 1200 por minuto por
+// padrão; zero ou negativo é recusado.
+func TestWebhookRateLimit(t *testing.T) {
+	m := baseEnv()
+	c, err := Load(env(m))
+	if err != nil || c.WebhookRateLimitPerMinute != 1200 {
+		t.Fatalf("padrão: %d, %v", c.WebhookRateLimitPerMinute, err)
+	}
+	m["RECORVIA_WEBHOOK_RATE_LIMIT_PER_MINUTE"] = "6000"
+	if c, err = Load(env(m)); err != nil || c.WebhookRateLimitPerMinute != 6000 {
+		t.Fatalf("configurado: %d, %v", c.WebhookRateLimitPerMinute, err)
+	}
+	m["RECORVIA_WEBHOOK_RATE_LIMIT_PER_MINUTE"] = "0"
+	if _, err = Load(env(m)); err == nil || !strings.Contains(err.Error(), "RECORVIA_WEBHOOK_RATE_LIMIT_PER_MINUTE") {
+		t.Fatalf("zero deveria ser recusado: %v", err)
 	}
 }
 
