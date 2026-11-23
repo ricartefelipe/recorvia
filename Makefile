@@ -176,10 +176,10 @@ postgres-image: ## Imagem do PostgreSQL com arquivamento contínuo de WAL e agen
 	docker build -f deploy/postgres/Dockerfile -t recorvia-postgres:$(IMAGE_TAG) .
 
 .PHONY: pitr-restore
-pitr-restore: ## Restaura o PostgreSQL até TARGET (RFC 3339 ou latest) num servidor novo, a partir do backup contínuo [BACKUP=nome] [MANIFEST=arquivo]
+pitr-restore: ## Restaura o PostgreSQL até TARGET (RFC 3339 ou latest) num servidor novo, a partir do backup contínuo [TIMELINE=n] [BACKUP=nome] [MANIFEST=arquivo]
 	@test -n "$(TARGET)" || { echo "informe TARGET=<instante RFC 3339> ou TARGET=latest"; exit 2; }
 	bash deploy/backup/pitr-restore.sh $(if $(filter latest,$(TARGET)),--latest,--target-time '$(TARGET)') \
-	  $(if $(BACKUP),--backup '$(BACKUP)') $(if $(MANIFEST),--manifest '$(MANIFEST)')
+	  $(if $(TIMELINE),--timeline '$(TIMELINE)') $(if $(BACKUP),--backup '$(BACKUP)') $(if $(MANIFEST),--manifest '$(MANIFEST)')
 
 .PHONY: keycloak-export
 keycloak-export: ## Exporta o realm do Keycloak, cifrado pelo agente, para o destino do backup contínuo

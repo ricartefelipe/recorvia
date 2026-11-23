@@ -9,6 +9,17 @@
 #   bash gerar-segredos.sh --senha     imprime uma senha nova
 #   bash gerar-segredos.sh --chave     imprime uma chave de cifragem nova
 #                                      (identificador:base64), para a rotação
+#   bash gerar-segredos.sh --chave-backup ARQUIVO
+#                                      cria o arquivo da chave de cifragem do
+#                                      backup contínuo, se ainda não existir
+#
+# No modo de preenchimento, também cria a chave de cifragem do backup
+# contínuo (ADR-087), se ainda não existir, no caminho de
+# RECORVIA_BACKUP_ENCRYPTION_KEY_HOST_FILE no ARQUIVO (padrão:
+# segredos/backup-cifragem.chave desta pasta; caminhos relativos a esta
+# pasta): 32 bytes em base64, permissão 0444 (o PostgreSQL e o agente rodam
+# com outro usuário e leem o arquivo montado como segredo) numa pasta 0700
+# (ninguém além do dono chega a ele no servidor).
 #
 # Os valores vêm de /dev/urandom (gerador do kernel, adequado a segredos):
 # senhas com 32 bytes em hexadecimal (64 caracteres, sem escape em URLs) e
@@ -32,7 +43,30 @@ random_key() { head -c 32 /dev/urandom | base64 | tr -d '\n'; }
 # geradas no mesmo dia.
 key_id() { printf 'k%s%s' "$(date -u +%Y%m%d)" "$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"; }
 
+# backup_key_file ARQUIVO: cria a chave do backup contínuo sem sobrescrever
+# uma existente; devolve 0 se criou e 1 se já existia.
+backup_key_file() {
+  local file=$1 dir
+  dir=$(dirname "$file")
+  [[ -e $file ]] && return 1
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+  random_key >"$file.tmp"
+  chmod 444 "$file.tmp"
+  mv "$file.tmp" "$file"
+  return 0
+}
+
 case ${1:-} in
+  --chave-backup)
+    [[ -n ${2:-} ]] || die "informe o arquivo da chave do backup"
+    if backup_key_file "$2"; then
+      echo "chave de cifragem do backup criada em $2 (guarde uma cópia no cofre)" >&2
+    else
+      echo "$2 já existe: nada foi alterado" >&2
+    fi
+    exit 0
+    ;;
   --senha)
     random_hex
     echo
@@ -43,10 +77,10 @@ case ${1:-} in
     exit 0
     ;;
   -h | --help)
-    sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
-  -*) die "opção desconhecida: $1 (use --senha, --chave ou o caminho do arquivo)" ;;
+  -*) die "opção desconhecida: $1 (use --senha, --chave, --chave-backup ou o caminho do arquivo)" ;;
 esac
 
 target=${1:-$here/.env}
@@ -87,6 +121,12 @@ mv "$tmp" "$target"
 trap - EXIT
 
 echo "segredos gerados: $count (arquivo $target, permissão 600)" >&2
+backup_key=$(sed -n 's/^RECORVIA_BACKUP_ENCRYPTION_KEY_HOST_FILE=//p' "$target" | tail -n 1)
+backup_key=${backup_key:-./segredos/backup-cifragem.chave}
+[[ $backup_key == /* ]] || backup_key=$here/$backup_key
+if backup_key_file "$backup_key"; then
+  echo "chave de cifragem do backup contínuo criada em $backup_key. Guarde uma cópia no cofre, à parte do .env, antes da primeira subida." >&2
+fi
 if [[ -n $id ]]; then
   echo "chave de cifragem nova: $id. Guarde o par completo de RECORVIA_ENCRYPTION_KEYS no cofre antes da primeira subida." >&2
 fi

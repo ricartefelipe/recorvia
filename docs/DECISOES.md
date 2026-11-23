@@ -2583,12 +2583,14 @@ serviço do banco depois.
   construídas no servidor a partir do checkout da tag (etiqueta `RECORVIA_VERSION`); as externas têm tag fixa
   (`make pin-check`). A migration roda antes da API e do worker, como no compose local. Todo serviço contínuo
   tem healthcheck, `restart: unless-stopped`, limites de CPU e memória e rotação de logs; os serviços sem
-  estado rodam com sistema de arquivos somente leitura, sem capabilities e com `no-new-privileges`. Três redes:
-  `edge` (proxy, web, Keycloak), `app` (com saída para a internet: provedor de pagamento, SMTP, webhooks) e
-  `data` (PostgreSQL, Redis, RabbitMQ, sem saída para a internet). O banco usa a imagem oficial,
-  com o volume `postgres-data` e um banco `keycloak` no mesmo servidor, criado por um serviço de bootstrap
-  idempotente. Extensões (como o backup contínuo) entram por um arquivo compose adicional (`COMPOSE_FILE`), sem
-  editar o arquivo base.
+  estado rodam com sistema de arquivos somente leitura, sem capabilities e com `no-new-privileges`. Quatro redes:
+  `edge` (proxy, web, Keycloak), `app` (com saída para a internet: provedor de pagamento, SMTP, webhooks),
+  `data` (PostgreSQL, Redis, RabbitMQ e agente de backup, sem saída para a internet) e `storage` (só PostgreSQL e
+  agente de backup, com saída para o S3). O banco usa a imagem `recorvia-postgres` com o backup contínuo (ADR-087:
+  arquivamento de WAL e o serviço `postgres-backup`, chave do backup num arquivo montado como segredo, gerado por
+  `gerar-segredos.sh`), com o volume `postgres-data` e um banco `keycloak` no mesmo servidor, criado por um serviço
+  de bootstrap idempotente. Extensões entram por um arquivo compose adicional (`COMPOSE_FILE`), sem editar o
+  arquivo base. O `make prod-check` confere o arquivamento com um MinIO que só existe no compose de verificação.
 - **Proxy: Caddy.** HTTPS automático (ACME) com renovação, redirecionamento de HTTP, HTTP/3 e configuração
   curta, embutida na imagem `recorvia-proxy` (ADR-020). O binário é compilado na imagem (xcaddy, imagem
   oficial de build) com as dependências corrigidas que a versão do Caddy ainda não trazia, e roda como
@@ -2721,7 +2723,11 @@ oficial do PostgreSQL e precisa receber o backup como um componente que outro co
   conjuntos, os N mais recentes (padrão 7) e os dos últimos D dias (padrão 7), e remove o WAL anterior ao mais antigo
   mantido.
 - **Restauração para um instante** (`make pitr-restore`, `deploy/backup/pitr-restore.sh`): só num volume de dados
-  vazio; escolhe o backup base terminado antes do instante, extrai, grava o alvo e a promoção, inicia o servidor, remove
+  vazio e com o servidor parado (em execução, reiniciando ou pausado é recusado); segue a linha do tempo mais recente do
+  arquivo ou a pedida (`TIMELINE`), sempre gravada em `recovery_target_timeline`, com aviso quando há outras; lê os
+  arquivos `.history` arquivados e só aceita backups base do histórico da linha seguida (um backup da linha abandonada
+  depois da ramificação faria a recuperação terminar com "requested timeline is not a child of this server's history");
+  escolhe o backup base terminado antes do instante, extrai, grava o alvo e a promoção, inicia o servidor, remove
   o alvo da configuração depois da promoção, confere o banco com as consultas do manifesto lógico (comparadas com um
   manifesto informado), o ledger e a RLS, e religa o agente. A religação da aplicação segue a regra da ADR-064: chaves
   conferidas, API sem tráfego, conciliação da janela entre o instante e o incidente e só então o worker; as filas do
@@ -2733,10 +2739,15 @@ oficial do PostgreSQL e precisa receber o backup como um componente que outro co
   e medição do RPO (atraso do arquivamento) e do RTO.
 - **Keycloak**: o banco dele fica no mesmo servidor PostgreSQL (banco `keycloak`, exercitado pelo `pitr-check`), coberto
   pelo mesmo backup base e WAL e restaurado no mesmo instante do Recorvia; a exportação do realm (`make keycloak-export`)
-  vai cifrada para o mesmo destino pelo agente.
+  exige banco externo (o banco embutido de desenvolvimento é recusado) e vai cifrada para o mesmo destino pelo agente,
+  com a ida e volta exercitada.
+- **Conferência da partida como o usuário do arquivamento**: o entrypoint executa `check-config` como `postgres` (com
+  `gosu`), o mesmo usuário do `archive_command`, que relê os segredos `*_FILE` a cada segmento.
 - **Métricas e alertas**: o agente exporta a idade do último segmento arquivado (lida de `pg_stat_archiver`), as falhas
   do arquivamento, os segmentos pendentes, o fim do último backup base (lido do armazenamento) e o intervalo
-  configurado; alertas `RecorviaWALArchiveStale`, `RecorviaWALArchiveFailing`, `RecorviaBaseBackupStale` (proporcional ao
+  configurado e os bytes do segmento atual (informativo); alertas `RecorviaWALArchiveStale` (só com segmentos
+  `.ready` aguardando ou falhas do arquivamento, para que um banco ocioso, como na manutenção e na recuperação com o
+  worker parado, não dispare), `RecorviaWALArchiveFailing`, `RecorviaBaseBackupStale` (proporcional ao
   intervalo), `RecorviaBackupDependencyUnavailable` e `RecorviaBackupAgentMissing`, com testes no `promtool` e runbook
   (`docs/operacao/runbooks/backup-continuo.md`). A coleta `recorvia-backup` usa a descoberta pelo DNS do compose: sem o
   componente (ambiente local), não há alvo nem alerta.
@@ -2766,4 +2777,5 @@ imediato, e um instante entre a troca e o fim desse backup não é recuperável.
 destino de produção com o servidor de origem em uso. O agente usa o superusuário e lê o diretório de dados pelo volume
 compartilhado, o que o prende ao mesmo host do servidor. Continuam fora: réplica de leitura ou de espera, cópia e
 restauração em outra região, verificação periódica automática de cópias reais, papel de privilégio mínimo para o agente e
-exportação agendada do realm do Keycloak. O componente ainda não está ligado ao pacote de produção (`deploy/producao`).
+exportação agendada do realm do Keycloak. O pacote de produção (`deploy/producao`, ADR-086) usa o componente por
+`extends`, com a chave por arquivo, o agente somente leitura e a rede `storage` só para o servidor e o agente.

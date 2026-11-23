@@ -538,31 +538,39 @@ groups:
   # servidor (pg_stat_archiver) e os backups base, do próprio armazenamento.
   - name: recorvia-backup
     rules:
-      # Com archive_timeout de 60 s, um servidor com escrita (o agendador do
-      # worker grava a cada minuto) arquiva ao menos um segmento por minuto.
-      # A idade do último segmento arquivado é o limite do que se perde se o
-      # servidor for destruído agora. Sem nenhum arquivamento desde a última
-      # reinicialização das estatísticas, a métrica vale zero e o alerta
-      # dispara.
+      # O último arquivamento antigo só é problema com o arquivamento travado:
+      # segmentos completos aguardando (.ready) ou falhas do archive_command
+      # na janela. Com archive_timeout de 60 s, um segmento com escrita é
+      # fechado e arquivado em cerca de um minuto; um banco ocioso (worker
+      # parado na manutenção ou na recuperação) não fecha segmentos e não
+      # dispara, por mais antigo que seja o último arquivamento. Os bytes do
+      # segmento atual não entram: num banco ocioso, o PostgreSQL pode deixar
+      # nele um registro que não força a troca de segmento. Sem nenhum
+      # arquivamento desde a última reinicialização das estatísticas, a idade
+      # é a maior possível.
       - alert: RecorviaWALArchiveStale
-        expr: time() - max(recorvia_backup_wal_last_archived_timestamp_seconds) > 600
+        expr: |
+          time() - max(recorvia_backup_wal_last_archived_timestamp_seconds) > 600
+            and on () (max(recorvia_backup_wal_pending_segments) > 0 or sum(increase(recorvia_backup_wal_archive_failures_total[10m])) > 0)
         for: 5m
         labels:
           severity: warning
           area: backup
         annotations:
-          summary: "Último segmento de WAL arquivado há {{ $value | humanizeDuration }}"
-          description: "Nenhum segmento de WAL chegou ao armazenamento há mais de 10 minutos: o que foi gravado desde então se perde se o servidor for destruído."
+          summary: "Último segmento de WAL arquivado há {{ $value | humanizeDuration }}, com segmentos aguardando"
+          description: "Há segmentos de WAL aguardando arquivamento (ou falhas do archive_command) e nenhum chegou ao armazenamento há mais de 10 minutos: o que foi gravado desde então se perde se o servidor for destruído."
           runbook: docs/operacao/runbooks/backup-continuo.md#arquivamento-de-wal-atrasado
       - alert: RecorviaWALArchiveStale
-        expr: time() - max(recorvia_backup_wal_last_archived_timestamp_seconds) > 1800
+        expr: |
+          time() - max(recorvia_backup_wal_last_archived_timestamp_seconds) > 1800
+            and on () (max(recorvia_backup_wal_pending_segments) > 0 or sum(increase(recorvia_backup_wal_archive_failures_total[10m])) > 0)
         for: 5m
         labels:
           severity: critical
           area: backup
         annotations:
-          summary: "Último segmento de WAL arquivado há {{ $value | humanizeDuration }}"
-          description: "O arquivamento de WAL está parado há mais de 30 minutos: a perda numa destruição do servidor cresce a cada minuto e o WAL se acumula no disco do servidor."
+          summary: "Último segmento de WAL arquivado há {{ $value | humanizeDuration }}, com segmentos aguardando"
+          description: "O arquivamento de WAL está parado há mais de 30 minutos com segmentos aguardando: a perda numa destruição do servidor cresce a cada minuto e o WAL se acumula no disco do servidor."
           runbook: docs/operacao/runbooks/backup-continuo.md#arquivamento-de-wal-atrasado
       - alert: RecorviaWALArchiveFailing
         expr: sum(increase(recorvia_backup_wal_archive_failures_total[10m])) > 0

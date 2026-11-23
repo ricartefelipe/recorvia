@@ -20,9 +20,11 @@ docker compose logs --since 30m postgres postgres-backup
 ## Arquivamento de WAL atrasado
 
 ### Sintomas
-- O último segmento de WAL arquivado é antigo: o que foi gravado desde então se perde se o
-  servidor for destruído. Com `archive_timeout` de 60 s e o agendador do worker gravando a cada
-  minuto, o normal é ao menos um segmento por minuto.
+- Há segmentos de WAL aguardando arquivamento (ou falhas do `archive_command`) e o último
+  segmento arquivado é antigo: o que foi gravado desde então se perde se o servidor for
+  destruído. Com `archive_timeout` de 60 s, um segmento com escrita é fechado e arquivado em
+  cerca de um minuto. Um banco ocioso (worker parado numa manutenção ou na recuperação) não fecha
+  segmentos: o último arquivamento fica antigo sem que o alerta dispare.
 - Log do PostgreSQL com `archive command failed with exit code` e a mensagem do
   `recorvia-pgbackup: arquivamento de ... falhou`.
 - O diretório `pg_wal` cresce: o PostgreSQL não recicla segmentos não arquivados. Sem correção,
@@ -30,7 +32,10 @@ docker compose logs --since 30m postgres postgres-backup
 
 ### Métricas e alertas
 - `RecorviaWALArchiveStale` (aviso com mais de 10 min, crítico com mais de 30 min):
-  `time() - max(recorvia_backup_wal_last_archived_timestamp_seconds)`.
+  `time() - max(recorvia_backup_wal_last_archived_timestamp_seconds)`, só enquanto há segmentos
+  aguardando (`recorvia_backup_wal_pending_segments > 0`) ou falhas do arquivamento em 10 min.
+  `recorvia_backup_wal_current_segment_bytes` (WAL do segmento atual, ainda não arquivável) fica
+  fora: um banco ocioso pode manter nele um registro pequeno que não força a troca de segmento.
 - `RecorviaWALArchiveFailing`: `increase(recorvia_backup_wal_archive_failures_total[10m]) > 0` por
   10 min.
 - `recorvia_backup_wal_pending_segments` e `recorvia_backup_wal_oldest_pending_seconds`: quantos
@@ -43,8 +48,8 @@ SELECT archived_count, last_archived_wal, last_archived_time, failed_count, last
   FROM pg_stat_archiver;
 -- Segmentos aguardando arquivamento e o mais antigo.
 SELECT count(*), min(modification) FROM pg_ls_archive_statusdir() WHERE name LIKE '%.ready';
--- Escrita recente: sem escrita, não há segmento novo a arquivar (o alerta também dispara com o banco parado).
-SELECT pg_walfile_name(pg_current_wal_lsn()), pg_current_wal_lsn();
+-- WAL no segmento atual, ainda não arquivável (num banco ocioso, zero ou poucos bytes).
+SELECT pg_walfile_name(pg_current_wal_lsn()), (pg_walfile_name_offset(pg_current_wal_lsn())).file_offset AS bytes_no_segmento_atual;
 ```
 ```bash
 docker compose logs --since 30m postgres | grep -E 'archive|recorvia-pgbackup'

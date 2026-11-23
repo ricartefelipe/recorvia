@@ -34,7 +34,7 @@ Arquivos:
 |---|---|
 | `deploy/producao/compose.yaml` | serviços, redes, volumes, limites e healthchecks |
 | `deploy/producao/.env.example` | todas as variáveis, explicadas; copie para `.env` |
-| `deploy/producao/gerar-segredos.sh` | gera senhas e a chave de cifragem com segurança |
+| `deploy/producao/gerar-segredos.sh` | gera senhas, a chave de cifragem e a chave do backup contínuo com segurança |
 | `deploy/producao/caddy/` | imagem do proxy (Caddyfile; Caddy compilado com dependências corrigidas, rodando como usuário sem privilégios com permissão só para abrir 80 e 443) |
 | `deploy/producao/keycloak/` | imagem do Keycloak de produção e o realm sem usuários |
 | `deploy/producao/verificar.sh` | verificação automatizada (`make prod-check`), para rodar fora da produção |
@@ -48,12 +48,13 @@ Arquivos:
   não tem `"ip6tables": false`): é ele que entrega as conexões IPv6 ao proxy com o endereço real
   do cliente.
 - **Tamanho mínimo**: 4 vCPU, 8 GB de RAM e 80 GB de SSD. Os limites do compose somam cerca de
-  6,5 GB de memória (PostgreSQL 2 GB, Keycloak 1,5 GB, RabbitMQ 1 GB, API e worker 512 MB cada,
-  demais menores). Com o perfil `observability`, conte mais 2 GB. Para ajustar os limites, use
+  7 GB de memória (PostgreSQL 2 GB, Keycloak 1,5 GB, RabbitMQ 1 GB, API, worker e agente de
+  backup 512 MB cada, demais menores). Com o perfil `observability`, conte mais 2 GB. Para ajustar os limites, use
   um arquivo compose adicional (veja [Extensões](#extensões)).
 - **Rede**: IP público fixo (IPv4, e IPv6 se houver); portas 80 e 443 (TCP e UDP) liberadas no
   firewall de entrada; porta do SSH restrita à operação. Saída liberada para a internet
-  (certificados, SMTP, provedor de pagamento e webhooks dos clientes).
+  (certificados, SMTP, provedor de pagamento, webhooks dos clientes e o armazenamento S3 do
+  backup contínuo).
 - **Disco**: os logs dos containers giram (5 arquivos de 20 MB por serviço). Monitore o espaço
   livre (veja [O que monitorar](#o-que-monitorar)).
 - **Relógio** sincronizado (NTP): tokens do login e assinaturas de webhook dependem dele.
@@ -105,6 +106,9 @@ O script:
   hexadecimal, que entram nas URLs de conexão sem escape);
 - gera a chave de cifragem (`RECORVIA_ENCRYPTION_KEYS`, no formato `identificador:base64`) e
   aponta `RECORVIA_ENCRYPTION_ACTIVE_KEY` para ela;
+- cria a chave de cifragem do backup contínuo em `segredos/backup-cifragem.chave` (pasta 0700,
+  arquivo 0444, montado como segredo no PostgreSQL e no agente; fora do `.env`), se ainda não
+  existir;
 - não troca valores já preenchidos (rodar de novo é seguro), não imprime segredos e deixa o
   `.env` com permissão 600;
 - lista as linhas que ainda estão com valor de exemplo.
@@ -118,6 +122,7 @@ Preencha à mão o que o script listou (todas marcadas com `[PREENCHER]` no `.en
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD` | servidor de e-mail transacional |
 | `SMTP_TLS` e `KEYCLOAK_SMTP_STARTTLS`/`KEYCLOAK_SMTP_SSL` | `starttls` (587) com `true`/`false`, ou `tls` (465) com `false`/`true` |
 | `RECORVIA_SMTP_FROM`, `KEYCLOAK_SMTP_FROM` | remetentes das cobranças e do login |
+| `RECORVIA_BACKUP_S3_PREFIX`, `RECORVIA_BACKUP_S3_ENDPOINT`, `RECORVIA_BACKUP_S3_ACCESS_KEY_ID`, `RECORVIA_BACKUP_S3_SECRET_ACCESS_KEY` | destino S3 do backup contínuo (bucket só para ele, em conta diferente da do servidor) e a credencial; o PostgreSQL não inicia sem eles ([Backup](#backup)) |
 | `KEYCLOAK_ADMIN_ALLOWED_CIDRS` | IPs (CIDR, separados por espaço) da operação ou da VPN que podem abrir o console do Keycloak e o realm `master`. Sem a variável, ninguém abre; liberar para todos exige `0.0.0.0/0 ::/0` escrito de propósito (não recomendado) |
 
 O que a aplicação confere sozinha em produção (`RECORVIA_ENV=production`, já fixado no compose; a
@@ -134,8 +139,9 @@ API ou o worker não sobem se algo falhar):
 origem precisa de CORS. Não defina `RECORVIA_PAYSIM_URL`: sem ela o simulador não é registrado.
 
 **Guarde no cofre de segredos da operação**, fora do servidor: uma cópia do `.env` e, à parte, o
-par completo de `RECORVIA_ENCRYPTION_KEYS`. Sem as chaves, o backup do banco não recupera as
-credenciais dos provedores nem os segredos dos webhooks
+par completo de `RECORVIA_ENCRYPTION_KEYS` e o arquivo `segredos/backup-cifragem.chave`. Sem as
+chaves, o backup do banco não recupera as credenciais dos provedores nem os segredos dos webhooks,
+e sem a chave do backup nenhum backup contínuo pode ser restaurado
 ([guarda das chaves](backup-e-restauracao.md#guarda)).
 
 ## Primeira subida
@@ -200,9 +206,22 @@ guardados por 90 dias (*Events* no console).
 
 ## Backup
 
-O backup contínuo do PostgreSQL (arquivamento de WAL) entra depois por um arquivo compose
-adicional. Até lá, use o backup lógico de [backup e restauração](backup-e-restauracao.md),
-apontando para o container de produção:
+O PostgreSQL usa a imagem `recorvia-postgres` (ADR-087): arquiva cada segmento de WAL, cifrado
+no servidor, no destino S3 do `.env`, e o serviço `postgres-backup` faz os backups base, a
+retenção e as métricas (coleta `recorvia-backup` do Prometheus; alertas e ações no
+[runbook](runbooks/backup-continuo.md)). Os dois ficam nas redes `data` (sem saída) e `storage`
+(com saída para o armazenamento). Restauração para um instante, linhas do tempo e exportação
+do realm do Keycloak: [backup contínuo](backup-e-restauracao.md) e
+[recuperação de desastre](runbooks/recuperacao-de-desastre.md). Confira depois da subida:
+
+```bash
+docker compose exec -T postgres-backup recorvia-pgbackup check-config   # destino e chave
+docker compose exec -T postgres-backup recorvia-pgbackup list           # backups base ("esta chave")
+```
+
+O backup lógico continua útil como cópia complementar (antes de atualizações, por exemplo), com
+os roteiros de [backup e restauração](backup-e-restauracao.md) apontando para o container de
+produção:
 
 ```bash
 cd /opt/recorvia
@@ -311,14 +330,16 @@ Fora do servidor (o que o próprio servidor não consegue avisar):
   menos de 14 dias).
 - **Recursos do servidor**: disco (alerta com menos de 20% livre; o banco e os logs crescem),
   memória, CPU e reinícios de containers (`docker compose ps`, coluna *STATUS*).
-- **Backup**: idade do último backup e resultado do último `restore-check`.
+- **Backup**: alertas do backup contínuo (`RecorviaWALArchiveStale`, `RecorviaBaseBackupStale` e
+  os demais do grupo `recorvia-backup`), idade do último backup lógico e resultado do último
+  `restore-check`.
 - **Entregabilidade**: bounces e reclamações no painel do provedor de e-mail.
 - **Segurança**: eventos de login com erro no Keycloak (*Events*), atualizações de segurança do
   sistema e das imagens (job `image-scan` da CI).
 
 ## Extensões
 
-Para mudar algo sem editar o `compose.yaml` (limites de memória, backup contínuo do banco, outro
+Para mudar algo sem editar o `compose.yaml` (limites de memória, parâmetros do banco, outro
 volume), crie um arquivo ao lado, por exemplo `compose.servidor.yaml`:
 
 ```yaml
@@ -330,8 +351,8 @@ services:
 ```
 
 e declare os dois no `.env`: `COMPOSE_FILE=compose.yaml:compose.servidor.yaml`. O serviço
-`postgres` usa a imagem oficial sem configuração própria; `command`, `volumes` e `environment` são
-os pontos de extensão, e o volume de dados é `postgres-data`.
+`postgres` usa a imagem `recorvia-postgres` (a oficial com o arquivamento de WAL); `command`,
+`volumes` e `environment` são os pontos de extensão, e o volume de dados é `postgres-data`.
 
 ## Verificação automatizada
 
@@ -344,8 +365,10 @@ interface, o endereço do cliente visto pelo nginx (também por IPv6, e sem acei
 `X-Forwarded-For` forjado), o login redirecionando ao Keycloak com o `redirect_uri` do domínio,
 problem+json numa rota inexistente, as portas dos containers em execução, a lista do que o proxy
 repassa no domínio do Keycloak (console, API de administração, realm `master` e variantes de
-caminho com 403), os realms `recorvia` e `master` e o backup do banco do Keycloak, e derruba o
-projeto no fim. Exige as portas 80 e 443 de 127.0.0.1 livres. Não rode no
+caminho com 403), os realms `recorvia` e `master`, o backup do banco do Keycloak e o backup
+contínuo (com um MinIO só no compose de verificação: segmento de WAL arquivado, agente saudável,
+backup base cifrado com a chave do arquivo, métricas pela rede `data` e o armazenamento só pela
+rede `storage`), e derruba o projeto no fim. Exige as portas 80 e 443 de 127.0.0.1 livres. Não rode no
 servidor de produção.
 
 ## Pendências que dependem do dono

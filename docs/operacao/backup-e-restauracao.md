@@ -587,8 +587,11 @@ Comandos do agente (dentro do container `postgres-backup`, que tem a configuraç
 | `recorvia-pgbackup list` | backups base no armazenamento: início, fim, linha do tempo, tamanho e se foram cifrados com a chave configurada (`esta chave`, `outra (<impressão digital>)`) |
 | `recorvia-pgbackup backup` | backup base imediato e retenção (depois de trocar a chave, de uma restauração ou antes de uma manutenção) |
 | `recorvia-pgbackup check-config` | confere a configuração e mostra o destino e a impressão digital da chave |
-| `recorvia-pgbackup restore (--target-time <instante> \| --latest) [--backup <nome>]` | prepara um servidor novo (usado por `pitr-restore.sh`) |
-| `recorvia-pgbackup put-object <nome>` / `get-object <nome>` | envia a entrada padrão, compactada e cifrada com a chave do backup, para `extra/<nome>` no destino, e a lê de volta decifrada (exportação do Keycloak); entrada vazia não é enviada |
+| `recorvia-pgbackup restore (--target-time <instante> \| --latest) [--timeline <n>] [--backup <nome>]` | prepara um servidor novo (usado por `pitr-restore.sh`) |
+| `recorvia-pgbackup put-object <nome>` / `get-object <nome>` | envia a entrada padrão, compactada e cifrada com a chave do backup, para `extra/<nome>` no destino, e a lê de volta decifrada na saída padrão (exportação do Keycloak); entrada vazia não é enviada, e a leitura acha o nome armazenado (com a extensão da compactação) pela listagem do destino |
+
+Os comandos que escrevem dados na saída padrão (`list`, `get-object`, `restore`) registram o log na
+saída de erro; o agente (`serve`) e o `backup` avulso, na saída padrão.
 
 #### Como incluir noutro compose
 
@@ -654,7 +657,9 @@ cifragem são sempre as traduzidas da configuração acima.
 - **Cifragem no cliente.** Backup base e WAL são compactados e cifrados no servidor, antes do
   envio, com a libsodium (secretstream XChaCha20-Poly1305, cifragem autenticada). O armazenamento
   e quem tiver acesso a ele só veem dados cifrados; um arquivo alterado não decifra.
-- **Obrigatória.** Sem chave, o servidor não inicia, o `archive_command` falha (o WAL fica no
+- **Obrigatória.** Sem chave (ou com o arquivo da chave ilegível pelo usuário `postgres`, que
+  executa o `archive_command`: a conferência da partida roda como ele), o servidor não inicia, o
+  `archive_command` falha (o WAL fica no
   servidor e o alerta dispara) e a restauração é recusada: nada é enviado sem cifragem.
 - **Guarda.** A chave do backup é guardada como as chaves de cifragem da aplicação
   ([Guarda](#guarda)): fora do armazenamento do backup, em conta e controle de acesso diferentes,
@@ -694,14 +699,18 @@ dados vazio (a sequência completa, com a aplicação, está no
 ```bash
 make pitr-restore TARGET=2026-11-22T10:15:00Z      # ou TARGET=latest: até o último segmento arquivado
 make pitr-restore TARGET=2026-11-22T10:15:00Z MANIFEST=backups/recorvia-20261122T101500Z.manifest
+make pitr-restore TARGET=2026-11-22T10:15:00Z TIMELINE=1   # na linha do tempo original (ver abaixo)
 ```
 
 `deploy/backup/pitr-restore.sh`:
-1. recusa se o servidor estiver em execução e para o agente de backup;
+1. recusa se o servidor não estiver parado (em execução, reiniciando, pausado) e para o agente
+   de backup; se o roteiro falhar antes de o servidor entrar em recuperação, ou depois da
+   promoção, o agente é religado (no meio da recuperação, fica parado e o roteiro avisa);
 2. num container avulso do serviço `postgres`, recusa um volume com dados (a restauração nunca
-   sobrescreve um servidor), escolhe o backup base mais recente terminado antes do instante,
-   recusa chave ausente ou diferente da usada nele, extrai o backup e grava `recovery.signal`, o
-   instante (`recovery_target_time`) e a promoção ao alcançá-lo;
+   sobrescreve um servidor), recusa chave ausente ou diferente da usada nos backups, escolhe a
+   linha do tempo e o backup base mais recente **do histórico dela** terminado antes do
+   instante, extrai o backup e grava `recovery.signal`, a linha do tempo
+   (`recovery_target_timeline`), o instante (`recovery_target_time`) e a promoção ao alcançá-lo;
 3. inicia o servidor, que busca o WAL no armazenamento, para antes do primeiro commit posterior
    ao instante e é promovido numa linha do tempo nova; registra o último commit aplicado (log
    `last completed transaction was at log time ...`). Se o WAL até o instante não existir ou não
@@ -719,7 +728,21 @@ divergir, e o resultado da comparação deve ser lido tabela a tabela. O exercí
 escrita parada e exige o manifesto idêntico.
 
 Depois da recuperação, a linha do tempo é a nova: o WAL e os backups seguintes vão para o mesmo
-destino, e o WAL-G distingue as linhas do tempo. Uma restauração **de teste** com o servidor de
+destino, e o WAL-G distingue as linhas do tempo.
+
+**Linhas do tempo.** Cada restauração para um instante cria uma linha do tempo nova, ramificada
+da anterior no ponto restaurado; o que a linha anterior gravou depois desse ponto continua no
+arquivo, mas não faz parte da nova. A restauração lê os arquivos `.history` arquivados e:
+- segue, por padrão, a linha do tempo **mais recente** do arquivo (a do servidor em uso depois da
+  última restauração), gravada explicitamente em `recovery_target_timeline`, e avisa quando o
+  arquivo tem mais de uma; `TIMELINE=<n>` (`--timeline`) segue outra, por exemplo a original,
+  para recuperar um instante dela posterior à ramificação, e o roteiro avisa que há linhas mais
+  novas;
+- só aceita backups base do histórico da linha seguida: os da própria linha e os das anteriores
+  terminados antes do ponto em que ela foi deixada. Um backup feito na linha abandonada depois da
+  ramificação é ignorado na escolha e recusado em `BACKUP=` (a recuperação terminaria com
+  `requested timeline N is not a child of this server's history`); sem backup do histórico antes
+  do instante, a restauração para com a sugestão de `--backup` ou `--timeline`. Uma restauração **de teste** com o servidor de
 origem ainda em uso nunca deve usar o mesmo destino: configure outro `RECORVIA_BACKUP_S3_PREFIX`
 com leitura do original (ou uma cópia), ou não inicie o servidor restaurado com arquivamento.
 
@@ -761,6 +784,13 @@ servidor PostgreSQL, coberto pelo mesmo backup.
    com o worker parado, conciliação pela API e `reconcile-pending` (o pagamento feito depois de T
    volta como `payment_not_reflected` e é adotado do provedor) e só então o worker; outbox
    publicada, ledger balanceado, sem pagamento duplicado nem dead letters.
+9. **Objetos extras e Keycloak**: um objeto enviado pelo agente (`put-object`) volta igual
+   (`get-object`), um inexistente é apontado como tal e outra chave mostra o erro de decifragem;
+   o realm exportado do banco restaurado (`make keycloak-export`) volta legível, com o usuário de
+   antes de T e sem o de depois.
+
+Na origem, o exercício também confere que o entrypoint recusa um arquivo de chave legível só pelo
+root: a conferência roda como o usuário `postgres`, o mesmo do `archive_command`.
 
 Ao final, o projeto é derrubado com os volumes e o cofre é apagado; ficam em `backups/pitr-check/`
 (fora do Git) o relatório com os tempos, os manifestos, as listas de backups, as saídas das
@@ -791,9 +821,12 @@ dele. Duas cópias complementares:
   Keycloak num servidor PostgreSQL separado, aplique o mesmo componente a ele, com outro prefixo
   de destino, e restaure os dois no mesmo instante.
 - **Exportação do realm** (`make keycloak-export`, `deploy/backup/keycloak-export.sh`): cópia
-  lógica, para inspeção, recuperação seletiva ou migração entre versões do Keycloak. Executa
-  `kc.sh export --realm recorvia --users same_file` num container avulso do serviço do Keycloak
-  (mesma configuração e mesmo banco do servidor em execução) e envia o arquivo pelo agente
+  lógica, para inspeção, recuperação seletiva ou migração entre versões do Keycloak. Exige o
+  Keycloak com banco externo (`KC_DB=postgres`): com o banco embutido do modo de desenvolvimento
+  (`dev-file`, como no compose local), um container avulso enxergaria um banco vazio, e o roteiro
+  recusa. Executa `kc.sh export --realm recorvia --users same_file` num container avulso do
+  serviço do Keycloak (mesma configuração e mesmo banco do servidor em execução), confere que o
+  realm veio na exportação e envia o arquivo pelo agente
   (`recorvia-pgbackup put-object`), que o compacta e cifra com a chave do backup em
   `extra/keycloak/realm-recorvia-<instante>.json` no mesmo destino. O arquivo contém hashes de
   senha e segredos de clientes e não fica no host. Para ler:

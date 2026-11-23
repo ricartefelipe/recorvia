@@ -28,7 +28,14 @@
 #   8. os realms: recorvia sem usuários, com verificação de e-mail, política
 #      de senha, proteção contra força bruta e cliente com os endereços do
 #      domínio e o segredo do .env; master com proteção contra força bruta;
-#   9. o backup do banco do Keycloak (pg_dump legível por pg_restore).
+#   9. o backup do banco do Keycloak (pg_dump legível por pg_restore);
+#  10. o backup contínuo (ADR-087), com o MinIO de verificacao.compose.yaml
+#      como S3 de teste: PostgreSQL com a imagem recorvia-postgres e o
+#      arquivamento de WAL funcionando (segmento forçado chega ao
+#      armazenamento, sem falhas), agente postgres-backup saudável, com o
+#      backup base cifrado com a chave do arquivo e as métricas alcançáveis
+#      pela rede do Prometheus, e as redes (data sem saída; storage só para o
+#      PostgreSQL e o agente).
 #
 # Variáveis (todas opcionais):
 #   RECORVIA_PROD_CHECK_PROJECT  projeto do compose (padrão:
@@ -45,7 +52,10 @@
 #                                (padrão: 600)
 #
 # Exige docker com o plugin compose 2.24 ou superior e suporte a redes IPv6,
-# curl e jq, e as portas 80 e 443 de 127.0.0.1 livres. Usa a imagem
+# curl e jq, e as portas 80 e 443 de 127.0.0.1 livres. A chave de cifragem do
+# backup é montada como arquivo: fica numa pasta temporária dentro de
+# RECORVIA_PROD_CHECK_SECRETS_DIR (padrão: ~/.cache), porque o Docker Desktop
+# só compartilha a pasta pessoal com a máquina virtual. Usa a imagem
 # curlimages/curl como cliente dentro da rede edge (IPv6 e X-Forwarded-For
 # forjado).
 set -euo pipefail
@@ -91,6 +101,9 @@ done < <({
 
 work=$(mktemp -d)
 env_file=$work/.env
+secrets_base=${RECORVIA_PROD_CHECK_SECRETS_DIR:-$HOME/.cache}
+mkdir -p "$secrets_base"
+secrets_dir=$(mktemp -d "$secrets_base/recorvia-prodcheck-segredos.XXXXXX")
 compose() { docker compose -p "$project" -f compose.yaml -f verificacao.compose.yaml --env-file "$env_file" "$@"; }
 
 teardown() {
@@ -101,10 +114,10 @@ teardown() {
     compose logs --no-color --tail 80 >&2 || true
   fi
   if [[ $keep == 1 ]]; then
-    log "ambiente mantido (RECORVIA_PROD_CHECK_KEEP=1): projeto $project, configuração em $work"
+    log "ambiente mantido (RECORVIA_PROD_CHECK_KEEP=1): projeto $project, configuração em $work e chave do backup em $secrets_dir"
   else
     compose down -v --remove-orphans >/dev/null 2>&1 || true
-    rm -rf "$work"
+    rm -rf "$work" "$secrets_dir"
   fi
   exit "$status"
 }
@@ -139,7 +152,18 @@ get_env() { sed -n "s/^$1=//p" "$env_file" | tail -n 1; }
 
 log "configuração de teste em $work (domínios $app e $auth)"
 cp .env.example "$env_file"
+# A chave do backup contínuo é criada por gerar-segredos.sh no caminho do .env.
+backup_key_file=$secrets_dir/segredos/backup-cifragem.chave
+set_env RECORVIA_BACKUP_ENCRYPTION_KEY_HOST_FILE "$backup_key_file"
 bash gerar-segredos.sh "$env_file" 2>/dev/null
+[[ -f $backup_key_file && $(stat -c %a "$backup_key_file") == 444 && $(stat -c %a "$(dirname "$backup_key_file")") == 700 ]] ||
+  die "gerar-segredos.sh não criou a chave do backup (0444 numa pasta 0700)"
+# S3 de teste: o MinIO da verificação, com credencial gerada aqui.
+set_env RECORVIA_BACKUP_S3_PREFIX s3://recorvia-backup/prodcheck
+set_env RECORVIA_BACKUP_S3_ENDPOINT http://minio:9000
+set_env RECORVIA_BACKUP_S3_FORCE_PATH_STYLE true
+set_env RECORVIA_BACKUP_S3_ACCESS_KEY_ID "prodcheck$(bash gerar-segredos.sh --senha | cut -c1-8)"
+set_env RECORVIA_BACKUP_S3_SECRET_ACCESS_KEY "$(bash gerar-segredos.sh --senha)"
 set_env RECORVIA_VERSION "$tag"
 set_env RECORVIA_DOMAIN "$app"
 set_env KEYCLOAK_DOMAIN "$auth"
@@ -180,6 +204,18 @@ incomplete=$(docker compose -p "$project" -f compose.yaml --env-file "$env_file"
         or ((.value.healthcheck == null) and (.key != "otel-collector"))) | .key')
 [[ -z $incomplete ]] || die "serviços sem restart, limites ou healthcheck: $incomplete"
 ok "serviços contínuos com restart, healthcheck e limites de CPU e memória"
+[[ $(jq -r .services.postgres.image <<<"$base") == recorvia-postgres:* ]] || die "o PostgreSQL deveria usar a imagem recorvia-postgres"
+jq -e '.services["postgres-backup"].read_only == true and (.services["postgres-backup"].volumes[0].read_only == true)
+  and ([.services.postgres, .services["postgres-backup"]] | all(.secrets[0].target == "/run/secrets/backup-encryption-key"))
+  and ([.services.postgres, .services["postgres-backup"]] | all(.environment.RECORVIA_BACKUP_ENCRYPTION_KEY == ""))
+  and .networks.data.internal == true and (.networks.storage.internal // false) == false' <<<"$base" >/dev/null ||
+  die "backup contínuo mal configurado (agente somente leitura, chave por arquivo, redes data e storage)"
+storage_users=$(jq -r '[.services | to_entries[] | select(.value.networks | has("storage")) | .key] | sort | join(" ")' <<<"$base")
+[[ $storage_users == "postgres postgres-backup" ]] || die "serviços na rede storage: $storage_users (esperado só postgres e postgres-backup)"
+obs=$(docker compose -p "$project" -f compose.yaml --env-file "$env_file" --profile observability config --format json)
+jq -e '(.services.prometheus.networks | keys) as $p | (.services["postgres-backup"].networks | keys) as $b | any($p[]; . as $n | $b | index($n))' \
+  <<<"$obs" >/dev/null || die "o Prometheus não compartilha rede com o agente de backup (coleta recorvia-backup)"
+ok "backup contínuo: imagem recorvia-postgres, chave por arquivo (fora do ambiente), agente somente leitura, rede storage só para o PostgreSQL e o agente, Prometheus na rede do agente"
 
 log "subida do projeto $project (etiqueta $tag)"
 require_own_project
@@ -398,5 +434,43 @@ compose exec -T postgres pg_restore --list <"$work/keycloak.dump" >"$work/keyclo
   die "pg_restore não leu o dump do banco do Keycloak"
 grep -q 'TABLE public user_entity' "$work/keycloak.list" || die "dump do banco do Keycloak sem a tabela de usuários"
 ok "pg_dump do banco keycloak legível ($(stat -c %s "$work/keycloak.dump") bytes)"
+
+log "10. backup contínuo"
+psql_su() { compose exec -T postgres psql -X -q -A -t -v ON_ERROR_STOP=1 -U postgres -d postgres -c "$1"; }
+[[ $(psql_su "SHOW archive_mode") == on ]] || die "archive_mode deveria estar ligado"
+segment=$(psql_su "SELECT pg_walfile_name(pg_current_wal_lsn())")
+psql_su "SELECT pg_switch_wal()" >/dev/null
+archived=""
+for _ in $(seq 1 60); do
+  archived=$(psql_su "SELECT count(*) FROM pg_stat_archiver WHERE last_archived_wal >= '$segment'")
+  [[ $archived == 1 ]] && break
+  sleep 2
+done
+[[ $archived == 1 ]] || die "o segmento $segment não chegou ao armazenamento: $(psql_su "SELECT row_to_json(a) FROM pg_stat_archiver a")"
+failed=$(psql_su "SELECT failed_count FROM pg_stat_archiver")
+[[ $failed == 0 ]] || die "archive_command com $failed falhas"
+ok "arquivamento de WAL no S3 de teste: segmento $segment arquivado, nenhuma falha"
+health=$(docker inspect -f '{{.State.Health.Status}}' "$(compose ps -q postgres-backup)")
+[[ $health == healthy ]] || die "agente de backup com saúde $health"
+listing=""
+for _ in $(seq 1 60); do
+  listing=$(compose exec -T postgres-backup recorvia-pgbackup list 2>/dev/null || true)
+  grep -q '^base_.*esta chave$' <<<"$listing" && break
+  sleep 2
+done
+grep -q '^base_.*esta chave$' <<<"$listing" || die "nenhum backup base cifrado com a chave do arquivo: $listing"
+ok "agente de backup saudável; backup base no armazenamento, cifrado com a chave do arquivo ($(grep -c '^base_' <<<"$listing") backup)"
+# A coleta recorvia-backup do Prometheus chega ao agente pelo nome do serviço
+# na rede data: outro container dessa rede lê as métricas.
+metrics=$(compose exec -T redis wget -q -O - http://postgres-backup:9187/metrics) || die "métricas do agente fora do alcance da rede data"
+grep -q '^recorvia_backup_dependency_up{dependency="storage",service="pgbackup"} 1' <<<"$metrics" || die "agente sem acesso ao armazenamento"
+grep -q '^recorvia_backup_dependency_up{dependency="postgres",service="pgbackup"} 1' <<<"$metrics" || die "agente sem acesso ao PostgreSQL"
+grep -q '^recorvia_backup_wal_last_archived_timestamp_seconds' <<<"$metrics" || die "métricas do arquivamento ausentes"
+ok "métricas do agente em postgres-backup:9187 pela rede data (armazenamento e PostgreSQL disponíveis)"
+# Sem saída da rede data: o Redis (só na data) não alcança o MinIO.
+if compose exec -T redis wget -q -T 5 -O /dev/null http://minio:9000/minio/health/live 2>/dev/null; then
+  die "a rede data alcança o armazenamento"
+fi
+ok "o armazenamento só é alcançável pela rede storage"
 
 log "verificação do pacote de produção concluída"

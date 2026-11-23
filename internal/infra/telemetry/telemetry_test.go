@@ -638,6 +638,7 @@ func TestAlertRulesAndDashboardsUseDeclaredMetrics(t *testing.T) {
 		"recorvia_webhook_deliveries_backlog", "recorvia_webhook_deliveries_backlog_oldest_due_seconds",
 		"recorvia_retention_purged_total", "recorvia_retention_purge_incomplete_total",
 		"recorvia_backup_wal_last_archived_timestamp_seconds", "recorvia_backup_wal_archive_failures_total",
+		"recorvia_backup_wal_pending_segments",
 		"recorvia_backup_base_last_success_timestamp_seconds", "recorvia_backup_base_interval_seconds", "recorvia_backup_dependency_up"} {
 		if !used[required] {
 			t.Errorf("métrica %s sem alerta ou painel", required)

@@ -81,6 +81,10 @@ type ArchiverStats struct {
 	// OldestPending, a idade do mais antigo deles (zero sem pendências).
 	Pending       int64
 	OldestPending time.Duration
+	// CurrentSegmentBytes são os bytes já escritos no segmento atual, ainda
+	// incompleto e não arquivável (informativo: um servidor ocioso pode
+	// manter nele um registro pequeno sem trocar de segmento).
+	CurrentSegmentBytes int64
 }
 
 // ObserveArchiver registra o coletor do arquivamento de WAL, que lê o estado
@@ -95,10 +99,10 @@ func (m *BackupMetrics) ObserveArchiver(timeout time.Duration, read func(ctx con
 }
 
 type archiverCollector struct {
-	m                                    *BackupMetrics
-	timeout                              time.Duration
-	read                                 func(ctx context.Context) (ArchiverStats, error)
-	lastArchived, failures, pending, age *prometheus.Desc
+	m                                             *BackupMetrics
+	timeout                                       time.Duration
+	read                                          func(ctx context.Context) (ArchiverStats, error)
+	lastArchived, failures, pending, age, current *prometheus.Desc
 }
 
 func newArchiverCollector(m *BackupMetrics, timeout time.Duration, read func(ctx context.Context) (ArchiverStats, error)) *archiverCollector {
@@ -112,12 +116,14 @@ func newArchiverCollector(m *BackupMetrics, timeout time.Duration, read func(ctx
 			"Segmentos de WAL completos aguardando arquivamento.", nil, cl),
 		age: prometheus.NewDesc("recorvia_backup_wal_oldest_pending_seconds",
 			"Idade do segmento de WAL mais antigo aguardando arquivamento (zero sem pendências).", nil, cl),
+		current: prometheus.NewDesc("recorvia_backup_wal_current_segment_bytes",
+			"Bytes escritos no segmento de WAL atual, ainda incompleto e não arquivável.", nil, cl),
 	}
 }
 
 // Describe implementa prometheus.Collector.
 func (c *archiverCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, d := range []*prometheus.Desc{c.lastArchived, c.failures, c.pending, c.age} {
+	for _, d := range []*prometheus.Desc{c.lastArchived, c.failures, c.pending, c.age, c.current} {
 		ch <- d
 	}
 	c.m.DependencyUp.Describe(ch)
@@ -143,4 +149,5 @@ func (c *archiverCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.failures, prometheus.CounterValue, float64(s.Failures))
 	ch <- prometheus.MustNewConstMetric(c.pending, prometheus.GaugeValue, float64(s.Pending))
 	ch <- prometheus.MustNewConstMetric(c.age, prometheus.GaugeValue, s.OldestPending.Seconds())
+	ch <- prometheus.MustNewConstMetric(c.current, prometheus.GaugeValue, float64(s.CurrentSegmentBytes))
 }

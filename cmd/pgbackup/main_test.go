@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ricartefelipe/recorvia/internal/infra/pgbackup"
 )
 
 func TestRunRefusesWithoutConfiguration(t *testing.T) {
@@ -52,8 +56,61 @@ func TestObjectNames(t *testing.T) {
 		"keycloak//duplo":   false,
 		"keycloak/a b.json": false,
 	} {
-		if got := objectName.MatchString(name); got != ok {
+		if got := pgbackup.ValidObjectName(name); got != ok {
 			t.Errorf("%q: %v, esperado %v", name, got, ok)
 		}
+	}
+}
+
+// Nos comandos que escrevem dados na saída padrão, o log (inclusive o de
+// erro) vai para a saída de erro: list | ... e get-object > arquivo recebem
+// só os dados.
+func TestDataCommandsLogToStderr(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "wal-g")
+	script := "#!/bin/sh\ncase \"$1 $2\" in\n" +
+		"  'backup-list --json') echo '[{\"backup_name\":\"base_000000010000000000000003\",\"finish_time\":\"2026-11-22T10:00:00Z\"}]' ;;\n" +
+		"  'st ls') echo 'obj 2 2026-11-22 10:00:00 +0000 UTC realm.json.lz4' ;;\n" +
+		"  'st get') printf '{}' >\"$4\" ;;\n" +
+		"  *) echo \"falha simulada: $*\" >&2; exit 1 ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(fake, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(fake); err != nil {
+		t.Fatal(err)
+	}
+	prev := walgBin
+	walgBin = fake
+	defer func() { walgBin = prev }()
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
+	env := map[string]string{"RECORVIA_BACKUP_S3_PREFIX": "s3://recorvia-backup/teste", "RECORVIA_BACKUP_ENCRYPTION_KEY": key}
+	getenv := func(k string) string { return env[k] }
+
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"list"}, getenv, &stdout, &stderr); code != 0 {
+		t.Skipf("WAL-G falso não executou (disco sem permissão de execução?): %s", stderr.String())
+	}
+	if !strings.HasPrefix(stdout.String(), "BACKUP") || strings.Contains(stdout.String(), `"level"`) {
+		t.Errorf("list: saída padrão com algo além da tabela: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run(context.Background(), []string{"get-object", "keycloak/realm.json"}, getenv, &stdout, &stderr); code != 0 || stdout.String() != "{}" {
+		t.Errorf("get-object: código %d, saída %q (%s)", code, stdout.String(), stderr.String())
+	}
+
+	// Com falha, o erro fica na saída de erro e a saída padrão, vazia.
+	stdout.Reset()
+	stderr.Reset()
+	if code := run(context.Background(), []string{"get-object", "keycloak/outro.json"}, getenv, &stdout, &stderr); code != 1 {
+		t.Errorf("get-object inexistente: código %d", code)
+	}
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "não encontrado") {
+		t.Errorf("get-object inexistente: saída %q, erro %q", stdout.String(), stderr.String())
 	}
 }

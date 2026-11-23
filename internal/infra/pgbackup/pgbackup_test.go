@@ -143,7 +143,7 @@ func TestFingerprintIdentifiesKeyWithoutRevealingIt(t *testing.T) {
 func TestParseBackupListAndChooseForTarget(t *testing.T) {
 	raw := `[
 	 {"backup_name":"base_000000020000000000000009","start_time":"2026-11-22T12:00:00Z","finish_time":"2026-11-22T12:01:00Z","user_data":{"recorvia_key_fingerprint":"abc"}},
-	 {"backup_name":"base_000000010000000000000003","start_time":"2026-11-21T12:00:00Z","finish_time":"2026-11-21T12:01:00Z"}
+	 {"backup_name":"base_000000010000000000000003","start_time":"2026-11-21T12:00:00Z","finish_time":"2026-11-21T12:01:00Z","start_lsn":50331688,"finish_lsn":50331960}
 	]`
 	list, err := parseBackupList([]byte(raw))
 	if err != nil {
@@ -151,6 +151,9 @@ func TestParseBackupListAndChooseForTarget(t *testing.T) {
 	}
 	if list[0].Name != "base_000000010000000000000003" || list[0].Timeline() != 1 || list[1].Timeline() != 2 {
 		t.Fatalf("ordem ou linha do tempo inesperadas: %+v", list)
+	}
+	if list[0].StartLSN != 0x3000028 || list[0].FinishLSN != 0x3000138 {
+		t.Errorf("LSN do backup lidos errado: %x %x", list[0].StartLSN, list[0].FinishLSN)
 	}
 	if list[1].Fingerprint() != "abc" || list[0].Fingerprint() != "" {
 		t.Error("impressão digital lida errada")
@@ -177,7 +180,7 @@ func TestParseBackupListAndChooseForTarget(t *testing.T) {
 		{time.Date(2026, 11, 21, 12, 1, 0, 0, time.UTC), "", ErrNoBackupForTarget},
 	}
 	for _, tc := range cases {
-		b, err := ForTarget(list, tc.target)
+		b, err := ForTarget(list, tc.target, NewAncestry(2, map[uint32]uint64{1: 0x5000000}))
 		if !errors.Is(err, tc.err) || b.Name != tc.want {
 			t.Errorf("ForTarget(%s) = %q, %v; esperado %q, %v", tc.target, b.Name, err, tc.want, tc.err)
 		}
@@ -215,6 +218,16 @@ type fakeRunner struct {
 	list   string
 	fail   map[string]error
 	onCall func(args []string)
+	// files são os arquivos do WAL arquivado (wal-fetch); ausente devolve o
+	// código 74 do WAL-G (arquivo inexistente).
+	files map[string]string
+	// stdin recebe a entrada de RunInput.
+	stdin []byte
+}
+
+// exitCode devolve um *exec.ExitError real com o código informado.
+func exitCode(code int) error {
+	return exec.Command("sh", "-c", "exit "+strconv.Itoa(code)).Run()
 }
 
 func (f *fakeRunner) Run(_ context.Context, stdout io.Writer, args ...string) error {
@@ -225,10 +238,26 @@ func (f *fakeRunner) Run(_ context.Context, stdout io.Writer, args ...string) er
 	if err := f.fail[args[0]]; err != nil {
 		return err
 	}
-	if args[0] == "backup-list" {
+	switch args[0] {
+	case "backup-list":
 		_, _ = io.WriteString(stdout, f.list)
+	case "wal-fetch":
+		content, ok := f.files[args[1]]
+		if !ok {
+			return exitCode(74)
+		}
+		return os.WriteFile(args[2], []byte(content), 0o600)
 	}
 	return nil
+}
+
+func (f *fakeRunner) RunInput(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error {
+	b, err := io.ReadAll(stdin)
+	if err != nil {
+		return err
+	}
+	f.stdin = b
+	return f.Run(ctx, stdout, args...)
 }
 
 func (f *fakeRunner) commands() []string {
@@ -405,19 +434,22 @@ func TestPrepareRestore(t *testing.T) {
 				_ = os.WriteFile(filepath.Join(args[1], "postgresql.auto.conf"), []byte("# gerado\n"), 0o600)
 			}
 		}}
-		b, err := PrepareRestore(context.Background(), r, cfg, RestoreOptions{Target: target}, log)
+		plan, err := PrepareRestore(context.Background(), r, cfg, RestoreOptions{Target: target}, log)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if b.Name != "base_000000010000000000000003" || r.commands()[1] != "backup-fetch "+cfg.PGData+" base_000000010000000000000003" {
-			t.Fatalf("restauração de %q: %q", b.Name, r.commands())
+		cmds := r.commands()
+		if plan.Backup.Name != "base_000000010000000000000003" || plan.Timeline != 1 || plan.LatestTimeline != 1 ||
+			cmds[len(cmds)-1] != "backup-fetch "+cfg.PGData+" base_000000010000000000000003" {
+			t.Fatalf("restauração de %+v: %q", plan, cmds)
 		}
 		if _, err := os.Stat(filepath.Join(cfg.PGData, "recovery.signal")); err != nil {
 			t.Error("recovery.signal ausente")
 		}
 		auto, _ := os.ReadFile(filepath.Join(cfg.PGData, "postgresql.auto.conf"))
 		if !strings.Contains(string(auto), "# gerado\n") || !strings.Contains(string(auto), "recovery_target_time = '2026-11-22 12:30:00.123456+00'") ||
-			!strings.Contains(string(auto), "recovery_target_action = 'promote'") {
+			!strings.Contains(string(auto), "recovery_target_action = 'promote'") ||
+			!strings.Contains(string(auto), "recovery_target_timeline = '1'") {
 			t.Errorf("postgresql.auto.conf:\n%s", auto)
 		}
 		if st, _ := os.Stat(cfg.PGData); st.Mode().Perm() != 0o700 {
@@ -438,8 +470,9 @@ func TestPrepareRestore(t *testing.T) {
 		if _, err := PrepareRestore(context.Background(), r, cfg, RestoreOptions{Latest: true}, log); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := os.Stat(filepath.Join(cfg.PGData, "postgresql.auto.conf")); !errors.Is(err, os.ErrNotExist) {
-			t.Error("sem instante, nenhum alvo deveria ser gravado")
+		auto, _ := os.ReadFile(filepath.Join(cfg.PGData, "postgresql.auto.conf"))
+		if strings.Contains(string(auto), "recovery_target_time =") || !strings.Contains(string(auto), "recovery_target_timeline = '1'") {
+			t.Errorf("sem instante, só a linha do tempo deveria ser gravada:\n%s", auto)
 		}
 	})
 
@@ -471,13 +504,14 @@ func TestPrepareRestore(t *testing.T) {
 
 	t.Run("escolhas inválidas", func(t *testing.T) {
 		cfg := newCfg(t)
-		r := &fakeRunner{list: list}
+		r := &fakeRunner{list: strings.ReplaceAll(list, "FP", cfg.KeyFingerprint())}
 		for name, opts := range map[string]RestoreOptions{
 			"sem ponto":             {},
 			"ponto duplo":           {Latest: true, Target: target},
 			"backup inexistente":    {Target: target, BackupName: "base_x"},
 			"backup depois do alvo": {Target: time.Date(2026, 11, 22, 11, 0, 0, 0, time.UTC), BackupName: "base_000000010000000000000003"},
 			"alvo antes de todos":   {Target: time.Date(2026, 11, 22, 11, 0, 0, 0, time.UTC)},
+			"linha inexistente":     {Target: target, Timeline: 2},
 		} {
 			if _, err := PrepareRestore(context.Background(), r, cfg, opts, log); err == nil {
 				t.Errorf("%s: aceito", name)

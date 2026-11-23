@@ -19,21 +19,17 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
-	"regexp"
-	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -48,8 +44,8 @@ import (
 
 var version = "dev"
 
-// walgBin é o executável do WAL-G na imagem.
-const walgBin = "/usr/local/bin/wal-g"
+// walgBin é o executável do WAL-G na imagem (variável para os testes).
+var walgBin = "/usr/local/bin/wal-g"
 
 // lockFile impede dois backups base simultâneos no mesmo container.
 const lockFile = "/tmp/recorvia-pgbackup.lock"
@@ -107,7 +103,14 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		return pgbackup.WALFetch(ctx, runner, rest[0], rest[1], stderr)
 	}
 
-	log := logging.New(stdout, getenv("RECORVIA_LOG_LEVEL"), "pgbackup")
+	// O log vai para a saída de erro nos comandos que escrevem dados na saída
+	// padrão (list, get-object, restore); o agente e o backup avulso registram
+	// na saída padrão, como os demais processos.
+	logOut := stderr
+	if cmd == "serve" || cmd == "backup" {
+		logOut = stdout
+	}
+	log := logging.New(logOut, getenv("RECORVIA_LOG_LEVEL"), "pgbackup")
 	switch cmd {
 	case "serve":
 		err = serve(ctx, cfg, runner, log)
@@ -118,7 +121,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	case "restore":
 		err = restore(ctx, cfg, runner, rest, log, stdout)
 	case "put-object", "get-object":
-		err = object(ctx, runner, cmd, rest, stdout)
+		err = object(ctx, runner, cmd, rest, os.Stdin, stdout)
 	default:
 		_, _ = fmt.Fprintf(stderr, "subcomando desconhecido: %s\n", cmd)
 		return 2
@@ -222,11 +225,15 @@ func restore(ctx context.Context, cfg pgbackup.Config, runner pgbackup.Runner, a
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	target := fs.String("target-time", "", "instante da recuperação (RFC 3339)")
 	latest := fs.Bool("latest", false, "recuperar até o fim do WAL arquivado")
-	name := fs.String("backup", "", "backup base a usar (padrão: o mais recente terminado antes do instante)")
+	name := fs.String("backup", "", "backup base a usar (padrão: o mais recente do histórico da linha do tempo terminado antes do instante)")
+	timeline := fs.Uint("timeline", 0, "linha do tempo seguida na recuperação (padrão: a mais recente do arquivo)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	opts := pgbackup.RestoreOptions{Latest: *latest, BackupName: *name}
+	if *timeline > math.MaxUint32 {
+		return fmt.Errorf("linha do tempo inválida: %d", *timeline)
+	}
+	opts := pgbackup.RestoreOptions{Latest: *latest, BackupName: *name, Timeline: uint32(*timeline)}
 	if *target != "" {
 		t, err := pgbackup.ParseTarget(*target)
 		if err != nil {
@@ -234,7 +241,7 @@ func restore(ctx context.Context, cfg pgbackup.Config, runner pgbackup.Runner, a
 		}
 		opts.Target = t
 	}
-	b, err := pgbackup.PrepareRestore(ctx, runner, cfg, opts, log)
+	plan, err := pgbackup.PrepareRestore(ctx, runner, cfg, opts, log)
 	if err != nil {
 		return err
 	}
@@ -242,77 +249,35 @@ func restore(ctx context.Context, cfg pgbackup.Config, runner pgbackup.Runner, a
 	if !opts.Target.IsZero() {
 		point = opts.Target.Format(time.RFC3339Nano)
 	}
-	_, _ = fmt.Fprintf(stdout, "backup base %s (fim %s) extraído em %s; ao iniciar, o servidor recupera até %s e é promovido\n",
-		b.Name, b.FinishTime.UTC().Format(time.RFC3339), cfg.PGData, point)
+	_, _ = fmt.Fprintf(stdout, "backup base %s (fim %s) extraído em %s; ao iniciar, o servidor recupera até %s na linha do tempo %d e é promovido\n",
+		plan.Backup.Name, plan.Backup.FinishTime.UTC().Format(time.RFC3339), cfg.PGData, point, plan.Timeline)
+	if plan.Timeline < plan.LatestTimeline {
+		_, _ = fmt.Fprintf(stdout, "atenção: o arquivo tem linhas do tempo mais novas (até a %d); a recuperação segue a %d, como pedido\n",
+			plan.LatestTimeline, plan.Timeline)
+	} else if plan.LatestTimeline > 1 {
+		_, _ = fmt.Fprintf(stdout, "atenção: o arquivo tem %d linhas do tempo; a recuperação segue a mais recente (%d). Para seguir outra, use --timeline\n",
+			plan.LatestTimeline, plan.Timeline)
+	}
 	return nil
 }
-
-// objectName aceita nomes de objetos extras (por exemplo,
-// keycloak/realm-recorvia-20261122T101500Z.json): sem caminhos absolutos nem
-// "..", sempre sob extra/, longe das pastas do WAL-G.
-var objectName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`)
 
 // object envia ou lê um arquivo extra do destino do backup, com a mesma
 // compactação e cifragem do backup (wal-g st put/get). Usado para a
 // exportação do realm do Keycloak (deploy/backup/keycloak-export.sh).
-func object(ctx context.Context, runner pgbackup.ExecRunner, cmd string, args []string, stdout io.Writer) error {
-	if len(args) != 1 || !objectName.MatchString(args[0]) || strings.Contains(args[0], "..") {
+func object(ctx context.Context, runner pgbackup.ExecRunner, cmd string, args []string, stdin io.Reader, stdout io.Writer) error {
+	if len(args) != 1 || !pgbackup.ValidObjectName(args[0]) {
 		return fmt.Errorf("uso: recorvia-pgbackup %s <nome> (letras, dígitos, ., _, - e /)", cmd)
 	}
-	path := "extra/" + args[0]
 	if cmd == "put-object" {
 		// A entrada inteira é lida antes do envio: uma exportação que falhou
 		// no meio não chega ao destino como arquivo vazio ou truncado.
-		data, err := io.ReadAll(os.Stdin)
+		data, err := io.ReadAll(stdin)
 		if err != nil {
 			return err
 		}
-		if len(data) == 0 {
-			return errors.New("entrada vazia: nada foi enviado")
-		}
-		return runWithStdin(ctx, runner, bytes.NewReader(data), "st", "put", "--read-stdin", path)
+		return pgbackup.PutObject(ctx, runner, args[0], data)
 	}
-	// O WAL-G só grava num arquivo novo: o objeto decifrado passa por um
-	// diretório temporário do container (0700), removido em seguida.
-	dir, err := os.MkdirTemp("", "recorvia-pgbackup-")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.RemoveAll(dir) }()
-	// O WAL-G acrescenta ao nome a extensão da compactação usada no envio.
-	local := filepath.Join(dir, "objeto")
-	quiet := runner
-	quiet.Stderr = io.Discard
-	found := false
-	for _, ext := range []string{".lz4", ".zst", ".br", ".lzma", ""} {
-		if err := quiet.Run(ctx, io.Discard, "st", "get", path+ext, local); err == nil {
-			found = true
-			break
-		}
-	}
-	if !found {
-		// Repete a última tentativa com o erro visível.
-		if err := runner.Run(ctx, io.Discard, "st", "get", path+".lz4", local); err != nil {
-			return fmt.Errorf("objeto %s não encontrado ou ilegível (chave de cifragem do backup diferente?): %w", path, err)
-		}
-	}
-	f, err := os.Open(local) //nolint:gosec // arquivo do diretório temporário criado acima
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	_, err = io.Copy(stdout, f)
-	return err
-}
-
-// runWithStdin executa o WAL-G com a entrada padrão informada.
-func runWithStdin(ctx context.Context, r pgbackup.ExecRunner, stdin io.Reader, args ...string) error {
-	c := exec.CommandContext(ctx, r.Bin, args...) //nolint:gosec // executável fixo da imagem e argumentos validados
-	c.Env, c.Stdin, c.Stdout, c.Stderr = r.Env, stdin, r.Stderr, r.Stderr
-	if err := c.Run(); err != nil {
-		return fmt.Errorf("wal-g %s: %w", strings.Join(args[:2], " "), err)
-	}
-	return nil
+	return pgbackup.GetObject(ctx, runner, args[0], stdout)
 }
 
 // healthcheck confere se o agente responde em RECORVIA_BACKUP_METRICS_ADDR.

@@ -2,16 +2,24 @@
 # Recuperação do PostgreSQL para um ponto no tempo num servidor novo (ADR-087),
 # a partir do backup contínuo (backup base e WAL arquivado pelo componente
 # deploy/postgres).
-# Uso: make pitr-restore TARGET=<instante RFC 3339 | latest> [BACKUP=<nome>] [MANIFEST=<arquivo>]
+# Uso: make pitr-restore TARGET=<instante RFC 3339 | latest> [TIMELINE=<n>] [BACKUP=<nome>] [MANIFEST=<arquivo>]
 #      (ou bash deploy/backup/pitr-restore.sh (--target-time <instante> | --latest)
-#       [--backup <nome>] [--manifest <arquivo>])
+#       [--timeline <n>] [--backup <nome>] [--manifest <arquivo>])
+#
+# Linha do tempo: depois de uma restauração anterior, o arquivo tem mais de
+# uma. Sem --timeline, a recuperação segue a mais recente (a do servidor em
+# uso); --timeline escolhe outra (por exemplo, a original, para um instante
+# posterior ao da restauração anterior). O backup base escolhido é sempre um
+# do histórico da linha seguida.
 #
 # Usa o docker compose do diretório atual ou o definido pelas variáveis do
 # próprio compose (COMPOSE_PROJECT_NAME, COMPOSE_FILE, COMPOSE_ENV_FILES), com
 # o serviço do PostgreSQL do componente (imagem recorvia-postgres). A chave de
 # cifragem do backup e as credenciais do armazenamento são as do ambiente
 # desse serviço. Passos:
-#   1. confere que o servidor está parado e para o agente de backup;
+#   1. confere que o servidor está parado (nenhum container em execução,
+#      reiniciando ou pausado) e para o agente de backup, que é religado se o
+#      roteiro falhar antes de o servidor entrar em recuperação;
 #   2. num container avulso do serviço, com o volume de dados vazio (servidor
 #      novo), escolhe o backup base terminado antes do instante, recusa chave
 #      ausente ou diferente da usada no backup antes de baixar qualquer
@@ -46,17 +54,18 @@ timeout_s=${RECORVIA_PITR_TIMEOUT:-1800}
 out_dir=${RECORVIA_PITR_DIR:-backups}
 summary=${RECORVIA_PITR_SUMMARY:-}
 
-usage() { die "uso: pitr-restore.sh (--target-time <RFC 3339> | --latest) [--backup <nome>] [--manifest <arquivo>]"; }
-target="" latest=0 backup="" manifest=""
+usage() { die "uso: pitr-restore.sh (--target-time <RFC 3339> | --latest) [--timeline <n>] [--backup <nome>] [--manifest <arquivo>]"; }
+target="" latest=0 backup="" manifest="" timeline_opt=""
 while (($# > 0)); do
   case $1 in
     --latest) latest=1 ;;
-    --target-time | --backup | --manifest)
+    --target-time | --backup | --manifest | --timeline)
       (($# >= 2)) || usage
       case $1 in
         --target-time) target=$2 ;;
         --backup) backup=$2 ;;
         --manifest) manifest=$2 ;;
+        --timeline) timeline_opt=$2 ;;
       esac
       shift
       ;;
@@ -67,6 +76,7 @@ done
 [[ -n $target || $latest == 1 ]] || usage
 [[ -z $target || $latest == 0 ]] || die "informe --target-time ou --latest, não os dois"
 [[ $timeout_s =~ ^[1-9][0-9]*$ ]] || die "RECORVIA_PITR_TIMEOUT inválido: $timeout_s"
+[[ -z $timeline_opt || $timeline_opt =~ ^[1-9][0-9]*$ ]] || die "linha do tempo inválida: $timeline_opt"
 if [[ -n $manifest ]]; then
   [[ -f $manifest ]] || die "manifesto não encontrado: $manifest"
   require_manifest_lines "$manifest"
@@ -92,11 +102,43 @@ if [[ -n $summary ]]; then
 fi
 
 # ---------- 1. Servidor parado ----------
-running=$(dc ps -q --status running "$pg_service" 2>/dev/null || true)
-[[ -z $running ]] || die "o serviço $pg_service está em execução: a restauração é feita num servidor novo. Pare-o (docker compose stop $pg_service) e use um volume de dados vazio; nada foi alterado"
+# Só um container parado (exited) ou nunca iniciado (created) do serviço, ou
+# nenhum, é aceito: em execução, reiniciando (crash loop), pausado ou em
+# remoção, o servidor ainda pode estar usando o volume.
+states=$(dc ps -a --format '{{.State}}' "$pg_service" 2>/dev/null) || die "não foi possível consultar o serviço $pg_service"
+while IFS= read -r state; do
+  case $state in
+    "" | exited | created) ;;
+    *) die "o serviço $pg_service está no estado $state: a restauração é feita num servidor parado e novo. Pare-o (docker compose stop $pg_service) e use um volume de dados vazio; nada foi alterado" ;;
+  esac
+done <<<"$states"
+
+# A partir daqui o agente fica parado. Se o roteiro terminar com erro, ele é
+# religado, a menos que o servidor esteja no meio da recuperação (iniciado e
+# ainda não promovido): aí o agente fica parado até a situação ser resolvida.
+agent_stopped=0 agent_restarted=0 server_started=0
+server_primary() {
+  [[ -n ${PG:-} && $(docker inspect -f '{{.State.Status}}' "$PG" 2>/dev/null) == running ]] &&
+    [[ $(docker exec "$PG" psql -X -q -A -t -U "$RECORVIA_PG_SUPERUSER" -d postgres -c "SELECT pg_is_in_recovery()" 2>/dev/null) == f ]]
+}
+restart_agent_on_failure() {
+  local code=$?
+  trap - EXIT
+  if ((code != 0 && agent_stopped == 1 && agent_restarted == 0)); then
+    if ((server_started == 0)) || server_primary; then
+      log "religando o agente de backup ($agent_service) depois da falha"
+      dc up -d --no-deps "$agent_service" >/dev/null 2>&1 || log "aviso: não foi possível religar o agente; religue com docker compose up -d $agent_service"
+    else
+      log "aviso: o agente de backup ($agent_service) continua parado, porque o servidor ficou no meio da recuperação; depois de resolver, religue com docker compose up -d $agent_service"
+    fi
+  fi
+  exit "$code"
+}
+trap restart_agent_on_failure EXIT
 if ((has_agent == 1)); then
   log "parando o agente de backup ($agent_service) durante a restauração"
   dc stop "$agent_service" >/dev/null 2>&1 || true
+  agent_stopped=1
 fi
 # Container parado de uma execução anterior: removido (o volume fica).
 dc rm -f "$pg_service" >/dev/null 2>&1 || true
@@ -111,10 +153,13 @@ fi
 if [[ -n $backup ]]; then
   args+=(--backup "$backup")
 fi
+if [[ -n $timeline_opt ]]; then
+  args+=(--timeline "$timeline_opt")
+fi
 log "extraindo o backup base (recorvia-pgbackup restore ${args[*]})"
 fetch_started=$(now_s)
 dc run --rm --no-deps -T --user postgres --entrypoint recorvia-pgbackup "$pg_service" restore "${args[@]}" ||
-  die "restauração recusada ou interrompida: veja a mensagem acima (o volume de dados continua vazio)"
+  die "restauração recusada ou interrompida: veja a mensagem acima"
 fetch_finished=$(now_s)
 summary_line fetch_seconds $((fetch_finished - fetch_started))
 
@@ -122,6 +167,7 @@ summary_line fetch_seconds $((fetch_finished - fetch_started))
 log "iniciando o servidor para a recuperação até ${target:-o fim do WAL arquivado}"
 recovery_started=$(now_s)
 since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+server_started=1
 dc up -d --no-deps "$pg_service"
 PG=$(dc ps -q "$pg_service")
 [[ -n $PG ]] || die "container do serviço $pg_service não encontrado"
@@ -155,6 +201,7 @@ resolve_container
 psql_in postgres >/dev/null <<'SQL'
 ALTER SYSTEM RESET recovery_target_time;
 ALTER SYSTEM RESET recovery_target_action;
+ALTER SYSTEM RESET recovery_target_timeline;
 SELECT pg_reload_conf();
 SQL
 timeline=$(psql_in postgres -c "SELECT timeline_id FROM pg_control_checkpoint()")
@@ -190,5 +237,6 @@ fi
 if ((has_agent == 1)); then
   log "religando o agente de backup: o backup base da linha do tempo $timeline começa em seguida"
   dc up -d --no-deps "$agent_service" >/dev/null
+  agent_restarted=1
 fi
 log "servidor restaurado até ${target:-o fim do WAL arquivado}. Próximos passos (runbook): chaves de cifragem (keyring-check), API sem tráfego, conciliação da janela perdida e só então o worker"

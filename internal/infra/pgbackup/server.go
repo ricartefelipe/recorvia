@@ -49,13 +49,17 @@ func (s *PGServer) Timeline(ctx context.Context) (uint32, error) {
 	return uint32(tl), nil
 }
 
-// archiverSQL lê pg_stat_archiver e os segmentos completos ainda não
-// arquivados (arquivos .ready), com a idade do mais antigo.
+// archiverSQL lê pg_stat_archiver, os segmentos completos ainda não
+// arquivados (arquivos .ready), com a idade do mais antigo, e os bytes já
+// escritos no segmento atual, que ainda não pode ser arquivado (zero num
+// servidor em recuperação, que não gera WAL).
 const archiverSQL = `
 SELECT COALESCE(extract(epoch FROM a.last_archived_time), 0)::float8,
        a.failed_count,
        s.pending,
-       COALESCE(extract(epoch FROM now() - s.oldest), 0)::float8
+       COALESCE(extract(epoch FROM now() - s.oldest), 0)::float8,
+       CASE WHEN pg_is_in_recovery() THEN 0
+            ELSE (pg_walfile_name_offset(pg_current_wal_lsn())).file_offset END::bigint
   FROM pg_stat_archiver a,
        LATERAL (SELECT count(*) AS pending, min(modification) AS oldest
                   FROM pg_ls_archive_statusdir() WHERE name LIKE '%.ready') s`
@@ -64,7 +68,7 @@ SELECT COALESCE(extract(epoch FROM a.last_archived_time), 0)::float8,
 func (s *PGServer) Archiver(ctx context.Context) (telemetry.ArchiverStats, error) {
 	var last, oldest float64
 	var st telemetry.ArchiverStats
-	if err := s.pool.QueryRow(ctx, archiverSQL).Scan(&last, &st.Failures, &st.Pending, &oldest); err != nil {
+	if err := s.pool.QueryRow(ctx, archiverSQL).Scan(&last, &st.Failures, &st.Pending, &oldest, &st.CurrentSegmentBytes); err != nil {
 		return telemetry.ArchiverStats{}, fmt.Errorf("estado do arquivamento: %w", err)
 	}
 	if last > 0 {

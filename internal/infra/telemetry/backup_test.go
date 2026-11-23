@@ -30,7 +30,7 @@ func TestBackupArchiverIsReadOnEachGather(t *testing.T) {
 		if _, ok := ctx.Deadline(); !ok {
 			t.Error("leitura sem prazo")
 		}
-		return ArchiverStats{LastArchived: last, Failures: 3, Pending: 2, OldestPending: 90 * time.Second}, fail
+		return ArchiverStats{LastArchived: last, Failures: 3, Pending: 2, OldestPending: 90 * time.Second, CurrentSegmentBytes: 8192}, fail
 	})
 	got := gatherBackup(t, m)
 	svc := map[string]string{"service": "pgbackup"}
@@ -39,6 +39,7 @@ func TestBackupArchiverIsReadOnEachGather(t *testing.T) {
 		"recorvia_backup_wal_archive_failures_total":          3,
 		"recorvia_backup_wal_pending_segments":                2,
 		"recorvia_backup_wal_oldest_pending_seconds":          90,
+		"recorvia_backup_wal_current_segment_bytes":           8192,
 	} {
 		if v := value(t, got[name], svc); v != want {
 			t.Errorf("%s = %v, esperado %v", name, v, want)

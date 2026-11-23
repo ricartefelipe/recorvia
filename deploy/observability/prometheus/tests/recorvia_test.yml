@@ -969,12 +969,15 @@ tests:
               runbook: docs/operacao/runbooks/filas-e-dlq.md#processo-ou-broker-indisponivel
 
   # Backup contínuo (ADR-087). Último segmento de WAL arquivado a cada
-  # minuto até 10 min; depois o arquivamento para: aviso com mais de 10 min
+  # minuto até 10 min; depois o arquivamento trava com escrita contínua
+  # (segmentos .ready acumulando a partir de 11 min): aviso com mais de 10 min
   # por 5 min e crítico com mais de 30 min por 5 min.
   - interval: 1m
     input_series:
       - series: 'recorvia_backup_wal_last_archived_timestamp_seconds{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
         values: '0+60x10 600x40'
+      - series: 'recorvia_backup_wal_pending_segments{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '0x10 1+1x40'
     alert_rule_test:
       - eval_time: 25m
         alertname: RecorviaWALArchiveStale
@@ -986,8 +989,8 @@ tests:
               severity: warning
               area: backup
             exp_annotations:
-              summary: "Último segmento de WAL arquivado há 17m 0s"
-              description: "Nenhum segmento de WAL chegou ao armazenamento há mais de 10 minutos: o que foi gravado desde então se perde se o servidor for destruído."
+              summary: "Último segmento de WAL arquivado há 17m 0s, com segmentos aguardando"
+              description: "Há segmentos de WAL aguardando arquivamento (ou falhas do archive_command) e nenhum chegou ao armazenamento há mais de 10 minutos: o que foi gravado desde então se perde se o servidor for destruído."
               runbook: docs/operacao/runbooks/backup-continuo.md#arquivamento-de-wal-atrasado
       - eval_time: 47m
         alertname: RecorviaWALArchiveStale
@@ -996,15 +999,53 @@ tests:
               severity: warning
               area: backup
             exp_annotations:
-              summary: "Último segmento de WAL arquivado há 37m 0s"
-              description: "Nenhum segmento de WAL chegou ao armazenamento há mais de 10 minutos: o que foi gravado desde então se perde se o servidor for destruído."
+              summary: "Último segmento de WAL arquivado há 37m 0s, com segmentos aguardando"
+              description: "Há segmentos de WAL aguardando arquivamento (ou falhas do archive_command) e nenhum chegou ao armazenamento há mais de 10 minutos: o que foi gravado desde então se perde se o servidor for destruído."
               runbook: docs/operacao/runbooks/backup-continuo.md#arquivamento-de-wal-atrasado
           - exp_labels:
               severity: critical
               area: backup
             exp_annotations:
-              summary: "Último segmento de WAL arquivado há 37m 0s"
-              description: "O arquivamento de WAL está parado há mais de 30 minutos: a perda numa destruição do servidor cresce a cada minuto e o WAL se acumula no disco do servidor."
+              summary: "Último segmento de WAL arquivado há 37m 0s, com segmentos aguardando"
+              description: "O arquivamento de WAL está parado há mais de 30 minutos com segmentos aguardando: a perda numa destruição do servidor cresce a cada minuto e o WAL se acumula no disco do servidor."
+              runbook: docs/operacao/runbooks/backup-continuo.md#arquivamento-de-wal-atrasado
+
+  # Banco ocioso (worker parado na manutenção ou na recuperação): último
+  # arquivamento cada vez mais antigo, nenhum segmento .ready e só um
+  # registro pequeno no segmento atual, que não força a troca; não dispara.
+  # A escrita volta aos 50 min com o arquivamento travado: os segmentos
+  # .ready pendentes por 5 min disparam o alerta.
+  - interval: 1m
+    input_series:
+      - series: 'recorvia_backup_wal_last_archived_timestamp_seconds{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '60x80'
+      - series: 'recorvia_backup_wal_current_segment_bytes{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '104x80'
+      - series: 'recorvia_backup_wal_pending_segments{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '0x50 1x30'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: RecorviaWALArchiveStale
+        exp_alerts: []
+      - eval_time: 53m
+        alertname: RecorviaWALArchiveStale
+        exp_alerts: []
+      - eval_time: 56m
+        alertname: RecorviaWALArchiveStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: backup
+            exp_annotations:
+              summary: "Último segmento de WAL arquivado há 55m 0s, com segmentos aguardando"
+              description: "Há segmentos de WAL aguardando arquivamento (ou falhas do archive_command) e nenhum chegou ao armazenamento há mais de 10 minutos: o que foi gravado desde então se perde se o servidor for destruído."
+              runbook: docs/operacao/runbooks/backup-continuo.md#arquivamento-de-wal-atrasado
+          - exp_labels:
+              severity: critical
+              area: backup
+            exp_annotations:
+              summary: "Último segmento de WAL arquivado há 55m 0s, com segmentos aguardando"
+              description: "O arquivamento de WAL está parado há mais de 30 minutos com segmentos aguardando: a perda numa destruição do servidor cresce a cada minuto e o WAL se acumula no disco do servidor."
               runbook: docs/operacao/runbooks/backup-continuo.md#arquivamento-de-wal-atrasado
 
   # Arquivamento em dia: nenhum alerta do backup.
@@ -1012,6 +1053,8 @@ tests:
     input_series:
       - series: 'recorvia_backup_wal_last_archived_timestamp_seconds{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
         values: '0+60x60'
+      - series: 'recorvia_backup_wal_current_segment_bytes{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
+        values: '4096x60'
       - series: 'recorvia_backup_wal_archive_failures_total{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'
         values: '2x60'
       - series: 'recorvia_backup_base_last_success_timestamp_seconds{service="pgbackup", instance="postgres-backup:9187", job="recorvia-backup"}'

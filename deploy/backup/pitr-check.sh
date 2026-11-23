@@ -27,7 +27,9 @@
 #      do Keycloak, credencial) e os de depois de T não;
 #   8. religa a aplicação como na recuperação de desastre: chaves conferidas,
 #      API sem o worker, conciliação da janela perdida (o pagamento depois de
-#      T volta pelo provedor) e só então o worker; mede o RTO.
+#      T volta pelo provedor) e só então o worker; mede o RTO;
+#   9. confere a ida e volta de objetos extras cifrados pelo agente e a
+#      exportação do realm do Keycloak (make keycloak-export).
 #
 # Variáveis (todas opcionais):
 #   RECORVIA_PITR_PROJECT        projeto do compose (padrão: recorvia-pitrcheck),
@@ -124,9 +126,9 @@ compose_files=("$root/compose.yaml" "$root/deploy/backup/dr.compose.yaml" "$root
 dc_argv=(-p "$project" --env-file "$env_file")
 for f in "${compose_files[@]}"; do dc_argv+=(-f "$f"); done
 dc() { docker compose "${dc_argv[@]}" "$@"; }
-# pitr_restore ARGUMENTOS: o roteiro de restauração com o compose do exercício
-# (variáveis padrão do docker compose, como faria quem opera).
-pitr_restore() {
+# with_compose ROTEIRO ARGUMENTOS: um roteiro de operação com o compose do
+# exercício (variáveis padrão do docker compose, como faria quem opera).
+with_compose() {
   (
     COMPOSE_PROJECT_NAME=$project COMPOSE_ENV_FILES=$env_file
     COMPOSE_FILE=$(
@@ -134,9 +136,10 @@ pitr_restore() {
       echo "${compose_files[*]}"
     )
     export COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_FILE
-    bash "$here/pitr-restore.sh" "$@"
+    bash "$@"
   )
 }
+pitr_restore() { with_compose "$here/pitr-restore.sh" "$@"; }
 
 finished=0
 cleanup() {
@@ -342,6 +345,22 @@ if [[ ${RECORVIA_PITR_BUILD:-1} == 1 ]]; then
   docker build -q -f deploy/postgres/Dockerfile -t "recorvia-postgres:$image_tag" . >/dev/null
   dc --profile seed build -q migrate-bootstrap api worker seed paysim keycloak
 fi
+# O entrypoint confere a configuração como o usuário postgres, o mesmo do
+# archive_command: um arquivo de chave legível só pelo root é recusado na
+# partida, em vez de fazer falhar depois todo arquivamento.
+# shellcheck disable=SC2016 # expandido no container
+key_file_check='umask 077 && printf %s "$K" >/tmp/chave && chmod "$MODO" /tmp/chave &&
+  RECORVIA_BACKUP_ENCRYPTION_KEY_FILE=/tmp/chave RECORVIA_BACKUP_S3_PREFIX=s3://recorvia-backup/conferencia exec recorvia-postgres-entrypoint postgres --version'
+code=0
+docker run --rm -e K="$backup_key" -e MODO=0600 --entrypoint sh "recorvia-postgres:$image_tag" -c "$key_file_check" >"$out_dir/entrypoint-chave-so-root.txt" 2>&1 || code=$?
+if ((code == 0)) || ! grep -q 'permission denied' "$out_dir/entrypoint-chave-so-root.txt"; then
+  die "o entrypoint deveria recusar um arquivo de chave legível só pelo root: $(cat "$out_dir/entrypoint-chave-so-root.txt")"
+fi
+docker run --rm -e K="$backup_key" -e MODO=0644 --entrypoint sh "recorvia-postgres:$image_tag" -c "$key_file_check" >"$work/entrypoint-chave-legivel.txt" 2>&1 ||
+  die "o entrypoint recusou um arquivo de chave legível pelo postgres: $(cat "$work/entrypoint-chave-legivel.txt")"
+grep -q 'configuração do backup válida' "$work/entrypoint-chave-legivel.txt" || die "entrypoint sem a conferência da configuração"
+ok "entrypoint confere a configuração como o usuário postgres: arquivo de chave legível só pelo root recusado na partida"
+
 dc up -d --wait --quiet-pull minio postgres
 resolve_pg
 # Banco do Keycloak no mesmo servidor: coberto pelo mesmo backup base e WAL.
@@ -437,8 +456,10 @@ disaster_at=$(now_s)
 disaster_iso=$(now_iso)
 last_archived=$(agent_metric recorvia_backup_wal_last_archived_timestamp_seconds)
 pending=$(agent_metric recorvia_backup_wal_pending_segments)
+current_segment=$(agent_metric recorvia_backup_wal_current_segment_bytes)
+[[ -n $last_archived && -n $pending && -n $current_segment ]] || die "métricas do arquivamento ausentes no agente"
 rpo_at_disaster=$(awk -v d="$disaster_at" -v l="$last_archived" 'BEGIN { printf "%d", d - l }')
-ok "métricas do agente no desastre: último segmento arquivado há $rpo_at_disaster s, $pending segmentos aguardando arquivamento"
+ok "métricas do agente no desastre: último segmento arquivado há $rpo_at_disaster s, $pending segmentos aguardando arquivamento, $current_segment bytes no segmento atual"
 
 # ---------- 5. Desastre ----------
 
@@ -552,6 +573,38 @@ ledger_balanced || die "ledger desbalanceado depois da retomada"
 [[ $(sql "SELECT count(*) FROM dead_letters") == 0 ]] || die "mensagens em dead letter depois da retomada"
 done_at=$(now_s)
 ok "worker religado depois da conciliação: readiness, outbox publicada, ledger balanceado, sem pagamento duplicado nem dead letters"
+
+# ---------- 9. Objetos extras e exportação do Keycloak ----------
+
+phase "9. Objetos extras cifrados e exportação do realm do Keycloak"
+# Ida e volta pelo agente: o conteúdo volta igual, um objeto inexistente é
+# apontado como tal e outra chave mostra o erro real de decifragem.
+probe_content="conferencia-pitr-$(openssl rand -hex 16)"
+printf '%s' "$probe_content" | dc exec -T postgres-backup recorvia-pgbackup put-object pitr-check/conferencia.txt >"$work/put.txt" 2>&1 ||
+  die "put-object falhou: $(tail -n 3 "$work/put.txt")"
+[[ $(dc exec -T postgres-backup recorvia-pgbackup get-object pitr-check/conferencia.txt 2>"$work/get.txt") == "$probe_content" ]] ||
+  die "get-object não devolveu o conteúdo enviado: $(tail -n 3 "$work/get.txt")"
+code=0
+dc exec -T postgres-backup recorvia-pgbackup get-object pitr-check/inexistente.txt >"$work/get-ausente.txt" 2>&1 || code=$?
+if ((code == 0)) || ! grep -q 'não encontrado' "$work/get-ausente.txt"; then
+  die "get-object de um objeto inexistente sem a mensagem esperada"
+fi
+code=0
+dc exec -T -e RECORVIA_BACKUP_ENCRYPTION_KEY="$wrong_key" postgres-backup recorvia-pgbackup get-object pitr-check/conferencia.txt \
+  >"$out_dir/get-object-chave-errada.txt" 2>&1 || code=$?
+if ((code == 0)) || ! grep -q 'corrupted chunk' "$out_dir/get-object-chave-errada.txt" ||
+  grep -q 'file exists' "$out_dir/get-object-chave-errada.txt"; then
+  die "get-object com outra chave deveria falhar com o erro de decifragem: $(tail -n 3 "$out_dir/get-object-chave-errada.txt")"
+fi
+realm_object=$(with_compose "$here/keycloak-export.sh" 2>"$out_dir/keycloak-export.txt") || {
+  cat "$out_dir/keycloak-export.txt" >&2
+  die "exportação do realm do Keycloak falhou"
+}
+dc exec -T postgres-backup recorvia-pgbackup get-object "$realm_object" 2>/dev/null >"$work/realm.json" || die "exportação do realm ilegível"
+jq -e '.realm == "recorvia" and ([.users[].username] | index("pitr-antes-de-t") != null) and ([.users[].username] | index("pitr-depois-de-t") == null)' \
+  "$work/realm.json" >/dev/null || die "exportação do realm sem os usuários esperados"
+rm -f "$work/realm.json"
+ok "objeto extra cifrado: ida e volta igual, inexistente apontado, outra chave com o erro de decifragem; realm do Keycloak exportado do banco restaurado ($realm_object), lido de volta com pitr-antes-de-t e sem pitr-depois-de-t"
 
 # ---------- Relatório ----------
 

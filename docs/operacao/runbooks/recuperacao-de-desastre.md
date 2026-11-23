@@ -158,6 +158,14 @@ docker compose run --rm --no-deps -T --entrypoint recorvia-pgbackup postgres lis
   (inclusive o do Keycloak), deixa de existir no servidor restaurado.
 - O instante precisa ser posterior ao fim de algum backup base da lista e anterior ao último
   segmento arquivado (`pg_stat_archiver.last_archived_time` da origem, ou as métricas do agente).
+- **Linha do tempo.** Depois de uma restauração anterior, o arquivo tem mais de uma (coluna
+  `LINHA DO TEMPO` do `list`). Sem `TIMELINE`, a recuperação segue a mais recente, a do servidor
+  em uso, e avisa que há outras. Para um instante da linha original posterior à restauração
+  anterior (por exemplo, quando a restauração anterior foi um engano), use `TIMELINE=1` (ou o
+  número da linha): o roteiro avisa que há linhas mais novas e só usa backups base do histórico
+  da linha pedida. A mensagem `nenhum backup base terminado antes do instante pedido no histórico
+  da linha do tempo N` indica que só há backups da linha abandonada antes do instante: escolha
+  outra linha (`TIMELINE`) ou um backup do histórico (`BACKUP`).
 - Separe a chave de cifragem do backup e as chaves da aplicação, do cofre.
 
 ### Ações
@@ -174,7 +182,7 @@ docker compose run --rm --no-deps -T --entrypoint recorvia-pgbackup postgres lis
    # volume, para inspeção, e só então o remova.
    docker run --rm -v <projeto>_postgres-data:/de:ro -v recorvia-origem-copia:/para alpine:3.24 cp -a /de/. /para/
    docker volume rm <projeto>_postgres-data
-   make pitr-restore TARGET=2026-11-22T10:15:00Z    # ou TARGET=latest
+   make pitr-restore TARGET=2026-11-22T10:15:00Z    # ou TARGET=latest; TIMELINE=<n> para outra linha do tempo
    # Com um manifesto do backup lógico do mesmo instante, a comparação é exigida:
    make pitr-restore TARGET=<instante do snapshot> MANIFEST=backups/recorvia-<instante>.manifest
    ```
@@ -184,6 +192,10 @@ docker compose run --rm --no-deps -T --entrypoint recorvia-pgbackup postgres lis
    antes do instante pedido`. Se o servidor terminar durante a recuperação (`o servidor terminou
    durante a recuperação`), o WAL até o instante falta ou não decifra: confira o log do
    PostgreSQL e o arquivamento da origem; um servidor nunca sobe num ponto anterior ao pedido.
+   Recusado o servidor (`está no estado running`, `restarting` ou `paused`), pare-o antes: um
+   container reiniciando ainda usa o volume. Em qualquer falha antes da recuperação, o roteiro
+   religa o agente de backup; se o servidor ficou no meio da recuperação, o agente fica parado
+   até a situação ser resolvida (`docker compose up -d postgres-backup`).
 3. Registre no incidente o último commit aplicado (`último commit aplicado: ...` na saída) e a
    linha do tempo nova: eles delimitam a janela perdida, do instante ao incidente.
 4. Descarte as filas do RabbitMQ (volume do broker) antes de religar o worker: as mensagens

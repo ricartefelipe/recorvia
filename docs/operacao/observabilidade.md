@@ -129,6 +129,7 @@ componente, como no ambiente local, a coleta não tem alvos):
 | `recorvia_backup_wal_last_archived_timestamp_seconds` | gauge | — | agente, `pg_stat_archiver` lido a cada coleta (prazo de 5 s): instante do último segmento de WAL arquivado com sucesso; zero se nenhum desde a última reinicialização das estatísticas do servidor |
 | `recorvia_backup_wal_archive_failures_total` | contador | — | agente, `pg_stat_archiver.failed_count`: falhas do `archive_command` (volta a zero quando as estatísticas do servidor são reiniciadas, o que `increase()` trata como reinício do contador) |
 | `recorvia_backup_wal_pending_segments` / `recorvia_backup_wal_oldest_pending_seconds` | gauge | — | agente, `pg_ls_archive_statusdir()`: segmentos completos aguardando arquivamento (arquivos `.ready`) e a idade do mais antigo (zero sem pendências) |
+| `recorvia_backup_wal_current_segment_bytes` | gauge | — | agente, `pg_walfile_name_offset(pg_current_wal_lsn())`: bytes já escritos no segmento atual, ainda incompleto (zero num servidor em recuperação): o tamanho do WAL ainda não arquivável, informativo; fica fora de `RecorviaWALArchiveStale` porque um servidor ocioso pode manter nele um registro pequeno sem trocar de segmento |
 | `recorvia_backup_base_last_success_timestamp_seconds` | gauge | — | agente, listagem do armazenamento (a cada 5 min e depois de cada backup): fim do backup base mais recente; zero sem backup |
 | `recorvia_backup_base_retained` | gauge | — | agente, listagem do armazenamento: backups base existentes |
 | `recorvia_backup_base_interval_seconds` | gauge | — | agente: intervalo configurado entre backups base (`RECORVIA_BACKUP_BASE_INTERVAL`), para o alerta proporcional `RecorviaBaseBackupStale` |
@@ -267,7 +268,7 @@ nome e os mesmos rótulos; enquanto a crítica dispara, o Alertmanager inibe a d
 | `RecorviaDBServerConnectionsHigh` | servidor com mais de 80% das conexões para papéis comuns, por 10 min | critical |
 | `RecorviaDependencyUnavailable` | dependência indisponível por 2 min (estado verificado a cada coleta) | critical |
 | `RecorviaHTTPErrorRate` | mais de 5% de respostas 5xx por 10 min | warning |
-| `RecorviaWALArchiveStale` | último segmento de WAL arquivado há mais de 10 min, por 5 min (backup contínuo, ADR-087) | warning |
+| `RecorviaWALArchiveStale` | último segmento de WAL arquivado há mais de 10 min com segmentos `.ready` aguardando ou falhas do `archive_command` em 10 min, por 5 min; um banco ocioso não dispara (backup contínuo, ADR-087) | warning |
 | `RecorviaWALArchiveStale` | o mesmo, há mais de 30 min, por 5 min | critical |
 | `RecorviaWALArchiveFailing` | falhas do `archive_command` contínuas por 10 min | warning |
 | `RecorviaBaseBackupStale` | nenhum backup base novo no intervalo configurado mais 2 h, por 15 min (inclusive sem backup no armazenamento) | warning |

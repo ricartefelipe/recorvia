@@ -30,15 +30,20 @@ type ExecRunner struct {
 
 // Run implementa Runner.
 func (r ExecRunner) Run(ctx context.Context, stdout io.Writer, args ...string) error {
-	cmd := exec.CommandContext(ctx, r.Bin, args...) //nolint:gosec // executável fixo da imagem; argumentos montados pelo agente
-	cmd.Env = r.Env
+	cmd := r.command(ctx, args)
 	cmd.Stdout = stdout
-	cmd.Stderr = r.Stderr
-	cmd.WaitDelay = 10 * time.Second
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("wal-g %s: %w", args[0], err)
 	}
 	return nil
+}
+
+func (r ExecRunner) command(ctx context.Context, args []string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, r.Bin, args...) //nolint:gosec // executável fixo da imagem; argumentos montados pelo agente
+	cmd.Env = r.Env
+	cmd.Stderr = r.Stderr
+	cmd.WaitDelay = 10 * time.Second
+	return cmd
 }
 
 // Backup é um backup base no armazenamento (wal-g backup-list --json --detail).
@@ -51,6 +56,8 @@ type Backup struct {
 	PGVersion      int             `json:"pg_version"`
 	CompressedSize int64           `json:"compressed_size"`
 	Permanent      bool            `json:"is_permanent"`
+	StartLSN       uint64          `json:"start_lsn"`
+	FinishLSN      uint64          `json:"finish_lsn"`
 	UserData       json.RawMessage `json:"user_data,omitempty"`
 }
 
@@ -114,16 +121,20 @@ func Latest(list []Backup) *Backup {
 	return &list[len(list)-1]
 }
 
-// ErrNoBackupForTarget indica que nenhum backup base terminou antes do
-// instante pedido.
+// ErrNoBackupForTarget indica que nenhum backup base do histórico da linha do
+// tempo alvo terminou antes do instante pedido.
 var ErrNoBackupForTarget = errors.New("nenhum backup base terminado antes do instante pedido")
 
-// ForTarget escolhe o backup base para recuperar até o instante: o mais
-// recente que terminou antes dele (a recuperação só alcança um instante
-// posterior ao fim do backup). Com target zero, o mais recente.
-func ForTarget(list []Backup, target time.Time) (Backup, error) {
+// ForTarget escolhe o backup base para recuperar até o instante na linha do
+// tempo alvo: o mais recente que terminou antes dele (a recuperação só
+// alcança um instante posterior ao fim do backup) entre os do histórico da
+// linha (Ancestry.Contains). Com target zero, o mais recente do histórico.
+func ForTarget(list []Backup, target time.Time, history Ancestry) (Backup, error) {
 	var chosen *Backup
 	for i := range list {
+		if !history.Contains(list[i]) {
+			continue
+		}
 		if target.IsZero() || list[i].FinishTime.Before(target) {
 			chosen = &list[i]
 		}
