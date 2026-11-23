@@ -8,6 +8,22 @@
 # e volumes criados por ele (deploy/backup/dr.compose.yaml).
 dr_marker=.recorvia-dr-check
 dr_label=recorvia.dr-check
+# Variável e padrão do diretório de saída citados nas mensagens, e descrição
+# gravada na marca do diretório. O exercício de recuperação para um ponto no
+# tempo (pitr-check.sh) define os próprios antes de chamar as funções.
+: "${dr_dir_var:=RECORVIA_DR_DIR}"
+: "${dr_dir_default:=backups/dr-check}"
+: "${dr_dir_purpose:=Diretório do exercício de recuperação de desastre (make dr-check)}"
+: "${dr_project_var:=RECORVIA_DR_PROJECT}"
+: "${dr_reuse_var:=RECORVIA_DR_REUSE_PROJECT}"
+
+# demo_user_password REALM USUÁRIO: senha do usuário de demonstração, lida do
+# realm de demonstração importado pelo Keycloak do exercício
+# (deploy/keycloak/realm-recorvia.json), para que o valor exista num só lugar.
+demo_user_password() {
+  jq -er --arg u "$2" 'first(.users[] | select(.username == $u) | .credentials[] | select(.type == "password") | .value)' "$1" ||
+    die "usuário de demonstração $2 sem senha em $1"
+}
 
 # require_safe_dr_dir DIRETÓRIO RAIZ BACKUPS: encerra com erro, sem alterar
 # nada, se o diretório de saída puder conter algo que não é do exercício: a
@@ -16,21 +32,21 @@ dr_label=recorvia.dr-check
 # não marcou.
 require_safe_dr_dir() {
   local given=$1 dir root backups
-  [[ -n $given ]] || die "RECORVIA_DR_DIR vazio"
+  [[ -n $given ]] || die "$dr_dir_var vazio"
   dir=$(realpath -m -- "$given")
   root=$(realpath -m -- "$2")
   backups=$(realpath -m -- "$3")
   if [[ $dir == / || $dir == "$root" || $root/ == "$dir"/* ]]; then
-    die "RECORVIA_DR_DIR ($given) é a raiz do repositório ou um diretório acima dela: informe um diretório próprio do exercício (padrão: backups/dr-check)"
+    die "$dr_dir_var ($given) é a raiz do repositório ou um diretório acima dela: informe um diretório próprio do exercício (padrão: $dr_dir_default)"
   fi
   if [[ $dir == "$backups" ]]; then
-    die "RECORVIA_DR_DIR ($given) é o diretório dos backups: o exercício usa um diretório próprio (padrão: backups/dr-check) e nada foi apagado"
+    die "$dr_dir_var ($given) é o diretório dos backups: o exercício usa um diretório próprio (padrão: $dr_dir_default) e nada foi apagado"
   fi
   if [[ -e $dir && ! -d $dir ]]; then
-    die "RECORVIA_DR_DIR ($given) existe e não é um diretório"
+    die "$dr_dir_var ($given) existe e não é um diretório"
   fi
   if [[ -d $dir && ! -f $dir/$dr_marker && -n $(ls -A -- "$dir") ]]; then
-    die "RECORVIA_DR_DIR ($given) já existe, tem conteúdo e não foi criado pelo exercício (sem o arquivo $dr_marker): nada foi apagado; informe um diretório novo ou vazio"
+    die "$dr_dir_var ($given) já existe, tem conteúdo e não foi criado pelo exercício (sem o arquivo $dr_marker): nada foi apagado; informe um diretório novo ou vazio"
   fi
 }
 
@@ -56,8 +72,7 @@ prepare_dr_dir() {
       fi
     done
   fi
-  printf 'Diretório do exercício de recuperação de desastre (make dr-check). A cada execução, os arquivos da anterior vão para anterior/.\n' \
-    >"$dir/$dr_marker"
+  printf '%s. A cada execução, os arquivos da anterior vão para anterior/.\n' "$dr_dir_purpose" >"$dir/$dr_marker"
 }
 
 # require_own_project PROJETO: encerra com erro, sem remover nada, se o
@@ -65,7 +80,8 @@ prepare_dr_dir() {
 # (sem o rótulo do exercício). O exercício derruba o próprio projeto com os
 # volumes antes de começar e ao terminar; um projeto de mesmo nome criado de
 # outra forma (por exemplo, uma restauração manual mantida para inspeção)
-# perderia os dados. RECORVIA_DR_REUSE_PROJECT=1 confirma a remoção.
+# perderia os dados. RECORVIA_DR_REUSE_PROJECT=1 (ou a variável em
+# dr_reuse_var) confirma a remoção.
 require_own_project() {
   local project=$1 kind all own foreign=""
   for kind in containers volumes; do
@@ -83,11 +99,11 @@ require_own_project() {
     fi
   done
   [[ -n $foreign ]] || return 0
-  if [[ ${RECORVIA_DR_REUSE_PROJECT:-0} == 1 ]]; then
-    log "aviso: o projeto $project tem $foreign que o exercício não criou; serão removidos (RECORVIA_DR_REUSE_PROJECT=1)"
+  if [[ ${!dr_reuse_var:-0} == 1 ]]; then
+    log "aviso: o projeto $project tem $foreign que o exercício não criou; serão removidos ($dr_reuse_var=1)"
     return 0
   fi
-  die "o projeto $project do compose já tem $foreign que não foram criados pelo exercício (sem o rótulo $dr_label): nada foi removido. Use outro nome em RECORVIA_DR_PROJECT ou, se o projeto pode ser apagado com os volumes, repita com RECORVIA_DR_REUSE_PROJECT=1"
+  die "o projeto $project do compose já tem $foreign que não foram criados pelo exercício (sem o rótulo $dr_label): nada foi removido. Use outro nome em $dr_project_var ou, se o projeto pode ser apagado com os volumes, repita com $dr_reuse_var=1"
 }
 
 # hex_of TEXTO: os bytes do texto em hexadecimal, como o pg_dump escreve o

@@ -1,5 +1,6 @@
 # Regras de alerta do Recorvia. Somente métricas existentes no código
-# (internal/infra/telemetry), no plugin rabbitmq_prometheus, o "up" e o
+# (internal/infra/telemetry, inclusive as do agente de backup contínuo
+# cmd/pgbackup), no plugin rabbitmq_prometheus, o "up" e o
 # process_start_time_seconds das coletas; nenhum rótulo identifica tenant,
 # cliente ou fatura. Os limites são pontos de partida para o ambiente local e devem ser calibrados com o
 # volume real. Catálogo e justificativas: docs/operacao/observabilidade.md.
@@ -24,7 +25,7 @@ groups:
   - name: recorvia-alvos
     rules:
       - alert: RecorviaTargetDown
-        expr: up{job=~"recorvia-api|recorvia-worker|rabbitmq|alertmanager"} == 0
+        expr: up{job=~"recorvia-api|recorvia-worker|recorvia-backup|rabbitmq|alertmanager"} == 0
         for: 2m
         labels:
           severity: critical
@@ -530,6 +531,103 @@ groups:
           summary: "Dependência {{ $labels.dependency }} indisponível para {{ $labels.service }}"
           description: "A última verificação da dependência falhou há pelo menos 2 minutos."
           runbook: docs/operacao/runbooks/filas-e-dlq.md#processo-ou-broker-indisponivel
+
+  # Backup contínuo do PostgreSQL (ADR-087): métricas do agente
+  # recorvia-pgbackup (coleta recorvia-backup), que só existe quando o
+  # componente deploy/postgres está no compose. O arquivamento é lido do
+  # servidor (pg_stat_archiver) e os backups base, do próprio armazenamento.
+  - name: recorvia-backup
+    rules:
+      # O último arquivamento antigo só é problema com o arquivamento travado:
+      # segmentos completos aguardando (.ready) ou falhas do archive_command
+      # na janela. Com archive_timeout de 60 s, um segmento com escrita é
+      # fechado e arquivado em cerca de um minuto; um banco ocioso (worker
+      # parado na manutenção ou na recuperação) não fecha segmentos e não
+      # dispara, por mais antigo que seja o último arquivamento. Os bytes do
+      # segmento atual não entram: num banco ocioso, o PostgreSQL pode deixar
+      # nele um registro que não força a troca de segmento. Sem nenhum
+      # arquivamento desde a última reinicialização das estatísticas, a idade
+      # é a maior possível.
+      - alert: RecorviaWALArchiveStale
+        expr: |
+          time() - max(recorvia_backup_wal_last_archived_timestamp_seconds) > 600
+            and on () (max(recorvia_backup_wal_pending_segments) > 0 or sum(increase(recorvia_backup_wal_archive_failures_total[10m])) > 0)
+        for: 5m
+        labels:
+          severity: warning
+          area: backup
+        annotations:
+          summary: "Último segmento de WAL arquivado há {{ $value | humanizeDuration }}, com segmentos aguardando"
+          description: "Há segmentos de WAL aguardando arquivamento (ou falhas do archive_command) e nenhum chegou ao armazenamento há mais de 10 minutos: o que foi gravado desde então se perde se o servidor for destruído."
+          runbook: docs/operacao/runbooks/backup-continuo.md#arquivamento-de-wal-atrasado
+      - alert: RecorviaWALArchiveStale
+        expr: |
+          time() - max(recorvia_backup_wal_last_archived_timestamp_seconds) > 1800
+            and on () (max(recorvia_backup_wal_pending_segments) > 0 or sum(increase(recorvia_backup_wal_archive_failures_total[10m])) > 0)
+        for: 5m
+        labels:
+          severity: critical
+          area: backup
+        annotations:
+          summary: "Último segmento de WAL arquivado há {{ $value | humanizeDuration }}, com segmentos aguardando"
+          description: "O arquivamento de WAL está parado há mais de 30 minutos com segmentos aguardando: a perda numa destruição do servidor cresce a cada minuto e o WAL se acumula no disco do servidor."
+          runbook: docs/operacao/runbooks/backup-continuo.md#arquivamento-de-wal-atrasado
+      - alert: RecorviaWALArchiveFailing
+        expr: sum(increase(recorvia_backup_wal_archive_failures_total[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+          area: backup
+        annotations:
+          summary: "archive_command falhando há mais de 10 minutos"
+          description: "O envio de segmentos de WAL ao armazenamento falha repetidamente (credencial, rede, chave de cifragem ou espaço); o PostgreSQL mantém os segmentos e tenta de novo."
+          runbook: docs/operacao/runbooks/backup-continuo.md#arquivamento-de-wal-atrasado
+      # Proporcional ao intervalo configurado (padrão 24 h), com 2 h de folga
+      # para a duração do backup.
+      - alert: RecorviaBaseBackupStale
+        expr: time() - max(recorvia_backup_base_last_success_timestamp_seconds) > max(recorvia_backup_base_interval_seconds) + 7200
+        for: 15m
+        labels:
+          severity: warning
+          area: backup
+        annotations:
+          summary: "Último backup base há {{ $value | humanizeDuration }}"
+          description: "Nenhum backup base novo no intervalo configurado mais 2 horas: a restauração precisa reaplicar mais WAL (mais lenta) e a retenção deixa de renovar os pontos de restauração."
+          runbook: docs/operacao/runbooks/backup-continuo.md#backup-base-atrasado
+      - alert: RecorviaBaseBackupStale
+        expr: time() - max(recorvia_backup_base_last_success_timestamp_seconds) > 2 * max(recorvia_backup_base_interval_seconds) + 7200
+        for: 15m
+        labels:
+          severity: critical
+          area: backup
+        annotations:
+          summary: "Último backup base há {{ $value | humanizeDuration }}"
+          description: "Dois intervalos sem backup base (ou nenhum backup no armazenamento): sem backup base recente, a recuperação para um instante depende de backups antigos que a retenção pode remover."
+          runbook: docs/operacao/runbooks/backup-continuo.md#backup-base-atrasado
+      - alert: RecorviaBackupDependencyUnavailable
+        expr: min by (dependency) (recorvia_backup_dependency_up) == 0
+        for: 10m
+        labels:
+          severity: warning
+          area: backup
+        annotations:
+          summary: "Agente de backup sem acesso a {{ $labels.dependency }}"
+          description: "O agente não lê o armazenamento (storage) ou o estado do arquivamento no PostgreSQL (postgres) há 10 minutos: os backups base e as métricas do backup param."
+          runbook: docs/operacao/runbooks/backup-continuo.md#agente-de-backup-com-falha
+      # A coleta usa descoberta por DNS (o alvo só existe com o agente no
+      # compose): o agente que deixa de existir some dos alvos em vez de
+      # aparecer com up 0. O alerta dispara quando a coleta existiu nos
+      # últimos 7 dias e está ausente há 10 minutos; no ambiente local sem o
+      # componente, nunca dispara.
+      - alert: RecorviaBackupAgentMissing
+        expr: absent_over_time(up{job="recorvia-backup"}[10m]) and on () present_over_time(up{job="recorvia-backup"}[7d])
+        labels:
+          severity: warning
+          area: backup
+        annotations:
+          summary: "Agente de backup ausente há 10 minutos"
+          description: "O container do agente de backup (postgres-backup) não existe mais ou não resolve no DNS: não há backups base nem métricas do arquivamento."
+          runbook: docs/operacao/runbooks/backup-continuo.md#agente-de-backup-com-falha
 
   - name: recorvia-api
     rules:

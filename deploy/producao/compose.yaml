@@ -15,12 +15,17 @@
 #   construídas aqui a partir do checkout da versão (RECORVIA_VERSION).
 # - Redes: "edge" (proxy, web e Keycloak), "app" (web, API, worker,
 #   Keycloak, com saída para a internet: provedor de pagamento, SMTP e
-#   webhooks) e "data" (PostgreSQL, Redis e RabbitMQ, sem saída para a
-#   internet).
+#   webhooks), "data" (PostgreSQL, Redis, RabbitMQ e o agente de backup, sem
+#   saída para a internet) e "storage" (PostgreSQL e agente de backup, com
+#   saída para o armazenamento S3 do backup contínuo).
+# - Backup contínuo do PostgreSQL (ADR-087): a imagem recorvia-postgres
+#   arquiva o WAL no S3 e o agente postgres-backup faz os backups base, a
+#   retenção e as métricas; tudo cifrado no cliente com a chave do arquivo
+#   segredos/backup-cifragem.chave (gerar-segredos.sh), fora do .env.
 #
-# Extensões (por exemplo, o backup contínuo do PostgreSQL): acrescente um
-# arquivo compose com os serviços ou as alterações, sem editar este, e
-# declare os dois em COMPOSE_FILE no .env (compose.yaml:outro.yaml).
+# Extensões (limites, parâmetros): acrescente um arquivo compose com as
+# alterações, sem editar este, e declare os dois em COMPOSE_FILE no .env
+# (compose.yaml:outro.yaml).
 name: recorvia-producao
 
 x-logging: &logging
@@ -32,6 +37,12 @@ x-logging: &logging
 x-security: &security
   security_opt:
     - no-new-privileges:true
+
+# Chave de cifragem do backup contínuo: arquivo montado como segredo (fora
+# do .env e do ambiente dos processos), lido pelo archive_command, pelo
+# restore_command e pelo agente.
+x-backup-key-file: &backup-key-file
+  RECORVIA_BACKUP_ENCRYPTION_KEY_FILE: /run/secrets/backup-encryption-key
 
 x-go-build: &go-build
   context: ../..
@@ -81,24 +92,31 @@ x-app-env: &app-env
 
 services:
   # PostgreSQL do Recorvia e do Keycloak (bancos "recorvia" e "keycloak" no
-  # mesmo servidor). Imagem oficial, sem configuração própria: os dados ficam
-  # no volume postgres-data (/var/lib/postgresql, layout da imagem 18) e o
-  # superusuário só é usado pelos serviços de bootstrap e pelo backup
-  # (deploy/backup, com RECORVIA_PG_CONTAINER). Para estender (arquivamento
-  # de WAL, parâmetros, outro volume), use um arquivo compose adicional que
-  # altere este serviço: command, volumes e environment são os pontos de
-  # extensão.
+  # mesmo servidor, ambos cobertos pelo backup contínuo). Imagem
+  # recorvia-postgres (deploy/postgres, ADR-087): a oficial 18.7-alpine com o
+  # WAL-G e o agente de backup; arquiva cada segmento de WAL no S3
+  # (archive_timeout de 60 s) e não inicia sem o destino e a chave. Os dados
+  # ficam no volume postgres-data (/var/lib/postgresql, layout da imagem 18)
+  # e o superusuário só é usado pelos serviços de bootstrap e pelo backup.
+  # Variáveis e mapeamento: deploy/postgres/compose.yaml.
   postgres:
-    image: postgres:18.7-alpine
+    extends: { file: ../postgres/compose.yaml, service: postgres }
+    image: recorvia-postgres:${RECORVIA_VERSION:-0.3.0}
+    build:
+      context: ../..
+      dockerfile: deploy/postgres/Dockerfile
+      args: { VERSION: "${RECORVIA_VERSION:-0.3.0}" }
     <<: *security
     environment:
+      <<: *backup-key-file
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?defina no .env}
       POSTGRES_DB: postgres
+    secrets: [backup-encryption-key]
     volumes:
       - postgres-data:/var/lib/postgresql
     shm_size: 256mb
-    networks: [data]
+    networks: [data, storage]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 10s
@@ -109,6 +127,37 @@ services:
     deploy:
       resources:
         limits: { cpus: "2", memory: 2g }
+    logging: *logging
+
+  # Agente do backup contínuo (recorvia-pgbackup serve): backup base a cada
+  # RECORVIA_BACKUP_BASE_INTERVAL, retenção e métricas (porta 9187, coleta
+  # recorvia-backup do Prometheus pela rede data). Lê o diretório de dados
+  # pelo mesmo volume, somente para leitura.
+  postgres-backup:
+    extends: { file: ../postgres/compose.yaml, service: postgres-backup }
+    image: recorvia-postgres:${RECORVIA_VERSION:-0.3.0}
+    <<: *security
+    read_only: true
+    cap_drop: [ALL]
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+    environment:
+      <<: *backup-key-file
+    secrets: [backup-encryption-key]
+    volumes:
+      - postgres-data:/var/lib/postgresql:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [data, storage]
+    healthcheck:
+      test: ["CMD", "recorvia-pgbackup", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1", memory: 512m }
     logging: *logging
 
   # Papéis recorvia_owner e recorvia_app e o banco recorvia (idempotente;
@@ -571,6 +620,16 @@ networks:
   app: {}
   data:
     internal: true
+  # Saída para o armazenamento do backup contínuo (S3), só do PostgreSQL
+  # (archive_command) e do agente de backup.
+  storage: {}
+
+# Chave de cifragem do backup contínuo (32 bytes em base64), gerada por
+# gerar-segredos.sh com permissão 0444 numa pasta 0700. Guarde uma cópia no
+# cofre, à parte do .env e das chaves da aplicação.
+secrets:
+  backup-encryption-key:
+    file: ${RECORVIA_BACKUP_ENCRYPTION_KEY_HOST_FILE:-./segredos/backup-cifragem.chave}
 
 volumes:
   postgres-data:
