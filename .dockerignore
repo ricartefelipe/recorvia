@@ -7,6 +7,10 @@ dist
 coverage*
 *.out
 .env
+# .env de produção (deploy/producao/.env) e cópias: segredos fora do contexto de build.
+**/.env
+**/.env.*
+!**/.env.example
 web/node_modules
 web/dist
 web/playwright-report

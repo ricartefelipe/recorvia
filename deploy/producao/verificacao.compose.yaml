@@ -1,0 +1,42 @@
+# Ajustes da verificação automatizada do pacote de produção (make
+# prod-check, deploy/producao/verificar.sh). Usado sempre junto com o
+# compose.yaml desta pasta e com um nome de projeto próprio:
+#   docker compose -p recorvia-prodcheck -f compose.yaml -f verificacao.compose.yaml ...
+#
+# Diferenças em relação à produção:
+# - o proxy publica 80 e 443 somente em 127.0.0.1 (a máquina que verifica não
+#   fica exposta na rede);
+# - containers e volumes levam o rótulo recorvia.prod-check: antes de
+#   derrubar o projeto com os volumes, o roteiro confere que tudo o que existe
+#   nele foi criado pela verificação.
+# Exige Docker Compose 2.24 ou superior (marcador !override).
+x-check-labels: &check-labels
+  recorvia.prod-check: "1"
+
+services:
+  postgres: { labels: *check-labels }
+  migrate-bootstrap: { labels: *check-labels }
+  migrate: { labels: *check-labels }
+  keycloak-db-bootstrap: { labels: *check-labels }
+  redis: { labels: *check-labels }
+  rabbitmq: { labels: *check-labels }
+  keycloak: { labels: *check-labels }
+  api: { labels: *check-labels }
+  worker: { labels: *check-labels }
+  web: { labels: *check-labels }
+  proxy:
+    labels: *check-labels
+    ports: !override
+      - "127.0.0.1:80:80"
+      - "127.0.0.1:443:443"
+      - "127.0.0.1:443:443/udp"
+
+volumes:
+  postgres-data: { labels: *check-labels }
+  redis-data: { labels: *check-labels }
+  rabbitmq-data: { labels: *check-labels }
+  caddy-data: { labels: *check-labels }
+  caddy-config: { labels: *check-labels }
+  prometheus-data: { labels: *check-labels }
+  alertmanager-data: { labels: *check-labels }
+  grafana-data: { labels: *check-labels }
