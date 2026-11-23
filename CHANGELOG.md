@@ -6,6 +6,78 @@ Todas as mudanças relevantes são registradas aqui. Formato baseado em
 
 ## [Não lançado]
 
+## [0.4.0] - 2026-11-23
+
+Preparação para produção: pacote de implantação num servidor, backup contínuo com recuperação para um
+ponto no tempo, revisão de segurança e teste de carga.
+
+### Adicionado
+- Pacote de produção em `deploy/producao/` (ADR-086):
+  - compose de um servidor com Caddy: HTTPS automático, interface e API na mesma origem e Keycloak
+    em subdomínio;
+  - Keycloak em modo de produção com banco próprio e realm sem usuários (verificação de e-mail,
+    política de senha, proteção contra força bruta, também no realm `master`);
+  - healthchecks, limites, reinício automático, sistema de arquivos somente leitura e somente as
+    portas 80 e 443;
+  - `.env.example` com cada variável explicada e `gerar-segredos.sh`;
+  - guia `docs/operacao/implantacao.md`.
+- `make prod-check` e job `production-stack`: sobem o pacote de produção com `localhost` e conferem
+  HTTPS, login até o Keycloak, recusas do proxy, endereço real do cliente por IPv4 e IPv6, portas
+  internas fechadas, arquivamento do backup e o backup do Keycloak.
+- Backup contínuo do PostgreSQL com WAL-G (ADR-087):
+  - arquivamento de WAL e backups base cifrados no cliente num armazenamento compatível com S3;
+  - agente `postgres-backup` com backup base agendado, retenção e métricas;
+  - imagem `recorvia-postgres` sem root.
+- Recuperação para um ponto no tempo num servidor novo (`make pitr-restore TARGET=... [TIMELINE=...]`).
+  Segue a linha do tempo pedida, recusa a chave do backup errada ou ausente e confere o resultado.
+- Exercício de recuperação para um ponto no tempo com MinIO (`make pitr-check` e job `pitr-check`),
+  com RPO e RTO medidos.
+- Exportação cifrada do realm do Keycloak (`make keycloak-export`).
+- Alertas do arquivamento de WAL, do backup base e do agente de backup, com runbook.
+- `docs/operacao/seguranca.md` com o modelo de ameaças, o que foi verificado e os riscos abertos
+  (ADR-089).
+- Testes de acesso cruzado entre organizações por identificador, corpo, cursor e credencial de API em
+  cerca de 40 rotas e nos recebíveis.
+- Teste de carga manual (`make load-test`, ADR-088), num projeto isolado do compose, com os limites de
+  produção: fechamento, leitura, escrita, webhooks e consumo, sem deixar a máquina suspender.
+  Números, limites recomendados e como repetir em `docs/operacao/carga.md`.
+
+### Alterado
+- O proxy de produção só repassa ao Keycloak o realm `recorvia` e os recursos estáticos. Console, API
+  de administração e realm `master` ficam restritos a `KEYCLOAK_ADMIN_ALLOWED_CIDRS`, fechado por
+  padrão.
+- O nginx da interface só aceita `X-Forwarded-For` dos proxies listados em
+  `RECORVIA_TRUSTED_PROXIES`. A origem pública expõe `/livez`; `/readyz` fica só na rede interna.
+- `RECORVIA_ALLOWED_ORIGINS` aceita só origens bem formadas, recusa `null`, `*`, porta padrão
+  explícita e porta vazia, e exige https em produção.
+- As respostas da API trazem `Content-Security-Policy` restritiva também sem o nginx à frente. O
+  nginx deixou de duplicar cabeçalhos de segurança.
+- O motor de recorrência fatura até 4 organizações ao mesmo tempo (`RECORVIA_BILLING_CONCURRENCY`,
+  limitado à metade do pool de conexões) e retoma na hora uma organização parada no limite de 500
+  assinaturas, com 5 s entre as repetições e no máximo 20 seguidas. No teste de carga, a primeira
+  fatura do fechamento sai em 6 s, e não em 20 a 88 s.
+- O limite de webhooks de provedores por IP passa a ser configurável
+  (`RECORVIA_WEBHOOK_RATE_LIMIT_PER_MINUTE`, padrão 1200).
+
+### Corrigido
+- **Login CSRF:** cada login fica vinculado ao navegador que o iniciou por um cookie próprio do fluxo
+  (`__Host-…_login_<hash>`). Logins em várias abas continuam funcionando. Logins em andamento
+  durante a atualização precisam ser refeitos (ADR-089).
+- A proteção contra SSRF dos webhooks enviados recusa formas IPv6 com IPv4 embutido (`::/96`,
+  `::ffff:0:0:0/96`) e as faixas `3fff::/20` e `5f00::/16`.
+- A lista de assinaturas não faz mais uma consulta por item. Com 64 usuários, a mediana caiu de 2,4 a
+  3,6 s para 0,3 a 0,5 s.
+- Lotes de consumo simultâneos com `external_id` em comum não entram mais em deadlock.
+- A consulta de reembolsos e chargebacks do painel caiu de cerca de 200 ms para cerca de 20 ms.
+- Sem limite de contratos no plano da plataforma, a criação de assinatura não conta mais as
+  assinaturas ativas.
+
+### Segurança
+- A imagem do proxy compila o Caddy com `golang.org/x/net` 0.62.0, `golang.org/x/crypto` 0.59.0 e
+  OpenTelemetry 1.47.0 e roda como usuário sem privilégios. As imagens do Keycloak de produção e do
+  PostgreSQL também rodam sem root.
+- O código-fonte do WAL-G é baixado só por HTTPS e conferido pela soma SHA-256.
+
 ## [0.3.0] - 2026-11-21
 
 Auditoria de todos os requisitos (RF-01 a RF-17 e RNF-01 a RNF-12) e correção do que ela encontrou.
@@ -292,7 +364,8 @@ Auditoria de todos os requisitos (RF-01 a RF-17 e RNF-01 a RNF-12) e correção 
   `user_session_required`, e o tratamento de dead letters grava a auditoria,
   com a justificativa, na mesma transação da resolução (ADR-059).
 
-[Não lançado]: https://github.com/ricartefelipe/recorvia/compare/v0.3.0...HEAD
+[Não lançado]: https://github.com/ricartefelipe/recorvia/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ricartefelipe/recorvia/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ricartefelipe/recorvia/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ricartefelipe/recorvia/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ricartefelipe/recorvia/releases/tag/v0.1.0
