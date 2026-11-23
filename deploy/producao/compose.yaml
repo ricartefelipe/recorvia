@@ -1,0 +1,553 @@
+# Produção do Recorvia num único servidor com Docker Compose (ADR-086).
+# Guia: docs/operacao/implantacao.md.
+#
+# Uso, a partir desta pasta (o compose lê o .env daqui):
+#   cp .env.example .env && bash gerar-segredos.sh .env   # uma vez
+#   docker compose up -d --build --wait
+#
+# - Só o proxy (Caddy) publica portas no host: 80 e 443 (TCP e UDP, HTTP/3).
+#   As interfaces do perfil observability ficam em 127.0.0.1 (túnel SSH).
+# - Segredos vêm do .env desta pasta, fora do Git (.gitignore e
+#   .dockerignore); nada sensível fica no repositório nem nas imagens.
+# - Sem simulador de pagamentos, sem Mailpit e sem seed de demonstração. O
+#   realm do Keycloak não tem usuários.
+# - Imagens externas com tag fixa (make pin-check); as da aplicação são
+#   construídas aqui a partir do checkout da versão (RECORVIA_VERSION).
+# - Redes: "borda" (proxy, web e Keycloak), "aplicacao" (web, API, worker,
+#   Keycloak, com saída para a internet: provedor de pagamento, SMTP e
+#   webhooks) e "dados" (PostgreSQL, Redis e RabbitMQ, sem saída para a
+#   internet).
+#
+# Extensões (por exemplo, o backup contínuo do PostgreSQL): acrescente um
+# arquivo compose com os serviços ou as alterações, sem editar este, e
+# declare os dois em COMPOSE_FILE no .env (compose.yaml:outro.yaml).
+name: recorvia-producao
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-security: &security
+  security_opt:
+    - no-new-privileges:true
+
+x-go-build: &go-build
+  context: ../..
+  dockerfile: deploy/docker/go.Dockerfile
+
+x-app-env: &app-env
+  RECORVIA_ENV: production
+  RECORVIA_LOG_LEVEL: ${RECORVIA_LOG_LEVEL:-info}
+  RECORVIA_DATABASE_URL: postgres://recorvia_app:${RECORVIA_APP_PASSWORD}@postgres:5432/recorvia?sslmode=disable
+  RECORVIA_DATABASE_MAX_CONNS: ${RECORVIA_DATABASE_MAX_CONNS:-20}
+  RECORVIA_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+  RECORVIA_AMQP_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+  RECORVIA_PUBLIC_URL: https://${RECORVIA_DOMAIN}
+  RECORVIA_OIDC_ISSUER: https://${KEYCLOAK_DOMAIN}/realms/recorvia
+  # Descoberta e troca de tokens pela rede interna; o emissor continua o
+  # endereço público (o Keycloak responde com o hostname público para o
+  # navegador e com o endereço interno para o backend).
+  RECORVIA_OIDC_DISCOVERY_URL: http://keycloak:8080/realms/recorvia
+  RECORVIA_OIDC_CLIENT_ID: recorvia-web
+  RECORVIA_OIDC_CLIENT_SECRET: ${RECORVIA_OIDC_CLIENT_SECRET}
+  RECORVIA_OIDC_REDIRECT_URL: https://${RECORVIA_DOMAIN}/auth/callback
+  # Cookies __Host- (padrão) e Secure: exigidos em produção.
+  RECORVIA_COOKIE_SECURE: "true"
+  RECORVIA_ENCRYPTION_KEYS: ${RECORVIA_ENCRYPTION_KEYS}
+  RECORVIA_ENCRYPTION_ACTIVE_KEY: ${RECORVIA_ENCRYPTION_ACTIVE_KEY}
+  RECORVIA_ENCRYPTION_STARTUP_CHECK: ${RECORVIA_ENCRYPTION_STARTUP_CHECK:-enforce}
+  RECORVIA_ENCRYPTION_LOST_KEYS: ${RECORVIA_ENCRYPTION_LOST_KEYS:-}
+  RECORVIA_SMTP_ADDR: ${SMTP_HOST}:${SMTP_PORT}
+  RECORVIA_SMTP_FROM: ${RECORVIA_SMTP_FROM}
+  RECORVIA_SMTP_USERNAME: ${SMTP_USERNAME:-}
+  RECORVIA_SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  RECORVIA_SMTP_TLS: ${SMTP_TLS:-starttls}
+  RECORVIA_SMTP_TIMEOUT: ${RECORVIA_SMTP_TIMEOUT:-15s}
+  RECORVIA_RETENTION_INBOX_DAYS: ${RECORVIA_RETENTION_INBOX_DAYS:-90}
+  RECORVIA_RETENTION_DEAD_LETTERS_DAYS: ${RECORVIA_RETENTION_DEAD_LETTERS_DAYS:-180}
+  RECORVIA_RETENTION_WEBHOOKS_DAYS: ${RECORVIA_RETENTION_WEBHOOKS_DAYS:-90}
+  RECORVIA_RETENTION_PROVIDER_WEBHOOK_PAYLOADS_DAYS: ${RECORVIA_RETENTION_PROVIDER_WEBHOOK_PAYLOADS_DAYS:-90}
+  RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS: ${RECORVIA_RETENTION_NOTIFICATION_CONTENT_DAYS:-90}
+  RECORVIA_RETENTION_NOTIFICATIONS_DAYS: ${RECORVIA_RETENTION_NOTIFICATIONS_DAYS:-365}
+  RECORVIA_RETENTION_PORTAL_LINKS_DAYS: ${RECORVIA_RETENTION_PORTAL_LINKS_DAYS:-90}
+  RECORVIA_RETENTION_USAGE_EVENTS_DAYS: ${RECORVIA_RETENTION_USAGE_EVENTS_DAYS:-400}
+  RECORVIA_RETENTION_INVITATIONS_DAYS: ${RECORVIA_RETENTION_INVITATIONS_DAYS:-90}
+  RECORVIA_RETENTION_BATCH_SIZE: ${RECORVIA_RETENTION_BATCH_SIZE:-500}
+  # Vazio: rastros desligados. Com o perfil observability:
+  # http://otel-collector:4317.
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
+services:
+  # PostgreSQL do Recorvia e do Keycloak (bancos "recorvia" e "keycloak" no
+  # mesmo servidor). Imagem oficial, sem configuração própria: os dados ficam
+  # no volume postgres-data (/var/lib/postgresql, layout da imagem 18) e o
+  # superusuário só é usado pelos serviços de bootstrap e pelo backup
+  # (deploy/backup, com RECORVIA_PG_CONTAINER). Para estender (arquivamento
+  # de WAL, parâmetros, outro volume), use um arquivo compose adicional que
+  # altere este serviço: command, volumes e environment são os pontos de
+  # extensão.
+  postgres:
+    image: postgres:18.7-alpine
+    <<: *security
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?defina no .env}
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    shm_size: 256mb
+    networks: [dados]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    stop_grace_period: 1m
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "2", memory: 2g }
+    logging: *logging
+
+  # Papéis recorvia_owner e recorvia_app e o banco recorvia (idempotente;
+  # também atualiza as senhas dos papéis).
+  migrate-bootstrap:
+    image: recorvia-migrate:${RECORVIA_VERSION:-0.3.0}
+    build:
+      <<: *go-build
+      args: { CMD: migrate, VERSION: "${RECORVIA_VERSION:-0.3.0}" }
+    <<: *security
+    read_only: true
+    cap_drop: [ALL]
+    command: ["bootstrap"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      RECORVIA_BOOTSTRAP_DATABASE_URL: postgres://postgres:${POSTGRES_SUPERUSER_PASSWORD}@postgres:5432/postgres?sslmode=disable
+      RECORVIA_OWNER_PASSWORD: ${RECORVIA_OWNER_PASSWORD:?defina no .env}
+      RECORVIA_APP_PASSWORD: ${RECORVIA_APP_PASSWORD:?defina no .env}
+    networks: [dados]
+    restart: "no"
+    logging: *logging
+
+  # Migrations: rodam antes da API e do worker, a cada subida.
+  migrate:
+    image: recorvia-migrate:${RECORVIA_VERSION:-0.3.0}
+    <<: *security
+    read_only: true
+    cap_drop: [ALL]
+    command: ["up"]
+    depends_on:
+      migrate-bootstrap: { condition: service_completed_successfully }
+    environment:
+      RECORVIA_ENV: production
+      RECORVIA_MIGRATIONS_DATABASE_URL: postgres://recorvia_owner:${RECORVIA_OWNER_PASSWORD}@postgres:5432/recorvia?sslmode=disable
+    networks: [dados]
+    restart: "no"
+    logging: *logging
+
+  # Papel e banco do Keycloak no mesmo servidor (idempotente; também
+  # atualiza a senha do papel). Sem acesso ao banco recorvia: o bootstrap da
+  # aplicação revoga CONNECT de PUBLIC.
+  keycloak-db-bootstrap:
+    image: postgres:18.7-alpine
+    <<: *security
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        psql -X -q -v ON_ERROR_STOP=1 -v senha="$$KEYCLOAK_DB_PASSWORD" <<'SQL'
+        SELECT format('%s ROLE keycloak LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD %L',
+                      CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'keycloak') THEN 'ALTER' ELSE 'CREATE' END,
+                      :'senha')
+        \gexec
+        SELECT 'CREATE DATABASE keycloak OWNER keycloak'
+         WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'keycloak')
+        \gexec
+        REVOKE ALL ON DATABASE keycloak FROM PUBLIC;
+        GRANT CONNECT, TEMPORARY ON DATABASE keycloak TO keycloak;
+        SQL
+        echo "papel e banco do Keycloak prontos"
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGDATABASE: postgres
+      PGPASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?defina no .env}
+    networks: [dados]
+    restart: "no"
+    logging: *logging
+
+  # Sessões, fluxos de login e limites de taxa. Com senha e persistência
+  # (AOF): um reinício não encerra as sessões.
+  redis:
+    image: redis:8.8.4-alpine
+    <<: *security
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        exec redis-server --requirepass "$$REDISCLI_AUTH"
+        --appendonly yes --save ""
+        --maxmemory 256mb --maxmemory-policy volatile-lru
+    environment:
+      # Lida pelo servidor (acima) e pelo redis-cli do healthcheck.
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?defina no .env}
+    volumes:
+      - redis-data:/data
+    networks: [dados]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 384m }
+    logging: *logging
+
+  rabbitmq:
+    image: rabbitmq:4.2.9-management-alpine
+    <<: *security
+    # Servidor e healthcheck com o mesmo usuário (como no compose local).
+    user: rabbitmq
+    environment:
+      # Usados somente na criação do volume; a troca da senha depois disso é
+      # feita com rabbitmqctl (docs/operacao/implantacao.md).
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?defina no .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?defina no .env}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks: [dados]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1", memory: 1g }
+    logging: *logging
+
+  keycloak:
+    image: recorvia-keycloak-producao:${RECORVIA_VERSION:-0.3.0}
+    build:
+      context: keycloak
+    <<: *security
+    depends_on:
+      keycloak-db-bootstrap: { condition: service_completed_successfully }
+    environment:
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      KC_DB_POOL_MAX_SIZE: "20"
+      KC_HOSTNAME: https://${KEYCLOAK_DOMAIN:?defina no .env}
+      # A API conversa com o Keycloak pela rede interna (descoberta e troca
+      # do código); o navegador, pelo endereço público.
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      # TLS termina no proxy; o Keycloak confia nos cabeçalhos X-Forwarded-*
+      # somente vindos das redes privadas do Docker.
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_PROXY_TRUSTED_ADDRESSES: ${KEYCLOAK_PROXY_TRUSTED_ADDRESSES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+      # Administrador temporário do realm master: criado só na primeira
+      # partida (banco sem administrador); depois as variáveis são ignoradas.
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:-admin-temporario}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?defina no .env}
+      # Marcadores do realm de produção (keycloak/realm-producao.json),
+      # resolvidos na importação, que acontece só na primeira partida.
+      RECORVIA_DOMAIN: ${RECORVIA_DOMAIN:?defina no .env}
+      RECORVIA_OIDC_CLIENT_SECRET: ${RECORVIA_OIDC_CLIENT_SECRET:?defina no .env}
+      KEYCLOAK_SMTP_HOST: ${SMTP_HOST:?defina no .env}
+      KEYCLOAK_SMTP_PORT: ${SMTP_PORT:?defina no .env}
+      KEYCLOAK_SMTP_FROM: ${KEYCLOAK_SMTP_FROM:?defina no .env}
+      KEYCLOAK_SMTP_USERNAME: ${SMTP_USERNAME:-}
+      KEYCLOAK_SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      KEYCLOAK_SMTP_STARTTLS: ${KEYCLOAK_SMTP_STARTTLS:-true}
+      KEYCLOAK_SMTP_SSL: ${KEYCLOAK_SMTP_SSL:-false}
+    networks: [borda, aplicacao, dados]
+    healthcheck:
+      # A descoberta do realm, e não só /health/ready: na primeira partida o
+      # Keycloak fica pronto antes de terminar a importação do realm e
+      # responde 503 a tudo até lá.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /realms/recorvia/.well-known/openid-configuration HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"issuer\"' <&3"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 2m
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1.5", memory: 1536m }
+    logging: *logging
+
+  api:
+    image: recorvia-api:${RECORVIA_VERSION:-0.3.0}
+    build:
+      <<: *go-build
+      args: { CMD: api, VERSION: "${RECORVIA_VERSION:-0.3.0}" }
+    <<: *security
+    read_only: true
+    cap_drop: [ALL]
+    environment:
+      <<: *app-env
+      RECORVIA_HTTP_ADDR: ":8081"
+      RECORVIA_METRICS_ADDR: ":9091"
+      GOMEMLIMIT: 400MiB
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    networks: [aplicacao, dados]
+    healthcheck:
+      test: ["CMD", "/app", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    stop_grace_period: 25s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1.5", memory: 512m }
+    logging: *logging
+
+  worker:
+    image: recorvia-worker:${RECORVIA_VERSION:-0.3.0}
+    build:
+      <<: *go-build
+      args: { CMD: worker, VERSION: "${RECORVIA_VERSION:-0.3.0}" }
+    <<: *security
+    read_only: true
+    cap_drop: [ALL]
+    environment:
+      <<: *app-env
+      RECORVIA_METRICS_ADDR: ":9091"
+      GOMEMLIMIT: 400MiB
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+    networks: [aplicacao, dados]
+    healthcheck:
+      test: ["CMD", "/app", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    # Drenagem no SIGTERM (ADR-082), como no compose local.
+    stop_grace_period: 2m30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1.5", memory: 512m }
+    logging: *logging
+
+  # SPA e proxy para a API (web/nginx.conf), atrás do Caddy.
+  web:
+    image: recorvia-web:${RECORVIA_VERSION:-0.3.0}
+    build:
+      context: ../../web
+    <<: *security
+    read_only: true
+    cap_drop: [ALL]
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+    depends_on:
+      api: { condition: service_healthy }
+    networks: [borda, aplicacao]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 128m }
+    logging: *logging
+
+  # Proxy reverso com HTTPS automático (caddy/Caddyfile): a aplicação em
+  # RECORVIA_DOMAIN e o Keycloak em KEYCLOAK_DOMAIN. Certificados e conta
+  # ACME no volume caddy-data (perdê-lo força nova emissão, sujeita aos
+  # limites da autoridade).
+  proxy:
+    image: recorvia-proxy:${RECORVIA_VERSION:-0.3.0}
+    build:
+      context: caddy
+    <<: *security
+    environment:
+      RECORVIA_DOMAIN: ${RECORVIA_DOMAIN}
+      KEYCLOAK_DOMAIN: ${KEYCLOAK_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?defina no .env}
+      KEYCLOAK_ADMIN_ALLOWED_CIDRS: ${KEYCLOAK_ADMIN_ALLOWED_CIDRS:-0.0.0.0/0 ::/0}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      web: { condition: service_healthy }
+      keycloak: { condition: service_started }
+    networks: [borda]
+    healthcheck:
+      # API de administração do Caddy, só no loopback do container.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 256m }
+    logging: *logging
+
+  # Perfil observability (opcional): docker compose --profile observability
+  # up -d, com OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 no
+  # .env. As mesmas imagens do ambiente local (deploy/observability); as
+  # interfaces ficam só no loopback do servidor (túnel SSH,
+  # docs/operacao/implantacao.md).
+  otel-collector:
+    image: recorvia-otel-collector:${RECORVIA_VERSION:-0.3.0}
+    profiles: ["observability"]
+    build:
+      context: ../observability/otel-collector
+    <<: *security
+    depends_on:
+      jaeger: { condition: service_healthy }
+    networks: [aplicacao]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 256m }
+    logging: *logging
+
+  jaeger:
+    image: recorvia-jaeger:${RECORVIA_VERSION:-0.3.0}
+    profiles: ["observability"]
+    build:
+      context: ../observability/jaeger
+    <<: *security
+    ports:
+      - "127.0.0.1:${JAEGER_UI_PORT:-16686}:16686"
+    networks: [aplicacao]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:13133/status"]
+      interval: 15s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 512m }
+    logging: *logging
+
+  prometheus:
+    image: recorvia-prometheus:${RECORVIA_VERSION:-0.3.0}
+    profiles: ["observability"]
+    build:
+      context: ../observability/prometheus
+      args:
+        RUNBOOK_BASE_URL: ${RUNBOOK_BASE_URL:-https://github.com/ricartefelipe/recorvia/blob/main/}
+    <<: *security
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}
+      - --web.external-url=http://localhost:${PROMETHEUS_PORT:-9090}
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - prometheus-data:/prometheus
+    networks: [aplicacao, dados]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 15s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1", memory: 1g }
+    logging: *logging
+
+  alertmanager:
+    image: recorvia-alertmanager:${RECORVIA_VERSION:-0.3.0}
+    profiles: ["observability"]
+    build:
+      context: ../observability/alertmanager
+    <<: *security
+    environment:
+      ALERTMANAGER_EXTERNAL_URL: http://localhost:${ALERTMANAGER_PORT:-9093}
+      ALERTMANAGER_SMTP_SMARTHOST: ${ALERTMANAGER_SMTP_SMARTHOST:-}
+      ALERTMANAGER_SMTP_FROM: ${ALERTMANAGER_SMTP_FROM:-}
+      ALERTMANAGER_SMTP_REQUIRE_TLS: ${ALERTMANAGER_SMTP_REQUIRE_TLS:-true}
+      ALERTMANAGER_SMTP_USERNAME: ${ALERTMANAGER_SMTP_USERNAME:-}
+      ALERTMANAGER_SMTP_PASSWORD: ${ALERTMANAGER_SMTP_PASSWORD:-}
+      ALERTMANAGER_EMAIL_TO: ${ALERTMANAGER_EMAIL_TO:-}
+      ALERTMANAGER_EMAIL_TO_CRITICAL: ${ALERTMANAGER_EMAIL_TO_CRITICAL:-}
+      ALERTMANAGER_WEBHOOK_URL: ${ALERTMANAGER_WEBHOOK_URL:-}
+      ALERTMANAGER_WEBHOOK_BEARER_TOKEN: ${ALERTMANAGER_WEBHOOK_BEARER_TOKEN:-}
+    ports:
+      - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - alertmanager-data:/alertmanager
+    networks: [aplicacao]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9093/-/ready"]
+      interval: 15s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128m }
+    logging: *logging
+
+  grafana:
+    image: recorvia-grafana:${RECORVIA_VERSION:-0.3.0}
+    profiles: ["observability"]
+    build:
+      context: ../observability/grafana
+    <<: *security
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?defina no .env}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      prometheus: { condition: service_healthy }
+    networks: [aplicacao]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 30
+      start_period: 180s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 512m }
+    logging: *logging
+
+networks:
+  borda: {}
+  aplicacao: {}
+  dados:
+    internal: true
+
+volumes:
+  postgres-data:
+  redis-data:
+  rabbitmq-data:
+  caddy-data:
+  caddy-config:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:

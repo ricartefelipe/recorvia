@@ -24,6 +24,7 @@ tenant, RabbitMQ para eventos, Redis para sessões, Keycloak para identidade. De
 - [Modelo de dados](docs/arquitetura/modelo-de-dados.md)
 - [Matriz de permissões](docs/arquitetura/permissoes.md)
 - [Operação: observabilidade, runbooks, backup e retenção](docs/operacao/observabilidade.md)
+- [Implantação em produção](docs/operacao/implantacao.md)
 - [Decisões arquiteturais](docs/DECISOES.md) · [Requisitos](docs/REQUISITOS.md)
 - [Modelo comercial (hipóteses)](docs/negocio/modelo-comercial.md)
 - [Roteiro demonstrativo](docs/roteiro-demo.md)
@@ -67,9 +68,16 @@ make lint vulncheck sqlc-check secrets-scan
 
 ## Operação
 
-Guias em [`docs/operacao/`](docs/operacao): [observabilidade](docs/operacao/observabilidade.md),
-[runbooks](docs/operacao/runbooks/README.md), [backup e restauração](docs/operacao/backup-e-restauracao.md)
-e [retenção e anonimização](docs/operacao/retencao-e-anonimizacao.md).
+Guias em [`docs/operacao/`](docs/operacao): [implantação em produção](docs/operacao/implantacao.md),
+[observabilidade](docs/operacao/observabilidade.md), [runbooks](docs/operacao/runbooks/README.md),
+[backup e restauração](docs/operacao/backup-e-restauracao.md) e
+[retenção e anonimização](docs/operacao/retencao-e-anonimizacao.md).
+
+A produção sobe num servidor com Docker Compose (`deploy/producao/`, ADR-086): Caddy com HTTPS
+automático na frente da interface e da API (mesma origem) e do Keycloak (subdomínio próprio),
+realm de produção sem usuários, segredos num `.env` fora do Git gerado por
+`deploy/producao/gerar-segredos.sh`, e somente as portas 80 e 443 publicadas. `make prod-check`
+sobe esse compose localmente com `localhost` e confere HTTPS, prontidão, interface, login e portas.
 
 ### Observabilidade
 
@@ -128,8 +136,8 @@ make images       # constrói api, worker, migrate, seed, paysim, web e keycloak
 make image-scan   # Trivy 0.76.2: falha em HIGH/CRITICAL com correção disponível (.trivyignore.yaml)
 ```
 
-Na CI, o job `image-scan` constrói e analisa cada imagem com a mesma versão do Trivy; nenhuma
-imagem é publicada e não há deploy.
+Na CI, o job `image-scan` constrói e analisa cada imagem com a mesma versão do Trivy (inclusive
+as de produção: proxy e Keycloak); nenhuma imagem é publicada e não há deploy automático.
 
 ## Configuração
 

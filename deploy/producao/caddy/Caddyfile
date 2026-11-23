@@ -1,0 +1,64 @@
+# Proxy reverso de produção do Recorvia (ADR-086).
+#
+# - {$RECORVIA_DOMAIN}: interface e API na mesma origem. Tudo vai para o nginx
+#   da imagem web, que serve a SPA e encaminha /api, /auth, /portal/access,
+#   /webhooks e /readyz à API (web/nginx.conf).
+# - {$KEYCLOAK_DOMAIN}: Keycloak num subdomínio próprio (o caminho /auth da
+#   origem da aplicação já é do login do Recorvia).
+#
+# Os certificados são emitidos e renovados automaticamente (ACME, Let's
+# Encrypt ou ZeroSSL) e ficam no volume /data. Nomes que não podem ter
+# certificado público (localhost, *.localhost, *.internal) recebem
+# certificado da autoridade interna do Caddy: é o que a verificação
+# automatizada usa (deploy/producao/verificar.sh).
+#
+# Sem log de acesso aqui: a URI completa traria o token de uso único de
+# /portal/access na query string. O log de acesso fica no nginx da imagem web,
+# que registra essa rota sem a query string.
+{
+	email {$ACME_EMAIL}
+	# A autoridade interna só é usada nos nomes locais; o container não tem
+	# repositório de confiança do sistema a atualizar.
+	skip_install_trust
+	servers {
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		# Nenhum proxy confiável à frente: X-Forwarded-For e
+		# X-Forwarded-Proto recebidos do cliente são descartados e refeitos.
+		# Com um balanceador ou CDN à frente, declare-o em trusted_proxies.
+	}
+}
+
+(cabecalhos_comuns) {
+	header {
+		# Mantém o valor da aplicação quando ela já define o cabeçalho.
+		?Strict-Transport-Security "max-age=63072000"
+		-Server
+		-Via
+	}
+}
+
+{$RECORVIA_DOMAIN} {
+	import cabecalhos_comuns
+	reverse_proxy web:8080 {
+		# O nginx da imagem web passa X-Forwarded-For e X-Forwarded-Proto
+		# adiante e usa o X-Forwarded-For como endereço do cliente.
+		health_uri /healthz
+		health_interval 15s
+	}
+}
+
+{$KEYCLOAK_DOMAIN} {
+	import cabecalhos_comuns
+	# Console e API de administração só a partir dos endereços permitidos
+	# (KEYCLOAK_ADMIN_ALLOWED_CIDRS, separados por espaço). O login dos
+	# usuários (/realms/...) continua aberto.
+	@administracao_bloqueada {
+		path /admin /admin/*
+		not remote_ip {$KEYCLOAK_ADMIN_ALLOWED_CIDRS}
+	}
+	respond @administracao_bloqueada "Acesso restrito." 403
+	reverse_proxy keycloak:8080
+}
