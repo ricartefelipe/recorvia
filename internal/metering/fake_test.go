@@ -79,6 +79,8 @@ type meterStore struct {
 	aggregated []time.Time
 	// shareLocks registra a ordem das leituras com bloqueio compartilhado.
 	shareLocks []uuid.UUID
+	// inserts registra a ordem das tentativas de gravação (external_id).
+	inserts []string
 }
 
 func newMeterStore() *meterStore {
@@ -221,6 +223,7 @@ func (t *meterTx) InsertEvent(_ context.Context, e Event) (bool, error) {
 	if err := t.s.hit("InsertEvent"); err != nil {
 		return false, err
 	}
+	t.s.inserts = append(t.s.inserts, e.ExternalID)
 	if other, ok := t.s.concurrent[e.ExternalID]; ok {
 		delete(t.s.concurrent, e.ExternalID)
 		t.st.events[e.ExternalID] = other

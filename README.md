@@ -72,8 +72,9 @@ make lint vulncheck sqlc-check secrets-scan
 Guias em [`docs/operacao/`](docs/operacao): [implantação em produção](docs/operacao/implantacao.md),
 [observabilidade](docs/operacao/observabilidade.md), [runbooks](docs/operacao/runbooks/README.md),
 [backup e restauração](docs/operacao/backup-e-restauracao.md),
-[retenção e anonimização](docs/operacao/retencao-e-anonimizacao.md) e
-[segurança](docs/operacao/seguranca.md).
+[retenção e anonimização](docs/operacao/retencao-e-anonimizacao.md),
+[segurança](docs/operacao/seguranca.md) e
+[teste de carga](docs/operacao/carga.md) (`make load-test`, manual e fora da CI).
 
 A produção sobe num servidor com Docker Compose (`deploy/producao/`, ADR-086): Caddy com HTTPS
 automático na frente da interface e da API (mesma origem) e do Keycloak (subdomínio próprio),

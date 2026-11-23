@@ -167,6 +167,10 @@ restore-check: ## Restaura o último backup (ou DUMP=arquivo) num banco novo e c
 dr-check: ## Exercício de recuperação de desastre de ponta a ponta num projeto isolado do compose (relatório em backups/dr-check)
 	bash deploy/backup/dr-check.sh
 
+.PHONY: load-test
+load-test: ## Teste de carga num projeto isolado do compose com os limites de produção (relatório em backups/carga; fora da CI)
+	bash deploy/carga/carga.sh
+
 .PHONY: prod-check
 prod-check: ## Sobe o compose de produção num projeto isolado (localhost, certificado interno) e confere HTTPS, readyz, interface, login, problem+json e portas
 	bash deploy/producao/verificar.sh

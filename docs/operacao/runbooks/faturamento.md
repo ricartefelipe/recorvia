@@ -64,6 +64,16 @@ SELECT tenant_id, count(*), min(next_billing_at) AS vencida_desde
    atrasado pela falha de outro.
 4. Lease preso após queda abrupta: aguarde a expiração (`locked_until`). Não apague linhas de
    `scheduled_jobs`.
+5. Fechamento lento (muitas assinaturas vencidas ao mesmo tempo, sem falhas): o motor fatura
+   `RECORVIA_BILLING_CONCURRENCY` tenants ao mesmo tempo (padrão 4) e, quando um tenant para no
+   limite de 500 assinaturas distintas por execução, a execução seguinte vem 5 s depois (depois
+   das outras tarefas vencidas), sem esperar o intervalo de 1 minuto; depois de 20 repetições
+   seguidas, volta ao intervalo normal. Cada tenant em faturamento ocupa uma conexão do pool do
+   worker (`RECORVIA_DATABASE_MAX_CONNS`, padrão 20), que também atende os consumidores, a outbox e
+   as outras tarefas: a concorrência do motor fica limitada a metade do pool (10 com o padrão). Um
+   valor explícito acima disso impede o worker de iniciar; o padrão 4 desce sozinho para metade de
+   um pool menor que 8. Aumentar a concorrência só ajuda com o PostgreSQL e o pool do worker com
+   folga ([teste de carga](../carga.md), ADR-088).
 
 ### Verificação
 - `recorvia_job_last_success_timestamp_seconds{task="billing.run_cycle"}` volta a avançar a cada
@@ -207,7 +217,13 @@ docker compose logs --since 1h api | grep -E 'webhook' | tail -50
   provedor reenvia os eventos pendentes conforme a política dele; a conciliação cobre os que não
   forem reenviados.
 - Recusas por varredura não exigem ação além de acompanhar o volume; volume alto vindo de poucas
-  origens pode ser bloqueado na borda (o limite por IP da rota é 1200 requisições por minuto).
+  origens pode ser bloqueado na borda (o limite por IP da rota é 1200 requisições por minuto,
+  `RECORVIA_WEBHOOK_RATE_LIMIT_PER_MINUTE`).
+- Respostas 429 na rota de webhooks (`recorvia_http_requests_total{route="/webhooks/providers/{provider}/{token}",status_class="4xx"}`
+  em pico de pagamentos, sem recusas no alerta): o provedor passou do limite por IP e repete as
+  entregas depois, o que atrasa a confirmação dos pagamentos. Com os IPs de origem do provedor
+  conhecidos, aumente `RECORVIA_WEBHOOK_RATE_LIMIT_PER_MINUTE` na API ([teste de carga](../carga.md),
+  ADR-088).
 - `too_large` de um provedor real: registre o caso com o provedor (eventos acima do limite não são
   aceitos) e execute a conciliação da janela para refletir os pagamentos não recebidos.
 

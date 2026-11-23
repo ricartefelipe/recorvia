@@ -188,13 +188,14 @@ func (tx subscriptionsTx) List(ctx context.Context, f subscriptions.ListFilter) 
 	if err != nil {
 		return subscriptions.Page{}, err
 	}
-	var p subscriptions.Page
+	p := subscriptions.Page{Names: make(map[uuid.UUID]subscriptions.Names, min(len(rows), limit))}
 	for i, r := range rows {
 		if i == limit {
 			last := p.Items[len(p.Items)-1]
 			p.NextCursor = timeCursor(last.CreatedAt, last.ID)
 			break
 		}
+		p.Names[r.ID] = subscriptions.Names{Customer: r.CustomerName, Plan: r.PlanName}
 		sub, err := subscriptionFromRow(dbgen.Subscription{ID: r.ID, TenantID: r.TenantID, CustomerID: r.CustomerID, PlanID: r.PlanID,
 			PriceVersionID: r.PriceVersionID, Status: r.Status, Quantity: r.Quantity, BillingInterval: r.BillingInterval, Timezone: r.Timezone,
 			AnchorDate: r.AnchorDate, TrialEndsAt: r.TrialEndsAt, StartedAt: r.StartedAt, CurrentPeriodStart: r.CurrentPeriodStart,

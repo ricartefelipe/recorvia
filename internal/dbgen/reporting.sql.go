@@ -46,13 +46,15 @@ func (q *Queries) DashboardBilled(ctx context.Context, arg DashboardBilledParams
 }
 
 const dashboardContraRevenue = `-- name: DashboardContraRevenue :one
-SELECT COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END) FILTER (WHERE a.code = 'refunds'), 0)::bigint AS refunds,
-       COALESCE(sum(CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END) FILTER (WHERE a.code = 'chargebacks'), 0)::bigint AS chargebacks
-  FROM ledger_entries e
-  JOIN ledger_accounts a ON a.tenant_id = e.tenant_id AND a.id = e.account_id
-  JOIN ledger_transactions t ON t.tenant_id = e.tenant_id AND t.id = e.transaction_id
- WHERE e.tenant_id = $1 AND a.code IN ('refunds', 'chargebacks')
-   AND t.occurred_at >= $2 AND t.occurred_at < $3
+SELECT COALESCE(sum(CASE WHEN x.direction = 'debit' THEN x.amount ELSE -x.amount END) FILTER (WHERE x.code = 'refunds'), 0)::bigint AS refunds,
+       COALESCE(sum(CASE WHEN x.direction = 'debit' THEN x.amount ELSE -x.amount END) FILTER (WHERE x.code = 'chargebacks'), 0)::bigint AS chargebacks
+  FROM (SELECT e.direction, e.amount, e.transaction_id, a.code
+          FROM ledger_accounts a
+          JOIN ledger_entries e ON e.tenant_id = a.tenant_id AND e.account_id = a.id
+         WHERE a.tenant_id = $1 AND a.code IN ('refunds', 'chargebacks')
+        OFFSET 0) x
+  JOIN ledger_transactions t ON t.tenant_id = $1 AND t.id = x.transaction_id
+ WHERE t.occurred_at >= $2 AND t.occurred_at < $3
 `
 
 type DashboardContraRevenueParams struct {
@@ -72,6 +74,11 @@ type DashboardContraRevenueRow struct {
 // parte do chargeback que era pagamento excedente (dispute.credit_reversed):
 // somar só os débitos contaria duas vezes o valor reembolsado ao pagador, o
 // valor de disputa ganha e o crédito do cliente estornado.
+// As partidas partem das duas contas (subconsulta com OFFSET 0, que o
+// planejador não desfaz): no plano genérico da consulta preparada, o filtro
+// de período parecia seletivo e o PostgreSQL percorria todos os lançamentos do
+// mês para achar as poucas partidas dessas contas (360 ms contra menos de 1 ms
+// no teste de carga, ADR-088).
 func (q *Queries) DashboardContraRevenue(ctx context.Context, arg DashboardContraRevenueParams) (DashboardContraRevenueRow, error) {
 	row := q.db.QueryRow(ctx, dashboardContraRevenue, arg.TenantID, arg.FromTs, arg.ToTs)
 	var i DashboardContraRevenueRow

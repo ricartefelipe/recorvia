@@ -36,6 +36,16 @@ type ListFilter struct {
 type Page struct {
 	Items      []Subscription
 	NextCursor string
+	// Names são os nomes do cliente e do plano de cada item, para exibição,
+	// lidos na mesma consulta da lista (sem uma consulta por item). Ausente
+	// quando o armazenamento não os fornece.
+	Names map[uuid.UUID]Names
+}
+
+// Names são os nomes de exibição do cliente e do plano de uma assinatura.
+type Names struct {
+	Customer string
+	Plan     string
 }
 
 // HistoryEntry é uma entrada persistida do histórico.
@@ -254,6 +264,13 @@ func (s *Service) Create(ctx context.Context, tenantID uuid.UUID, actor audit.Ac
 // checkSubscriptionLimit confere o limite de contratos ativos do plano da
 // plataforma; o plano deve ter sido lido com LockPlatformPlan.
 func checkSubscriptionLimit(ctx context.Context, tx Tx, pplan platformbilling.Plan) error {
+	// Sem limite de contratos, a contagem (que percorre as assinaturas do
+	// tenant com a linha do plano bloqueada) não decide nada: o bloqueio
+	// continua serializando a criação com a troca de plano, mas o trecho
+	// serializado fica menor (teste de carga, ADR-088).
+	if pplan.MaxActiveSubscriptions == nil {
+		return nil
+	}
 	usage, err := tx.PlatformUsage(ctx)
 	if err != nil {
 		return err

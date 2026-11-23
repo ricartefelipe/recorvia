@@ -437,11 +437,28 @@ func TestServiceCreateAllowsUsageWithFeatureAndBelowLimit(t *testing.T) {
 	}
 }
 
+// Plano da plataforma sem limite de contratos: a criação não conta as
+// assinaturas ativas (a contagem percorre o tenant com a linha do plano
+// bloqueada e não decide nada), mas continua bloqueando o plano.
+func TestServiceCreateWithoutLimitSkipsCount(t *testing.T) {
+	f := newServiceFixture(t, catalog.Flat)
+	f.store.platformPlan.MaxActiveSubscriptions = nil
+	f.store.errs["PlatformUsage"] = errors.New("a contagem não deveria ser consultada")
+	if _, err := f.svc.Create(context.Background(), f.tenantID, f.actor, CreateInput{CustomerID: f.customer.ID, PlanID: f.plan.ID}); err != nil {
+		t.Fatalf("criação sem limite: %v", err)
+	}
+	f.store.errs = map[string]error{"LockPlatformPlan": errors.New("bloqueio indisponível")}
+	if _, err := f.svc.Create(context.Background(), f.tenantID, f.actor, CreateInput{CustomerID: f.customer.ID, PlanID: f.plan.ID}); err == nil {
+		t.Fatal("o bloqueio do plano continua obrigatório sem limite")
+	}
+}
+
 func TestServiceCreatePropagatesStoreFailures(t *testing.T) {
 	for _, method := range []string{"TenantLocation", "Customer", "Plan", "PriceVersion", "LockPlatformPlan", "PlatformUsage",
 		"Insert", "InsertHistory", "Emit", "Audit"} {
 		t.Run(method, func(t *testing.T) {
 			f := newServiceFixture(t, catalog.Flat)
+			f.store.platformPlan.MaxActiveSubscriptions = intPtr(100) // com limite, a contagem é consultada
 			boom := errors.New("falha em " + method)
 			f.store.errs[method] = boom
 			_, err := f.svc.Create(context.Background(), f.tenantID, f.actor, CreateInput{CustomerID: f.customer.ID, PlanID: f.plan.ID})

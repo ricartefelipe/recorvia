@@ -176,6 +176,7 @@ func Assemble(cfg *config.Config, log *slog.Logger, db *postgres.DB, keyring *se
 	webhookClient := NewWebhookClient(cfg)
 	resolver := NewResolver(cfg)
 	engine := billing.NewEngine(store.Billing(), c)
+	engine.Concurrency = cfg.BillingConcurrency
 	webhookBase := cfg.WebhookPublicURL
 	if webhookBase == "" && cfg.PublicURL != nil {
 		webhookBase = strings.TrimRight(cfg.PublicURL.String(), "/") + "/webhooks/providers"

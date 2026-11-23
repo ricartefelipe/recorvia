@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -472,6 +473,35 @@ func TestIngestDeduplicatesWithinBatch(t *testing.T) {
 			t.Fatalf("duplicata deve apontar o evento original: %s e %s", *res[0].EventID, *res[1].EventID)
 		}
 	})
+}
+
+// Os eventos do lote são gravados em ordem de external_id, para que dois
+// lotes concorrentes com external_ids em comum esperem um pelo outro na mesma
+// ordem (sem deadlock); cada resultado continua na posição do evento no lote
+// e, entre repetições do mesmo external_id, vale a ordem do lote.
+func TestIngestInsertsInExternalIDOrder(t *testing.T) {
+	e := newEnv()
+	ids := []string{"evt-c", " evt-a", "evt-b", "evt-a"}
+	batch := make([]EventInput, len(ids))
+	for i, id := range ids {
+		batch[i] = e.input()
+		batch[i].ExternalID = id
+	}
+	batch[3].Quantity = "99"
+	res := e.ingest(t, batch...)
+	if want := []string{"evt-a", "evt-b", "evt-c"}; !slices.Equal(e.store.inserts, want) {
+		t.Fatalf("ordem das gravações = %v, esperada %v", e.store.inserts, want)
+	}
+	for i, want := range []string{"evt-c", "evt-a", "evt-b", "evt-a"} {
+		if res[i].ExternalID != want {
+			t.Errorf("resultado %d é de %q, esperado %q", i, res[i].ExternalID, want)
+		}
+	}
+	assertOutcome(t, res[1], OutcomeAccepted)
+	assertOutcome(t, res[3], OutcomeRejected)
+	if res[3].Error != msgConflict {
+		t.Errorf("repetição com outro conteúdo: %q, esperado %q", res[3].Error, msgConflict)
+	}
 }
 
 func TestIngestWithinBatchDivergentContentIsRejected(t *testing.T) {

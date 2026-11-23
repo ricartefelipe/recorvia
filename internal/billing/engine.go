@@ -7,6 +7,7 @@ import (
 	"maps"
 	"math/big"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -194,11 +195,17 @@ type Engine struct {
 	MaxCatchUp int
 	// MaxSubscriptionsPerRun limita o trabalho de uma execução por tenant.
 	MaxSubscriptionsPerRun int
+	// Concurrency é o número de tenants processados ao mesmo tempo por
+	// RunAll (cada um em sequência, uma transação por assinatura). Com 1, os
+	// tenants são processados um depois do outro. O teste de carga (ADR-088)
+	// mostrou o motor limitado pela latência de cada transação, não pelo
+	// banco: tenants em paralelo multiplicam a vazão do fechamento.
+	Concurrency int
 }
 
 // NewEngine cria o motor.
 func NewEngine(store CycleStore, c Clock) *Engine {
-	return &Engine{store: store, clock: c, MaxCatchUp: 24, MaxSubscriptionsPerRun: 500}
+	return &Engine{store: store, clock: c, MaxCatchUp: 24, MaxSubscriptionsPerRun: 500, Concurrency: 1}
 }
 
 // RunResult resume uma execução.
@@ -206,30 +213,88 @@ type RunResult struct {
 	Subscriptions int
 	Invoices      int
 	InvoiceIDs    []uuid.UUID
+	// More indica que algum tenant parou no limite de assinaturas por
+	// execução (MaxSubscriptionsPerRun) depois de processar esse número de
+	// assinaturas distintas, e pode ter mais assinaturas vencidas. Uma
+	// assinatura reivindicada de novo na mesma execução (que não avançou)
+	// não conta: sem isso, uma assinatura presa manteria More verdadeiro em
+	// toda execução.
+	More bool
 }
 
 var engineActor = audit.System("billing.engine")
 
-// RunAll processa todos os tenants com faturamento vencido.
+// RunAll processa todos os tenants com faturamento vencido, até Concurrency
+// ao mesmo tempo. A falha de um tenant interrompe a execução: nenhum tenant
+// novo é iniciado, os que estão em andamento terminam e o resultado parcial
+// volta com o erro (os tenants restantes ficam para a próxima execução).
 func (e *Engine) RunAll(ctx context.Context) (RunResult, error) {
 	tenants, err := e.store.TenantsWithDueBilling(ctx, e.clock.Now(), 1000)
 	if err != nil {
 		return RunResult{}, err
 	}
-	var total RunResult
-	for _, t := range tenants {
-		if err := ctx.Err(); err != nil {
-			return total, err
+	if e.Concurrency <= 1 || len(tenants) <= 1 {
+		var total RunResult
+		for _, t := range tenants {
+			if err := ctx.Err(); err != nil {
+				return total, err
+			}
+			r, err := e.RunTenant(ctx, t, engineActor)
+			total.add(r)
+			if err != nil {
+				return total, fmt.Errorf("billing: tenant %s: %w", t, err)
+			}
 		}
-		r, err := e.RunTenant(ctx, t, engineActor)
-		total.Subscriptions += r.Subscriptions
-		total.Invoices += r.Invoices
-		total.InvoiceIDs = append(total.InvoiceIDs, r.InvoiceIDs...)
-		if err != nil {
-			return total, fmt.Errorf("billing: tenant %s: %w", t, err)
-		}
+		return total, nil
 	}
-	return total, nil
+	var (
+		mu    sync.Mutex
+		total RunResult
+		errs  []error
+		next  int
+		wg    sync.WaitGroup
+	)
+	// claim devolve o próximo tenant a processar, ou falso depois de uma
+	// falha ou do cancelamento.
+	claim := func() (uuid.UUID, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(errs) > 0 || next >= len(tenants) {
+			return uuid.Nil, false
+		}
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			return uuid.Nil, false
+		}
+		next++
+		return tenants[next-1], true
+	}
+	for range min(e.Concurrency, len(tenants)) {
+		wg.Go(func() {
+			for {
+				t, ok := claim()
+				if !ok {
+					return
+				}
+				r, err := e.RunTenant(ctx, t, engineActor)
+				mu.Lock()
+				total.add(r)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("billing: tenant %s: %w", t, err))
+				}
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+	return total, errors.Join(errs...)
+}
+
+func (r *RunResult) add(o RunResult) {
+	r.Subscriptions += o.Subscriptions
+	r.Invoices += o.Invoices
+	r.InvoiceIDs = append(r.InvoiceIDs, o.InvoiceIDs...)
+	r.More = r.More || o.More
 }
 
 // RunTenant processa as assinaturas vencidas de um tenant. A falha de uma
@@ -243,10 +308,14 @@ func (e *Engine) RunTenant(ctx context.Context, tenantID uuid.UUID, actor audit.
 		errs   []error
 		seen   = map[uuid.UUID]bool{}
 	)
-	for range e.MaxSubscriptionsPerRun {
+	for i := range e.MaxSubscriptionsPerRun {
 		if err := ctx.Err(); err != nil {
 			return res, errors.Join(append(errs, err)...)
 		}
+		// A última volta do limite sempre reivindica: se achar uma
+		// assinatura, pode haver outras.
+		last := i == e.MaxSubscriptionsPerRun-1
+		res.More = false
 		var claimed uuid.UUID
 		var created []uuid.UUID
 		err := e.store.InCycleTx(ctx, tenantID, func(tx CycleTx) error {
@@ -275,6 +344,7 @@ func (e *Engine) RunTenant(ctx context.Context, tenantID uuid.UUID, actor audit.
 			seen[claimed] = true
 			res.Subscriptions++
 		}
+		res.More = last && res.Subscriptions >= e.MaxSubscriptionsPerRun
 		res.Invoices += len(created)
 		res.InvoiceIDs = append(res.InvoiceIDs, created...)
 	}

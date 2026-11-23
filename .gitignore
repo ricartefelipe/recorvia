@@ -1,6 +1,8 @@
 # Binários e artefatos de build
 /bin/
 /dist/
+# go build ./tools/carga na raiz (o roteiro compila fora do repositório)
+/carga
 *.test
 *.out
 coverage*.txt
