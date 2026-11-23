@@ -69,7 +69,6 @@ source "$here/dr-lib.sh"
 api_url=http://localhost:18081
 keycloak_host=localhost:8180
 demo_user=ana.owner@acme.test
-demo_password='Recorvia#Demo2026'
 
 phase() { echo >&2; echo "=== $* ===" >&2; }
 ok() {
@@ -215,7 +214,9 @@ api_quiet() {
 # login: fluxo OIDC real (API, formulário do Keycloak, callback) com curl.
 # Deixa o cookie de sessão em $work/cookies e o token CSRF em $csrf.
 login() {
-  local kc_port location action
+  local kc_port location action demo_password
+  # Senha do usuário de demonstração, lida do realm importado pelo Keycloak do exercício.
+  demo_password=$(demo_user_password "$root/deploy/keycloak/realm-recorvia.json" "$demo_user")
   kc_port=$(port_of keycloak 8080)
   local kc=("${connect[@]}" --connect-to "$keycloak_host:127.0.0.1:$kc_port" -c "$work/cookies" -b "$work/cookies")
   rm -f "$work/cookies"

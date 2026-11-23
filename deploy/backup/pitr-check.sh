@@ -75,7 +75,6 @@ source "$here/dr-lib.sh"
 api_url=http://localhost:18081
 keycloak_host=localhost:8180
 demo_user=carla.owner@beta.test
-demo_password='Recorvia#Demo2026'
 probe_db=recorvia_pitr_conferencia
 
 phase() {
@@ -214,7 +213,9 @@ api() {
 # login: fluxo OIDC real (API, formulário do Keycloak, callback), como no
 # dr-check.sh; deixa o cookie em $work/cookies e o token CSRF em $csrf.
 login() {
-  local kc_port location action
+  local kc_port location action demo_password
+  # Senha do usuário de demonstração, lida do realm importado pelo Keycloak do exercício.
+  demo_password=$(demo_user_password "$root/deploy/keycloak/realm-recorvia.json" "$demo_user")
   kc_port=$(port_of keycloak 8080)
   local kc=("${connect[@]}" --connect-to "$keycloak_host:127.0.0.1:$kc_port" -c "$work/cookies" -b "$work/cookies")
   rm -f "$work/cookies"
@@ -345,21 +346,32 @@ if [[ ${RECORVIA_PITR_BUILD:-1} == 1 ]]; then
   docker build -q -f deploy/postgres/Dockerfile -t "recorvia-postgres:$image_tag" . >/dev/null
   dc --profile seed build -q migrate-bootstrap api worker seed paysim keycloak
 fi
-# O entrypoint confere a configuração como o usuário postgres, o mesmo do
-# archive_command: um arquivo de chave legível só pelo root é recusado na
-# partida, em vez de fazer falhar depois todo arquivamento.
+# A imagem roda como o usuário postgres, sem root, e o entrypoint confere a
+# configuração como esse usuário, o mesmo do archive_command: um arquivo de
+# chave legível só pelo root é recusado na partida, em vez de fazer falhar
+# depois todo arquivamento, tanto no usuário padrão da imagem quanto num
+# container iniciado como root (troca pelo gosu). O arquivo é criado pelo
+# root (como um segredo montado do host) e o entrypoint roda como COMO.
+[[ $(docker image inspect -f '{{.Config.User}}' "recorvia-postgres:$image_tag") == postgres ]] ||
+  die "a imagem recorvia-postgres deveria rodar como o usuário postgres"
 # shellcheck disable=SC2016 # expandido no container
 key_file_check='umask 077 && printf %s "$K" >/tmp/chave && chmod "$MODO" /tmp/chave &&
-  RECORVIA_BACKUP_ENCRYPTION_KEY_FILE=/tmp/chave RECORVIA_BACKUP_S3_PREFIX=s3://recorvia-backup/conferencia exec recorvia-postgres-entrypoint postgres --version'
-code=0
-docker run --rm -e K="$backup_key" -e MODO=0600 --entrypoint sh "recorvia-postgres:$image_tag" -c "$key_file_check" >"$out_dir/entrypoint-chave-so-root.txt" 2>&1 || code=$?
-if ((code == 0)) || ! grep -q 'permission denied' "$out_dir/entrypoint-chave-so-root.txt"; then
-  die "o entrypoint deveria recusar um arquivo de chave legível só pelo root: $(cat "$out_dir/entrypoint-chave-so-root.txt")"
-fi
-docker run --rm -e K="$backup_key" -e MODO=0644 --entrypoint sh "recorvia-postgres:$image_tag" -c "$key_file_check" >"$work/entrypoint-chave-legivel.txt" 2>&1 ||
-  die "o entrypoint recusou um arquivo de chave legível pelo postgres: $(cat "$work/entrypoint-chave-legivel.txt")"
-grep -q 'configuração do backup válida' "$work/entrypoint-chave-legivel.txt" || die "entrypoint sem a conferência da configuração"
-ok "entrypoint confere a configuração como o usuário postgres: arquivo de chave legível só pelo root recusado na partida"
+  export RECORVIA_BACKUP_ENCRYPTION_KEY_FILE=/tmp/chave RECORVIA_BACKUP_S3_PREFIX=s3://recorvia-backup/conferencia &&
+  if [ "$COMO" = root ]; then exec recorvia-postgres-entrypoint postgres --version; fi &&
+  exec gosu postgres recorvia-postgres-entrypoint postgres --version'
+for como in postgres root; do
+  code=0
+  docker run --rm --user 0 -e K="$backup_key" -e MODO=0600 -e COMO="$como" --entrypoint sh "recorvia-postgres:$image_tag" -c "$key_file_check" \
+    >"$out_dir/entrypoint-chave-so-root-$como.txt" 2>&1 || code=$?
+  if ((code == 0)) || ! grep -q 'permission denied' "$out_dir/entrypoint-chave-so-root-$como.txt"; then
+    die "o entrypoint como $como deveria recusar um arquivo de chave legível só pelo root: $(cat "$out_dir/entrypoint-chave-so-root-$como.txt")"
+  fi
+  docker run --rm --user 0 -e K="$backup_key" -e MODO=0444 -e COMO="$como" --entrypoint sh "recorvia-postgres:$image_tag" -c "$key_file_check" \
+    >"$work/entrypoint-chave-legivel.txt" 2>&1 ||
+    die "o entrypoint como $como recusou um arquivo de chave legível pelo postgres: $(cat "$work/entrypoint-chave-legivel.txt")"
+  grep -q 'configuração do backup válida' "$work/entrypoint-chave-legivel.txt" || die "entrypoint como $como sem a conferência da configuração"
+done
+ok "imagem sem root (usuário postgres); entrypoint confere a configuração como postgres, também iniciado como root: arquivo de chave legível só pelo root recusado na partida, 0444 aceito"
 
 dc up -d --wait --quiet-pull minio postgres
 resolve_pg

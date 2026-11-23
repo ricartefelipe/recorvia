@@ -17,6 +17,14 @@ dr_label=recorvia.dr-check
 : "${dr_project_var:=RECORVIA_DR_PROJECT}"
 : "${dr_reuse_var:=RECORVIA_DR_REUSE_PROJECT}"
 
+# demo_user_password REALM USUÁRIO: senha do usuário de demonstração, lida do
+# realm de demonstração importado pelo Keycloak do exercício
+# (deploy/keycloak/realm-recorvia.json), para que o valor exista num só lugar.
+demo_user_password() {
+  jq -er --arg u "$2" 'first(.users[] | select(.username == $u) | .credentials[] | select(.type == "password") | .value)' "$1" ||
+    die "usuário de demonstração $2 sem senha em $1"
+}
+
 # require_safe_dr_dir DIRETÓRIO RAIZ BACKUPS: encerra com erro, sem alterar
 # nada, se o diretório de saída puder conter algo que não é do exercício: a
 # raiz do repositório ou um diretório acima dela, o diretório dos backups

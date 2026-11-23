@@ -22,7 +22,9 @@
 #
 # Configuração (no ambiente do compose ou num arquivo --env-file; nunca no
 # repositório). Segredos podem vir de arquivos montados pelo orquestrador,
-# com as variáveis *_FILE no lugar das que trazem o valor:
+# com as variáveis *_FILE no lugar das que trazem o valor; os arquivos
+# precisam ser legíveis pelo usuário postgres (uid 70) com que a imagem roda,
+# sem root (0444, ou dono uid 70 e 0400):
 #   RECORVIA_BACKUP_S3_PREFIX              destino, s3://bucket[/caminho] (obrigatório)
 #   RECORVIA_BACKUP_S3_ENDPOINT            endereço do serviço compatível com S3 (vazio: AWS)
 #   RECORVIA_BACKUP_S3_REGION              região (padrão us-east-1)

@@ -437,6 +437,9 @@ ok "pg_dump do banco keycloak legível ($(stat -c %s "$work/keycloak.dump") byte
 
 log "10. backup contínuo"
 psql_su() { compose exec -T postgres psql -X -q -A -t -v ON_ERROR_STOP=1 -U postgres -d postgres -c "$1"; }
+for svc in postgres postgres-backup; do
+  [[ $(compose exec -T "$svc" id -un) == postgres ]] || die "o serviço $svc deveria rodar como o usuário postgres, sem root"
+done
 [[ $(psql_su "SHOW archive_mode") == on ]] || die "archive_mode deveria estar ligado"
 segment=$(psql_su "SELECT pg_walfile_name(pg_current_wal_lsn())")
 psql_su "SELECT pg_switch_wal()" >/dev/null
@@ -449,7 +452,7 @@ done
 [[ $archived == 1 ]] || die "o segmento $segment não chegou ao armazenamento: $(psql_su "SELECT row_to_json(a) FROM pg_stat_archiver a")"
 failed=$(psql_su "SELECT failed_count FROM pg_stat_archiver")
 [[ $failed == 0 ]] || die "archive_command com $failed falhas"
-ok "arquivamento de WAL no S3 de teste: segmento $segment arquivado, nenhuma falha"
+ok "PostgreSQL e agente sem root (usuário postgres); arquivamento de WAL no S3 de teste: segmento $segment arquivado, nenhuma falha"
 health=$(docker inspect -f '{{.State.Health.Status}}' "$(compose ps -q postgres-backup)")
 [[ $health == healthy ]] || die "agente de backup com saúde $health"
 listing=""

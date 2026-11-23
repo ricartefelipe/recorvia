@@ -5,10 +5,12 @@
 # acumularia no disco e o servidor pareceria saudável. A conferência roda
 # como o usuário postgres, o mesmo do archive_command, que relê os segredos
 # *_FILE a cada segmento: um arquivo legível só pelo root é recusado aqui, em
-# vez de fazer falhar todo arquivamento depois. Com a configuração válida,
-# segue o entrypoint da imagem oficial (initdb, scripts de inicialização e
-# troca para o usuário postgres). Outros comandos (por exemplo,
-# recorvia-pgbackup serve) são executados diretamente.
+# vez de fazer falhar todo arquivamento depois. A imagem já roda como
+# postgres (USER do Dockerfile); iniciada como root (user: root no compose),
+# a conferência troca de usuário com o gosu. Com a configuração válida, segue
+# o entrypoint da imagem oficial (initdb e scripts de inicialização; como
+# root, também a troca para o usuário postgres). Outros comandos (por
+# exemplo, recorvia-pgbackup serve) são executados diretamente.
 set -eu
 if [ "${1:-}" = postgres ]; then
   if [ "$(id -u)" = 0 ]; then

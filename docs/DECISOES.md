@@ -2741,8 +2741,11 @@ oficial do PostgreSQL e precisa receber o backup como um componente que outro co
   pelo mesmo backup base e WAL e restaurado no mesmo instante do Recorvia; a exportação do realm (`make keycloak-export`)
   exige banco externo (o banco embutido de desenvolvimento é recusado) e vai cifrada para o mesmo destino pelo agente,
   com a ida e volta exercitada.
-- **Conferência da partida como o usuário do arquivamento**: o entrypoint executa `check-config` como `postgres` (com
-  `gosu`), o mesmo usuário do `archive_command`, que relê os segredos `*_FILE` a cada segmento.
+- **Sem root e conferência da partida como o usuário do arquivamento**: a imagem roda como `postgres` (uid 70,
+  `USER` do Dockerfile; os segredos montados precisam ser legíveis por ele, por exemplo 0444) e o entrypoint executa
+  `check-config` como esse usuário (com `gosu` só se o container for iniciado como root), o mesmo do `archive_command`,
+  que relê os segredos `*_FILE` a cada segmento. O código-fonte do WAL-G é baixado só por HTTPS, inclusive nos
+  redirecionamentos, e conferido pela soma SHA-256.
 - **Métricas e alertas**: o agente exporta a idade do último segmento arquivado (lida de `pg_stat_archiver`), as falhas
   do arquivamento, os segmentos pendentes, o fim do último backup base (lido do armazenamento) e o intervalo
   configurado e os bytes do segmento atual (informativo); alertas `RecorviaWALArchiveStale` (só com segmentos

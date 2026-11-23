@@ -657,8 +657,9 @@ cifragem são sempre as traduzidas da configuração acima.
 - **Cifragem no cliente.** Backup base e WAL são compactados e cifrados no servidor, antes do
   envio, com a libsodium (secretstream XChaCha20-Poly1305, cifragem autenticada). O armazenamento
   e quem tiver acesso a ele só veem dados cifrados; um arquivo alterado não decifra.
-- **Obrigatória.** Sem chave (ou com o arquivo da chave ilegível pelo usuário `postgres`, que
-  executa o `archive_command`: a conferência da partida roda como ele), o servidor não inicia, o
+- **Obrigatória.** Sem chave (ou com o arquivo da chave ilegível pelo usuário `postgres`, uid 70,
+  com que a imagem roda, sem root, e que executa o `archive_command`: monte o arquivo com 0444, ou
+  dono uid 70 e 0400), o servidor não inicia, o
   `archive_command` falha (o WAL fica no
   servidor e o alerta dispara) e a restauração é recusada: nada é enviado sem cifragem.
 - **Guarda.** A chave do backup é guardada como as chaves de cifragem da aplicação

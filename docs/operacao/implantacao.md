@@ -108,7 +108,9 @@ O script:
   aponta `RECORVIA_ENCRYPTION_ACTIVE_KEY` para ela;
 - cria a chave de cifragem do backup contínuo em `segredos/backup-cifragem.chave` (pasta 0700,
   arquivo 0444, montado como segredo no PostgreSQL e no agente; fora do `.env`), se ainda não
-  existir;
+  existir. O PostgreSQL e o agente rodam como o usuário `postgres` da imagem (uid 70), sem root:
+  um arquivo de chave (ou de credencial `*_FILE`) trocado à mão precisa continuar legível por esse
+  usuário (0444, ou dono uid 70 com 0400); legível só pelo root, o servidor não inicia;
 - não troca valores já preenchidos (rodar de novo é seguro), não imprime segredos e deixa o
   `.env` com permissão 600;
 - lista as linhas que ainda estão com valor de exemplo.

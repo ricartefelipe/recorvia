@@ -17,14 +17,16 @@
 # arquivos em tempo de execução: deploy/postgres/compose.yaml.
 
 # ---------- WAL-G ----------
-# Integridade: o pacote do código-fonte é conferido pela soma SHA-256 fixada
-# aqui, e as dependências Go, pelo go.sum do próprio WAL-G (-mod=readonly).
+# Integridade: o pacote do código-fonte é baixado só por HTTPS (inclusive nos
+# redirecionamentos do GitHub) e conferido pela soma SHA-256 fixada aqui; as
+# dependências Go, pelo go.sum do próprio WAL-G (-mod=readonly).
 FROM golang:1.27.4-alpine3.24 AS walg
-RUN apk add --no-cache build-base libsodium-dev libsodium-static
+RUN apk add --no-cache build-base curl libsodium-dev libsodium-static
 ARG WALG_VERSION=3.0.10
 ARG WALG_SHA256=e7ad190500da1eb7cc7fdbe7e86543ce5b884992e99491042c5b2592caacf5fe
 WORKDIR /src
-RUN wget -q -O /tmp/wal-g.tar.gz "https://github.com/wal-g/wal-g/archive/refs/tags/v${WALG_VERSION}.tar.gz" \
+RUN curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -o /tmp/wal-g.tar.gz \
+      "https://github.com/wal-g/wal-g/archive/refs/tags/v${WALG_VERSION}.tar.gz" \
  && echo "${WALG_SHA256}  /tmp/wal-g.tar.gz" | sha256sum -c - \
  && tar -xzf /tmp/wal-g.tar.gz --strip-components=1 \
  && rm /tmp/wal-g.tar.gz
@@ -46,13 +48,20 @@ ARG VERSION=dev
 RUN go build -ldflags="-s -w -X main.version=${VERSION}" -o /out/recorvia-pgbackup ./cmd/pgbackup
 
 # ---------- Imagem final ----------
+# Roda como o usuário postgres (uid 70 na variante alpine), sem root: o
+# /var/lib/postgresql da imagem oficial pertence a ele, e um volume nomeado
+# novo montado ali herda esse dono. Os segredos montados (chave do backup,
+# credenciais *_FILE) precisam ser legíveis por esse usuário (por exemplo,
+# 0444, como os gerados por deploy/producao/gerar-segredos.sh).
 FROM postgres:18.7-alpine
 COPY --from=walg /out/wal-g /usr/local/bin/wal-g
 COPY --from=agent /out/recorvia-pgbackup /usr/local/bin/recorvia-pgbackup
 COPY deploy/postgres/entrypoint.sh /usr/local/bin/recorvia-postgres-entrypoint
 RUN chmod 0755 /usr/local/bin/recorvia-postgres-entrypoint \
  && wal-g --version >/dev/null \
- && recorvia-pgbackup version >/dev/null
+ && recorvia-pgbackup version >/dev/null \
+ && [ "$(stat -c %U /var/lib/postgresql /var/run/postgresql | sort -u)" = postgres ]
+USER postgres
 ENTRYPOINT ["recorvia-postgres-entrypoint"]
 # archive_timeout limita a perda (RPO) com pouca escrita: um segmento
 # incompleto é fechado e arquivado depois de 60 s. O restore_command só é
