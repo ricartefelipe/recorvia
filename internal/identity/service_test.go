@@ -82,12 +82,12 @@ func (e *identEnv) login(t *testing.T) (Session, User) {
 
 func TestBeginLogin(t *testing.T) {
 	e := newIdentEnv()
-	target, err := e.svc.BeginLogin(context.Background(), "/faturas?status=open", testBinding)
+	start, err := e.svc.BeginLogin(context.Background(), "/faturas?status=open", testBinding)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(target, "https://idp.example/auth?state=") {
-		t.Fatalf("URL de autorização inesperada: %s", target)
+	if !strings.HasPrefix(start.URL, "https://idp.example/auth?state=") || start.State != e.idp.gotState {
+		t.Fatalf("início do login inesperado: %+v", start)
 	}
 	if len(e.sessions.flows) != 1 {
 		t.Fatalf("esperado um fluxo salvo, obtidos %d", len(e.sessions.flows))
@@ -125,9 +125,11 @@ func TestBeginLoginBindsBrowser(t *testing.T) {
 		t.Fatalf("o fluxo deve guardar o hash do vínculo, não o valor: %q", f.BindingHash)
 	}
 	for _, b := range []string{"", "curto", testBinding + "x", strings.Repeat("*", len(testBinding))} {
-		if target, err := e.svc.BeginLogin(context.Background(), "/", b); err == nil || target != "" {
+		start, err := e.svc.BeginLogin(context.Background(), "/", b)
+		if start != (LoginStart{}) {
 			t.Errorf("vínculo %q aceito", b)
 		}
+		assertKind(t, err, apperr.KindInvalid, "login_binding_invalid")
 	}
 	if len(e.sessions.flows) != 1 {
 		t.Fatalf("vínculo inválido não deve salvar fluxo: %d", len(e.sessions.flows))
@@ -174,9 +176,9 @@ func TestBeginLoginSanitizesReturnPath(t *testing.T) {
 func TestBeginLoginProviderUnavailable(t *testing.T) {
 	e := newIdentEnv()
 	e.idp.authURL = ""
-	target, err := e.svc.BeginLogin(context.Background(), "/", testBinding)
+	start, err := e.svc.BeginLogin(context.Background(), "/", testBinding)
 	assertKind(t, err, apperr.KindUnavailable, "identity_provider_unavailable")
-	if target != "" || len(e.sessions.flows) != 0 {
+	if start != (LoginStart{}) || len(e.sessions.flows) != 0 {
 		t.Fatal("nenhum fluxo deveria ser salvo com o provedor indisponível")
 	}
 }
@@ -184,9 +186,9 @@ func TestBeginLoginProviderUnavailable(t *testing.T) {
 func TestBeginLoginStoreFailure(t *testing.T) {
 	e := newIdentEnv()
 	e.sessions.fail["SaveLoginFlow"] = errBoom
-	target, err := e.svc.BeginLogin(context.Background(), "/", testBinding)
-	if !errors.Is(err, errBoom) || target != "" {
-		t.Fatalf("esperado erro encadeado sem URL, obtido %q, %v", target, err)
+	start, err := e.svc.BeginLogin(context.Background(), "/", testBinding)
+	if !errors.Is(err, errBoom) || start != (LoginStart{}) {
+		t.Fatalf("esperado erro encadeado sem URL, obtido %+v, %v", start, err)
 	}
 }
 

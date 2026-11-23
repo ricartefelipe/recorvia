@@ -2702,21 +2702,35 @@ acesso cruzado por referência direta para a maior parte das rotas.
 - **Login vinculado ao navegador.** O `state` do OIDC era guardado só no servidor (Redis), sem ligação com o
   navegador que iniciou o login. Quem atacava podia iniciar um login, entrar no provedor com a própria conta e
   levar outra pessoa ao `/auth/callback` com o `state` e o código dele: o navegador da vítima recebia uma sessão
-  na conta de quem atacou (login CSRF), e o que ela cadastrasse ficaria com ele. Agora `/auth/login` grava um
-  cookie de vínculo (nome do cookie de sessão com o sufixo `_login`, portanto `__Host-` em produção; HttpOnly,
-  Secure conforme a configuração, `SameSite=Lax` porque o callback chega por navegação vinda do provedor, e
-  validade do fluxo de login, 10 minutos) com 256 bits aleatórios; o fluxo guarda só o SHA-256 do vínculo, e o
-  callback exige o mesmo valor (comparação em tempo constante). O fluxo é consumido antes da conferência: um
-  callback em outro navegador inutiliza o `state` sem trocar o código no provedor. O vínculo válido é
-  reaproveitado por logins seguintes do mesmo navegador (abas simultâneas continuam funcionando) e removido
-  quando o login conclui. Fluxos gravados antes da mudança, sem vínculo, são recusados (o usuário entra de novo).
+  na conta de quem atacou (login CSRF), e o que ela cadastrasse ficaria com ele. Agora cada `/auth/login` gera
+  um vínculo novo de 256 bits e o grava num cookie próprio do fluxo, com nome derivado do `state` (nome do
+  cookie de sessão, sufixo `_login_` e 16 caracteres hexadecimais do SHA-256 do `state`; portanto `__Host-` em
+  produção). O cookie é HttpOnly, Secure conforme a configuração, `SameSite=Lax` (o callback chega por
+  navegação vinda do provedor) e dura o fluxo de login, 10 minutos; o caminho é `/auth`, exceto com o prefixo
+  `__Host-`, que exige `/`. O fluxo guarda só o SHA-256 do vínculo, e o callback exige o mesmo valor
+  (comparação em tempo constante). O fluxo é consumido antes da conferência: um callback em outro navegador
+  inutiliza o `state` sem trocar o código no provedor. Como cada fluxo tem o seu cookie, logins em abas
+  simultâneas não se sobrescrevem, nem quando as duas abas começam sem cookie, e concluir um não derruba o
+  outro. O callback remove o cookie do fluxo em qualquer desfecho (sucesso, `error=` do provedor ou recusa); a
+  partir de 5 fluxos pendentes no navegador, um novo login descarta os anteriores, para que os cookies não se
+  acumulem. Vínculo malformado em `BeginLogin` é erro de aplicação com código estável
+  (`422 login_binding_invalid`). Fluxos gravados antes da mudança, sem vínculo, são recusados (o usuário entra
+  de novo).
 - **Origens CORS validadas.** `RECORVIA_ALLOWED_ORIGINS` recebe CORS com credenciais e vale na conferência de
   origem do CSRF; qualquer texto era aceito. Agora cada origem precisa estar na forma serializada que o
-  navegador envia (`esquema://host[:porta]`, minúsculas, sem caminho, query, fragmento nem credenciais), `null`
-  e `*` são recusados na partida e, em produção, só origens `https` valem.
+  navegador envia no `Origin` (`esquema://host[:porta]`, minúsculas, sem caminho, query, fragmento nem
+  credenciais, sem a porta padrão do esquema, sem porta vazia, zero ou com zeros à esquerda), `null` e `*` são
+  recusados na partida e, em produção, só origens `https` valem. Uma origem que nunca coincidiria com o
+  `Origin` recebido faria o CORS e o CSRF falharem sem aviso. A mensagem de erro passa o valor por
+  `internal/infra/redact` (sem a senha de uma origem com credenciais).
 - **CSP também na API.** As respostas da API passam a levar `Content-Security-Policy: default-src 'none';
   frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, além dos cabeçalhos que já tinham, também
   quando ela é alcançada sem o nginx à frente. O documento HTML da fatura continua com a própria política.
+  Atrás do nginx, `Referrer-Policy`, `X-Frame-Options` e `X-Content-Type-Options` saíam duas vezes (o da API e
+  o da interface, e no `Referrer-Policy` valia o último); o nginx passa a ocultar os da API
+  (`proxy_hide_header`) e cada um sai uma vez, com o valor da interface (`same-origin`, que só tem efeito nos
+  documentos, todos da interface). A CSP da API não é ocultada: as duas políticas valem e a mais restritiva
+  prevalece. `make prod-check` confere que cada cabeçalho sai uma única vez nas respostas da API.
 - **IPv4 embutido em IPv6 nos webhooks enviados.** A proteção contra SSRF (ADR-045) passa a recusar `::/96`
   (endereços compatíveis com IPv4, obsoletos, além de `::` e `::1`), `::ffff:0:0:0/96` (IPv4 traduzido, SIIT),
   `3fff::/20` (documentação) e `5f00::/16` (SRv6), que um tradutor na rede poderia levar a um IPv4 interno.
@@ -2732,9 +2746,12 @@ acesso cruzado por referência direta para a maior parte das rotas.
 
 **Alternativas:** guardar o `state` num cookie em vez do Redis dispensaria o armazenamento, mas o fluxo
 continuaria precisando do verificador PKCE e do nonce no servidor; o vínculo por cookie com hash no fluxo
-mantém o desenho da ADR-012. Um cookie por login (com o `state` no nome) permitiria abas simultâneas sem
-reaproveitar o vínculo, ao custo de cookies acumulados; reaproveitar é seguro porque o cookie é `__Host-` e
-HttpOnly (outro subdomínio não o define e nenhum script o lê). Confirmar no provedor todo evento do Asaas antes
+mantém o desenho da ADR-012. Um único cookie de vínculo por navegador, reaproveitado entre logins, foi a
+primeira versão desta decisão: duas abas que começavam sem cookie recebiam vínculos diferentes no mesmo nome (só
+o último ficava), e o primeiro callback concluído removia o vínculo da outra aba. Um cookie por fluxo resolve as
+duas coisas ao custo de até 5 cookies pequenos durante o login. O caminho `/auth` em produção exigiria trocar
+`__Host-` por `__Secure-`, que não impede outro subdomínio do mesmo domínio de plantar o cookie de um fluxo
+iniciado por quem ataca; ficou `/` com `__Host-`. Confirmar no provedor todo evento do Asaas antes
 de aplicá-lo (o webhook do Asaas é autenticado só por token, ADR-013) foi deixado como recomendação: muda o
 ciclo do pagamento (ADR-080) e custa uma chamada por evento; a conciliação (ADR-038) já detecta divergências.
 **Consequências:** logins em andamento na implantação desta versão falham uma vez (`login_invalid`) e o usuário

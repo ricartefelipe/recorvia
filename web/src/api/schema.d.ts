@@ -47,7 +47,7 @@ export interface paths {
         };
         /**
          * Inicia login no provedor de identidade (Authorization Code + PKCE)
-         * @description Grava um cookie HttpOnly e SameSite=Lax que vincula o login ao navegador (nome do cookie de sessão com o sufixo `_login`, validade do fluxo de login); o callback só é aceito com esse cookie, o que impede o login CSRF.
+         * @description Grava um cookie HttpOnly e SameSite=Lax que vincula este fluxo de login ao navegador (um por fluxo: nome do cookie de sessão com o sufixo `_login_` e um hash curto do `state`, validade do fluxo de login); o callback só é aceito com esse cookie, o que impede o login CSRF. Logins em abas simultâneas não se sobrescrevem.
          */
         get: operations["authLogin"];
         put?: never;
@@ -65,7 +65,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description Exige o cookie de vínculo gravado por `/auth/login` no mesmo navegador; sem ele, ou com outro valor, responde 401 `login_invalid` e o `state` fica inutilizado. Concluído o login, o cookie é removido. */
+        /** @description Exige o cookie de vínculo do fluxo gravado por `/auth/login` no mesmo navegador; sem ele, ou com outro valor, responde 401 `login_invalid` e o `state` fica inutilizado. O cookie do fluxo é removido em qualquer desfecho, inclusive com `error` do provedor. */
         get: operations["authCallback"];
         put?: never;
         post?: never;

@@ -114,17 +114,27 @@ func TestProductionSafetyRules(t *testing.T) {
 // https em produção.
 func TestAllowedOriginsValidation(t *testing.T) {
 	for _, bad := range []string{"null", "*", "https://app.example/", "https://app.example/path", "app.example", "ftp://app.example",
-		"https://user@app.example", "https://app.example?x=1", "https://app.example#x", "https://APP.example", "https://"} {
+		"https://user@app.example", "https://app.example?x=1", "https://app.example#x", "https://APP.example", "https://",
+		// Porta padrão explícita, vazia, zero ou com zeros à esquerda: o
+		// navegador nunca as envia no Origin.
+		"https://app.example:443", "http://app.example:80", "https://app.example:", "https://app.example:0", "https://app.example:08443",
+		"https://app.example:65536", "http://[::1]:80"} {
 		m := baseEnv()
 		m["RECORVIA_ALLOWED_ORIGINS"] = "http://localhost:5173," + bad
 		if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), "RECORVIA_ALLOWED_ORIGINS") {
 			t.Errorf("origem %q aceita: %v", bad, err)
 		}
 	}
+	// A mensagem de erro não repete a senha de uma origem com credenciais.
 	m := baseEnv()
-	m["RECORVIA_ALLOWED_ORIGINS"] = "http://localhost:5173, https://app.example:8443"
+	m["RECORVIA_ALLOWED_ORIGINS"] = "https://usuario:senha-secreta-da-origem@app.example"
+	if _, err := Load(env(m)); err == nil || strings.Contains(err.Error(), "senha-secreta-da-origem") || !strings.Contains(err.Error(), "app.example") {
+		t.Fatalf("erro de origem com credenciais: %v", err)
+	}
+	m = baseEnv()
+	m["RECORVIA_ALLOWED_ORIGINS"] = "http://localhost:5173, https://app.example:8443, http://[::1]:8080, https://app.example:80"
 	c, err := Load(env(m))
-	if err != nil || !slices.Equal(c.AllowedOrigins, []string{"http://localhost:5173", "https://app.example:8443"}) {
+	if err != nil || !slices.Equal(c.AllowedOrigins, []string{"http://localhost:5173", "https://app.example:8443", "http://[::1]:8080", "https://app.example:80"}) {
 		t.Fatalf("origens válidas: %v %v", c.AllowedOrigins, err)
 	}
 	m["RECORVIA_ENV"] = "production"

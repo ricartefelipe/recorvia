@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -100,28 +102,64 @@ func (a *API) setSessionCookie(w http.ResponseWriter, s identity.Session) {
 		SameSite: http.SameSiteLaxMode, MaxAge: max(maxAge, 1)})
 }
 
-// loginCookieName é o cookie que vincula o fluxo de login ao navegador que o
-// iniciou; herda o prefixo __Host- do cookie de sessão.
-func (a *API) loginCookieName() string { return a.cookieName() + "_login" }
+// loginCookiePrefix é o início do nome dos cookies que vinculam cada fluxo de
+// login ao navegador que o iniciou; herda o prefixo __Host- do cookie de
+// sessão.
+func (a *API) loginCookiePrefix() string { return a.cookieName() + "_login_" }
 
-// setLoginCookie grava o vínculo do login. SameSite=Lax porque o callback
+// loginCookieName é o cookie de vínculo de um fluxo, com nome derivado do
+// state: cada login tem o seu, e logins simultâneos em abas do mesmo
+// navegador não se sobrescrevem.
+func (a *API) loginCookieName(state string) string {
+	sum := sha256.Sum256([]byte(state))
+	return a.loginCookiePrefix() + hex.EncodeToString(sum[:8])
+}
+
+// loginCookiePath restringe o cookie às rotas de login. Cookies __Host-
+// exigem Path=/ (e é o prefixo que impede outro subdomínio de plantar o
+// vínculo), então só fora dele o caminho é /auth.
+func (a *API) loginCookiePath() string {
+	if strings.HasPrefix(a.cookieName(), "__Host-") {
+		return "/"
+	}
+	return "/auth"
+}
+
+// maxPendingLogins limita os fluxos de login pendentes por navegador: além
+// disso, os vínculos anteriores são descartados (os cookies não se
+// acumulam a cada clique em "Entrar").
+const maxPendingLogins = 5
+
+// setLoginCookie grava o vínculo do fluxo. SameSite=Lax porque o callback
 // chega por navegação vinda do provedor de identidade (outro site); dura o
 // mesmo que o fluxo de login.
-func (a *API) setLoginCookie(w http.ResponseWriter, binding string, ttl time.Duration) {
+func (a *API) setLoginCookie(w http.ResponseWriter, state, binding string, ttl time.Duration) {
 	secure := a.Config == nil || a.Config.CookieSecure
-	http.SetCookie(w, &http.Cookie{Name: a.loginCookieName(), Value: binding, Path: "/", HttpOnly: true, Secure: secure, //nolint:gosec // Secure segue a configuração
+	http.SetCookie(w, &http.Cookie{Name: a.loginCookieName(state), Value: binding, Path: a.loginCookiePath(), HttpOnly: true, Secure: secure, //nolint:gosec // Secure segue a configuração
 		SameSite: http.SameSiteLaxMode, MaxAge: max(int(ttl.Seconds()), 1)})
 }
 
-func (a *API) clearLoginCookie(w http.ResponseWriter) {
+func (a *API) clearLoginCookie(w http.ResponseWriter, name string) {
 	secure := a.Config == nil || a.Config.CookieSecure
-	http.SetCookie(w, &http.Cookie{Name: a.loginCookieName(), Value: "", Path: "/", HttpOnly: true, Secure: secure, //nolint:gosec // Secure segue a configuração
+	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: a.loginCookiePath(), HttpOnly: true, Secure: secure, //nolint:gosec // Secure segue a configuração
 		SameSite: http.SameSiteLaxMode, MaxAge: -1})
 }
 
-// loginBinding devolve o vínculo de login do cookie, quando bem formado.
-func (a *API) loginBinding(r *http.Request) string {
-	if c, err := r.Cookie(a.loginCookieName()); err == nil && identity.ValidBrowserBinding(c.Value) {
+// pendingLoginCookies devolve os nomes dos cookies de vínculo presentes na
+// requisição.
+func (a *API) pendingLoginCookies(r *http.Request) []string {
+	var out []string
+	for _, c := range r.Cookies() {
+		if strings.HasPrefix(c.Name, a.loginCookiePrefix()) {
+			out = append(out, c.Name)
+		}
+	}
+	return out
+}
+
+// loginBinding devolve o vínculo do fluxo do state, quando bem formado.
+func (a *API) loginBinding(r *http.Request, state string) string {
+	if c, err := r.Cookie(a.loginCookieName(state)); err == nil && identity.ValidBrowserBinding(c.Value) {
 		return c.Value
 	}
 	return ""
@@ -303,36 +341,43 @@ func (a *API) requireStaff(next http.Handler) http.Handler {
 	})
 }
 
-// authLogin inicia o login vinculado ao navegador: o cookie de vínculo é
-// reaproveitado enquanto vale, para que logins em abas simultâneas do mesmo
-// navegador continuem válidos.
+// authLogin inicia o login vinculado ao navegador: cada fluxo recebe um
+// vínculo novo, num cookie próprio, para que logins em abas simultâneas do
+// mesmo navegador continuem válidos.
 func (a *API) authLogin(w http.ResponseWriter, r *http.Request) {
-	binding := a.loginBinding(r)
-	if binding == "" {
-		binding = identity.NewBrowserBinding()
-	}
-	target, err := a.Identity.BeginLogin(r.Context(), r.URL.Query().Get("return_to"), binding)
+	binding := identity.NewBrowserBinding()
+	start, err := a.Identity.BeginLogin(r.Context(), r.URL.Query().Get("return_to"), binding)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.setLoginCookie(w, binding, a.Identity.LoginFlowTTL())
+	if pending := a.pendingLoginCookies(r); len(pending) >= maxPendingLogins {
+		for _, name := range pending {
+			a.clearLoginCookie(w, name)
+		}
+	}
+	a.setLoginCookie(w, start.State, binding, a.Identity.LoginFlowTTL())
 	// O destino é a URL de autorização montada pelo próprio adaptador OIDC.
-	http.Redirect(w, r, target, http.StatusFound) //nolint:gosec // destino gerado pelo servidor
+	http.Redirect(w, r, start.URL, http.StatusFound) //nolint:gosec // destino gerado pelo servidor
 }
 
+// authCallback conclui o login. O cookie de vínculo do fluxo é removido em
+// qualquer desfecho: o state é de uso único.
 func (a *API) authCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	state := q.Get("state")
+	if state != "" {
+		a.clearLoginCookie(w, a.loginCookieName(state))
+	}
 	if e := q.Get("error"); e != "" {
 		a.writeError(w, r, apperr.Unauthenticated("login_denied", "Login cancelado ou recusado pelo provedor de identidade."))
 		return
 	}
-	sess, user, returnTo, err := a.Identity.CompleteLogin(r.Context(), q.Get("state"), q.Get("code"), a.loginBinding(r))
+	sess, user, returnTo, err := a.Identity.CompleteLogin(r.Context(), state, q.Get("code"), a.loginBinding(r, state))
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.clearLoginCookie(w)
 	// Com uma única organização, ela já fica ativa (sessão rotacionada).
 	orgs, err := a.Tenancy.UserOrganizations(r.Context(), user.ID)
 	if err == nil && len(orgs) == 1 {
