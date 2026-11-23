@@ -238,6 +238,12 @@ func (l *loader) boolv(key string, def bool) bool {
 	return b
 }
 
+// BillingConcurrencyLimit é o máximo de tenants faturados ao mesmo tempo
+// para um pool de maxConns conexões: metade do pool, ao menos 1.
+func BillingConcurrencyLimit(maxConns int32) int {
+	return max(1, int(maxConns)/2)
+}
+
 // DefaultWebhookRateLimitPerMinute é o limite padrão de webhooks de
 // provedores por IP de origem: 20 por segundo em média.
 const DefaultWebhookRateLimitPerMinute = 1200
@@ -366,8 +372,20 @@ func Load(get Getenv) (*Config, error) {
 	if c.WebhookRateLimitPerMinute < 1 {
 		l.errs = append(l.errs, errors.New("RECORVIA_WEBHOOK_RATE_LIMIT_PER_MINUTE deve ser positivo"))
 	}
-	if c.BillingConcurrency < 1 || c.BillingConcurrency > 32 {
+	// Cada tenant faturado ao mesmo tempo ocupa uma conexão do pool durante
+	// toda a transação de cada assinatura; os consumidores, a outbox e as
+	// outras tarefas do worker usam o mesmo pool. O motor fica com no máximo
+	// metade dele (ADR-088, runbook de faturamento).
+	maxBilling := BillingConcurrencyLimit(c.DatabaseMaxConns)
+	switch {
+	case c.BillingConcurrency < 1 || c.BillingConcurrency > 32:
 		l.errs = append(l.errs, errors.New("RECORVIA_BILLING_CONCURRENCY deve ficar entre 1 e 32"))
+	case c.BillingConcurrency > maxBilling && get("RECORVIA_BILLING_CONCURRENCY") != "":
+		l.errs = append(l.errs, fmt.Errorf("RECORVIA_BILLING_CONCURRENCY (%d) passa de metade de RECORVIA_DATABASE_MAX_CONNS (%d): no máximo %d",
+			c.BillingConcurrency, c.DatabaseMaxConns, maxBilling))
+	case c.BillingConcurrency > maxBilling:
+		// Padrão com um pool pequeno: o padrão se ajusta ao pool.
+		c.BillingConcurrency = maxBilling
 	}
 	return c, errors.Join(l.errs...)
 }

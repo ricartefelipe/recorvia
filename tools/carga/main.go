@@ -74,6 +74,18 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 	e := loadEnv()
 	suspended := watchClock(ctx, log)
+	// A porta do /metrics do worker muda sempre que ele é religado (pelo
+	// faturamento ou pelo motor): a do ambiente pode ser de antes.
+	if e.Worker != "" && cmd != "motor" {
+		if u, err := workerMetricsURL(ctx, e.Worker); err != nil {
+			log.Warn("porta do /metrics do worker não encontrada", slog.String("error", err.Error()))
+		} else {
+			if u != e.WorkerMetrics {
+				log.Info("porta do /metrics do worker mudou desde o início do roteiro", slog.String("anterior", e.WorkerMetrics), slog.String("atual", u))
+			}
+			e.WorkerMetrics = u
+		}
+	}
 	var err error
 	switch cmd {
 	case "preparar":

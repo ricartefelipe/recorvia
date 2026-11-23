@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -57,11 +58,37 @@ func startWorker(ctx context.Context, e *env) error {
 	}
 	// A porta publicada no host (escolhida pelo Docker) muda quando o
 	// container é religado.
-	addr, err := docker(ctx, 20*time.Second, "port", e.Worker, "9091/tcp")
+	u, err := workerMetricsURL(ctx, e.Worker)
 	if err != nil {
 		return err
 	}
-	addr = strings.Fields(addr)[0]
-	e.WorkerMetrics = "http://127.0.0.1:" + addr[strings.LastIndexByte(addr, ':')+1:] + "/metrics"
+	e.WorkerMetrics = u
 	return nil
+}
+
+// workerMetricsURL descobre a porta publicada agora para o /metrics do
+// worker. Cada subcomando chama ao começar: faturamento e motor religam o
+// worker, e o Docker escolhe outra porta a cada início.
+func workerMetricsURL(ctx context.Context, container string) (string, error) {
+	out, err := docker(ctx, 20*time.Second, "port", container, "9091/tcp")
+	if err != nil {
+		return "", err
+	}
+	return metricsURLFromPort(out)
+}
+
+// metricsURLFromPort monta o endereço a partir da saída de "docker port"
+// (uma linha por endereço, como 127.0.0.1:49153).
+func metricsURLFromPort(out string) (string, error) {
+	for _, addr := range strings.Fields(out) {
+		i := strings.LastIndexByte(addr, ':')
+		if i < 0 || i == len(addr)-1 {
+			continue
+		}
+		if _, err := strconv.Atoi(addr[i+1:]); err != nil {
+			continue
+		}
+		return "http://127.0.0.1:" + addr[i+1:] + "/metrics", nil
+	}
+	return "", fmt.Errorf("porta do /metrics do worker não publicada: %q", truncate(out, 100))
 }

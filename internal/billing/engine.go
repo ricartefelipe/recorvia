@@ -214,7 +214,11 @@ type RunResult struct {
 	Invoices      int
 	InvoiceIDs    []uuid.UUID
 	// More indica que algum tenant parou no limite de assinaturas por
-	// execução (MaxSubscriptionsPerRun) e pode ter mais assinaturas vencidas.
+	// execução (MaxSubscriptionsPerRun) depois de processar esse número de
+	// assinaturas distintas, e pode ter mais assinaturas vencidas. Uma
+	// assinatura reivindicada de novo na mesma execução (que não avançou)
+	// não conta: sem isso, uma assinatura presa manteria More verdadeiro em
+	// toda execução.
 	More bool
 }
 
@@ -310,7 +314,8 @@ func (e *Engine) RunTenant(ctx context.Context, tenantID uuid.UUID, actor audit.
 		}
 		// A última volta do limite sempre reivindica: se achar uma
 		// assinatura, pode haver outras.
-		res.More = i == e.MaxSubscriptionsPerRun-1
+		last := i == e.MaxSubscriptionsPerRun-1
+		res.More = false
 		var claimed uuid.UUID
 		var created []uuid.UUID
 		err := e.store.InCycleTx(ctx, tenantID, func(tx CycleTx) error {
@@ -333,13 +338,13 @@ func (e *Engine) RunTenant(ctx context.Context, tenantID uuid.UUID, actor audit.
 			continue
 		}
 		if claimed == uuid.Nil {
-			res.More = false
 			break
 		}
 		if !seen[claimed] {
 			seen[claimed] = true
 			res.Subscriptions++
 		}
+		res.More = last && res.Subscriptions >= e.MaxSubscriptionsPerRun
 		res.Invoices += len(created)
 		res.InvoiceIDs = append(res.InvoiceIDs, created...)
 	}

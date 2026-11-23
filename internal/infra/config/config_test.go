@@ -159,31 +159,43 @@ func TestHostCookieRequiresSecure(t *testing.T) {
 }
 
 // Tenants faturados ao mesmo tempo pelo motor (ADR-088): 4 por padrão, de 1
-// a 32.
+// a 32 e no máximo metade do pool de conexões. Um valor explícito acima da
+// metade do pool é recusado; o padrão se ajusta a um pool pequeno.
 func TestBillingConcurrency(t *testing.T) {
 	cases := []struct {
 		value   string
+		pool    string
 		want    int
 		wantErr bool
 	}{
-		{"", 4, false},
-		{"1", 1, false},
-		{"32", 32, false},
-		{"0", 0, true},
-		{"33", 33, true},
-		{"dois", 0, true},
+		{"", "", 4, false},
+		{"1", "", 1, false},
+		{"10", "", 10, false},
+		{"11", "", 0, true},
+		{"32", "64", 32, false},
+		{"32", "", 0, true},
+		{"", "4", 2, false},
+		{"", "1", 1, false},
+		{"2", "4", 2, false},
+		{"3", "4", 0, true},
+		{"0", "", 0, true},
+		{"33", "100", 0, true},
+		{"dois", "", 0, true},
 	}
 	for _, tc := range cases {
 		m := baseEnv()
 		if tc.value != "" {
 			m["RECORVIA_BILLING_CONCURRENCY"] = tc.value
 		}
+		if tc.pool != "" {
+			m["RECORVIA_DATABASE_MAX_CONNS"] = tc.pool
+		}
 		c, err := Load(env(m))
 		if gotErr := err != nil && strings.Contains(err.Error(), "RECORVIA_BILLING_CONCURRENCY"); gotErr != tc.wantErr {
-			t.Errorf("%q: erro %v, esperado erro=%v", tc.value, err, tc.wantErr)
+			t.Errorf("%q com pool %q: erro %v, esperado erro=%v", tc.value, tc.pool, err, tc.wantErr)
 		}
-		if !tc.wantErr && c.BillingConcurrency != tc.want {
-			t.Errorf("%q: concorrência %d, esperada %d", tc.value, c.BillingConcurrency, tc.want)
+		if !tc.wantErr && err == nil && c.BillingConcurrency != tc.want {
+			t.Errorf("%q com pool %q: concorrência %d, esperada %d", tc.value, tc.pool, c.BillingConcurrency, tc.want)
 		}
 	}
 }

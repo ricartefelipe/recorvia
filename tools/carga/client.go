@@ -85,14 +85,27 @@ func (c *apiClient) call(ctx context.Context, op, method, path string, body any,
 	return resp.StatusCode, nil
 }
 
-// retry repete a chamada em falhas transitórias (429, 5xx e transporte), com
-// espera crescente. Usado na população dos dados, não nos cenários medidos.
+// permanentError marca uma falha que retry não deve repetir.
+type permanentError struct{ err error }
+
+func (e permanentError) Error() string { return e.err.Error() }
+func (e permanentError) Unwrap() error { return e.err }
+
+func permanent(err error) error { return permanentError{err} }
+
+// retry repete a chamada em falhas transitórias (429, 409, 5xx e transporte),
+// com espera crescente; erros marcados com permanent não se repetem. Usado
+// na população dos dados, não nos cenários medidos.
 func retry(ctx context.Context, attempts int, fn func() (int, error)) error {
 	var err error
 	for i := range attempts {
 		_, err = fn()
 		if err == nil {
 			return nil
+		}
+		var pe permanentError
+		if errors.As(err, &pe) {
+			return err
 		}
 		var he *httpError
 		if errors.As(err, &he) && he.Status < 500 && he.Status != http.StatusTooManyRequests && he.Status != http.StatusConflict {

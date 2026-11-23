@@ -46,7 +46,7 @@ Variáveis principais (todas opcionais; a lista completa está no cabeçalho do 
 | `RECORVIA_LOAD_SCENARIOS` | `faturamento,leitura,escrita,webhooks,consumo` | cenários, na ordem |
 | `RECORVIA_LOAD_DURATION` | 45s | duração de cada nível de concorrência |
 | `RECORVIA_LOAD_READ_LEVELS` | 8,32,64 | usuários simultâneos da leitura |
-| `RECORVIA_LOAD_DIR` | `backups/carga` | resultados (a execução anterior vai para `anterior/`) |
+| `RECORVIA_LOAD_DIR` | `backups/carga` | resultados (a execução anterior vai para `anterior/`); precisa ser novo, vazio ou criado pelo teste (arquivo `.recorvia-carga`) |
 | `RECORVIA_LOAD_BUILD` | 1 | 0 reaproveita as imagens `carga` |
 | `RECORVIA_LOAD_KEEP` | 0 | 1 mantém o ambiente no ar para inspeção |
 | `RECORVIA_LOAD_BILLING_CONCURRENCY` | 4 | tenants faturados ao mesmo tempo pelo motor |

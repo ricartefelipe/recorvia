@@ -166,7 +166,7 @@ func (sc *scenarioCtx) read(ctx context.Context, args []string) error {
 		sc.log.Info("leitura", slog.Int("concorrencia", c), slog.Duration("duracao", *dur))
 		rec := newRecorder()
 		sc.resetStatements(ctx)
-		w := openWindow(ctx, sc.e)
+		w := openWindow(ctx, sc.log, sc.e)
 		rec.begin()
 		runFor(ctx, c, *dur, func(ctx context.Context, r *rand.Rand) {
 			o := sc.st.Orgs[picker.pick(r)]
@@ -258,14 +258,14 @@ func (sc *scenarioCtx) write(ctx context.Context, args []string) error {
 		rec.expectStatus(opConflict, http.StatusUnprocessableEntity, http.StatusConflict)
 		var mismatches, replays atomic.Int64
 		sc.resetStatements(ctx)
-		w := openWindow(ctx, sc.e)
+		w := openWindow(ctx, sc.log, sc.e)
 		rec.begin()
 		runFor(ctx, c, *dur, func(ctx context.Context, r *rand.Rand) {
 			oi := picker.pick(r)
 			o := sc.st.Orgs[oi]
 			cl := sc.client(o, rec)
 			n := int(seq.Add(1))
-			body := customerBody(o, oi+1, 50000+n%50000)
+			body := customerBody(o.Slug, oi+1, 50000+n%50000)
 			body["external_id"] = fmt.Sprintf("%s-escrita-%s-%06d", o.Slug, run, n)
 			var cust idResp
 			hc := http.Header{"Idempotency-Key": {fmt.Sprintf("carga-escrita-%s-c-%06d", run, n)}}
@@ -443,6 +443,12 @@ func (sc *scenarioCtx) billing(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// Antes de parar o worker: uma fração fora de 0 a 1 faria o fatiamento
+	// das cobranças entrar em pânico (acima de 1) ou não pagar nada (abaixo
+	// de 0).
+	if err := errors.Join(checkShare("fracao", *share), checkShare("pagas", *payShare)); err != nil {
+		return err
+	}
 	res := billingResult{}
 	type task struct {
 		org  int
@@ -503,14 +509,14 @@ func (sc *scenarioCtx) billing(ctx context.Context, args []string) error {
 	res.DueAtStart = p.DueSubscriptions
 	// Fase 1: emissão das faturas e criação das cobranças.
 	sc.resetStatements(ctx)
-	w := openWindow(ctx, sc.e)
+	w := openWindow(ctx, sc.log, sc.e)
 	t0 := time.Now()
 	if err := startWorker(ctx, &sc.e); err != nil {
 		return err
 	}
 	workerUp = true
 	w.e.WorkerMetrics = sc.e.WorkerMetrics
-	w.wrkStart, _ = metricsSnapshot(ctx, sc.e.WorkerMetrics)
+	w.snapshotWorker(ctx)
 	sc.log.Info("faturamento: worker religado", slog.Int64("assinaturas_vencidas", p.DueSubscriptions))
 	var invoicesAt time.Duration
 	deadline := t0.Add(*limit)
@@ -577,7 +583,7 @@ func (sc *scenarioCtx) billing(ctx context.Context, args []string) error {
 	toPay := pending[:int(float64(len(pending))**payShare)]
 	res.Paid = len(toPay)
 	sc.resetStatements(ctx)
-	pw := openWindow(ctx, sc.e)
+	pw := openWindow(ctx, sc.log, sc.e)
 	t2 := time.Now()
 	payRec := newRecorder()
 	payRec.begin()
@@ -739,6 +745,9 @@ func (sc *scenarioCtx) usage(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := checkShare("duplicados", *dupShare); err != nil {
+		return err
+	}
 	conc, err := intList(*levels)
 	if err != nil {
 		return err
@@ -770,7 +779,7 @@ func (sc *scenarioCtx) usage(ctx context.Context, args []string) error {
 		var omu sync.Mutex
 		before, _ := sc.obs.usageCount(ctx)
 		sc.resetStatements(ctx)
-		w := openWindow(ctx, sc.e)
+		w := openWindow(ctx, sc.log, sc.e)
 		rec.begin()
 		runFor(ctx, c, *dur, func(ctx context.Context, r *rand.Rand) {
 			// Um lote é de uma organização (a credencial é por organização),
@@ -1004,7 +1013,7 @@ func (sc *scenarioCtx) webhooks(ctx context.Context, args []string) error {
 	res := webhooksResult{Charges: len(pending), Sent: len(deliveries), OutOfOrder: outOfOrder}
 	rec := newRecorder()
 	sc.resetStatements(ctx)
-	w := openWindow(ctx, sc.e)
+	w := openWindow(ctx, sc.log, sc.e)
 	t0 := time.Now()
 	rec.begin()
 	sc.log.Info("webhooks: enviando", slog.Int("entregas", len(deliveries)), slog.Int("concorrencia", *conc))

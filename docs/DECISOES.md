@@ -2819,12 +2819,15 @@ CI de cada pull request.
   compartilhado da CI teria números ainda menos comparáveis.
 - **Correções baratas, com teste e com a medição antes e depois:**
   - o motor de recorrência fatura até `RECORVIA_BILLING_CONCURRENCY` tenants ao mesmo tempo (padrão 4,
-    de 1 a 32), cada um em sequência como antes (`FOR UPDATE SKIP LOCKED` já permitia motores em
-    paralelo). A falha de um tenant interrompe a execução como antes: nenhum tenant novo começa, os em
-    andamento terminam e o erro volta com o resultado parcial;
-  - quando um tenant para no limite de 500 assinaturas por execução, a tarefa devolve
-    `scheduler.ErrMoreWork` e volta a vencer na hora, depois das outras tarefas já vencidas (o
-    agendador reivindica por ordem de vencimento), em vez de esperar o intervalo de 1 minuto;
+    de 1 a 32 e no máximo metade de `RECORVIA_DATABASE_MAX_CONNS`), cada um em sequência como antes
+    (`FOR UPDATE SKIP LOCKED` já permitia motores em paralelo). A falha de um tenant interrompe a
+    execução como antes: nenhum tenant novo começa, os em andamento terminam e o erro volta com o
+    resultado parcial;
+  - quando um tenant para no limite de 500 assinaturas distintas por execução, a tarefa devolve
+    `scheduler.ErrMoreWork` e volta a vencer 5 s depois, depois das outras tarefas já vencidas (o
+    agendador reivindica por ordem de vencimento), em vez de esperar o intervalo de 1 minuto; uma
+    assinatura reivindicada de novo sem avançar não conta, e depois de 20 repetições seguidas a
+    tarefa volta ao intervalo normal;
   - a lista de assinaturas devolve os nomes do cliente e do plano lidos na própria consulta, sem uma
     transação por item na API (N+1);
   - a ingestão de consumo grava os eventos do lote em ordem de `external_id` (estável), para que dois

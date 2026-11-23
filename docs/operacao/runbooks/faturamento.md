@@ -66,9 +66,14 @@ SELECT tenant_id, count(*), min(next_billing_at) AS vencida_desde
    `scheduled_jobs`.
 5. Fechamento lento (muitas assinaturas vencidas ao mesmo tempo, sem falhas): o motor fatura
    `RECORVIA_BILLING_CONCURRENCY` tenants ao mesmo tempo (padrão 4) e, quando um tenant para no
-   limite de 500 assinaturas por execução, a execução seguinte vem logo depois das outras tarefas
-   vencidas, sem esperar o intervalo de 1 minuto. Aumentar a concorrência só ajuda com o
-   PostgreSQL e o pool do worker com folga ([teste de carga](../carga.md), ADR-088).
+   limite de 500 assinaturas distintas por execução, a execução seguinte vem 5 s depois (depois
+   das outras tarefas vencidas), sem esperar o intervalo de 1 minuto; depois de 20 repetições
+   seguidas, volta ao intervalo normal. Cada tenant em faturamento ocupa uma conexão do pool do
+   worker (`RECORVIA_DATABASE_MAX_CONNS`, padrão 20), que também atende os consumidores, a outbox e
+   as outras tarefas: a concorrência do motor fica limitada a metade do pool (10 com o padrão). Um
+   valor explícito acima disso impede o worker de iniciar; o padrão 4 desce sozinho para metade de
+   um pool menor que 8. Aumentar a concorrência só ajuda com o PostgreSQL e o pool do worker com
+   folga ([teste de carga](../carga.md), ADR-088).
 
 ### Verificação
 - `recorvia_job_last_success_timestamp_seconds{task="billing.run_cycle"}` volta a avançar a cada

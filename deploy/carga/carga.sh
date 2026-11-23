@@ -24,7 +24,8 @@
 #                            containers ou volumes que o teste não criou
 #   RECORVIA_LOAD_DIR        diretório dos resultados (padrão: backups/carga,
 #                            fora do Git); a execução anterior vai para
-#                            anterior/
+#                            anterior/. Precisa ser novo, vazio ou criado
+#                            pelo teste (arquivo .recorvia-carga)
 #   RECORVIA_LOAD_ORGS       organizações (padrão: 20)
 #   RECORVIA_LOAD_SCALE      multiplicador de clientes por organização
 #                            (padrão: 1, cerca de 6.600 clientes em 20
@@ -100,6 +101,18 @@ fi
 [[ $project != recorvia ]] || die "o teste de carga não pode usar o projeto do ambiente local (recorvia)"
 [[ $step_timeout =~ ^[1-9][0-9]*$ ]] || die "RECORVIA_LOAD_TIMEOUT inválido: $step_timeout"
 
+# O diretório dos resultados é esvaziado a cada execução (a anterior vai para
+# anterior/): só um diretório novo, vazio ou criado pelo próprio teste (com o
+# arquivo marcador) é aceito, nunca um diretório qualquer como "." ou $HOME.
+marker=.recorvia-carga
+[[ -n $out_dir ]] || die "RECORVIA_LOAD_DIR vazio"
+if [[ -e $out_dir || -L $out_dir ]]; then
+  [[ -d $out_dir && ! -L $out_dir ]] || die "RECORVIA_LOAD_DIR não é um diretório: $out_dir"
+  if [[ ! -f $out_dir/$marker && -n $(ls -A "$out_dir") ]]; then
+    die "RECORVIA_LOAD_DIR ($out_dir) não está vazio e não foi criado pelo teste de carga (sem o arquivo $marker): nada foi removido"
+  fi
+fi
+
 # Antes de remover qualquer coisa: o projeto precisa ser do teste de carga.
 for kind in containers volumes; do
   if [[ $kind == containers ]]; then
@@ -142,13 +155,14 @@ dc() {
   docker compose -p "$project" --env-file "$env_file" -f "$root/compose.yaml" -f "$here/carga.compose.yaml" "$@"
 }
 
-if [[ -d $out_dir ]]; then
+if [[ -f $out_dir/$marker ]]; then
   rm -rf "$out_dir/anterior"
   mkdir -p "$out_dir/anterior"
-  find "$out_dir" -mindepth 1 -maxdepth 1 ! -name anterior -exec mv -t "$out_dir/anterior" {} +
+  find "$out_dir" -mindepth 1 -maxdepth 1 ! -name anterior ! -name "$marker" -exec mv -t "$out_dir/anterior" {} +
 fi
 mkdir -p "$out_dir"
 chmod 755 "$out_dir"
+: >"$out_dir/$marker"
 
 finished=0
 cleanup() {
@@ -212,6 +226,8 @@ export RECORVIA_WEBHOOK_PUBLIC_URL=http://api:8081/webhooks/providers
 export RECORVIA_WEBHOOK_ALLOWED_PRIVATE_CIDRS=127.0.0.0/8,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8
 export RECORVIA_LOAD_API="http://127.0.0.1:$api_port"
 export RECORVIA_LOAD_API_METRICS="http://127.0.0.1:$api_metrics_port/metrics"
+# Porta do worker no início; cada subcomando de tools/carga descobre a atual
+# (docker port), porque o faturamento religa o worker e a porta muda.
 export RECORVIA_LOAD_WORKER_METRICS="http://127.0.0.1:$worker_metrics_port/metrics"
 export RECORVIA_LOAD_PAYSIM="http://127.0.0.1:$paysim_port"
 export RECORVIA_LOAD_RABBIT_API="http://127.0.0.1:$rabbit_port"

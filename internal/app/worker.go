@@ -287,9 +287,9 @@ func (w *Worker) Jobs() []scheduler.Job {
 			res, err := c.Engine.RunAll(ctx)
 			w.Metrics.InvoicesIssued.Add(float64(res.Invoices))
 			if err == nil && res.More {
-				// Tenant no limite de assinaturas por execução: a próxima
-				// execução vem logo, depois das outras tarefas vencidas, em
-				// vez de esperar o intervalo (ADR-088).
+				// Tenant no limite de assinaturas distintas por execução: a
+				// próxima execução vem depois da espera mínima do agendador,
+				// em vez de esperar o intervalo (ADR-088).
 				return scheduler.ErrMoreWork
 			}
 			return err

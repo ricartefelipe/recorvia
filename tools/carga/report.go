@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 )
@@ -14,11 +15,14 @@ import (
 // worker no início e no fim (pool do PostgreSQL, respostas e consumo).
 type window struct {
 	e        env
+	log      *slog.Logger
 	started  time.Time
 	stats    *statsSampler
 	queues   *queueSampler
 	apiStart map[string]float64
 	wrkStart map[string]float64
+	apiErr   error // falha da leitura inicial da API
+	wrkErr   error // falha da leitura inicial do worker
 }
 
 type windowResult struct {
@@ -28,13 +32,34 @@ type windowResult struct {
 	QueueTop   string             `json:"queue_top"`
 	Deltas     map[string]float64 `json:"deltas"`
 	Gauges     map[string]float64 `json:"gauges"`
+	// Warnings lista as leituras de /metrics que falharam: os números
+	// derivados delas (pool, respostas, mensagens) não valem.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
-func openWindow(ctx context.Context, e env) *window {
-	w := &window{e: e, started: time.Now(), stats: startStats(e.Project), queues: startQueues(e)}
-	w.apiStart, _ = metricsSnapshot(ctx, e.APIMetrics)
-	w.wrkStart, _ = metricsSnapshot(ctx, e.WorkerMetrics)
+func openWindow(ctx context.Context, log *slog.Logger, e env) *window {
+	w := &window{e: e, log: log, started: time.Now(), stats: startStats(e.Project), queues: startQueues(e)}
+	w.apiStart, w.apiErr = metricsSnapshot(ctx, e.APIMetrics)
+	w.snapshotWorker(ctx)
 	return w
+}
+
+// snapshotWorker (re)lê as métricas iniciais do worker, por exemplo depois
+// de religá-lo (o endereço em w.e.WorkerMetrics muda junto).
+func (w *window) snapshotWorker(ctx context.Context) {
+	w.wrkStart, w.wrkErr = metricsSnapshot(ctx, w.e.WorkerMetrics)
+}
+
+// warn registra a falha de uma leitura de /metrics no resultado e no log.
+func (w *window) warn(res *windowResult, what string, err error) {
+	if err == nil {
+		return
+	}
+	msg := fmt.Sprintf("métricas %s indisponíveis: %v", what, err)
+	res.Warnings = append(res.Warnings, msg)
+	if w.log != nil {
+		w.log.Warn("métricas indisponíveis no trecho medido", slog.String("leitura", what), slog.String("error", err.Error()))
+	}
 }
 
 // poolSeries são as séries do pool de conexões acompanhadas em cada serviço.
@@ -45,8 +70,12 @@ func (w *window) close(ctx context.Context) windowResult {
 	res := windowResult{Duration: time.Since(w.started), Deltas: map[string]float64{}, Gauges: map[string]float64{}}
 	res.Containers = w.stats.finish()
 	res.QueueMax, res.QueueTop = w.queues.finish()
-	apiEnd, _ := metricsSnapshot(ctx, w.e.APIMetrics)
-	wrkEnd, _ := metricsSnapshot(ctx, w.e.WorkerMetrics)
+	apiEnd, apiEndErr := metricsSnapshot(ctx, w.e.APIMetrics)
+	wrkEnd, wrkEndErr := metricsSnapshot(ctx, w.e.WorkerMetrics)
+	w.warn(&res, "da API no início", w.apiErr)
+	w.warn(&res, "do worker no início", w.wrkErr)
+	w.warn(&res, "da API no fim", apiEndErr)
+	w.warn(&res, "do worker no fim", wrkEndErr)
 	for _, s := range poolSeries {
 		res.Deltas["api "+s] = sumMetric(apiEnd, s) - sumMetric(w.apiStart, s)
 		res.Deltas["worker "+s] = sumMetric(wrkEnd, s) - sumMetric(w.wrkStart, s)
@@ -77,6 +106,9 @@ func (w *window) close(ctx context.Context) windowResult {
 
 // writeWindow escreve CPU e memória por container, filas e pool.
 func writeWindow(w *bytes.Buffer, r windowResult) {
+	for _, msg := range r.Warnings {
+		fmt.Fprintf(w, "\n**Aviso:** %s; os números do pool, das respostas e das mensagens deste trecho não valem.\n", msg)
+	}
 	fmt.Fprintf(w, "\nContainers (amostras de `docker stats` a cada ~2 s; CPU em %% de um núcleo):\n\n")
 	fmt.Fprintln(w, "| Container | CPU média | CPU máx | Memória máx (MiB) |")
 	fmt.Fprintln(w, "|---|---:|---:|---:|")

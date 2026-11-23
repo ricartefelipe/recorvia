@@ -930,6 +930,26 @@ func TestEngineRunTenantStopsAtMaxSubscriptions(t *testing.T) {
 	}
 }
 
+// Uma assinatura reivindicada que não avança (cancelada sem data de
+// encerramento: NextStep não tem passo) é pega de novo em toda volta. Ela
+// conta uma vez e não indica trabalho pendente; senão a tarefa do motor
+// voltaria a rodar na hora, sem parar.
+func TestEngineRunTenantStuckSubscriptionIsNotMoreWork(t *testing.T) {
+	f := newEngineFixture(t, catalog.Flat)
+	f.engine.MaxSubscriptionsPerRun = 5
+	sub := f.addSub(t, engineNow, nil)
+	stuck := &f.store.subs[len(f.store.subs)-1]
+	stuck.Status = subscriptions.Canceled
+	stuck.EndedAt = nil
+	res := f.run(t)
+	if res.Subscriptions != 1 || res.Invoices != 0 || res.More {
+		t.Fatalf("assinatura presa não é trabalho pendente: %+v", res)
+	}
+	if !f.store.sub(sub.ID).BillingDue(engineNow) {
+		t.Fatal("o caso de teste precisa de uma assinatura que continue vencida")
+	}
+}
+
 func TestEngineRunAll(t *testing.T) {
 	f := newEngineFixture(t, catalog.Flat)
 	other := uuid.New()

@@ -283,8 +283,8 @@ func TestRunOnceJobErrorIsRecordedAndRescheduled(t *testing.T) {
 }
 
 // A tarefa que para no próprio limite com trabalho pendente (ErrMoreWork)
-// volta a vencer na hora e não é registrada como falha.
-func TestRunOnceMoreWorkReschedulesNow(t *testing.T) {
+// volta a vencer depois da espera mínima e não é registrada como falha.
+func TestRunOnceMoreWorkReschedulesSoon(t *testing.T) {
 	store := newFakeStore("billing.run_cycle")
 	obs := &fakeObserver{}
 	s := newScheduler(t, store, clock.NewManual(baseTime), obs, Job{Name: "billing.run_cycle", Interval: time.Minute,
@@ -293,8 +293,8 @@ func TestRunOnceMoreWorkReschedulesNow(t *testing.T) {
 		t.Fatalf("ran=%v err=%v", ran, err)
 	}
 	_, completions := store.snapshot()
-	if len(completions) != 1 || completions[0].runErr != nil || !completions[0].next.Equal(baseTime) {
-		t.Fatalf("trabalho pendente deve vencer na hora, sem erro: %+v", completions)
+	if len(completions) != 1 || completions[0].runErr != nil || !completions[0].next.Equal(baseTime.Add(MoreWorkDelay)) {
+		t.Fatalf("trabalho pendente deve vencer depois de MoreWorkDelay, sem erro: %+v", completions)
 	}
 	if got := obs.snapshot(); len(got) != 1 || got[0].err != nil {
 		t.Fatalf("observador não deve receber falha: %+v", got)
@@ -552,5 +552,47 @@ func TestRunOncePutsJobNameInLogContext(t *testing.T) {
 	failed := lines["tarefa falhou"]
 	if failed["job"] != "conciliacao" || failed["component"] != "scheduler" || failed["error"] != "provedor fora do ar" {
 		t.Fatalf("log de falha: %v", failed)
+	}
+}
+
+// Uma tarefa que sempre avisa trabalho pendente (sem avançar) volta ao
+// intervalo normal depois de MaxMoreWorkRuns repetições seguidas, e uma
+// execução sem aviso zera a contagem.
+func TestRunOnceMoreWorkIsBounded(t *testing.T) {
+	due := make([]string, MaxMoreWorkRuns+3)
+	for i := range due {
+		due[i] = "billing.run_cycle"
+	}
+	store := newFakeStore(due...)
+	more := true
+	s := newScheduler(t, store, clock.NewManual(baseTime), &fakeObserver{}, Job{Name: "billing.run_cycle", Interval: time.Minute,
+		Run: func(context.Context) error {
+			if more {
+				return ErrMoreWork
+			}
+			return nil
+		}})
+	run := func() completion {
+		t.Helper()
+		if ran, err := s.RunOnce(context.Background()); err != nil || !ran {
+			t.Fatalf("ran=%v err=%v", ran, err)
+		}
+		_, completions := store.snapshot()
+		return completions[len(completions)-1]
+	}
+	for i := range MaxMoreWorkRuns {
+		if c := run(); !c.next.Equal(baseTime.Add(MoreWorkDelay)) {
+			t.Fatalf("repetição %d: próxima em %v, esperada a espera mínima", i+1, c.next)
+		}
+	}
+	if c := run(); !c.next.Equal(baseTime.Add(time.Minute)) {
+		t.Fatalf("depois de %d repetições, esperado o intervalo normal: %v", MaxMoreWorkRuns, c.next)
+	}
+	if c := run(); !c.next.Equal(baseTime.Add(MoreWorkDelay)) {
+		t.Fatalf("a contagem recomeça depois do intervalo normal: %v", c.next)
+	}
+	more = false
+	if c := run(); !c.next.Equal(baseTime.Add(time.Minute)) {
+		t.Fatalf("sem aviso, intervalo normal: %v", c.next)
 	}
 }

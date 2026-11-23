@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -277,7 +278,7 @@ var metricsClient = &http.Client{Timeout: 15 * time.Second}
 // (nome com rótulos) para valor.
 func metricsSnapshot(ctx context.Context, url string) (map[string]float64, error) {
 	if url == "" {
-		return map[string]float64{}, nil
+		return nil, errors.New("endereço do /metrics não definido")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -288,6 +289,9 @@ func metricsSnapshot(ctx context.Context, url string) (map[string]float64, error
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: situação %d", url, resp.StatusCode)
+	}
 	return parseMetrics(resp.Body)
 }
 
