@@ -8,7 +8,7 @@ import { api } from '../../api/client';
 import type { Dashboard } from '../../api/types';
 import { AccessDenied, LoadingState, QueryContent } from '../../components/states';
 import { HelpTip, PageHeader } from '../../components/ui';
-import { currentMonthInTimeZone, formatDateTime, formatMonth, timeZoneLabel } from '../../lib/dates';
+import { currentMonthInTimeZone, formatDateTime, formatMonth, timeZoneLabelInSentence } from '../../lib/dates';
 import { useUrlFilters } from '../../lib/hooks';
 import { formatBasisPoints, formatMoney } from '../../lib/money';
 import type { Permission } from '../../session/permissions';
@@ -329,8 +329,6 @@ function DashboardContent({ data }: { data: Dashboard }) {
   );
 }
 
-const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
-
 export function DashboardPage() {
   const { keys, timeZone, can } = useTenant();
   const currentMonth = currentMonthInTimeZone(timeZone);
@@ -353,7 +351,7 @@ export function DashboardPage() {
         description={
           <>
             Indicadores de {formatMonth(month)}, no{' '}
-            <span title={timeZone}>{lowerFirst(timeZoneLabel(timeZone))}</span>.
+            <span title={timeZone}>{timeZoneLabelInSentence(timeZone)}</span>.
           </>
         }
         actions={

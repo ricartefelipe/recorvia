@@ -1,5 +1,5 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import { Button, Group, Menu, Modal, Select, Stack, Text, Textarea } from '@mantine/core';
+import { Button, Group, Loader, Menu, Modal, Select, Stack, Text, Textarea } from '@mantine/core';
 import { DateTimePicker } from '@mantine/dates';
 import {
   IconBan,
@@ -263,7 +263,10 @@ export function InvoiceActions({ invoice }: { invoice: InvoiceDetails }) {
     can('payments.charge') && receivable && (
       <Menu.Item
         key="retry"
-        leftSection={<IconRefresh size={16} />}
+        // O carregamento fica só neste item: o botão "Ações" continua
+        // habilitado para abrir o documento e o ledger (menu único no celular).
+        disabled={retry.isPending}
+        leftSection={retry.isPending ? <Loader size={14} /> : <IconRefresh size={16} />}
         onClick={async () => {
           const ok = await confirmAction({
             title: 'Nova tentativa de cobrança',
@@ -323,9 +326,7 @@ export function InvoiceActions({ invoice }: { invoice: InvoiceDetails }) {
       {menuItems.length > 0 && (
         <Menu position="bottom-end" withArrow>
           <Menu.Target>
-            <Button rightSection={<IconChevronDown size={16} />} loading={retry.isPending}>
-              Ações
-            </Button>
+            <Button rightSection={<IconChevronDown size={16} />}>Ações</Button>
           </Menu.Target>
           <Menu.Dropdown>{menuItems}</Menu.Dropdown>
         </Menu>

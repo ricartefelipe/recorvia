@@ -166,11 +166,13 @@ export function timeZoneCity(timeZone: string): string {
  * "Horário do Amazonas", "Horário do Japão". Cai no código IANA quando o
  * navegador não conhece o fuso.
  */
-export function timeZoneName(timeZone: string): string {
+export function timeZoneName(timeZone: string, at: Date = new Date()): string {
   if (timeZone === 'UTC' || timeZone === 'Etc/UTC') return 'Tempo universal coordenado (UTC)';
   try {
+    // O nome depende do instante: em 1970, por exemplo, Lisboa usava o horário
+    // da Europa Central. Por padrão, o nome vigente agora.
     const part = dtf(timeZone, { timeZoneName: 'longGeneric' })
-      .formatToParts(new Date(0))
+      .formatToParts(at)
       .find((p) => p.type === 'timeZoneName')?.value;
     if (!part || /^GMT/.test(part)) return timeZone;
     return part.replace(/^Horário Padrão/, 'Horário');
@@ -184,10 +186,21 @@ export function timeZoneName(timeZone: string): string {
  * identifica a cidade (por exemplo, Fortaleza também usa o horário de
  * Brasília), a cidade de referência entre parênteses.
  */
-export function timeZoneLabel(timeZone: string): string {
-  const name = timeZoneName(timeZone);
+export function timeZoneLabel(timeZone: string, at?: Date): string {
+  const name = timeZoneName(timeZone, at);
   if (name === timeZone || timeZone === 'America/Sao_Paulo' || timeZone === 'UTC' || timeZone === 'Etc/UTC') return name;
   return `${name} (${timeZoneCity(timeZone)})`;
+}
+
+/**
+ * Rótulo de fuso para o meio de uma frase ("no horário de Brasília"): só o
+ * nome amigável começa em minúscula; o código IANA, quando não há nome, fica
+ * como é ("Etc/GMT+3").
+ */
+export function timeZoneLabelInSentence(timeZone: string, at?: Date): string {
+  const label = timeZoneLabel(timeZone, at);
+  if (label === timeZone || !/^Horário /.test(label)) return label;
+  return label.charAt(0).toLowerCase() + label.slice(1);
 }
 
 /** Fusos do Brasil, listados primeiro nas opções. */

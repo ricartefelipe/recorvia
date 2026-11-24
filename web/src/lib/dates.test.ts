@@ -6,6 +6,7 @@ import {
   formatDateTime,
   formatInstantDate,
   timeZoneLabel,
+  timeZoneLabelInSentence,
   timeZoneName,
   timeZoneOptions,
   todayInTimeZone,
@@ -51,6 +52,18 @@ describe('nomes de fuso', () => {
     expect(timeZoneLabel('America/Manaus')).toBe('Horário do Amazonas (Manaus)');
     expect(timeZoneLabel('America/Cuiaba')).toMatch(/\(Cuiabá\)$/);
     expect(timeZoneLabel('UTC')).toBe('Tempo universal coordenado (UTC)');
+  });
+
+  it('usa o nome vigente do fuso, não o de 1970', () => {
+    // Em 1970 Lisboa estava no horário da Europa Central; hoje, no da Europa Ocidental.
+    expect(timeZoneName('Europe/Lisbon')).toBe('Horário da Europa Ocidental');
+    expect(timeZoneName('Europe/Lisbon', new Date('2026-07-01T12:00:00Z'))).toBe('Horário da Europa Ocidental');
+  });
+
+  it('no meio da frase, só o nome amigável começa em minúscula', () => {
+    expect(timeZoneLabelInSentence('America/Sao_Paulo')).toBe('horário de Brasília');
+    expect(timeZoneLabelInSentence('America/Manaus')).toBe('horário do Amazonas (Manaus)');
+    expect(timeZoneLabelInSentence('Etc/GMT+3')).toBe('Etc/GMT+3');
   });
 
   it('cai no código quando o fuso é desconhecido', () => {

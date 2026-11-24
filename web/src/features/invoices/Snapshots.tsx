@@ -2,7 +2,7 @@ import { SimpleGrid, Text } from '@mantine/core';
 import type { ReactNode } from 'react';
 import { DateTime, JsonView } from '../../components/format';
 import { KeyValue } from '../../components/ui';
-import { formatDocument } from '../../lib/documents';
+import { formatDocument, formatPostalCode } from '../../lib/documents';
 import { billingIntervalLabels, labelOf, pricingModelLabels } from '../../lib/labels';
 import { formatMoney, formatQuantity, formatUnitAmountDecimal } from '../../lib/money';
 
@@ -20,7 +20,7 @@ export function formatSnapshotAddress(address: unknown): string[] {
   const cityState = [text(a.city), text(a.state)].filter(Boolean).join('/');
   const line2 = [text(a.district), cityState].filter(Boolean).join(', ');
   const postal = text(a.postal_code);
-  const line3 = [postal && `CEP ${postal}`, text(a.country) && text(a.country) !== 'BR' ? text(a.country) : undefined]
+  const line3 = [postal && `CEP ${formatPostalCode(postal)}`, text(a.country) && text(a.country) !== 'BR' ? text(a.country) : undefined]
     .filter(Boolean)
     .join(' · ');
   return [line1, line2, line3].filter((l): l is string => !!l);
