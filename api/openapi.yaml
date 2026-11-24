@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Recorvia API
-  version: 0.4.0
+  version: 0.4.1
   description: |
     API do Recorvia: gestão de assinaturas, faturamento recorrente, cobranças,
     inadimplência e conciliação de recebíveis.

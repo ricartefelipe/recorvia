@@ -94,7 +94,7 @@ No servidor:
 ```bash
 git clone https://github.com/ricartefelipe/recorvia.git /opt/recorvia
 cd /opt/recorvia
-git checkout v0.4.0                      # a versão a implantar
+git checkout v0.4.1                      # a versão a implantar
 cd deploy/producao
 cp .env.example .env
 bash gerar-segredos.sh .env
