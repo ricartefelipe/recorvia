@@ -6,6 +6,36 @@ Todas as mudanças relevantes são registradas aqui. Formato baseado em
 
 ## [Não lançado]
 
+## [0.4.1] - 2026-11-24
+
+Revisão de UI/UX e de acessibilidade da interface, feita a partir de capturas de todas as telas em
+computador e celular (ADR-090).
+
+### Adicionado
+- Roteiro E2E de acessibilidade (`web/e2e/10-acessibilidade.spec.ts`) com axe-core: 29 telas em
+  computador e celular, falhando em violações graves ou críticas das regras WCAG 2.1 AA, e navegação
+  por teclado com foco visível.
+
+### Alterado
+- Contraste WCAG AA nos textos secundários, badges, botões preenchidos, placeholders e no logo, com as
+  cores calculadas no tema; campos com contorno visível no foco.
+- No celular, as tabelas viram cartões com rótulo e valor; quando a rolagem horizontal continua, ela é
+  acessível pelo teclado.
+- Códigos internos traduzidos: ações e recursos da auditoria (com filtros em lista), eventos da
+  assinatura, motivos da fatura, lançamentos e contas do ledger, recursos do plano Recorvia, eventos de
+  webhook, consumidores, situação no provedor e campos da conciliação.
+- Dados do cliente na emissão e preço do item exibidos como lista, sem JSON, com CPF/CNPJ e CEP
+  formatados; fuso pelo nome ("horário de Brasília"); versão de preço pela data; "Fim do período de
+  teste" e "Data-base do ciclo".
+- Seletor de organização com o nome completo no computador e no menu lateral no celular; ações da
+  fatura agrupadas no celular; legenda curta no topo do painel.
+
+### Corrigido
+- As abas do catálogo apontavam para painéis inexistentes; os nomes acessíveis do menu do usuário e do
+  seletor de mês não continham o texto visível.
+- O teste da baixa do valor a recuperar falhava entre 21h e meia-noite de Brasília, porque formatava a
+  data efetiva em UTC.
+
 ## [0.4.0] - 2026-11-23
 
 Preparação para produção: pacote de implantação num servidor, backup contínuo com recuperação para um
@@ -364,7 +394,8 @@ Auditoria de todos os requisitos (RF-01 a RF-17 e RNF-01 a RNF-12) e correção 
   `user_session_required`, e o tratamento de dead letters grava a auditoria,
   com a justificativa, na mesma transação da resolução (ADR-059).
 
-[Não lançado]: https://github.com/ricartefelipe/recorvia/compare/v0.4.0...HEAD
+[Não lançado]: https://github.com/ricartefelipe/recorvia/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/ricartefelipe/recorvia/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ricartefelipe/recorvia/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ricartefelipe/recorvia/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ricartefelipe/recorvia/compare/v0.1.0...v0.2.0

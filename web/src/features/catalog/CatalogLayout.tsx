@@ -22,18 +22,24 @@ export function CatalogLayout() {
             title="Catálogo"
             description="Produtos, planos e versões de preço imutáveis. Mudar o preço cria uma nova versão; assinaturas existentes mantêm a versão contratada."
           />
-          <Tabs value={current} onChange={(v) => v && navigate(`/catalogo/${v}`)} mb="md">
-            <Tabs.List>
+          {/* Cada aba controla um painel existente (aria-controls válido); só o da seção atual tem conteúdo. */}
+          <Tabs value={current} onChange={(v) => v && navigate(`/catalogo/${v}`)}>
+            <Tabs.List mb="md">
               {SECTIONS.map((s) => (
                 <Tabs.Tab key={s.value} value={s.value}>
                   {s.label}
                 </Tabs.Tab>
               ))}
             </Tabs.List>
+            {SECTIONS.map((s) => (
+              <Tabs.Panel key={s.value} value={s.value}>
+                {s.value === current && <Outlet />}
+              </Tabs.Panel>
+            ))}
           </Tabs>
         </>
       )}
-      <Outlet />
+      {isDetail && <Outlet />}
     </>
   );
 }

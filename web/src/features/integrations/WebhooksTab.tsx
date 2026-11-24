@@ -27,10 +27,18 @@ import { DateTime, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { confirmAction, CursorPager, PageHeader, SecretRevealModal } from '../../components/ui';
 import { useApiMutation, useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
-import { deliveryStatusLabels, webhookStatusLabels } from '../../lib/labels';
+import { deliveryStatusLabels, labelOf, webhookEventLabels, webhookStatusLabels } from '../../lib/labels';
+import { accentInsensitiveFilter } from '../../components/inputs';
 import { optionalText } from '../../lib/validation';
 import { Can, usePermission, useTenant } from '../../session/SessionContext';
 import { integrationsApi } from './api';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
+
+/** Opção de evento: nome em português e o código que chega no payload do webhook. */
+function webhookEventOption(code: string): string {
+  const label = webhookEventLabels[code];
+  return label ? `${label} (${code})` : code;
+}
 
 const endpointSchema = z.object({
   url: z
@@ -100,7 +108,8 @@ function EndpointModal({
                 label="Tipos de evento"
                 required
                 searchable
-                data={eventTypes.data?.data ?? []}
+                data={(eventTypes.data?.data ?? []).map((code) => ({ value: code, label: webhookEventOption(code) }))}
+                filter={accentInsensitiveFilter}
                 value={field.value}
                 onChange={field.onChange}
                 error={fieldState.error?.message}
@@ -212,7 +221,7 @@ export function WebhooksTab() {
           data.length === 0 ? (
             <EmptyState title="Nenhum endpoint" description="Cadastre uma URL para receber eventos como fatura emitida e pagamento confirmado." icon={<IconWebhook size={26} />} />
           ) : (
-            <Table.ScrollContainer minWidth={900}>
+            <ResponsiveTable minWidth={900}>
               <Table aria-label="Endpoints de webhook">
                 <Table.Thead>
                   <Table.Tr>
@@ -238,7 +247,7 @@ export function WebhooksTab() {
                         )}
                       </Table.Td>
                       <Table.Td>
-                        <Tooltip label={e.event_types.join(', ')} multiline w={320}>
+                        <Tooltip label={e.event_types.map((code) => labelOf(webhookEventLabels, code)).join(', ')} multiline w={320}>
                           <Badge variant="light" tabIndex={0}>
                             {e.event_types.length} tipo(s)
                           </Badge>
@@ -303,7 +312,7 @@ export function WebhooksTab() {
                   ))}
                 </Table.Tbody>
               </Table>
-            </Table.ScrollContainer>
+            </ResponsiveTable>
           )
         }
       </QueryContent>
@@ -331,8 +340,11 @@ function DeliveryAttemptsModal({ delivery, onClose }: { delivery: WebhookDeliver
   return (
     <Modal opened onClose={onClose} title="Tentativas da entrega" size="xl">
       <Stack gap="sm">
-        <Text size="sm" ff="monospace">
-          {delivery.event_type} · {delivery.event_id}
+        <Text size="sm">
+          {labelOf(webhookEventLabels, delivery.event_type)}{' '}
+          <Text span size="xs" c="dimmed" ff="monospace">
+            {delivery.event_type} · {delivery.event_id}
+          </Text>
         </Text>
         <QueryContent query={query} loading={<LoadingState />}>
           {(list) =>
@@ -415,7 +427,7 @@ export function WebhookDeliveriesPage() {
             <EmptyState title="Nenhuma entrega" description="Entregas aparecem quando eventos assinados por este endpoint acontecem." />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={900}>
+              <ResponsiveTable minWidth={900}>
                 <Table aria-label="Entregas">
                   <Table.Thead>
                     <Table.Tr>
@@ -436,11 +448,9 @@ export function WebhookDeliveriesPage() {
                           <DateTime value={d.created_at} />
                         </Table.Td>
                         <Table.Td>
-                          <Text size="sm" ff="monospace">
-                            {d.event_type}
-                          </Text>
+                          <Text size="sm">{labelOf(webhookEventLabels, d.event_type)}</Text>
                           <Text size="xs" c="dimmed" ff="monospace">
-                            {d.event_id}
+                            {d.event_type} · {d.event_id}
                           </Text>
                         </Table.Td>
                         <Table.Td>
@@ -479,7 +489,7 @@ export function WebhookDeliveriesPage() {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}

@@ -10,7 +10,8 @@ import type { Organization, OrganizationUpdate } from '../../api/types';
 import { DateTime, StatusBadge } from '../../components/format';
 import { LoadingState, QueryContent } from '../../components/states';
 import { KeyValue, PageHeader } from '../../components/ui';
-import { supportedTimeZones } from '../../lib/dates';
+import { accentInsensitiveFilter } from '../../components/inputs';
+import { timeZoneOptions } from '../../lib/dates';
 import { formatDocument, isCnpjFormat, normalizeDocument } from '../../lib/documents';
 import { useApiMutation } from '../../lib/hooks';
 import { organizationStatusLabels } from '../../lib/labels';
@@ -64,7 +65,7 @@ type FormValues = z.input<ReturnType<typeof makeSchema>>;
 function OrganizationForm({ org }: { org: Organization }) {
   const queryClient = useQueryClient();
   const canEdit = usePermission('organization.update');
-  const timeZones = useMemo(() => supportedTimeZones().map((tz) => ({ value: tz, label: tz })), []);
+  const timeZones = useMemo(() => timeZoneOptions(), []);
   const schema = useMemo(() => makeSchema(!!org.address), [org.address]);
   const a = org.address;
   const form = useForm<FormValues, unknown, OrganizationUpdate>({
@@ -114,6 +115,7 @@ function OrganizationForm({ org }: { org: Organization }) {
                     label="Fuso horário"
                     description="Afeta vencimentos, lembretes e indicadores."
                     data={timeZones}
+                    filter={accentInsensitiveFilter}
                     searchable
                     required
                     value={field.value}

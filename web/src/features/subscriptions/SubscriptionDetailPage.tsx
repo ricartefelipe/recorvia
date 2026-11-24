@@ -15,15 +15,19 @@ import {
   labelOf,
   scheduledChangeKindLabels,
   scheduledChangeStatusLabels,
+  subscriptionEventLabels,
   subscriptionStatusLabels,
+  systemActorLabels,
 } from '../../lib/labels';
+import { timeZoneLabel } from '../../lib/dates';
 import { useTenant } from '../../session/SessionContext';
-import { usePlans } from '../catalog/api';
+import { catalogApi, usePlans } from '../catalog/api';
 import { RelatedInvoices } from '../invoices/InvoicesTable';
 import { subscriptionsApi } from './api';
 import { PriceAdjustmentsPanel } from './PriceAdjustmentsPanel';
 import { CancelScheduledAlert, SubscriptionActions } from './SubscriptionActions';
 import { UsagePanel } from './UsagePanel';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 function HistoryPanel({ subscriptionId }: { subscriptionId: string }) {
   const { keys } = useTenant();
@@ -38,11 +42,13 @@ function HistoryPanel({ subscriptionId }: { subscriptionId: string }) {
         data.length === 0 ? (
           <EmptyState title="Sem transições registradas" />
         ) : (
-          <Table.ScrollContainer minWidth={720}>
+          <ResponsiveTable minWidth={720}>
             <Table aria-label="Histórico de transições">
               <Table.Thead>
                 <Table.Tr>
-                  <Table.Th w={40} />
+                  <Table.Th w={40}>
+                    <span className="visually-hidden">Detalhes</span>
+                  </Table.Th>
                   <Table.Th>Quando</Table.Th>
                   <Table.Th>Evento</Table.Th>
                   <Table.Th>Transição</Table.Th>
@@ -73,7 +79,9 @@ function HistoryPanel({ subscriptionId }: { subscriptionId: string }) {
                           <DateTime value={h.occurred_at} />
                         </Table.Td>
                         <Table.Td>
-                          <Code>{h.event}</Code>
+                          <Text size="sm" span title={h.event}>
+                            {labelOf(subscriptionEventLabels, h.event)}
+                          </Text>
                         </Table.Td>
                         <Table.Td>
                           <Group gap={4} wrap="nowrap">
@@ -83,13 +91,16 @@ function HistoryPanel({ subscriptionId }: { subscriptionId: string }) {
                           </Group>
                         </Table.Td>
                         <Table.Td>
-                          {labelOf(actorTypeLabels, h.actor_type)} {h.actor_id && <ShortId id={h.actor_id} />}
+                          <ActorCell type={h.actor_type} id={h.actor_id} />
                         </Table.Td>
                       </Table.Tr>
                       {hasDetails && (
                         <Table.Tr style={{ display: expanded ? undefined : 'none' }}>
                           <Table.Td colSpan={5} bg="gray.0">
                             <Collapse in={expanded}>
+                              <Text size="xs" c="dimmed" mb={4}>
+                                Dados técnicos registrados com o evento.
+                              </Text>
                               <JsonView value={h.details} />
                             </Collapse>
                           </Table.Td>
@@ -100,10 +111,39 @@ function HistoryPanel({ subscriptionId }: { subscriptionId: string }) {
                 })}
               </Table.Tbody>
             </Table>
-          </Table.ScrollContainer>
+          </ResponsiveTable>
         )
       }
     </QueryContent>
+  );
+}
+
+/** Versão de preço contratada, pelo número e pela data da versão no catálogo. */
+function PriceVersionText({ planId, priceVersionId }: { planId: string; priceVersionId: string }) {
+  const { keys, can } = useTenant();
+  const plan = useQuery({
+    queryKey: keys('plans', 'detail', planId),
+    queryFn: ({ signal }) => catalogApi.getPlan(planId, signal),
+    enabled: can('catalog.read'),
+  });
+  const version = plan.data?.prices.find((p) => p.id === priceVersionId);
+  if (!version) return <span title={priceVersionId}>Versão contratada do plano</span>;
+  return (
+    <span title={priceVersionId}>
+      Versão {version.version}, de <DateTime value={version.created_at} dateOnly />
+      {plan.data?.current_price?.id === priceVersionId ? ' (atual)' : ''}
+    </span>
+  );
+}
+
+/** Ator de uma transição: rotinas automáticas pelo nome; pessoas pelo tipo. */
+function ActorCell({ type, id }: { type: string; id?: string | null }) {
+  const routine = type === 'system' || type === 'provider' ? systemActorLabels[id ?? ''] : undefined;
+  if (routine) return <>{routine}</>;
+  return (
+    <>
+      {labelOf(actorTypeLabels, type)} {id && <ShortId id={id} />}
+    </>
   );
 }
 
@@ -131,17 +171,23 @@ function Overview({ subscription: s }: { subscription: Subscription }) {
             <DateTime value={s.current_period_start} dateOnly /> – <DateTime value={s.current_period_end} dateOnly />
           </KeyValue>
           <KeyValue label="Próxima cobrança">{s.next_billing_at ? <DateTime value={s.next_billing_at} /> : '—'}</KeyValue>
-          <KeyValue label="Avaliação até">{s.trial_ends_at ? <DateTime value={s.trial_ends_at} /> : '—'}</KeyValue>
+          {s.trial_ends_at && (
+            <KeyValue label="Fim do período de teste">
+              <DateTime value={s.trial_ends_at} />
+            </KeyValue>
+          )}
           <KeyValue label="Início">
             <DateTime value={s.started_at} />
           </KeyValue>
-          <KeyValue label="Data âncora">
+          <KeyValue label="Data-base do ciclo">
             <CivilDate value={s.anchor_date} />
           </KeyValue>
-          <KeyValue label="Fuso do calendário">{s.timezone}</KeyValue>
+          <KeyValue label="Fuso do calendário">
+            <span title={s.timezone}>{timeZoneLabel(s.timezone)}</span>
+          </KeyValue>
           <KeyValue label="Prazo de pagamento">{s.payment_terms_days != null ? `${s.payment_terms_days} dias` : 'Padrão'}</KeyValue>
-          <KeyValue label="Versão de preço">
-            <ShortId id={s.price_version_id} />
+          <KeyValue label="Preço contratado">
+            <PriceVersionText planId={s.plan_id} priceVersionId={s.price_version_id} />
           </KeyValue>
           {s.suspended_at && (
             <KeyValue label="Suspensa em">

@@ -44,6 +44,7 @@ import { stableStringify } from '../../lib/idempotency';
 import { channelLabels, labelOf, notificationReasonLabels, notificationStatusLabels, optionsOf, templateKeyLabels } from '../../lib/labels';
 import { requiredText } from '../../lib/validation';
 import { Can, usePermission, useTenant } from '../../session/SessionContext';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const enc = encodeURIComponent;
 
@@ -303,7 +304,7 @@ function PoliciesTab() {
           data.length === 0 ? (
             <EmptyState title="Nenhuma política" description="Defina quando enviar lembretes antes e depois do vencimento e quando suspender assinaturas em atraso." />
           ) : (
-            <Table.ScrollContainer minWidth={900}>
+            <ResponsiveTable minWidth={900}>
               <Table aria-label="Políticas de cobrança">
                 <Table.Thead>
                   <Table.Tr>
@@ -347,7 +348,7 @@ function PoliciesTab() {
                   ))}
                 </Table.Tbody>
               </Table>
-            </Table.ScrollContainer>
+            </ResponsiveTable>
           )
         }
       </QueryContent>
@@ -611,7 +612,7 @@ function NotificationsTab() {
             <EmptyState title="Nenhuma notificação" description="E-mails de cobrança agendados e enviados aparecem aqui." />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={1000}>
+              <ResponsiveTable minWidth={1000}>
                 <Table aria-label="Histórico de notificações">
                   <Table.Thead>
                     <Table.Tr>
@@ -674,7 +675,7 @@ function NotificationsTab() {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}

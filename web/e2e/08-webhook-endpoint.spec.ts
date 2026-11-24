@@ -38,11 +38,11 @@ test('(h) cadastra e remove um endpoint de webhook', async ({ page }) => {
     const dialog = page.getByRole('dialog', { name: 'Novo endpoint de webhook' });
     await dialog.getByLabel(/^URL/).fill(url);
     await dialog.getByLabel('Descrição').fill('ERP financeiro (roteiro E2E)');
-    await chooseOption(dialog, /^Tipos de evento/, /^invoice\.paid$/);
+    await chooseOption(dialog, /^Tipos de evento/, /^Fatura paga \(invoice\.paid\)$/);
     // A lista de opções continua aberta depois da escolha; o clique no campo
     // acima dela a fecha sem cobrir o botão de salvar.
     await dialog.getByLabel(/^URL/).click();
-    await expect(page.getByRole('option', { name: /^invoice\.paid$/ })).toBeHidden();
+    await expect(page.getByRole('option', { name: /^Fatura paga \(invoice\.paid\)$/ })).toBeHidden();
     await dialog.getByRole('button', { name: 'Salvar' }).click();
     await expect(page.getByText('Endpoint criado.').first()).toBeVisible();
 

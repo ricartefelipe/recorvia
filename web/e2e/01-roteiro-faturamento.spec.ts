@@ -118,7 +118,7 @@ test.describe.serial('roteiro de faturamento da Acme', () => {
       const invoiceId = invoicePath.split('/').pop() ?? '';
       await page.goto(`/auditoria?id=${invoiceId}`);
       await expect(page.getByRole('heading', { name: 'Auditoria' })).toBeVisible();
-      await expect(page.locator('code', { hasText: /^invoice\./ }).first()).toBeVisible();
+      await expect(page.getByText('Fatura emitida').first()).toBeVisible();
     });
   });
 });

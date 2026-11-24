@@ -7,7 +7,8 @@ import { Controller, useForm } from 'react-hook-form';
 import { Link, useNavigate } from 'react-router';
 import { z } from 'zod';
 import type { OrganizationInput } from '../../api/types';
-import { supportedTimeZones } from '../../lib/dates';
+import { accentInsensitiveFilter } from '../../components/inputs';
+import { timeZoneOptions } from '../../lib/dates';
 import { isCnpjFormat, normalizeDocument } from '../../lib/documents';
 import { handleMutationError } from '../../lib/errors';
 import { notifySuccess } from '../../lib/notify';
@@ -54,7 +55,7 @@ export function OnboardingPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [slugEdited, setSlugEdited] = useState(false);
-  const timeZones = useMemo(() => supportedTimeZones().map((tz) => ({ value: tz, label: tz })), []);
+  const timeZones = useMemo(() => timeZoneOptions(), []);
 
   const form = useForm<FormInput, unknown, OrganizationInput>({
     resolver: zodResolver(organizationSchema),
@@ -125,6 +126,7 @@ export function OnboardingPage() {
                 label="Fuso horário"
                 description="Datas de vencimento, lembretes e indicadores usam este fuso."
                 data={timeZones}
+                filter={accentInsensitiveFilter}
                 searchable
                 required
                 value={field.value}

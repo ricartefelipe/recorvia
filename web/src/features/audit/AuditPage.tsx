@@ -1,4 +1,4 @@
-import { Button, Group, Paper, SimpleGrid, Stack, TextInput } from '@mantine/core';
+import { Button, Group, Paper, Select, SimpleGrid, Stack, TextInput } from '@mantine/core';
 import { DatePickerInput } from '@mantine/dates';
 import { IconFilter, IconX } from '@tabler/icons-react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
@@ -6,10 +6,12 @@ import { useState } from 'react';
 import { api } from '../../api/client';
 import type { AuditEvent, CursorPage } from '../../api/types';
 import { AuditEventList } from '../../components/AuditEventList';
+import { accentInsensitiveFilter } from '../../components/inputs';
 import { AccessDenied, LoadingState, QueryContent } from '../../components/states';
 import { CursorPager, PageHeader } from '../../components/ui';
 import { useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import { stableStringify } from '../../lib/idempotency';
+import { auditActionLabels, auditResourceLabels, optionsOf } from '../../lib/labels';
 import { useTenant } from '../../session/SessionContext';
 
 interface AuditParams {
@@ -28,6 +30,10 @@ const auditApi = {
 };
 
 const FILTER_KEYS = ['recurso', 'id', 'acao', 'ator', 'de', 'ate'] as const;
+
+const byLabel = (a: { label: string }, b: { label: string }) => a.label.localeCompare(b.label, 'pt-BR');
+const RESOURCE_OPTIONS = optionsOf(auditResourceLabels).sort(byLabel);
+const ACTION_OPTIONS = optionsOf(auditActionLabels).sort(byLabel);
 
 export function AuditPage() {
   const { keys, can } = useTenant();
@@ -53,6 +59,20 @@ export function AuditPage() {
 
   if (!can('audit.read')) return <AccessDenied message="A trilha de auditoria exige a permissão “Ver auditoria”." />;
 
+  const choose = (key: (typeof FILTER_KEYS)[number], label: string, data: { value: string; label: string }[], placeholder: string) => (
+    <Select
+      label={label}
+      placeholder={placeholder}
+      data={draft[key] && !data.some((o) => o.value === draft[key]) ? [{ value: draft[key], label: draft[key] }, ...data] : data}
+      value={draft[key] || null}
+      onChange={(v) => setDraft({ ...draft, [key]: v ?? '' })}
+      searchable
+      clearable
+      filter={accentInsensitiveFilter}
+      nothingFoundMessage="Nada encontrado"
+      comboboxProps={{ withinPortal: true }}
+    />
+  );
   const text = (key: (typeof FILTER_KEYS)[number], label: string, placeholder: string, maxLength: number) => (
     <TextInput label={label} placeholder={placeholder} maxLength={maxLength} value={draft[key]} onChange={(e) => setDraft({ ...draft, [key]: e.currentTarget.value })} />
   );
@@ -69,9 +89,9 @@ export function AuditPage() {
           aria-label="Filtros da auditoria"
         >
           <SimpleGrid cols={{ base: 1, sm: 3, lg: 6 }}>
-            {text('recurso', 'Recurso', 'invoice, customer…', 64)}
-            {text('id', 'Identificador do recurso', 'UUID', 64)}
-            {text('acao', 'Ação', 'invoice.voided', 100)}
+            {choose('recurso', 'Recurso', RESOURCE_OPTIONS, 'Todos')}
+            {text('id', 'Identificador do recurso', 'Código do registro', 64)}
+            {choose('acao', 'Ação', ACTION_OPTIONS, 'Todas')}
             {text('ator', 'Ator', 'Identificador do usuário', 64)}
             <DatePickerInput label="De" clearable value={draft.de || null} onChange={(v) => setDraft({ ...draft, de: v ?? '' })} valueFormat="DD/MM/YYYY" />
             <DatePickerInput

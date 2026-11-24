@@ -6,13 +6,14 @@ import { useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
 import type { ProviderAccountConfigured, ProviderAccountInput } from '../../api/types';
-import { DateTime } from '../../components/format';
+import { DateTime, StatusBadge } from '../../components/format';
 import { EmptyState, QueryContent } from '../../components/states';
 import { SecretRevealModal } from '../../components/ui';
 import { useApiMutation } from '../../lib/hooks';
-import { labelOf, optionsOf, providerEnvironmentLabels, providerLabels } from '../../lib/labels';
+import { labelOf, optionsOf, providerAccountStatusLabels, providerEnvironmentLabels, providerLabels } from '../../lib/labels';
 import { Can, useTenant } from '../../session/SessionContext';
 import { generateSecret, integrationsApi, type ProviderCode } from './api';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const providerSchema = z.object({
   environment: z.enum(['local', 'sandbox', 'production']),
@@ -146,7 +147,7 @@ export function ProvidersTab() {
           {data.length === 0 ? (
             <EmptyState title="Nenhum provedor configurado" description="Configure um provedor para gerar cobranças com checkout hospedado." />
           ) : (
-            <Table.ScrollContainer minWidth={700}>
+            <ResponsiveTable minWidth={700}>
               <Table aria-label="Contas de provedor">
                 <Table.Thead>
                   <Table.Tr>
@@ -163,7 +164,9 @@ export function ProvidersTab() {
                     <Table.Tr key={a.id}>
                       <Table.Td>{labelOf(providerLabels, a.provider)}</Table.Td>
                       <Table.Td>{labelOf(providerEnvironmentLabels, a.environment)}</Table.Td>
-                      <Table.Td>{a.status}</Table.Td>
+                      <Table.Td>
+                        <StatusBadge status={a.status} labels={providerAccountStatusLabels} />
+                      </Table.Td>
                       <Table.Td>{a.api_key_hint ? <Code>••••{a.api_key_hint}</Code> : '—'}</Table.Td>
                       <Table.Td>{a.is_default ? <Badge size="sm">Padrão</Badge> : '—'}</Table.Td>
                       <Table.Td>
@@ -173,7 +176,7 @@ export function ProvidersTab() {
                   ))}
                 </Table.Tbody>
               </Table>
-            </Table.ScrollContainer>
+            </ResponsiveTable>
           )}
           {configuring && (
             <ConfigureProviderModal

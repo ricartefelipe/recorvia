@@ -60,7 +60,7 @@ describe('webhooks enviados', () => {
     const dialog = await screen.findByRole('dialog');
     await user.type(within(dialog).getByLabelText(/URL/), 'https://novo.cliente.test/hook');
     await user.click(within(dialog).getByRole('textbox', { name: /Tipos de evento/ }));
-    await user.click(await screen.findByRole('option', { name: 'invoice.overdue' }));
+    await user.click(await screen.findByRole('option', { name: 'Fatura vencida (invoice.overdue)' }));
     await user.click(within(dialog).getByRole('button', { name: 'Salvar' }));
     await waitFor(() => expect(bodies).toHaveLength(1));
     expect(bodies[0]).toEqual({ url: 'https://novo.cliente.test/hook', description: '', event_types: ['invoice.overdue'] });

@@ -12,11 +12,19 @@ import { EmptyState, LoadingState, QueryContent } from '../../components/states'
 import { confirmAction, CursorPager, KeyValue, PageHeader } from '../../components/ui';
 import { useApiMutation, useCursorPagination, useReturnFromEmptyPage } from '../../lib/hooks';
 import { useIdempotencyKey } from '../../lib/idempotency';
-import { addonOrderStatusLabels, labelOf, platformSubscriptionStatusLabels } from '../../lib/labels';
+import {
+  addonOrderStatusLabels,
+  labelOf,
+  platformFeatureLabels,
+  platformPlanLabels,
+  platformStatementStatusLabels,
+  platformSubscriptionStatusLabels,
+} from '../../lib/labels';
 import { formatMoney } from '../../lib/money';
 import type { PageRequest } from '../../lib/pages';
 import { optionalText } from '../../lib/validation';
 import { Can, useTenant } from '../../session/SessionContext';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const platformApi = {
   overview: (signal?: AbortSignal) => api.get<PlatformOverview>('/api/v1/platform/overview', { signal }),
@@ -104,7 +112,7 @@ function Overview({ overview }: { overview: PlatformOverview }) {
               <DateTime value={subscription.current_period_start} dateOnly /> – <DateTime value={subscription.current_period_end} dateOnly />
             </KeyValue>
             {subscription.trial_ends_at && (
-              <KeyValue label="Avaliação até">
+              <KeyValue label="Fim do período de teste">
                 <DateTime value={subscription.trial_ends_at} />
               </KeyValue>
             )}
@@ -112,7 +120,7 @@ function Overview({ overview }: { overview: PlatformOverview }) {
           {plan.features.length > 0 && (
             <List size="sm" spacing={2} icon={<IconCheck size={14} />}>
               {plan.features.map((f) => (
-                <List.Item key={f}>{f}</List.Item>
+                <List.Item key={f}>{labelOf(platformFeatureLabels, f)}</List.Item>
               ))}
             </List>
           )}
@@ -193,10 +201,10 @@ function PlansSection({ currentCode, version }: { currentCode: string; version: 
                     {p.max_users ? ' usuários' : ''} · {p.max_active_subscriptions ?? 'Assinaturas ilimitadas'}
                     {p.max_active_subscriptions ? ' assinaturas ativas' : ''}
                   </Text>
-                  {p.trial_days > 0 && <Text size="xs" c="dimmed">{p.trial_days} dias de avaliação</Text>}
+                  {p.trial_days > 0 && <Text size="xs" c="dimmed">{p.trial_days} dias de período de teste</Text>}
                   <List size="xs" spacing={2} icon={<IconCheck size={12} />} style={{ flex: 1 }}>
                     {p.features.map((f) => (
-                      <List.Item key={f}>{f}</List.Item>
+                      <List.Item key={f}>{labelOf(platformFeatureLabels, f)}</List.Item>
                     ))}
                   </List>
                   <Can permission="platform_billing.manage">
@@ -369,7 +377,7 @@ function StatementsSection() {
           <EmptyState title="Nenhum demonstrativo" description="Os demonstrativos mensais do Recorvia aparecem após o fechamento de cada período." />
         ) : (
           <>
-            <Table.ScrollContainer minWidth={700}>
+            <ResponsiveTable minWidth={700}>
               <Table aria-label="Demonstrativos do Recorvia">
                 <Table.Thead>
                   <Table.Tr>
@@ -387,7 +395,7 @@ function StatementsSection() {
                       <Table.Td>
                         <DateTime value={s.period_start} dateOnly /> – <DateTime value={s.period_end} dateOnly />
                       </Table.Td>
-                      <Table.Td>{s.plan_code}</Table.Td>
+                      <Table.Td>{labelOf(platformPlanLabels, s.plan_code)}</Table.Td>
                       <Table.Td ta="right">
                         <Money value={s.subscription_amount} currency={s.currency} />
                       </Table.Td>
@@ -397,12 +405,14 @@ function StatementsSection() {
                       <Table.Td ta="right">
                         <Money value={s.total} currency={s.currency} strong />
                       </Table.Td>
-                      <Table.Td>{labelOf(platformSubscriptionStatusLabels, s.status)}</Table.Td>
+                      <Table.Td>
+                        <StatusBadge status={s.status} labels={platformStatementStatusLabels} />
+                      </Table.Td>
                     </Table.Tr>
                   ))}
                 </Table.Tbody>
               </Table>
-            </Table.ScrollContainer>
+            </ResponsiveTable>
             <CursorPager
               page={pagination.page}
               hasPrevious={pagination.hasPrevious}

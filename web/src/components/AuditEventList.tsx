@@ -2,9 +2,10 @@ import { ActionIcon, Badge, Code, Collapse, Group, Stack, Table, Text } from '@m
 import { IconChevronDown, IconChevronRight } from '@tabler/icons-react';
 import { Fragment, useState } from 'react';
 import type { AuditEvent } from '../api/types';
-import { actorTypeLabels, labelOf } from '../lib/labels';
+import { actorTypeLabels, auditActionLabels, auditResourceLabels, labelOf, systemActorLabels } from '../lib/labels';
 import { DateTime, JsonView } from './format';
 import { EmptyState } from './states';
+import { ResponsiveTable } from './ResponsiveTable';
 
 /**
  * Quem executou a ação. Ações da equipe da plataforma (atendimento de
@@ -14,6 +15,11 @@ import { EmptyState } from './states';
  */
 export function actorText(event: AuditEvent): string {
   const staff = (event.details as Record<string, unknown> | null | undefined)?.platform_staff === true;
+  // Rotinas automáticas gravam o identificador técnico como nome ("billing.engine").
+  if (event.actor_type === 'system' || event.actor_type === 'provider') {
+    const routine = systemActorLabels[event.actor_label || ''] ?? systemActorLabels[event.actor_id || ''];
+    if (routine) return routine;
+  }
   if (event.actor_label) return staff ? `${event.actor_label} (equipe da plataforma Recorvia)` : event.actor_label;
   const type = staff ? 'Equipe da plataforma Recorvia' : labelOf(actorTypeLabels, event.actor_type);
   return event.actor_id ? `${type} ${event.actor_id.slice(0, 8)}` : type;
@@ -26,8 +32,8 @@ export function AuditEventList({ events, showResource = true }: { events: AuditE
     return <EmptyState title="Nenhum evento registrado" description="As alterações feitas neste recurso aparecerão aqui." />;
   }
   return (
-    <Table.ScrollContainer minWidth={720}>
-      <Table>
+    <ResponsiveTable minWidth={720}>
+      <Table aria-label="Eventos de auditoria">
         <Table.Thead>
           <Table.Tr>
             <Table.Th w={40}>
@@ -62,13 +68,15 @@ export function AuditEventList({ events, showResource = true }: { events: AuditE
                     <DateTime value={event.occurred_at} />
                   </Table.Td>
                   <Table.Td>
-                    <Code>{event.action}</Code>
+                    <Text size="sm" span title={event.action}>
+                      {labelOf(auditActionLabels, event.action)}
+                    </Text>
                   </Table.Td>
                   {showResource && (
                     <Table.Td>
-                      <Group gap={6} wrap="nowrap">
-                        <Badge variant="light" color="gray">
-                          {event.resource_type}
+                      <Group gap={6} wrap="wrap">
+                        <Badge variant="light" color="gray" title={event.resource_type}>
+                          {labelOf(auditResourceLabels, event.resource_type)}
                         </Badge>
                         {event.resource_id && (
                           <Text size="xs" c="dimmed" ff="monospace" title={event.resource_id}>
@@ -89,6 +97,9 @@ export function AuditEventList({ events, showResource = true }: { events: AuditE
                             Requisição: <Code>{event.request_id}</Code>
                           </Text>
                         )}
+                        <Text size="xs" c="dimmed">
+                          Código da ação: <Code>{event.action}</Code>
+                        </Text>
                         <JsonView value={event.details} />
                       </Stack>
                     </Collapse>
@@ -99,6 +110,6 @@ export function AuditEventList({ events, showResource = true }: { events: AuditE
           })}
         </Table.Tbody>
       </Table>
-    </Table.ScrollContainer>
+    </ResponsiveTable>
   );
 }

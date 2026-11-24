@@ -19,6 +19,7 @@ import { formatBasisPoints, parseMoneyToNumber, parsePercentToBasisPoints } from
 import { optionalText, reasonField } from '../../lib/validation';
 import { Can, usePermission, useTenant } from '../../session/SessionContext';
 import { subscriptionsApi } from './api';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const schema = z
   .object({
@@ -186,7 +187,7 @@ export function PriceAdjustmentsPanel({ subscription }: { subscription: Subscrip
             <EmptyState title="Nenhum reajuste" description="Programe reajustes anuais por índice ou por novo valor." />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={820}>
+              <ResponsiveTable minWidth={820}>
                 <Table aria-label="Reajustes">
                   <Table.Thead>
                     <Table.Tr>
@@ -245,7 +246,7 @@ export function PriceAdjustmentsPanel({ subscription }: { subscription: Subscrip
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}

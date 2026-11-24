@@ -114,7 +114,8 @@ describe('painel financeiro', () => {
     renderPage(<DashboardPage />, { route: '/?mes=2025-01' });
     const mrr = await screen.findByRole('region', { name: 'MRR' });
     expect(months).toEqual(['2025-01']);
-    expect(screen.getByText(/Indicadores de janeiro de 2025/)).toBeInTheDocument();
+    expect(screen.getByText(/Indicadores de janeiro de 2025, no/)).toBeInTheDocument();
+    expect(screen.getByText('horário de Brasília')).toHaveAttribute('title', 'America/Sao_Paulo');
 
     for (const [label, key] of CARDS) {
       const card = screen.getByRole('region', { name: label });
@@ -125,9 +126,9 @@ describe('painel financeiro', () => {
     }
     expect(within(mrr).getByText('Exclui consumo variável')).toBeInTheDocument();
 
-    const summary = screen.getByRole('region', { name: 'Base dos indicadores' });
-    expect(within(summary).getByText(/Posição em 31\/01\/2025,? 23:59: Recebíveis em aberto, Recebíveis vencidos/)).toBeInTheDocument();
-    expect(within(summary).getByText(/Posição atual, seja qual for o mês: MRR, ARR, Divergências abertas/)).toBeInTheDocument();
+    // A legenda do topo é curta: a data de referência e onde ver a base de cada indicador.
+    const summary = screen.getByRole('note', { name: 'Base dos indicadores' });
+    expect(summary).toHaveTextContent(/^Posição em 31\/01\/2025,? 23:59\. A base de cada indicador está em “Como calculamos”/);
   });
 
   it('"Como calculamos" lista todos os indicadores com rótulo, base e fórmula', async () => {

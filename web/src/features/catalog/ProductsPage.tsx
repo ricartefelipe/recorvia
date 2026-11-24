@@ -14,6 +14,7 @@ import { catalogStatusLabels } from '../../lib/labels';
 import { optionalText, requiredText } from '../../lib/validation';
 import { Can, usePermission, useTenant } from '../../session/SessionContext';
 import { catalogApi } from './api';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const productSchema = z.object({
   name: requiredText(2, 200, 'O nome'),
@@ -116,7 +117,7 @@ export function ProductsPage() {
             <EmptyState title="Nenhum produto" description="Produtos agrupam planos. Crie um produto e depois os planos com seus preços." />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={600}>
+              <ResponsiveTable minWidth={600}>
                 <Table aria-label="Produtos">
                   <Table.Thead>
                     <Table.Tr>
@@ -153,7 +154,7 @@ export function ProductsPage() {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}

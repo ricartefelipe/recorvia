@@ -11,6 +11,7 @@ import { useApiMutation } from '../../lib/hooks';
 import { optionalPhone, optionalText, requiredEmail, requiredText } from '../../lib/validation';
 import { Can, usePermission } from '../../session/SessionContext';
 import { customersApi } from './api';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const contactSchema = z.object({
   name: requiredText(1, 200, 'O nome'),
@@ -115,7 +116,7 @@ export function ContactsPanel({ customer }: { customer: CustomerDetails }) {
           description="Sem contatos, os e-mails de cobrança vão para o e-mail principal do cliente, se houver."
         />
       ) : (
-        <Table.ScrollContainer minWidth={640}>
+        <ResponsiveTable minWidth={640}>
           <Table aria-label="Contatos">
             <Table.Thead>
               <Table.Tr>
@@ -170,7 +171,7 @@ export function ContactsPanel({ customer }: { customer: CustomerDetails }) {
               ))}
             </Table.Tbody>
           </Table>
-        </Table.ScrollContainer>
+        </ResponsiveTable>
       )}
       {editing && (
         <ContactModal

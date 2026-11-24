@@ -9,7 +9,7 @@ import { EmptyState, LoadingState, QueryContent } from '../../components/states'
 import { CursorPager, KeyValue, PageHeader } from '../../components/ui';
 import { useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import { stableStringify } from '../../lib/idempotency';
-import { chargeStatusLabels, labelOf, optionsOf, providerLabels } from '../../lib/labels';
+import { chargeStatusLabels, labelOf, optionsOf, providerChargeStatusLabel, providerLabels } from '../../lib/labels';
 import { Can, useTenant } from '../../session/SessionContext';
 import { canRequestRefund, paymentsApi, refundableAmount } from './api';
 import { ChargesTable, CheckoutLink } from './ChargesTable';
@@ -136,7 +136,9 @@ export function ChargeDetailPage() {
                 </KeyValue>
                 <KeyValue label="Pago em">{c.paid_at ? <DateTime value={c.paid_at} /> : '—'}</KeyValue>
                 <KeyValue label="Identificador no provedor">{c.provider_charge_id ?? '—'}</KeyValue>
-                <KeyValue label="Situação no provedor">{c.provider_status || '—'}</KeyValue>
+                <KeyValue label="Situação no provedor">
+                  <span title={c.provider_status ?? undefined}>{providerChargeStatusLabel(c.provider_status)}</span>
+                </KeyValue>
                 <KeyValue label="Checkout hospedado">
                   <CheckoutLink url={c.checkout_url} />
                 </KeyValue>

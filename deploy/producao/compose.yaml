@@ -101,11 +101,11 @@ services:
   # Variáveis e mapeamento: deploy/postgres/compose.yaml.
   postgres:
     extends: { file: ../postgres/compose.yaml, service: postgres }
-    image: recorvia-postgres:${RECORVIA_VERSION:-0.4.0}
+    image: recorvia-postgres:${RECORVIA_VERSION:-0.4.1}
     build:
       context: ../..
       dockerfile: deploy/postgres/Dockerfile
-      args: { VERSION: "${RECORVIA_VERSION:-0.4.0}" }
+      args: { VERSION: "${RECORVIA_VERSION:-0.4.1}" }
     <<: *security
     environment:
       <<: *backup-key-file
@@ -135,7 +135,7 @@ services:
   # pelo mesmo volume, somente para leitura.
   postgres-backup:
     extends: { file: ../postgres/compose.yaml, service: postgres-backup }
-    image: recorvia-postgres:${RECORVIA_VERSION:-0.4.0}
+    image: recorvia-postgres:${RECORVIA_VERSION:-0.4.1}
     <<: *security
     read_only: true
     cap_drop: [ALL]
@@ -163,10 +163,10 @@ services:
   # Papéis recorvia_owner e recorvia_app e o banco recorvia (idempotente;
   # também atualiza as senhas dos papéis).
   migrate-bootstrap:
-    image: recorvia-migrate:${RECORVIA_VERSION:-0.4.0}
+    image: recorvia-migrate:${RECORVIA_VERSION:-0.4.1}
     build:
       <<: *go-build
-      args: { CMD: migrate, VERSION: "${RECORVIA_VERSION:-0.4.0}" }
+      args: { CMD: migrate, VERSION: "${RECORVIA_VERSION:-0.4.1}" }
     <<: *security
     read_only: true
     cap_drop: [ALL]
@@ -183,7 +183,7 @@ services:
 
   # Migrations: rodam antes da API e do worker, a cada subida.
   migrate:
-    image: recorvia-migrate:${RECORVIA_VERSION:-0.4.0}
+    image: recorvia-migrate:${RECORVIA_VERSION:-0.4.1}
     <<: *security
     read_only: true
     cap_drop: [ALL]
@@ -283,7 +283,7 @@ services:
     logging: *logging
 
   keycloak:
-    image: recorvia-keycloak-producao:${RECORVIA_VERSION:-0.4.0}
+    image: recorvia-keycloak-producao:${RECORVIA_VERSION:-0.4.1}
     build:
       context: keycloak
     <<: *security
@@ -335,10 +335,10 @@ services:
     logging: *logging
 
   api:
-    image: recorvia-api:${RECORVIA_VERSION:-0.4.0}
+    image: recorvia-api:${RECORVIA_VERSION:-0.4.1}
     build:
       <<: *go-build
-      args: { CMD: api, VERSION: "${RECORVIA_VERSION:-0.4.0}" }
+      args: { CMD: api, VERSION: "${RECORVIA_VERSION:-0.4.1}" }
     <<: *security
     read_only: true
     cap_drop: [ALL]
@@ -364,10 +364,10 @@ services:
     logging: *logging
 
   worker:
-    image: recorvia-worker:${RECORVIA_VERSION:-0.4.0}
+    image: recorvia-worker:${RECORVIA_VERSION:-0.4.1}
     build:
       <<: *go-build
-      args: { CMD: worker, VERSION: "${RECORVIA_VERSION:-0.4.0}" }
+      args: { CMD: worker, VERSION: "${RECORVIA_VERSION:-0.4.1}" }
     <<: *security
     read_only: true
     cap_drop: [ALL]
@@ -394,7 +394,7 @@ services:
 
   # SPA e proxy para a API (web/nginx.conf), atrás do Caddy.
   web:
-    image: recorvia-web:${RECORVIA_VERSION:-0.4.0}
+    image: recorvia-web:${RECORVIA_VERSION:-0.4.1}
     build:
       context: ../../web
     <<: *security
@@ -425,7 +425,7 @@ services:
   # ACME no volume caddy-data (perdê-lo força nova emissão, sujeita aos
   # limites da autoridade).
   proxy:
-    image: recorvia-proxy:${RECORVIA_VERSION:-0.4.0}
+    image: recorvia-proxy:${RECORVIA_VERSION:-0.4.1}
     build:
       context: caddy
     <<: *security
@@ -477,7 +477,7 @@ services:
   # interfaces ficam só no loopback do servidor (túnel SSH,
   # docs/operacao/implantacao.md).
   otel-collector:
-    image: recorvia-otel-collector:${RECORVIA_VERSION:-0.4.0}
+    image: recorvia-otel-collector:${RECORVIA_VERSION:-0.4.1}
     profiles: ["observability"]
     build:
       context: ../observability/otel-collector
@@ -492,7 +492,7 @@ services:
     logging: *logging
 
   jaeger:
-    image: recorvia-jaeger:${RECORVIA_VERSION:-0.4.0}
+    image: recorvia-jaeger:${RECORVIA_VERSION:-0.4.1}
     profiles: ["observability"]
     build:
       context: ../observability/jaeger
@@ -512,7 +512,7 @@ services:
     logging: *logging
 
   prometheus:
-    image: recorvia-prometheus:${RECORVIA_VERSION:-0.4.0}
+    image: recorvia-prometheus:${RECORVIA_VERSION:-0.4.1}
     profiles: ["observability"]
     build:
       context: ../observability/prometheus
@@ -541,7 +541,7 @@ services:
     logging: *logging
 
   alertmanager:
-    image: recorvia-alertmanager:${RECORVIA_VERSION:-0.4.0}
+    image: recorvia-alertmanager:${RECORVIA_VERSION:-0.4.1}
     profiles: ["observability"]
     build:
       context: ../observability/alertmanager
@@ -574,7 +574,7 @@ services:
     logging: *logging
 
   grafana:
-    image: recorvia-grafana:${RECORVIA_VERSION:-0.4.0}
+    image: recorvia-grafana:${RECORVIA_VERSION:-0.4.1}
     profiles: ["observability"]
     build:
       context: ../observability/grafana
