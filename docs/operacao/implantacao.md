@@ -94,7 +94,7 @@ No servidor:
 ```bash
 git clone https://github.com/ricartefelipe/recorvia.git /opt/recorvia
 cd /opt/recorvia
-git checkout v0.4.0                      # a versão a implantar
+git checkout v0.4.1                      # a versão a implantar
 cd deploy/producao
 cp .env.example .env
 bash gerar-segredos.sh .env
@@ -261,8 +261,8 @@ versão antes.
 
 ```bash
 cd /opt/recorvia
-git fetch --tags && git checkout v0.4.0
-sed -i 's/^RECORVIA_VERSION=.*/RECORVIA_VERSION=0.4.0/' deploy/producao/.env
+git fetch --tags && git checkout v0.4.1
+sed -i 's/^RECORVIA_VERSION=.*/RECORVIA_VERSION=0.4.1/' deploy/producao/.env
 diff <(grep -oE '^#?[A-Z_]+=' deploy/producao/.env.example | tr -d '#' | sort -u) \
      <(grep -oE '^#?[A-Z_]+=' deploy/producao/.env | tr -d '#' | sort -u)   # variáveis novas na versão
 cd deploy/producao

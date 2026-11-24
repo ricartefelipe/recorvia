@@ -22,6 +22,8 @@ resultado real) e as pendências.
 | 13 | Release `0.3.0` | `release/0.3.0` | integrada em `main` com a tag `v0.3.0` |
 | 14 | Preparação para produção: pacote de implantação, backup contínuo, revisão de segurança e teste de carga | quatro branches `feature/*` | integradas em `develop` (PRs #32 a #35) |
 | 15 | Release `0.4.0` | `release/0.4.0` | integrada em `main` com a tag `v0.4.0` |
+| 16 | Revisão de UI/UX e acessibilidade (WCAG AA) | `feature/revisao-de-ui` | integrada em `develop` (PR #38) |
+| 17 | Release `0.4.1` | `release/0.4.1` | integrada em `main` com a tag `v0.4.1` |
 
 A autoria das operações feitas por credencial de API foi corrigida depois das etapas 6 e 7
 (`feature/autoria-credenciais-api`, PR #9).
@@ -167,6 +169,12 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
   correções reduziram a primeira fatura do fechamento de 20 a 88 s para 6 s e a lista de assinaturas
   com 64 usuários de 2,4 a 3,6 s para 0,3 a 0,5 s. Números em `docs/operacao/carga.md`.
 
+### Etapa 16: revisão de UI/UX e acessibilidade
+- Capturas de 28 telas em computador e celular, crítica de design e auditoria automática com axe-core
+  (ADR-090): contraste WCAG AA calculado no tema, tabelas que viram cartões no celular, códigos
+  internos traduzidos, dados técnicos legíveis, seletor de organização sem corte e ações agrupadas no
+  celular. O roteiro E2E `10-acessibilidade` passa a verificar 29 telas e a navegação por teclado.
+
 ## Verificações executadas
 
 | Data | Comando | Resultado |
@@ -215,6 +223,7 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
 | 2026-11-23 | `make prod-check`, `make pitr-check` e CI dos PRs #32 a #35 | aprovados; `pitr-check` com RPO observado de 0 a 3 s e RTO de 134 a 204 s em dados de demonstração |
 | 2026-11-23 | `/code-review` de cada frente e SonarCloud | 8 (implantação), 9 (backup), 7 (segurança) e 8 (carga) apontamentos corrigidos com teste; SonarCloud aprovado depois de compilar o Caddy com dependências corrigidas e tirar o root das imagens |
 | 2026-11-23 | Teste de carga antes (3 execuções) e depois (4 execuções), máquina compartilhada de 12 núcleos | fechamento de 3.287 faturas de 3m18s–8m3s para 1m23s–2m30s; leitura limitada pela CPU do PostgreSQL a partir de 32 usuários |
+| 2026-11-24 | axe-core (WCAG 2.1 AA) em 29 telas, `npm run verify`, E2E 01 a 10 e CI do PR #38 | de violações graves em todas as telas para nenhuma; 303 testes de componente e 17 roteiros aprovados; `/code-review` com 4 apontamentos corrigidos |
 
 ## Pendências reais
 
@@ -269,7 +278,7 @@ plano da plataforma e portal do cliente. Servida por nginx sem root na mesma ori
 
 ## Ponto de retomada
 
-Versão `0.4.0` publicada (tag `v0.4.0` em `main`), pronta para a primeira implantação. Próximos passos
+Versão `0.4.1` publicada (tag `v0.4.1` em `main`), pronta para a primeira implantação. Próximos passos
 dependem do dono: escolher o provedor e o domínio e seguir `docs/operacao/implantacao.md`, configurar
 o SMTP transacional, validar o adaptador do Asaas no sandbox (`docs/integracoes/asaas.md`) e calibrar
 os limites dos alertas com o volume real.
