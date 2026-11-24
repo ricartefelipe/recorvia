@@ -14,6 +14,7 @@ import { customerKindLabels, customerStatusLabels, labelOf } from '../../lib/lab
 import { Can, useTenant } from '../../session/SessionContext';
 import { customersApi, type CustomerListParams } from './api';
 import { CustomerForm } from './CustomerForm';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const SORT_OPTIONS = [
   { value: 'name', label: 'Nome (A–Z)' },
@@ -112,7 +113,7 @@ export function CustomersPage() {
             )
           ) : (
             <>
-              <Table.ScrollContainer minWidth={760}>
+              <ResponsiveTable minWidth={760}>
                 <Table aria-label="Clientes">
                   <Table.Thead>
                     <Table.Tr>
@@ -145,7 +146,7 @@ export function CustomersPage() {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}

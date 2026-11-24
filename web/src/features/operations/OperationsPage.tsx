@@ -1,5 +1,5 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import { Alert, Button, Code, Group, Modal, Select, Stack, Table, Text, Textarea } from '@mantine/core';
+import { Alert, Button, Group, Modal, Select, Stack, Table, Text, Textarea } from '@mantine/core';
 import { IconInfoCircle, IconPlayerPlay, IconTrash } from '@tabler/icons-react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
@@ -11,9 +11,10 @@ import { DateTime, StatusBadge } from '../../components/format';
 import { EmptyState, QueryContent } from '../../components/states';
 import { confirmAction, CursorPager, PageHeader } from '../../components/ui';
 import { useApiMutation, useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
-import { deadLetterStatusLabels, optionsOf } from '../../lib/labels';
+import { consumerLabels, deadLetterStatusLabels, internalEventLabels, labelOf, optionsOf } from '../../lib/labels';
 import { reasonField } from '../../lib/validation';
 import { usePermission, useTenant } from '../../session/SessionContext';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const enc = encodeURIComponent;
 type Decision = 'replay' | 'discard';
@@ -53,7 +54,8 @@ function DecisionModal({ letter, decision, onClose }: { letter: DeadLetter; deci
       <form onSubmit={submit} noValidate>
         <Stack>
           <Text size="sm">
-            Consumidor <Code>{letter.consumer}</Code>, evento <Code>{letter.event_type ?? '—'}</Code>
+            Consumidor: <span title={letter.consumer}>{labelOf(consumerLabels, letter.consumer)}</span>. Evento:{' '}
+            <span title={letter.event_type ?? undefined}>{letter.event_type ? labelOf(internalEventLabels, letter.event_type) : '—'}</span>.
           </Text>
           <Alert color="red" variant="light" title="Erro registrado">
             <Text size="sm" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
@@ -93,7 +95,7 @@ export function OperationsPage() {
     <Stack gap={0}>
       <PageHeader
         title="Operações"
-        description="Mensagens que esgotaram as tentativas de processamento (dead letters). Reprocessar e descartar exigem justificativa e são auditados."
+        description="Mensagens internas que esgotaram as tentativas de processamento. Reprocessar e descartar exigem justificativa e são auditados."
       />
       {!canReprocess && (
         <Alert icon={<IconInfoCircle />} color="gray" mb="md">
@@ -116,7 +118,7 @@ export function OperationsPage() {
             <EmptyState title="Nenhuma mensagem" description={status === 'open' ? 'Nenhuma mensagem aguardando decisão.' : 'Nenhuma mensagem nesta situação.'} />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={1000}>
+              <ResponsiveTable minWidth={1000}>
                 <Table aria-label="Mensagens não processadas">
                   <Table.Thead>
                     <Table.Tr>
@@ -135,12 +137,10 @@ export function OperationsPage() {
                         <Table.Td>
                           <DateTime value={d.failed_at} />
                         </Table.Td>
+                        <Table.Td title={d.consumer}>{labelOf(consumerLabels, d.consumer)}</Table.Td>
                         <Table.Td>
-                          <Code>{d.consumer}</Code>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="sm" ff="monospace">
-                            {d.event_type ?? '—'}
+                          <Text size="sm" title={d.event_type ?? undefined}>
+                            {d.event_type ? labelOf(internalEventLabels, d.event_type) : '—'}
                           </Text>
                           <Text size="xs" c="dimmed" ff="monospace">
                             {d.message_id}
@@ -178,7 +178,7 @@ export function OperationsPage() {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}

@@ -1,20 +1,30 @@
-import { ActionIcon, Anchor, Breadcrumbs, Button, Collapse, Grid, Paper, SimpleGrid, Stack, Table, Text, Title } from '@mantine/core';
-import { IconBook, IconChevronDown, IconChevronRight } from '@tabler/icons-react';
+import { ActionIcon, Anchor, Breadcrumbs, Collapse, Grid, Paper, SimpleGrid, Stack, Table, Text, Title } from '@mantine/core';
+import { IconChevronDown, IconChevronRight } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
 import { Fragment, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import type { InvoiceDetails } from '../../api/types';
 import { FiscalNotice } from '../../components/FiscalNotice';
-import { CivilDate, DateTime, JsonView, Money, StatusBadge } from '../../components/format';
+import { CivilDate, DateTime, Money, StatusBadge } from '../../components/format';
 import { EmptyState, LoadingState, QueryContent } from '../../components/states';
 import { KeyValue, PageHeader } from '../../components/ui';
-import { actorTypeLabels, invoiceItemKindLabels, invoiceKindLabels, invoiceStatusLabels, labelOf } from '../../lib/labels';
+import {
+  actorTypeLabels,
+  invoiceHistoryReasonLabels,
+  invoiceItemKindLabels,
+  invoiceKindLabels,
+  invoiceStatusLabels,
+  labelOf,
+  systemActorLabels,
+} from '../../lib/labels';
 import { formatQuantity, formatUnitAmountDecimal } from '../../lib/money';
-import { Can, useTenant } from '../../session/SessionContext';
+import { useTenant } from '../../session/SessionContext';
 import { ChargesTable } from '../payments/ChargesTable';
 import { invoicesApi } from './api';
 import { InvoiceActions } from './InvoiceActions';
 import { InvoiceStatusBadges } from './InvoicesTable';
+import { CustomerSnapshotView, PriceSnapshotView } from './Snapshots';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 export function InvoiceTotals({ invoice }: { invoice: InvoiceDetails }) {
   const c = invoice.currency;
@@ -47,19 +57,33 @@ export function InvoiceTotals({ invoice }: { invoice: InvoiceDetails }) {
           ))}
         </Table.Tbody>
       </Table>
+      <Text size="xs" c="dimmed" mt="xs">
+        Valores em {currencyName(c)}.
+      </Text>
     </Paper>
   );
+}
+
+function currencyName(code: string): string {
+  try {
+    const name = new Intl.DisplayNames('pt-BR', { type: 'currency' }).of(code);
+    return name && name !== code ? `${name.charAt(0).toLowerCase()}${name.slice(1)} (${code})` : code;
+  } catch {
+    return code;
+  }
 }
 
 function ItemsTable({ invoice }: { invoice: InvoiceDetails }) {
   const [open, setOpen] = useState<string | null>(null);
   const items = [...invoice.items].sort((a, b) => a.position - b.position);
   return (
-    <Table.ScrollContainer minWidth={900}>
+    <ResponsiveTable minWidth={900}>
       <Table aria-label="Itens da fatura">
         <Table.Thead>
           <Table.Tr>
-            <Table.Th w={40} />
+            <Table.Th w={40}>
+              <span className="visually-hidden">Detalhes</span>
+            </Table.Th>
             <Table.Th>Descrição</Table.Th>
             <Table.Th>Tipo</Table.Th>
             <Table.Th>Período</Table.Th>
@@ -113,10 +137,10 @@ function ItemsTable({ invoice }: { invoice: InvoiceDetails }) {
                 <Table.Tr style={{ display: expanded ? undefined : 'none' }}>
                   <Table.Td colSpan={8} bg="gray.0">
                     <Collapse in={expanded}>
-                      <Text size="xs" c="dimmed" mb={4}>
-                        Preço registrado no momento da emissão (snapshot). Mudanças posteriores no catálogo não alteram este item.
+                      <Text size="xs" c="dimmed" mb="xs">
+                        Preço registrado no momento da emissão. Mudanças posteriores no catálogo não alteram este item.
                       </Text>
-                      <JsonView value={item.price_snapshot} />
+                      <PriceSnapshotView snapshot={(item.price_snapshot ?? {}) as Record<string, unknown>} currency={invoice.currency} />
                     </Collapse>
                   </Table.Td>
                 </Table.Tr>
@@ -125,14 +149,20 @@ function ItemsTable({ invoice }: { invoice: InvoiceDetails }) {
           })}
         </Table.Tbody>
       </Table>
-    </Table.ScrollContainer>
+    </ResponsiveTable>
   );
+}
+
+/** Rotinas automáticas pelo nome; pessoas e integrações pelo tipo de ator. */
+function actorName(type: string, id?: string | null): string {
+  if ((type === 'system' || type === 'provider') && id && systemActorLabels[id]) return systemActorLabels[id];
+  return labelOf(actorTypeLabels, type);
 }
 
 function HistoryTable({ invoice }: { invoice: InvoiceDetails }) {
   if (invoice.history.length === 0) return <Text size="sm" c="dimmed">Sem transições.</Text>;
   return (
-    <Table.ScrollContainer minWidth={640}>
+    <ResponsiveTable minWidth={640}>
       <Table aria-label="Histórico da fatura">
         <Table.Thead>
           <Table.Tr>
@@ -151,13 +181,13 @@ function HistoryTable({ invoice }: { invoice: InvoiceDetails }) {
               <Table.Td>
                 {h.from_status ? labelOf(invoiceStatusLabels, h.from_status) : '—'} → <StatusBadge status={h.to_status} labels={invoiceStatusLabels} />
               </Table.Td>
-              <Table.Td>{labelOf(actorTypeLabels, h.actor_type)}</Table.Td>
-              <Table.Td>{h.reason || '—'}</Table.Td>
+              <Table.Td>{actorName(h.actor_type, h.actor_id)}</Table.Td>
+              <Table.Td>{h.reason ? labelOf(invoiceHistoryReasonLabels, h.reason) : '—'}</Table.Td>
             </Table.Tr>
           ))}
         </Table.Tbody>
       </Table>
-    </Table.ScrollContainer>
+    </ResponsiveTable>
   );
 }
 
@@ -165,7 +195,7 @@ function CreditNotesTable({ invoice }: { invoice: InvoiceDetails }) {
   const notes = invoice.credit_notes ?? [];
   if (notes.length === 0) return <Text size="sm" c="dimmed">Nenhuma nota de crédito emitida.</Text>;
   return (
-    <Table.ScrollContainer minWidth={560}>
+    <ResponsiveTable minWidth={560}>
       <Table aria-label="Notas de crédito">
         <Table.Thead>
           <Table.Tr>
@@ -192,7 +222,7 @@ function CreditNotesTable({ invoice }: { invoice: InvoiceDetails }) {
           ))}
         </Table.Tbody>
       </Table>
-    </Table.ScrollContainer>
+    </ResponsiveTable>
   );
 }
 
@@ -204,22 +234,13 @@ export function InvoiceDetailView({ invoice }: { invoice: InvoiceDetails }) {
         title={`Fatura ${invoice.number ?? '(rascunho)'}`}
         badge={<InvoiceStatusBadges invoice={invoice} />}
         description={labelOf(invoiceKindLabels, invoice.kind)}
-        actions={
-          <>
-            <Can permission="ledger.read">
-              <Button component={Link} to={`/ledger?tipo=invoice&ref=${invoice.id}`} variant="subtle" leftSection={<IconBook size={16} />}>
-                Ver no ledger
-              </Button>
-            </Can>
-            <InvoiceActions invoice={invoice} />
-          </>
-        }
+        actions={<InvoiceActions invoice={invoice} />}
       />
       <FiscalNotice />
-      <Grid>
+      <Grid align="flex-start">
         <Grid.Col span={{ base: 12, md: 8 }}>
-          <Paper withBorder p="md" radius="md" h="100%">
-            <SimpleGrid cols={{ base: 1, xs: 2, md: 3 }} spacing="lg">
+          <Paper withBorder p="md" radius="md">
+            <SimpleGrid cols={{ base: 1, xs: 2, lg: 3 }} spacing="lg">
               <KeyValue label="Cliente">
                 <Anchor component={Link} to={`/clientes/${invoice.customer_id}`}>
                   {invoice.customer_name || String(snapshot.name ?? 'Ver cliente')}
@@ -254,7 +275,6 @@ export function InvoiceDetailView({ invoice }: { invoice: InvoiceDetails }) {
                 </KeyValue>
               )}
               {invoice.void_reason && <KeyValue label="Motivo do cancelamento">{invoice.void_reason}</KeyValue>}
-              <KeyValue label="Moeda">{invoice.currency}</KeyValue>
             </SimpleGrid>
           </Paper>
         </Grid.Col>
@@ -301,7 +321,12 @@ export function InvoiceDetailView({ invoice }: { invoice: InvoiceDetails }) {
         <Title order={2} size="h4">
           Dados do cliente na emissão
         </Title>
-        <JsonView value={snapshot} maxHeight={200} />
+        <Text size="sm" c="dimmed">
+          Cópia do cadastro usada no documento da fatura; alterações posteriores no cliente não mudam estes dados.
+        </Text>
+        <Paper withBorder p="md" radius="md">
+          <CustomerSnapshotView snapshot={snapshot as Record<string, unknown>} />
+        </Paper>
       </Stack>
     </Stack>
   );

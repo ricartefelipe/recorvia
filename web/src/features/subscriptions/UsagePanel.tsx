@@ -10,6 +10,7 @@ import { formatQuantity } from '../../lib/money';
 import { useTenant } from '../../session/SessionContext';
 import { useMetrics } from '../catalog/api';
 import { subscriptionsApi } from './api';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 function UsageEvents({ subscription }: { subscription: Subscription }) {
   const { keys } = useTenant();
@@ -29,7 +30,7 @@ function UsageEvents({ subscription }: { subscription: Subscription }) {
           <EmptyState title="Nenhum evento de consumo" description="Eventos enviados pela integração aparecem aqui, deduplicados pelo identificador externo." />
         ) : (
           <>
-            <Table.ScrollContainer minWidth={820}>
+            <ResponsiveTable minWidth={820}>
               <Table aria-label="Eventos de consumo">
                 <Table.Thead>
                   <Table.Tr>
@@ -66,7 +67,7 @@ function UsageEvents({ subscription }: { subscription: Subscription }) {
                   ))}
                 </Table.Tbody>
               </Table>
-            </Table.ScrollContainer>
+            </ResponsiveTable>
             <CursorPager
               page={pagination.page}
               hasPrevious={pagination.hasPrevious}
@@ -108,7 +109,7 @@ export function UsagePanel({ subscription }: { subscription: Subscription }) {
                   O plano desta assinatura não cobra por consumo.
                 </Text>
               ) : (
-                <Table.ScrollContainer minWidth={680}>
+                <ResponsiveTable minWidth={680}>
                   <Table aria-label="Consumo agregado">
                     <Table.Thead>
                       <Table.Tr>
@@ -141,7 +142,7 @@ export function UsagePanel({ subscription }: { subscription: Subscription }) {
                       ))}
                     </Table.Tbody>
                   </Table>
-                </Table.ScrollContainer>
+                </ResponsiveTable>
               )}
             </Stack>
           </Paper>

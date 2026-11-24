@@ -9,6 +9,7 @@ import { useApiMutation, useCursorPagination, useReturnFromEmptyPage } from '../
 import { actorTypeLabels, labelOf, portalLinkStatusLabels } from '../../lib/labels';
 import { useTenant } from '../../session/SessionContext';
 import { customersApi } from './api';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const revokeReasonLabels: Record<string, string> = {
   superseded: 'Substituído por um link mais novo',
@@ -81,7 +82,7 @@ export function PortalLinksPanel({ customer }: { customer: CustomerDetails }) {
             />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={760}>
+              <ResponsiveTable minWidth={760}>
                 <Table aria-label="Links do portal">
                   <Table.Thead>
                     <Table.Tr>
@@ -138,7 +139,7 @@ export function PortalLinksPanel({ customer }: { customer: CustomerDetails }) {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}

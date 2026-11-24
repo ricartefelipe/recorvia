@@ -7,7 +7,7 @@ export function AuthLayout({ title, subtitle, children, width = 460 }: { title: 
       <Paper withBorder shadow="sm" radius="lg" p="xl" w="100%" maw={width}>
         <Stack gap="lg">
           <Stack gap={4}>
-            <Text fw={750} c="blue.7" size="lg">
+            <Text fw={750} c="blue" size="lg">
               Recorvia
             </Text>
             <Title order={1} size="h2">

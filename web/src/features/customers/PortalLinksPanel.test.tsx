@@ -250,8 +250,8 @@ describe('links do portal na ficha do cliente', () => {
       }),
     );
     const { user } = renderCustomer({ tab: 'historico' });
-    expect(await screen.findByText('customer.created')).toBeInTheDocument();
-    expect(screen.queryByText('customer.portal_link_created')).not.toBeInTheDocument();
+    expect(await screen.findByText('Cliente cadastrado')).toBeInTheDocument();
+    expect(screen.queryByText('Link do portal criado')).not.toBeInTheDocument();
     expect(historyRequests).toBe(1);
 
     const detail = failCustomerDetail();
@@ -259,7 +259,7 @@ describe('links do portal na ficha do cliente', () => {
     expect(await screen.findByDisplayValue(PORTAL_URL)).toBeInTheDocument();
 
     // O evento de geração aparece sem depender de foco da janela nem de remontagem.
-    expect(await screen.findByText('customer.portal_link_created')).toBeInTheDocument();
+    expect(await screen.findByText('Link do portal criado')).toBeInTheDocument();
     expect(historyRequests).toBe(2);
     expect(detail.requests()).toBe(0);
     expect(screen.getByDisplayValue(PORTAL_URL)).toBeInTheDocument();
@@ -282,7 +282,7 @@ describe('links do portal na ficha do cliente', () => {
       }),
     );
     const { user } = renderCustomer({ tab: 'historico' });
-    expect(await screen.findByText('customer.created')).toBeInTheDocument();
+    expect(await screen.findByText('Cliente cadastrado')).toBeInTheDocument();
 
     const detail = failCustomerDetail();
     await user.click(screen.getByRole('button', { name: 'Link do portal' }));
@@ -290,7 +290,7 @@ describe('links do portal na ficha do cliente', () => {
 
     // O erro fica restrito ao painel do histórico; o modal e o link continuam.
     await waitFor(() => expect(historyRequests).toBe(2));
-    await waitFor(() => expect(screen.queryByText('customer.created')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText('Cliente cadastrado')).not.toBeInTheDocument());
     expect(detail.requests()).toBe(0);
     expect(screen.getByDisplayValue(PORTAL_URL)).toBeInTheDocument();
     expect(screen.getByRole('dialog', { name: 'Link do portal do cliente' })).toBeInTheDocument();

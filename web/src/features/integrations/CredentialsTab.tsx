@@ -14,6 +14,7 @@ import { optionalInt, requiredText } from '../../lib/validation';
 import { PERMISSIONS, permissionLabel, type Permission } from '../../session/permissions';
 import { usePermission, useTenant } from '../../session/SessionContext';
 import { integrationsApi } from './api';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 /**
  * Permissões que nunca viram escopo de credencial: exigem uma pessoa
@@ -219,7 +220,7 @@ export function CredentialsTab() {
             <EmptyState title="Nenhuma credencial" description="Crie uma credencial para integrar seu ERP, CRM ou o envio de eventos de consumo." icon={<IconKey size={26} />} />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={900}>
+              <ResponsiveTable minWidth={900}>
                 <Table aria-label="Credenciais de API">
                   <Table.Thead>
                     <Table.Tr>
@@ -267,7 +268,7 @@ export function CredentialsTab() {
                     })}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}

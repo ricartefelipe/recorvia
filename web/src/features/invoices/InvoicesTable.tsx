@@ -10,6 +10,7 @@ import { stableStringify } from '../../lib/idempotency';
 import { invoiceStatusLabels } from '../../lib/labels';
 import { useTenant } from '../../session/SessionContext';
 import { invoicesApi, type InvoiceListParams } from './api';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 export function InvoiceStatusBadges({ invoice }: { invoice: Pick<Invoice, 'status' | 'overdue'> }) {
   return (
@@ -26,7 +27,7 @@ export function InvoiceStatusBadges({ invoice }: { invoice: Pick<Invoice, 'statu
 
 export function InvoicesTable({ invoices, showCustomer = true }: { invoices: Invoice[]; showCustomer?: boolean }) {
   return (
-    <Table.ScrollContainer minWidth={900}>
+    <ResponsiveTable minWidth={900}>
       <Table aria-label="Faturas">
         <Table.Thead>
           <Table.Tr>
@@ -65,7 +66,7 @@ export function InvoicesTable({ invoices, showCustomer = true }: { invoices: Inv
           ))}
         </Table.Tbody>
       </Table>
-    </Table.ScrollContainer>
+    </ResponsiveTable>
   );
 }
 

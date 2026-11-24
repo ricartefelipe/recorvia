@@ -8,7 +8,7 @@ import { api } from '../../api/client';
 import type { Dashboard } from '../../api/types';
 import { AccessDenied, LoadingState, QueryContent } from '../../components/states';
 import { HelpTip, PageHeader } from '../../components/ui';
-import { currentMonthInTimeZone, formatDateTime, formatMonth } from '../../lib/dates';
+import { currentMonthInTimeZone, formatDateTime, formatMonth, timeZoneLabel } from '../../lib/dates';
 import { useUrlFilters } from '../../lib/hooks';
 import { formatBasisPoints, formatMoney } from '../../lib/money';
 import type { Permission } from '../../session/permissions';
@@ -90,7 +90,7 @@ function StatCard({
   // A lista filtrada mostra a posição de hoje: num mês encerrado, ela difere
   // do número das posições no fim do mês (e o card avisa).
   const todayList = !!href && (basis === 'month_end' || basis === 'current') && data.month !== currentMonthInTimeZone(timeZone);
-  const color = tone === 'danger' ? 'red.7' : tone === 'warning' ? 'orange.7' : undefined;
+  const color = tone === 'danger' ? 'red' : tone === 'warning' ? 'orange' : undefined;
   return (
     <Paper withBorder p="md" radius="md" component="section" aria-label={label}>
       <Stack gap={6}>
@@ -157,31 +157,18 @@ function Section({ title, description, children }: { title: string; description?
   );
 }
 
-function indicatorsWith(data: Dashboard, basis: Basis): string {
-  return (Object.keys(INDICATOR_LABELS) as IndicatorKey[])
-    .filter((key) => data.bases?.[key] === basis)
-    .map((key) => INDICATOR_LABELS[key])
-    .join(', ');
-}
-
-/** Explica a base temporal dos indicadores a partir de bases. */
+/**
+ * Legenda curta sobre a data de referência; a base de cada indicador aparece
+ * no próprio card e na tabela "Como calculamos".
+ */
 function BasisSummary({ data, timeZone }: { data: Dashboard; timeZone: string }) {
-  const monthEnd = indicatorsWith(data, 'month_end');
-  const current = indicatorsWith(data, 'current');
-  if (!monthEnd && !current) return null;
+  const bases = Object.values(data.bases ?? {});
+  if (!bases.includes('month_end') && !bases.includes('current')) return null;
   return (
-    <Stack gap={2} component="section" aria-label="Base dos indicadores">
-      {monthEnd && (
-        <Text size="sm" c="dimmed">
-          Posição em {formatDateTime(data.position_at, timeZone)}: {monthEnd}.
-        </Text>
-      )}
-      {current && (
-        <Text size="sm" c="dimmed">
-          Posição atual, seja qual for o mês: {current}.
-        </Text>
-      )}
-    </Stack>
+    <Text size="sm" c="dimmed" component="p" m={0} aria-label="Base dos indicadores" role="note">
+      Posição em {formatDateTime(data.position_at, timeZone)}. A base de cada indicador está em “Como calculamos”, no fim da
+      página.
+    </Text>
   );
 }
 
@@ -342,6 +329,8 @@ function DashboardContent({ data }: { data: Dashboard }) {
   );
 }
 
+const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
+
 export function DashboardPage() {
   const { keys, timeZone, can } = useTenant();
   const currentMonth = currentMonthInTimeZone(timeZone);
@@ -361,10 +350,15 @@ export function DashboardPage() {
     <>
       <PageHeader
         title="Painel financeiro"
-        description={`Indicadores de ${formatMonth(month)} no fuso ${timeZone}.`}
+        description={
+          <>
+            Indicadores de {formatMonth(month)}, no{' '}
+            <span title={timeZone}>{lowerFirst(timeZoneLabel(timeZone))}</span>.
+          </>
+        }
         actions={
           <MonthPickerInput
-            aria-label="Mês de referência"
+            aria-label={`Mês de referência: ${formatMonth(month)}`}
             leftSection={<IconCalendarMonth size={16} />}
             value={`${month}-01`}
             onChange={(value) => setFilters({ mes: value ? value.slice(0, 7) : null })}

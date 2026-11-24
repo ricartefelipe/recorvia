@@ -15,6 +15,7 @@ import { invitationStateLabels, labelOf, memberStatusLabels, roleLabels } from '
 import { requiredEmail } from '../../lib/validation';
 import { PERMISSIONS, permissionLabel } from '../../session/permissions';
 import { usePermission, useSession, useTenant } from '../../session/SessionContext';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const enc = encodeURIComponent;
 export const ROLES: Role[] = ['owner', 'admin', 'finance', 'operator', 'auditor'];
@@ -78,7 +79,7 @@ function MembersTab() {
         data.length === 0 ? (
           <EmptyState title="Nenhum membro" />
         ) : (
-          <Table.ScrollContainer minWidth={760}>
+          <ResponsiveTable minWidth={760}>
             <Table aria-label="Membros">
               <Table.Thead>
                 <Table.Tr>
@@ -146,7 +147,7 @@ function MembersTab() {
                 })}
               </Table.Tbody>
             </Table>
-          </Table.ScrollContainer>
+          </ResponsiveTable>
         )
       }
     </QueryContent>
@@ -234,7 +235,7 @@ function InvitationsTab() {
             <EmptyState title="Nenhum convite" description="Convide pessoas da sua equipe escolhendo o papel de cada uma." />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={700}>
+              <ResponsiveTable minWidth={700}>
                 <Table aria-label="Convites">
                   <Table.Thead>
                     <Table.Tr>
@@ -275,7 +276,7 @@ function InvitationsTab() {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}
@@ -307,7 +308,7 @@ export function RoleMatrix({ roles }: { roles: RolePermissions[] }) {
   const ordered = [...PERMISSIONS.filter((p) => all.has(p)), ...[...all].filter((p) => !(PERMISSIONS as readonly string[]).includes(p)).sort()];
   const columns = ROLES.filter((r) => byRole.has(r));
   return (
-    <Table.ScrollContainer minWidth={820}>
+    <ResponsiveTable minWidth={820}>
       <Table aria-label="Matriz de papéis e permissões" striped highlightOnHover>
         <Table.Thead>
           <Table.Tr>
@@ -347,7 +348,7 @@ export function RoleMatrix({ roles }: { roles: RolePermissions[] }) {
           ))}
         </Table.Tbody>
       </Table>
-    </Table.ScrollContainer>
+    </ResponsiveTable>
   );
 }
 

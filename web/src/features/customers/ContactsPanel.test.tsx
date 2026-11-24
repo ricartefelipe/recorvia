@@ -120,15 +120,15 @@ describe('histórico do cliente', () => {
       }),
     );
     const { user } = renderCustomer('historico');
-    expect(await screen.findByText('customer.address_updated')).toBeInTheDocument();
+    expect(await screen.findByText('Endereço do cliente alterado')).toBeInTheDocument();
     expect(screen.getByText('Página 1')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /Próxima/ }));
-    expect(await screen.findByText('customer.created')).toBeInTheDocument();
-    expect(screen.queryByText('customer.address_updated')).not.toBeInTheDocument();
+    expect(await screen.findByText('Cliente cadastrado')).toBeInTheDocument();
+    expect(screen.queryByText('Endereço do cliente alterado')).not.toBeInTheDocument();
     expect(screen.getByText('Página 2')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Próxima/ })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: /Anterior/ }));
-    expect(await screen.findByText('customer.address_updated')).toBeInTheDocument();
+    expect(await screen.findByText('Endereço do cliente alterado')).toBeInTheDocument();
     expect(cursors.slice(0, 2)).toEqual([null, 'pagina-2']);
   });
 });

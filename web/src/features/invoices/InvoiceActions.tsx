@@ -3,6 +3,7 @@ import { Button, Group, Menu, Modal, Select, Stack, Text, Textarea } from '@mant
 import { DateTimePicker } from '@mantine/dates';
 import {
   IconBan,
+  IconBook,
   IconCash,
   IconChevronDown,
   IconFileText,
@@ -10,7 +11,9 @@ import {
   IconRefresh,
   IconTrashX,
 } from '@tabler/icons-react';
+import { useMediaQuery } from '@mantine/hooks';
 import { useMemo, useState } from 'react';
+import { Link } from 'react-router';
 import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
 import type { Charge, InvoiceDetails, ManualPaymentInput, Payment } from '../../api/types';
@@ -199,7 +202,8 @@ const TITLES: Record<Exclude<Action, null>, string> = {
   uncollectible: 'Baixar como incobrável',
 };
 
-export function InvoiceDocumentButton({ invoice }: { invoice: InvoiceDetails }) {
+/** Estado e visualizador do documento HTML da fatura. */
+function useInvoiceDocument(invoice: InvoiceDetails) {
   const [state, setState] = useState<{ opened: boolean; html: string | null; loading: boolean; error: unknown }>({
     opened: false,
     html: null,
@@ -215,27 +219,29 @@ export function InvoiceDocumentButton({ invoice }: { invoice: InvoiceDetails }) 
       setState({ opened: true, html: null, loading: false, error });
     }
   };
-  return (
-    <>
-      <Button variant="default" leftSection={<IconFileText size={16} />} onClick={() => void open()}>
-        Abrir documento
-      </Button>
-      <DocumentViewer
-        opened={state.opened}
-        onClose={() => setState((s) => ({ ...s, opened: false }))}
-        title={`Fatura ${invoice.number ?? ''}`}
-        html={state.html}
-        loading={state.loading}
-        error={state.error}
-        filename={`fatura-${invoice.number ?? invoice.id}.html`}
-      />
-    </>
+  const viewer = (
+    <DocumentViewer
+      opened={state.opened}
+      onClose={() => setState((s) => ({ ...s, opened: false }))}
+      title={`Fatura ${invoice.number ?? ''}`}
+      html={state.html}
+      loading={state.loading}
+      error={state.error}
+      filename={`fatura-${invoice.number ?? invoice.id}.html`}
+    />
   );
+  return { open: () => void open(), viewer };
 }
 
-/** Ações financeiras da fatura, conforme situação e permissões. */
+/**
+ * Ações do cabeçalho da fatura: ledger, documento e ações financeiras,
+ * conforme situação e permissões. No celular, tudo fica num único menu
+ * "Ações", para o cabeçalho não se desalinhar.
+ */
 export function InvoiceActions({ invoice }: { invoice: InvoiceDetails }) {
   const { can } = useSession();
+  const compact = useMediaQuery('(max-width: 47.99em)', false, { getInitialValueInEffect: false });
+  const doc = useInvoiceDocument(invoice);
   const [action, setAction] = useState<Action>(null);
   const idempotency = useIdempotencyKey();
   const close = () => setAction(null);
@@ -287,19 +293,44 @@ export function InvoiceActions({ invoice }: { invoice: InvoiceDetails }) {
     ),
   ].filter(Boolean);
 
+  const ledgerLink = can('ledger.read') ? `/ledger?tipo=invoice&ref=${invoice.id}` : null;
+  const secondary = compact
+    ? [
+        <Menu.Item key="document" leftSection={<IconFileText size={16} />} onClick={doc.open}>
+          Abrir documento
+        </Menu.Item>,
+        ledgerLink && (
+          <Menu.Item key="ledger" component={Link} to={ledgerLink} leftSection={<IconBook size={16} />}>
+            Ver no ledger
+          </Menu.Item>
+        ),
+      ].filter(Boolean)
+    : [];
+  const menuItems = secondary.length && items.length ? [...secondary, <Menu.Divider key="divider" />, ...items] : [...secondary, ...items];
+
   return (
     <>
-      <InvoiceDocumentButton invoice={invoice} />
-      {items.length > 0 && (
+      {!compact && ledgerLink && (
+        <Button component={Link} to={ledgerLink} variant="subtle" leftSection={<IconBook size={16} />}>
+          Ver no ledger
+        </Button>
+      )}
+      {!compact && (
+        <Button variant="default" leftSection={<IconFileText size={16} />} onClick={doc.open}>
+          Abrir documento
+        </Button>
+      )}
+      {menuItems.length > 0 && (
         <Menu position="bottom-end" withArrow>
           <Menu.Target>
             <Button rightSection={<IconChevronDown size={16} />} loading={retry.isPending}>
               Ações
             </Button>
           </Menu.Target>
-          <Menu.Dropdown>{items}</Menu.Dropdown>
+          <Menu.Dropdown>{menuItems}</Menu.Dropdown>
         </Menu>
       )}
+      {doc.viewer}
       <Modal opened={action !== null} onClose={close} title={action ? TITLES[action] : ''} size="lg">
         {action === 'payment' && <ManualPaymentForm invoice={invoice} onClose={close} />}
         {action === 'credit' && <CreditNoteForm invoice={invoice} onClose={close} />}

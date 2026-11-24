@@ -18,6 +18,7 @@ import { formatMoney } from '../../lib/money';
 import { moneyField, reasonField } from '../../lib/validation';
 import { Can, useTenant } from '../../session/SessionContext';
 import { customersApi } from './api';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const grantSchema = z.object({ amount: moneyField(), reason: reasonField });
 type GrantForm = z.input<typeof grantSchema>;
@@ -100,7 +101,7 @@ export function CreditsPanel({ customer }: { customer: CustomerDetails }) {
             <EmptyState title="Nenhum movimento de crédito" description="Concessões e usos de crédito em faturas aparecerão aqui." />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={640}>
+              <ResponsiveTable minWidth={640}>
                 <Table aria-label="Movimentos de crédito">
                   <Table.Thead>
                     <Table.Tr>
@@ -137,7 +138,7 @@ export function CreditsPanel({ customer }: { customer: CustomerDetails }) {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}

@@ -17,6 +17,7 @@ import { handleMutationError } from '../../lib/errors';
 import { portalInvoiceStatusLabels } from '../../lib/labels';
 import { notifySuccess } from '../../lib/notify';
 import { portalTimeZone, usePortalSession } from './PortalLayout';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const enc = encodeURIComponent;
 const portalInvoicesApi = {
@@ -79,7 +80,7 @@ export function PortalInvoicesPage() {
         <EmptyState title="Nenhuma fatura" description="Quando houver faturas emitidas para você, elas aparecerão aqui." />
       ) : (
         <>
-          <Table.ScrollContainer minWidth={720}>
+          <ResponsiveTable minWidth={720}>
             <Table aria-label="Faturas">
               <Table.Thead>
                 <Table.Tr>
@@ -120,7 +121,7 @@ export function PortalInvoicesPage() {
                 ))}
               </Table.Tbody>
             </Table>
-          </Table.ScrollContainer>
+          </ResponsiveTable>
           {query.isFetchNextPageError && <ErrorState error={query.error} onRetry={() => void query.fetchNextPage()} />}
           <Group justify="space-between" component="nav" aria-label="Paginação">
             <Text size="sm" c="dimmed" role="status">

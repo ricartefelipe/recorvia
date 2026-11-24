@@ -1,4 +1,4 @@
-import { Text, TextInput, type TextInputProps } from '@mantine/core';
+import { Text, TextInput, type ComboboxItem, type OptionsFilter, type TextInputProps } from '@mantine/core';
 
 /**
  * Valor em reais digitado como texto ("1.234,56"). A conversão para centavos
@@ -20,3 +20,21 @@ export function MoneyInput({ description, ...props }: TextInputProps) {
     />
   );
 }
+
+const fold = (text: string) =>
+  text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+/**
+ * Filtro de Select que ignora acentos e também procura no valor (por exemplo,
+ * "sao paulo" encontra "Horário de Brasília" pelo código America/Sao_Paulo).
+ */
+export const accentInsensitiveFilter: OptionsFilter = ({ options, search }) => {
+  const term = fold(search.trim()).replace(/\s+/g, ' ');
+  if (!term) return options;
+  return (options as ComboboxItem[]).filter(
+    (o) => fold(o.label).includes(term) || fold(o.value).replace(/[_/]/g, ' ').includes(term),
+  );
+};

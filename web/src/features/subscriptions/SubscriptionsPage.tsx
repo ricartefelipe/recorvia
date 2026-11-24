@@ -14,10 +14,11 @@ import { Can, useTenant } from '../../session/SessionContext';
 import { CustomerSelect } from '../customers/CustomerSelect';
 import { subscriptionsApi, type SubscriptionListParams } from './api';
 import { SubscriptionCreateModal } from './SubscriptionCreateModal';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 export function SubscriptionsTable({ subscriptions, showCustomer = true }: { subscriptions: Subscription[]; showCustomer?: boolean }) {
   return (
-    <Table.ScrollContainer minWidth={880}>
+    <ResponsiveTable minWidth={880}>
       <Table aria-label="Assinaturas">
         <Table.Thead>
           <Table.Tr>
@@ -69,7 +70,7 @@ export function SubscriptionsTable({ subscriptions, showCustomer = true }: { sub
           ))}
         </Table.Tbody>
       </Table>
-    </Table.ScrollContainer>
+    </ResponsiveTable>
   );
 }
 

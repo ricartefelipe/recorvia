@@ -8,6 +8,7 @@ import { chargeStatusLabels, labelOf, providerLabels } from '../../lib/labels';
 import { usePermission } from '../../session/SessionContext';
 import { canRequestRefund } from './api';
 import { RefundModal } from './RefundModal';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 export function CheckoutLink({ url }: { url: string | null | undefined }) {
   if (!url) return <Text size="sm" c="dimmed">—</Text>;
@@ -27,7 +28,7 @@ export function ChargesTable({ charges, showInvoice = false }: { charges: Charge
   const [refunding, setRefunding] = useState<Charge | null>(null);
   return (
     <>
-      <Table.ScrollContainer minWidth={960}>
+      <ResponsiveTable minWidth={960}>
         <Table aria-label="Cobranças">
           <Table.Thead>
             <Table.Tr>
@@ -91,7 +92,7 @@ export function ChargesTable({ charges, showInvoice = false }: { charges: Charge
             ))}
           </Table.Tbody>
         </Table>
-      </Table.ScrollContainer>
+      </ResponsiveTable>
       {refunding && <RefundModal charge={refunding} opened onClose={() => setRefunding(null)} />}
     </>
   );
