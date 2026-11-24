@@ -16,6 +16,7 @@ import { optionalInt, optionalText, requiredText } from '../../lib/validation';
 import { Can, useTenant } from '../../session/SessionContext';
 import { catalogApi, useMetrics, useProducts } from './api';
 import { describePrice, emptyPrice, PriceFields, priceSchema } from './PriceFields';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 export const planSchema = z.object({
   product_id: z.string().min(1, 'Selecione o produto.'),
@@ -182,7 +183,7 @@ export function PlansPage() {
             <EmptyState title="Nenhum plano" description="Crie um plano com seu preço para começar a vender assinaturas." />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={820}>
+              <ResponsiveTable minWidth={820}>
                 <Table aria-label="Planos">
                   <Table.Thead>
                     <Table.Tr>
@@ -222,7 +223,7 @@ export function PlansPage() {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}

@@ -9,8 +9,9 @@ import { EmptyState, LoadingState, QueryContent } from '../../components/states'
 import { CursorPager, PageHeader } from '../../components/ui';
 import { useCursorPagination, useReturnFromEmptyPage, useUrlFilters } from '../../lib/hooks';
 import { stableStringify } from '../../lib/idempotency';
-import { labelOf, ledgerAccountKindLabels, ledgerReferenceLabels, optionsOf } from '../../lib/labels';
+import { labelOf, ledgerAccountKindLabels, ledgerReferenceLabels, optionsOf, ledgerAccountLabels, ledgerTransactionKindLabel } from '../../lib/labels';
 import { useTenant } from '../../session/SessionContext';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const ledgerApi = {
   accounts: (signal?: AbortSignal) => api.get<DataList<LedgerAccount>>('/api/v1/ledger/accounts', { signal }),
@@ -29,12 +30,12 @@ function Accounts() {
         data.length === 0 ? (
           <EmptyState title="Nenhuma conta movimentada" />
         ) : (
-          <Table.ScrollContainer minWidth={760}>
+          <ResponsiveTable minWidth={760}>
             <Table aria-label="Contas do ledger">
               <Table.Thead>
                 <Table.Tr>
-                  <Table.Th>Código</Table.Th>
                   <Table.Th>Conta</Table.Th>
+                  <Table.Th>Código</Table.Th>
                   <Table.Th>Natureza</Table.Th>
                   <Table.Th ta="right">Débitos</Table.Th>
                   <Table.Th ta="right">Créditos</Table.Th>
@@ -44,8 +45,10 @@ function Accounts() {
               <Table.Tbody>
                 {data.map((a) => (
                   <Table.Tr key={`${a.code}-${a.currency}`}>
-                    <Table.Td ff="monospace">{a.code}</Table.Td>
                     <Table.Td>{a.name}</Table.Td>
+                    <Table.Td ff="monospace" fz="sm" c="dimmed">
+                      {a.code}
+                    </Table.Td>
                     <Table.Td>{labelOf(ledgerAccountKindLabels, a.kind)}</Table.Td>
                     <Table.Td ta="right">
                       <Money value={a.debits} currency={a.currency} />
@@ -60,7 +63,7 @@ function Accounts() {
                 ))}
               </Table.Tbody>
             </Table>
-          </Table.ScrollContainer>
+          </ResponsiveTable>
         )
       }
     </QueryContent>
@@ -94,10 +97,10 @@ function Transactions() {
         />
         <TextInput
           label="Identificador da referência"
-          placeholder="UUID"
+          placeholder="Código do registro (ex.: da fatura)"
           value={filters.ref}
           onChange={(e) => setFilters({ ref: e.currentTarget.value.trim() })}
-          error={refValid ? undefined : 'Informe um UUID válido.'}
+          error={refValid ? undefined : 'Informe o código completo do registro (36 caracteres, como aparece no endereço da página).'}
           w={340}
         />
         {(filters.tipo || filters.ref) && (
@@ -122,7 +125,9 @@ function Transactions() {
                           <Text fw={600} size="sm">
                             {t.description}
                           </Text>
-                          <Badge variant="light">{t.kind}</Badge>
+                          <Badge variant="light" title={t.kind}>
+                            {ledgerTransactionKindLabel(t.kind)}
+                          </Badge>
                           {t.reverses_transaction_id && (
                             <Badge variant="outline" color="orange">
                               Estorno
@@ -156,8 +161,8 @@ function Transactions() {
                         <Table.Tbody>
                           {t.entries.map((e, i) => (
                             <Table.Tr key={`${t.id}-${i}`}>
-                              <Table.Td ff="monospace" fz="sm">
-                                {e.account}
+                              <Table.Td fz="sm" title={e.account}>
+                                {labelOf(ledgerAccountLabels, e.account)}
                               </Table.Td>
                               <Table.Td ta="right">{e.direction === 'debit' ? <Money value={e.amount} currency={e.currency} /> : ''}</Table.Td>
                               <Table.Td ta="right">{e.direction === 'credit' ? <Money value={e.amount} currency={e.currency} /> : ''}</Table.Td>

@@ -113,7 +113,7 @@ func TestRecoverySettlementAPI(t *testing.T) {
 		"Idempotency-Key", "acima-"+uuid.NewString())
 	lost, _ := owner.expect(http.StatusCreated, http.MethodPost, path,
 		map[string]any{"outcome": "written_off", "amount": 500, "justification": "Acordo comercial: restante perdoado.",
-			"effective_date": r.env.Clock.Now().Format("2006-01-02")}, "Idempotency-Key", "perda-"+uuid.NewString())
+			"effective_date": tenantToday(t, r.env).String()}, "Idempotency-Key", "perda-"+uuid.NewString())
 	r.conforms(t, "RecoverySettlement", lost)
 	owner.expectProblem(http.StatusConflict, "recovery_already_settled", http.MethodPost, path, settlementBody("received", 1),
 		"Idempotency-Key", "zerado-"+uuid.NewString())

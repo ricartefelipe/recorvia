@@ -29,8 +29,11 @@ describe('resolução de divergência', () => {
   it('compara valores locais e do provedor destacando a diferença', () => {
     renderPage(<ComparisonTable discrepancy={discrepancy} />);
     const rows = screen.getAllByRole('row');
-    const amount = rows.find((r) => r.textContent?.startsWith('amount'));
-    const status = rows.find((r) => r.textContent?.startsWith('status'));
+    const amount = rows.find((r) => r.textContent?.startsWith('Valor'));
+    const status = rows.find((r) => r.textContent?.startsWith('Situação'));
+    // Campos e situações aparecem em português, não com o código do contrato.
+    expect(status).toHaveTextContent('Paga');
+    expect(screen.queryByText('amount')).not.toBeInTheDocument();
     expect(amount).toHaveTextContent('(diferente)');
     expect(amount).toHaveTextContent('R$ 159,90');
     expect(amount).toHaveTextContent('R$ 150,00');

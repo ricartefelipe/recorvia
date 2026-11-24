@@ -19,6 +19,7 @@ import { formatMoney } from '../../lib/money';
 import { notifySuccess } from '../../lib/notify';
 import { reasonField } from '../../lib/validation';
 import { useSession } from '../../session/SessionContext';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 /** Filtros da fila: sem situação, a API devolve os pedidos em aberto. */
 const FILTERS = [
@@ -191,7 +192,7 @@ function OrdersTable({ orders, timeZone }: { orders: StaffAddonOrder[]; timeZone
   };
   return (
     <>
-      <Table.ScrollContainer minWidth={1000}>
+      <ResponsiveTable minWidth={1000}>
         <Table aria-label="Pedidos de serviços adicionais" verticalSpacing="sm">
           <Table.Thead>
             <Table.Tr>
@@ -279,7 +280,7 @@ function OrdersTable({ orders, timeZone }: { orders: StaffAddonOrder[]; timeZone
             })}
           </Table.Tbody>
         </Table>
-      </Table.ScrollContainer>
+      </ResponsiveTable>
       {scheduling && <ScheduleModal order={scheduling} timeZone={timeZone} onClose={() => setScheduling(null)} />}
       {canceling && <CancelModal order={canceling} onClose={() => setCanceling(null)} />}
     </>

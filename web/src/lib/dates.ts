@@ -138,3 +138,101 @@ export function supportedTimeZones(): string[] {
     return ['America/Sao_Paulo', 'America/Manaus', 'America/Fortaleza', 'America/Recife', 'UTC'];
   }
 }
+
+/** Nomes com acento das cidades brasileiras usadas como referência de fuso. */
+const ZONE_CITIES: Record<string, string> = {
+  Sao_Paulo: 'São Paulo',
+  Belem: 'Belém',
+  Maceio: 'Maceió',
+  Araguaina: 'Araguaína',
+  Santarem: 'Santarém',
+  Cuiaba: 'Cuiabá',
+  Eirunepe: 'Eirunepé',
+  Porto_Velho: 'Porto Velho',
+  Boa_Vista: 'Boa Vista',
+  Campo_Grande: 'Campo Grande',
+  Rio_Branco: 'Rio Branco',
+  Noronha: 'Fernando de Noronha',
+};
+
+/** Cidade de referência de um fuso IANA ("America/Sao_Paulo" → "São Paulo"). */
+export function timeZoneCity(timeZone: string): string {
+  const last = timeZone.split('/').pop() ?? timeZone;
+  return ZONE_CITIES[last] ?? last.replace(/_/g, ' ');
+}
+
+/**
+ * Nome amigável de um fuso, em português: "Horário de Brasília",
+ * "Horário do Amazonas", "Horário do Japão". Cai no código IANA quando o
+ * navegador não conhece o fuso.
+ */
+export function timeZoneName(timeZone: string, at: Date = new Date()): string {
+  if (timeZone === 'UTC' || timeZone === 'Etc/UTC') return 'Tempo universal coordenado (UTC)';
+  try {
+    // O nome depende do instante: em 1970, por exemplo, Lisboa usava o horário
+    // da Europa Central. Por padrão, o nome vigente agora.
+    const part = dtf(timeZone, { timeZoneName: 'longGeneric' })
+      .formatToParts(at)
+      .find((p) => p.type === 'timeZoneName')?.value;
+    if (!part || /^GMT/.test(part)) return timeZone;
+    return part.replace(/^Horário Padrão/, 'Horário');
+  } catch {
+    return timeZone;
+  }
+}
+
+/**
+ * Rótulo de fuso para exibição e listas: o nome amigável e, quando ele não
+ * identifica a cidade (por exemplo, Fortaleza também usa o horário de
+ * Brasília), a cidade de referência entre parênteses.
+ */
+export function timeZoneLabel(timeZone: string, at?: Date): string {
+  const name = timeZoneName(timeZone, at);
+  if (name === timeZone || timeZone === 'America/Sao_Paulo' || timeZone === 'UTC' || timeZone === 'Etc/UTC') return name;
+  return `${name} (${timeZoneCity(timeZone)})`;
+}
+
+/**
+ * Rótulo de fuso para o meio de uma frase ("no horário de Brasília"): só o
+ * nome amigável começa em minúscula; o código IANA, quando não há nome, fica
+ * como é ("Etc/GMT+3").
+ */
+export function timeZoneLabelInSentence(timeZone: string, at?: Date): string {
+  const label = timeZoneLabel(timeZone, at);
+  if (label === timeZone || !/^Horário /.test(label)) return label;
+  return label.charAt(0).toLowerCase() + label.slice(1);
+}
+
+/** Fusos do Brasil, listados primeiro nas opções. */
+const BRAZIL_ZONES = [
+  'America/Sao_Paulo',
+  'America/Bahia',
+  'America/Fortaleza',
+  'America/Recife',
+  'America/Maceio',
+  'America/Belem',
+  'America/Araguaina',
+  'America/Santarem',
+  'America/Manaus',
+  'America/Cuiaba',
+  'America/Campo_Grande',
+  'America/Porto_Velho',
+  'America/Boa_Vista',
+  'America/Rio_Branco',
+  'America/Eirunepe',
+  'America/Noronha',
+];
+
+/**
+ * Opções de fuso para Select: rótulo amigável e o código IANA como valor,
+ * com os fusos do Brasil primeiro.
+ */
+export function timeZoneOptions(zones: string[] = supportedTimeZones()): { value: string; label: string }[] {
+  const rank = (z: string) => {
+    const i = BRAZIL_ZONES.indexOf(z);
+    return i < 0 ? BRAZIL_ZONES.length : i;
+  };
+  return [...zones]
+    .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+    .map((value) => ({ value, label: timeZoneLabel(value) }));
+}

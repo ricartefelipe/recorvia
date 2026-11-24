@@ -2921,3 +2921,75 @@ com a variável no erro. As respostas da API que passam pelo nginx levam duas po
 a da API); o navegador aplica as duas, e a da API é a mais restritiva. Os riscos que continuam abertos (token
 do Asaas, limites por IP que confiam no `X-Real-IP`, ausência de limite de tentativas na borda para o
 Keycloak, e-mails de destinatários recusados nos registros de erro) estão em `docs/operacao/seguranca.md`.
+
+## ADR-090 Interface acessível: contraste no tema, tabelas que viram cartões no celular, rótulos para todo código e auditoria com axe
+**Status:** aceita.
+**Contexto:** a revisão de UI/UX e acessibilidade da interface web, feita com capturas em 1440 px e 390 px e com o
+axe-core, encontrou quatro problemas que se repetiam em todas as telas. (1) O texto secundário do Mantine
+(`dimmed`, cinza `#868e96`, 3,3:1 sobre branco), os badges claros (texto no tom 6 sobre o mesmo tom a 10%, de
+1,8:1 no amarelo a 3,6:1 no azul), os botões e badges preenchidos (texto branco sobre o tom 6) e os placeholders
+(`#adb5bd`) ficavam abaixo dos 4,5:1 do critério 1.4.3; o axe acusava `color-contrast` em todas as telas. (2) No
+celular, as tabelas dentro de `Table.ScrollContainer` cortavam colunas para fora da tela, sem indicação de
+rolagem, e a região rolável não recebia foco pelo teclado. (3) Códigos do contrato apareciam crus: ações e
+recursos da auditoria, eventos do histórico da assinatura, motivos do histórico da fatura (`issued`), tipos de
+lançamento e contas do ledger, recursos dos planos do Recorvia, eventos de webhook, consumidores das mensagens não
+processadas, campos da conciliação, a cópia do cliente na emissão em JSON, o fuso como `America/Sao_Paulo` e a
+versão de preço como os 8 primeiros caracteres do identificador. (4) As abas do catálogo apontavam para painéis
+inexistentes (`aria-valid-attr-value`, crítico) e o botão do menu do usuário tinha um `aria-label` que não
+continha o texto visível (`label-content-name-mismatch`).
+**Decisão:**
+- **Contraste no tema.** `web/src/app/theme.ts` calcula, para cada cor do tema, um tom de texto (usado em
+  `-text`, `-light-color` e `-outline`) com pelo menos 4,6:1 sobre o fundo claro do próprio badge e um tom de
+  preenchimento com pelo menos 4,6:1 para texto branco: o primeiro tom da paleta, a partir do 6, que atinge o
+  mínimo, ou o tom 9 escurecido aos poucos quando nenhum basta (verde, amarelo, laranja, lima, ciano, teal). Os
+  valores entram pelo `cssVariablesResolver` do `MantineProvider`, só no esquema claro (o único usado). O
+  `dimmed` passa a `#5c636a` (6,1:1), o placeholder a `#6c757d` (4,7:1) e a borda de campos a `#868e96` (3,3:1,
+  acima dos 3:1 do critério 1.4.11). Um teste unitário confere todas as combinações. Componentes não precisam
+  escolher tons: `c="blue"`, `color="green"` e os variants `light`, `filled` e `outline` já saem acessíveis;
+  tons fixos como `blue.7` deixam de ser usados para texto.
+- **`ResponsiveTable`.** `web/src/components/ResponsiveTable.tsx` substitui o `Table.ScrollContainer` em todas as
+  listas e tabelas de detalhe. Abaixo do breakpoint `sm` (48em), no modo padrão `cards`, cada linha vira um cartão
+  com pares rótulo e valor: o rótulo vem do texto visível do cabeçalho da coluna (ou de `data-label` na célula),
+  aplicado por um efeito que também acompanha linhas novas, e é desenhado por CSS (`content: attr(...) / ""`,
+  que não é lido em duplicidade). O cabeçalho continua no DOM, fora da tela, e a tabela recebe papéis ARIA
+  explícitos (`table`, `rowgroup`, `row`, `columnheader`, `cell`), porque navegadores descartam a semântica de
+  tabelas exibidas como bloco. Células sem rótulo (ações, linhas de detalhe expandidas) ocupam a largura toda. O
+  modo `scroll` mantém a tabela; quando há rolagem, a região ganha `tabIndex`, `role="region"`, nome acessível e
+  a dica visível "Role para os lados para ver todas as colunas". Acima do breakpoint, `minWidth` continua
+  definindo a largura mínima.
+- **Rótulos para todo código exibido.** Os mapas de `web/src/lib/labels.ts` passam a cobrir ações e recursos da
+  auditoria, rotinas automáticas que aparecem como ator (`billing.engine` vira "Faturamento automático"), eventos
+  do histórico da assinatura, motivos do histórico da fatura (o motivo digitado no cancelamento continua
+  aparecendo como foi escrito), tipos de lançamento (inclusive estornos) e contas do ledger, recursos e planos do
+  Recorvia, situação dos demonstrativos, eventos de webhook, consumidores e eventos internos, situação da conta do
+  provedor, método de pagamento `provider` e campos e valores da conciliação. O código continua disponível no
+  `title` (e, na auditoria, nos detalhes do evento), e os filtros da auditoria por recurso e ação passam a ser
+  listas com os nomes em português. Nas opções de evento de webhook, o código aparece entre parênteses, porque é
+  ele que chega no payload. Dados de emissão deixam de ser JSON: a cópia do cliente vira lista descritiva (nome,
+  CPF ou CNPJ formatado, e-mail, endereço) e o preço registrado no item vira modelo, valores e cupom, com o JSON
+  recolhido em "Dados técnicos do preço". O fuso aparece pelo nome do `Intl` em português ("horário de Brasília",
+  com a cidade quando ajuda) e o código fica no `title`; os campos de fuso listam os do Brasil primeiro e buscam
+  sem acento. A versão de preço da assinatura aparece como "Versão 2, de 21/11/2026", pela lista de versões do
+  plano.
+- **Cabeçalhos e ações no celular.** O seletor de organização vai para o menu lateral abaixo de `sm` e, no
+  desktop, tem a largura do nome mais longo (até 24rem) e o nome completo na dica. No detalhe da fatura, "Ver no
+  ledger" e "Abrir documento" entram no menu "Ações" no celular. Breadcrumbs quebram linha em vez de alargar a
+  página. O painel troca o parágrafo com a lista de indicadores por uma legenda curta com a data de referência; a
+  base de cada indicador continua no card e em "Como calculamos".
+- **Auditoria automática.** O roteiro E2E `web/e2e/10-acessibilidade.spec.ts` usa `@axe-core/playwright` (versão
+  exata) para passar pelas telas principais e por cinco telas de detalhe, logado como a Ana, em 1440 px e em
+  390 px (com o menu lateral aberto), e falha em violações `serious` ou `critical` das regras WCAG 2.0/2.1 A e AA.
+  Um segundo teste confere a navegação por teclado: o primeiro Tab mostra "Pular para o conteúdo", os itens do
+  menu e os botões recebem foco com contorno visível e a navegação leva o foco ao conteúdo.
+**Alternativas:** trocar o `primaryShade` do tema para 8 escureceria tudo por igual, mas ainda deixaria verde,
+amarelo, laranja, ciano e teal abaixo de 4,5:1, porque nenhum tom da paleta padrão atinge o mínimo nessas cores;
+o `autoContrast` do Mantine troca a cor do texto pelo tom da paleta e não pela cor final do resolver, e mistura
+texto preto e branco em botões da mesma cor. Para as tabelas, um componente com definição de colunas por props
+exigiria reescrever as 42 tabelas e duplicar cada célula; derivar os rótulos do cabeçalho mantém o JSX de cada
+tela e o mesmo comportamento nos testes. Mostrar o código ao lado do rótulo em toda a interface ajudaria quem
+integra, mas polui a leitura de quem opera; ele fica no `title`, nos detalhes técnicos e nas opções de webhook.
+**Consequências:** um código novo no contrato aparece cru até ganhar rótulo (o `labelOf` cai no próprio código),
+então quem cria uma ação de auditoria, um evento ou um tipo de lançamento deve acrescentar o rótulo em
+`labels.ts`. Tabelas novas devem usar `ResponsiveTable` e ter cabeçalhos com texto visível (ou `data-label` nas
+células). As cores do tema ficam mais escuras que as do Mantine padrão. O roteiro 10 roda com os demais E2E contra
+o ambiente completo.

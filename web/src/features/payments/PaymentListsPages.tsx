@@ -21,6 +21,7 @@ import {
 import { usePermission, useTenant } from '../../session/SessionContext';
 import { paymentsApi, type PaymentOperationStatus } from './api';
 import { RecoverySettlementModal } from './RecoverySettlementModal';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 function ChargeLink({ id }: { id: string }) {
   return (
@@ -48,7 +49,7 @@ export function PaymentsPage() {
             <EmptyState title="Nenhum recebimento" description="Pagamentos confirmados aparecem aqui." />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={860}>
+              <ResponsiveTable minWidth={860}>
                 <Table aria-label="Recebimentos">
                   <Table.Thead>
                     <Table.Tr>
@@ -89,7 +90,7 @@ export function PaymentsPage() {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}
@@ -124,7 +125,7 @@ export function RefundsPage() {
             <EmptyState title="Nenhum reembolso" description="Reembolsos são feitos a partir de uma cobrança paga." />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={820}>
+              <ResponsiveTable minWidth={820}>
                 <Table aria-label="Reembolsos">
                   <Table.Thead>
                     <Table.Tr>
@@ -157,7 +158,7 @@ export function RefundsPage() {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}
@@ -197,7 +198,7 @@ export function DisputesPage() {
             <EmptyState title="Nenhuma disputa" description="Contestações informadas pelo provedor aparecem aqui." />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={1100}>
+              <ResponsiveTable minWidth={1100}>
                 <Table aria-label="Disputas">
                   <Table.Thead>
                     <Table.Tr>
@@ -253,7 +254,7 @@ export function DisputesPage() {
                     })}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}
@@ -339,7 +340,7 @@ export function PaymentOperationsPage() {
             <EmptyState title="Nenhuma operação" description={status ? 'Nenhuma operação nesta situação.' : 'As operações aparecem ao criar cobranças e reembolsos.'} />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={980}>
+              <ResponsiveTable minWidth={980}>
                 <Table aria-label="Operações de pagamento">
                   <Table.Thead>
                     <Table.Tr>
@@ -404,7 +405,7 @@ export function PaymentOperationsPage() {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}

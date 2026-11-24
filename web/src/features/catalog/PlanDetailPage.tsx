@@ -35,6 +35,7 @@ import { optionalText, requiredInt, requiredText } from '../../lib/validation';
 import { Can, useTenant } from '../../session/SessionContext';
 import { catalogApi, useMetrics, useProducts } from './api';
 import { describePrice, PriceFields, priceSchema, priceToForm, type PriceFormValues } from './PriceFields';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const planUpdateSchema = z.object({
   name: requiredText(2, 200, 'O nome'),
@@ -217,7 +218,7 @@ export function PlanDetailPage() {
               <Text size="sm" c="dimmed">
                 Cada assinatura guarda a versão contratada. Criar uma versão não altera assinaturas nem faturas existentes.
               </Text>
-              <Table.ScrollContainer minWidth={720}>
+              <ResponsiveTable minWidth={720}>
                 <Table aria-label="Versões de preço">
                   <Table.Thead>
                     <Table.Tr>
@@ -249,7 +250,7 @@ export function PlanDetailPage() {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <EditPlanModal plan={plan} opened={editing} onClose={() => setEditing(false)} />
               <NewPriceVersionModal plan={plan} opened={pricing} onClose={() => setPricing(false)} />
             </>

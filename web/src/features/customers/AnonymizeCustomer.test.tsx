@@ -351,7 +351,8 @@ describe('anonimização de cliente', () => {
     expect(screen.getByRole('tab', { name: 'Dados' })).toHaveAttribute('aria-selected', 'true');
 
     await user.click(screen.getByRole('button', { name: 'Histórico' }));
-    expect(await screen.findByText('customer.anonymized')).toBeInTheDocument();
+    const history = await screen.findByRole('table', { name: 'Eventos de auditoria' });
+    expect(within(history).getByText('Cliente anonimizado')).toHaveAttribute('title', 'customer.anonymized');
     expect(screen.getByRole('tab', { name: 'Histórico' })).toHaveAttribute('aria-selected', 'true');
     await user.click(screen.getByRole('button', { name: 'Mostrar detalhes do evento' }));
     expect(screen.getByText(/"provider_customer_id": "cus_000123"/)).toBeInTheDocument();

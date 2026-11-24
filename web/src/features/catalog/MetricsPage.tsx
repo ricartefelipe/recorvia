@@ -15,6 +15,7 @@ import { formatQuantity } from '../../lib/money';
 import { optionalInt, quantityField, requiredText } from '../../lib/validation';
 import { Can, useTenant } from '../../session/SessionContext';
 import { catalogApi } from './api';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const AGGREGATIONS: Aggregation[] = ['sum', 'max', 'unique_count', 'last'];
 
@@ -139,7 +140,7 @@ export function MetricsPage() {
             <EmptyState title="Nenhuma métrica" description="Crie uma métrica para cobrar por consumo, como chamadas de API ou armazenamento." />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={760}>
+              <ResponsiveTable minWidth={760}>
                 <Table aria-label="Métricas de consumo">
                   <Table.Thead>
                     <Table.Tr>
@@ -178,7 +179,7 @@ export function MetricsPage() {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}

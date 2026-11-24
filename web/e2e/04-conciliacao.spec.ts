@@ -179,7 +179,7 @@ test.describe.serial('reembolso e conciliação da Acme', () => {
       await expect(row).toContainText('Aberta');
       await row.getByRole('link', { name: 'Analisar' }).click();
       await expect(page.getByRole('heading', { name: 'Taxa divergente' })).toBeVisible();
-      const fee = page.getByRole('table', { name: 'Comparação local e provedor' }).getByRole('row').filter({ hasText: /^fee/ });
+      const fee = page.getByRole('table', { name: 'Comparação local e provedor' }).getByRole('row').filter({ hasText: /^Taxa/ });
       await expect(fee).toContainText('R$ 9,99');
       await expect(fee).toContainText('(diferente)');
     });
@@ -201,8 +201,9 @@ test.describe.serial('reembolso e conciliação da Acme', () => {
       await page.reload();
       await expect(page.getByText(`Justificativa: ${justification}`)).toBeVisible();
       await expect(page.getByText('Resolução: Ajustar o ledger com lançamento compensatório')).toBeVisible();
-      await expect(page.locator('code', { hasText: 'reconciliation.discrepancy_resolved' })).toBeVisible();
-      await expect(page.locator('code', { hasText: 'reconciliation.discrepancy_detected' })).toBeVisible();
+      const events = page.getByRole('table', { name: 'Eventos de auditoria' });
+      await expect(events.getByText('Divergência resolvida', { exact: true })).toBeVisible();
+      await expect(events.getByText('Divergência encontrada', { exact: true })).toBeVisible();
       await expect(page.getByRole('form', { name: 'Resolver divergência' })).toHaveCount(0);
     });
 

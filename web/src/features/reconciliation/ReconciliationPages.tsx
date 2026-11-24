@@ -34,6 +34,9 @@ import { useApiMutation, useCursorPagination, useReturnFromEmptyPage, useUrlFilt
 import { useIdempotencyKey } from '../../lib/idempotency';
 import {
   actorTypeLabels,
+  chargeStatusLabels,
+  providerChargeStatusLabel,
+  refundStatusLabels,
   discrepancyKindLabels,
   discrepancyStatusLabels,
   labelOf,
@@ -41,11 +44,14 @@ import {
   providerLabels,
   reconciliationRunStatusLabels,
   reconciliationRunTriggerLabels,
+  reconciliationFieldLabels,
+  reconciliationValueLabels,
   resolutionLabels,
 } from '../../lib/labels';
 import { formatMoney } from '../../lib/money';
 import { notifyError, notifyInfo, notifySuccess } from '../../lib/notify';
 import { Can, usePermission, useSession, useTenant } from '../../session/SessionContext';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const enc = encodeURIComponent;
 type Resolution = 'accept_provider' | 'keep_local' | 'adjust_ledger' | 'dismiss';
@@ -204,7 +210,7 @@ export function RunsTab({ pollIntervalMs = RUN_POLL_INTERVAL_MS }: { pollInterva
             <EmptyState title="Nenhuma execução" description="As execuções agendadas e manuais aparecem aqui." />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={940}>
+              <ResponsiveTable minWidth={940}>
                 <Table aria-label="Execuções de conciliação">
                   <Table.Thead>
                     <Table.Tr>
@@ -251,7 +257,7 @@ export function RunsTab({ pollIntervalMs = RUN_POLL_INTERVAL_MS }: { pollInterva
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}
@@ -308,7 +314,7 @@ function DiscrepanciesTab() {
             <EmptyState title="Nenhuma divergência" description={status === 'open' ? 'Tudo conciliado com o provedor.' : 'Nenhuma divergência com esses filtros.'} icon={<IconScale size={26} />} />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={800}>
+              <ResponsiveTable minWidth={800}>
                 <Table aria-label="Divergências">
                   <Table.Thead>
                     <Table.Tr>
@@ -349,7 +355,7 @@ function DiscrepanciesTab() {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}
@@ -394,9 +400,13 @@ export function ReconciliationPage() {
 function formatValue(key: string, value: unknown, currency: string): string {
   if (value === undefined) return '—';
   if (typeof value === 'number' && Number.isInteger(value) && /amount|fee|total|value|paid|refund/i.test(key)) {
-    return `${formatMoney(value, currency)} (${value})`;
+    return formatMoney(value, currency);
   }
-  if (value === null) return 'nulo';
+  if (value === null) return 'Sem valor';
+  if (typeof value === 'string') {
+    if (reconciliationValueLabels[key]) return labelOf(reconciliationValueLabels[key], value);
+    if (/(^|_)status$/.test(key)) return chargeStatusLabels[value] ?? refundStatusLabels[value] ?? providerChargeStatusLabel(value);
+  }
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
 }
@@ -405,10 +415,12 @@ export function ComparisonTable({ discrepancy }: { discrepancy: Discrepancy }) {
   const local = discrepancy.local_value ?? {};
   const provider = discrepancy.provider_value ?? {};
   const currency = String(local.currency ?? provider.currency ?? 'BRL');
-  const fields = Array.from(new Set([...Object.keys(local), ...Object.keys(provider)])).sort();
+  const fields = Array.from(new Set([...Object.keys(local), ...Object.keys(provider)])).sort((a, b) =>
+    labelOf(reconciliationFieldLabels, a).localeCompare(labelOf(reconciliationFieldLabels, b), 'pt-BR'),
+  );
   if (fields.length === 0) return <Text size="sm" c="dimmed">Sem valores para comparar.</Text>;
   return (
-    <Table.ScrollContainer minWidth={600}>
+    <ResponsiveTable minWidth={600}>
       <Table aria-label="Comparação local e provedor">
         <Table.Thead>
           <Table.Tr>
@@ -422,8 +434,8 @@ export function ComparisonTable({ discrepancy }: { discrepancy: Discrepancy }) {
             const differs = JSON.stringify(local[f]) !== JSON.stringify(provider[f]);
             return (
               <Table.Tr key={f} bg={differs ? 'yellow.0' : undefined}>
-                <Table.Th scope="row">
-                  <Code>{f}</Code>
+                <Table.Th scope="row" title={f}>
+                  {labelOf(reconciliationFieldLabels, f)}
                   {differs && <span className="visually-hidden"> (diferente)</span>}
                 </Table.Th>
                 <Table.Td fw={differs ? 600 : undefined}>{formatValue(f, local[f], currency)}</Table.Td>
@@ -433,7 +445,7 @@ export function ComparisonTable({ discrepancy }: { discrepancy: Discrepancy }) {
           })}
         </Table.Tbody>
       </Table>
-    </Table.ScrollContainer>
+    </ResponsiveTable>
   );
 }
 

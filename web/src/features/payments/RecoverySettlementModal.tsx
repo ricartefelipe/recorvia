@@ -19,6 +19,7 @@ import { centsToInput, formatMoney } from '../../lib/money';
 import { moneyField, requiredText } from '../../lib/validation';
 import { usePermission, useTenant } from '../../session/SessionContext';
 import { paymentsApi } from './api';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 type Outcome = RecoverySettlementInput['outcome'];
 
@@ -56,7 +57,7 @@ function SettlementList({ dispute }: { dispute: Dispute }) {
         data.length === 0 ? (
           <EmptyState title="Nenhuma baixa" description="As baixas registradas aparecem aqui, com a justificativa." />
         ) : (
-          <Table.ScrollContainer minWidth={560}>
+          <ResponsiveTable minWidth={560}>
             <Table aria-label="Baixas do valor a recuperar">
               <Table.Thead>
                 <Table.Tr>
@@ -91,7 +92,7 @@ function SettlementList({ dispute }: { dispute: Dispute }) {
                 ))}
               </Table.Tbody>
             </Table>
-          </Table.ScrollContainer>
+          </ResponsiveTable>
         )
       }
     </QueryContent>

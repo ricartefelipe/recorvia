@@ -33,8 +33,52 @@ describe('detalhe da fatura', () => {
     expect(screen.getByText('10/11/2026')).toBeInTheDocument();
     const items = screen.getByRole('table', { name: 'Itens da fatura' });
     expect(within(items).getByText('Plano Profissional (novembro)')).toBeInTheDocument();
-    expect(within(items).getByText('R$ 411,52')).toBeInTheDocument();
+    expect(within(items).getByRole('row', { name: /Plano Profissional \(novembro\)/ })).toHaveTextContent('R$ 411,52');
+    // O preço registrado no item aparece descrito, não como JSON.
+    expect(within(items).getByText('Por quantidade (unidades ou usuários)')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /Abrir checkout/ })).toHaveAttribute('href', 'https://pagamentos.exemplo.test/checkout/abc');
+  });
+
+  it('mostra os dados do cliente na emissão como lista descritiva, com documento formatado', async () => {
+    serveInvoice(
+      makeInvoice({
+        customer_snapshot: {
+          name: 'Cliente Exemplo Ltda',
+          document_type: 'cnpj',
+          document_number: '11222333000181',
+          email: 'financeiro@exemplo.test',
+          address: { street: 'Rua das Flores', number: '100', district: 'Centro', city: 'Curitiba', state: 'PR', postal_code: '80000000', country: 'BR' },
+          captured_at: '2026-11-01T12:00:00Z',
+        },
+      }),
+    );
+    renderPage(<InvoiceDetailPage />, { path: '/faturas/:id', route });
+
+    expect(await screen.findByText('11.222.333/0001-81')).toBeInTheDocument();
+    expect(screen.getByText('CNPJ')).toBeInTheDocument();
+    expect(screen.getByText('financeiro@exemplo.test')).toBeInTheDocument();
+    expect(screen.getByText('Rua das Flores, 100')).toBeInTheDocument();
+    expect(screen.getByText('Centro, Curitiba/PR')).toBeInTheDocument();
+    // O backend grava o CEP só com dígitos; a tela mostra 00000-000.
+    expect(screen.getByText('CEP 80000-000')).toBeInTheDocument();
+    expect(screen.queryByText(/"document_number"/)).not.toBeInTheDocument();
+  });
+
+  it('traduz o motivo das transições do histórico', async () => {
+    serveInvoice(
+      makeInvoice({
+        history: [
+          { id: 'h1', from_status: 'draft', to_status: 'open', occurred_at: '2026-11-01T12:00:00Z', actor_type: 'system', actor_id: 'billing.engine', reason: 'issued' },
+        ],
+      }),
+    );
+    renderPage(<InvoiceDetailPage />, { path: '/faturas/:id', route });
+
+    const history = await screen.findByRole('table', { name: 'Histórico da fatura' });
+    const row = within(history).getAllByRole('row')[1];
+    expect(row).toHaveTextContent('Emissão');
+    expect(row).toHaveTextContent('Faturamento automático');
+    expect(row).not.toHaveTextContent('issued');
   });
 
   it('avisa que a fatura comercial não é documento fiscal', async () => {
@@ -77,6 +121,33 @@ describe('detalhe da fatura', () => {
     expect(screen.getByRole('menuitem', { name: 'Emitir nota de crédito' })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Baixar como incobrável' })).toBeInTheDocument();
     expect(screen.queryByRole('menuitem', { name: 'Cancelar fatura' })).not.toBeInTheDocument();
+  });
+
+  it('nova tentativa de cobrança em andamento não bloqueia o botão "Ações"', async () => {
+    serveInvoice();
+    let release: () => void = () => {};
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.post('/api/v1/invoices/:id/charges', async () => {
+        await pending;
+        return HttpResponse.json(invoice.charges[0], { status: 201 });
+      }),
+    );
+    const { user } = renderPage(<InvoiceDetailPage />, { path: '/faturas/:id', route });
+    await user.click(await screen.findByRole('button', { name: 'Ações' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Nova tentativa de cobrança' }));
+    await user.click(await screen.findByRole('button', { name: 'Solicitar cobrança' }));
+
+    // Enquanto a requisição não termina, o menu abre e só a nova tentativa fica desabilitada.
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Nova tentativa de cobrança' })).not.toBeInTheDocument());
+    const actions = screen.getByRole('button', { name: 'Ações' });
+    expect(actions).toBeEnabled();
+    await user.click(actions);
+    expect(await screen.findByRole('menuitem', { name: 'Nova tentativa de cobrança' })).toBeDisabled();
+    expect(screen.getByRole('menuitem', { name: 'Emitir nota de crédito' })).toBeEnabled();
+    release();
   });
 
   it('auditor vê a fatura e o documento, mas nenhuma ação de escrita', async () => {

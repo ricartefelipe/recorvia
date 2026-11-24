@@ -18,6 +18,7 @@ import { formatBasisPoints, formatMoney, parseMoneyToNumber, parsePercentToBasis
 import { optionalInt, requiredText } from '../../lib/validation';
 import { Can, usePermission, useTenant } from '../../session/SessionContext';
 import { catalogApi, usePlans } from './api';
+import { ResponsiveTable } from '../../components/ResponsiveTable';
 
 const couponSchema = z
   .object({
@@ -276,7 +277,7 @@ export function CouponsPage() {
             <EmptyState title="Nenhum cupom" description="Cupons concedem descontos percentuais ou de valor fixo nas assinaturas." />
           ) : (
             <>
-              <Table.ScrollContainer minWidth={880}>
+              <ResponsiveTable minWidth={880}>
                 <Table aria-label="Cupons">
                   <Table.Thead>
                     <Table.Tr>
@@ -327,7 +328,7 @@ export function CouponsPage() {
                     ))}
                   </Table.Tbody>
                 </Table>
-              </Table.ScrollContainer>
+              </ResponsiveTable>
               <CursorPager
                 page={pagination.page}
                 hasPrevious={pagination.hasPrevious}

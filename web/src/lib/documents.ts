@@ -41,3 +41,10 @@ export function formatDocument(value: string | null | undefined, kind?: Document
 export function isPostalCode(value: string): boolean {
   return /^\d{5}-?\d{3}$/.test(value.trim());
 }
+
+/** CEP para exibição: "80000000" → "80000-000"; outros formatos ficam como vieram. */
+export function formatPostalCode(value: string | null | undefined): string {
+  if (!value) return '';
+  const digits = value.replace(/\D/g, '');
+  return digits.length === 8 ? `${digits.slice(0, 5)}-${digits.slice(5)}` : value;
+}

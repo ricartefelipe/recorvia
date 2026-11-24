@@ -1,4 +1,4 @@
-import { createTheme, MantineProvider } from '@mantine/core';
+import { MantineProvider } from '@mantine/core';
 import { DatesProvider } from '@mantine/dates';
 import { ModalsProvider } from '@mantine/modals';
 import { Notifications } from '@mantine/notifications';
@@ -9,17 +9,7 @@ import { ApiError, NetworkError } from '../api/http';
 import { LiveRegion, openConcurrencyModal } from '../components/ui';
 import { setConcurrencyHandler } from '../lib/errors';
 import '../lib/validation';
-
-export const theme = createTheme({
-  primaryColor: 'blue',
-  defaultRadius: 'md',
-  fontFamily: 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
-  headings: { fontWeight: '650' },
-  components: {
-    Table: { defaultProps: { highlightOnHover: true, verticalSpacing: 'sm' } },
-    Modal: { defaultProps: { centered: true } },
-  },
-});
+import { cssVariablesResolver, theme } from './theme';
 
 /** Não repete erros de cliente (4xx); repete falhas de rede e 5xx até 2 vezes. */
 export function shouldRetry(failureCount: number, error: unknown): boolean {
@@ -53,7 +43,7 @@ export function AppProviders({
   }, []);
 
   return (
-    <MantineProvider theme={theme} defaultColorScheme="light" env={env}>
+    <MantineProvider theme={theme} cssVariablesResolver={cssVariablesResolver} defaultColorScheme="light" env={env}>
       <DatesProvider settings={{ locale: 'pt-br', firstDayOfWeek: 0 }}>
         <QueryClientProvider client={queryClient}>
           <ModalsProvider labels={{ confirm: 'Confirmar', cancel: 'Cancelar' }}>
